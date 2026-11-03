@@ -1,3 +1,5 @@
+<p align="center"><img src="android/images/logo.svg" alt="Banana Native logo" width="128"></p>
+
 # Banana Native
 
 Switch 2 games, running natively on Android.
@@ -11,8 +13,9 @@ the Mac, iPhone and iPad with Metal.
 
 > [!NOTE]
 > Unofficial and experimental, tested on one phone. Not affiliated with Nintendo, nxnative or Eden: please don't send
-> them bug reports about this. Most of the code was written with an AI coding assistant (Claude) and tested by hand.
-> Releases are only published on this page.
+> them bug reports about this. Not related to [nx2android](https://github.com/shirai91/nx2android) either: Banana
+> Native is its own codebase, ported from nxnative, and not a fork of that project. Most of the code was written with
+> an AI coding assistant (Claude) and tested by hand. Releases are only published on this page.
 
 ## Games
 
