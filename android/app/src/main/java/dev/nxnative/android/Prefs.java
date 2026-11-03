@@ -1,0 +1,127 @@
+package dev.nxnative.android;
+
+import android.content.Context;
+import android.content.SharedPreferences;
+
+/** The launcher's own settings (the on-screen controls keep theirs in TouchControls): the overlay over the game, frame generation. */
+final class Prefs {
+    private Prefs() {}
+
+    /**
+     * A settings file, read again whenever another process has written it. The launcher and the game (GameActivity, in its own process :game) each keep the file in memory:
+     * with MODE_PRIVATE a change made in the game's panel stayed unseen by the launcher, whose next write put its old copy back over it, so in-game settings came back
+     * as they were. MODE_MULTI_PROCESS reloads the file on each getSharedPreferences when it changed on disk (deprecated, still honoured), so every access goes through
+     * here, and writes use commit(): written before the call returns, so Stop (which ends the game's process) cannot drop one still queued by apply().
+     */
+    @SuppressWarnings("deprecation")
+    static SharedPreferences open(Context c, String name) { return c.getSharedPreferences(name, Context.MODE_MULTI_PROCESS); }
+    static SharedPreferences of(Context c) { return open(c, "launcher"); }
+
+    /** The overlay over the game (master switch: the frame rate and the other items top right, Overlay; the build tag top left is always shown); on by default. DM_OVERLAY=0 / 1 in env.txt overrides it for a run. */
+    static boolean overlay(Context c) { return of(c).getBoolean("overlay", true); }
+    static void overlay(Context c, boolean on) { of(c).edit().putBoolean("overlay", on).commit(); }
+
+    /** One item of the overlay (Overlay.ITEMS); all on by default, shown only while the overlay is on */
+    static boolean overlayItem(Context c, String key) { return of(c).getBoolean("overlay_" + key, true); }
+    static void overlayItem(Context c, String key, boolean on) { of(c).edit().putBoolean("overlay_" + key, on).commit(); }
+
+    /** The game's window size (Game resolution): DM_WINDOW_SIZE for the host (loader.c window_apply), "1920x1080" (Phone 1080p, the default) or "original" (the game's own, 2880x1620 in Donkey Kong Bananza). DM_WINDOW_SIZE in env.txt overrides it for a run. */
+    static final String[] WINDOWS = {"1920x1080", "original"}, WINDOW_NAMES = {"Phone 1080p (1920x1080)", "Original (the game's own size)"};
+    static String window(Context c) { return of(c).getString("window", WINDOWS[0]); }
+    static void window(Context c, String v) { of(c).edit().putString("window", v).commit(); }
+
+    // ---- A game's own settings (its Manage sheet › Game settings, the in-game panel), stored per title ID as "<key>@<title ID>"; a game without its own value
+    // takes the default (the main screen's Settings, global). DKB with nothing of its own set runs exactly as before ----
+    static String gameKey(String key, String titleId) { return key + "@" + titleId; }
+
+    /** The game's window size: its own choice, else the default (window(c)) */
+    static String gameWindow(Context c, String titleId) { return of(c).getString(gameKey("window", titleId), window(c)); }
+    /** null: back to the default */
+    static void gameWindow(Context c, String titleId, String v) { put(c, gameKey("window", titleId), v); }
+    static boolean ownWindow(Context c, String titleId) { return of(c).contains(gameKey("window", titleId)); }
+
+    /**
+     * The frame rate cap (the in-game panel): -1 = not set (the game profile's fps_target), 0 = the game's own, else 15, 20, 30 or 60. DM_FPS_TARGET for the host at
+     * start, and Native.fpsCapSet while the game runs. A DM_FPS_TARGET line in env.txt overrides it for a run. 40 and 45 are no longer offered (they did not hold):
+     * a stored 40 or 45 reads as the next lower cap (capOf), so an older install keeps a working choice.
+     */
+    static final int[] FPS_CAPS = {0, 60, 30, 20, 15};
+    /** A stored cap as one of FPS_CAPS: -1 and 0 as they are, else the highest offered cap at or below it (45 → 30), the game's own when none is */
+    static int capOf(int v) {
+        if (v <= 0) return v;
+        int best = 0;
+        for (int k : FPS_CAPS) if (k > 0 && k <= v && k > best) best = k;
+        return best;
+    }
+    static int fpsCap(Context c) { return capOf(of(c).getInt("fps_cap", -1)); }
+    static void fpsCap(Context c, int v) { of(c).edit().putInt("fps_cap", v).commit(); }
+    /** The game's cap: its own (set in its Game settings or its in-game panel), else the default */
+    static int fpsCap(Context c, String titleId) { return capOf(of(c).getInt(gameKey("fps_cap", titleId), fpsCap(c))); }
+
+    /**
+     * Whether the host found that this game picks its own frame rate (its cap status reports no rate it can hold: Native.fpsCapStatus rates 0), as the last run
+     * saw it: its Game settings and its in-game panel then show no cap choices, which would do nothing. Written by GameActivity and the panel while the game runs.
+     */
+    static boolean ownRate(Context c, String titleId) { return of(c).getBoolean(gameKey("own_rate", titleId), false); }
+    static void ownRate(Context c, String titleId, boolean v) { if (ownRate(c, titleId) != v) of(c).edit().putBoolean(gameKey("own_rate", titleId), v).commit(); }
+    /** null: back to the default */
+    static void fpsCap(Context c, String titleId, Integer v) {
+        if (v == null) of(c).edit().remove(gameKey("fps_cap", titleId)).commit();
+        else of(c).edit().putInt(gameKey("fps_cap", titleId), v).commit();
+    }
+    static boolean ownFpsCap(Context c, String titleId) { return of(c).contains(gameKey("fps_cap", titleId)); }
+
+    /** Pause on return (per game, on by default): the game's screen coming back from the background shows it paused, suspended until a tap (GameActivity.onStart) */
+    static boolean pauseOnReturn(Context c, String titleId) { return of(c).getBoolean(gameKey("pause_return", titleId), true); }
+    static void pauseOnReturn(Context c, String titleId, boolean on) { of(c).edit().putBoolean(gameKey("pause_return", titleId), on).commit(); }
+
+    /**
+     * The game's own environment lines (KEY=VALUE, one a line; its Game settings), given to the host after the launcher's settings and env.txt, so they win for
+     * this game; env-&lt;title ID&gt;.txt in the app's folder (adb) comes after them. "" = none
+     */
+    static String gameEnv(Context c, String titleId) { return of(c).getString(gameKey("env", titleId), ""); }
+    static void gameEnv(Context c, String titleId, String text) { put(c, gameKey("env", titleId), text == null || text.trim().isEmpty() ? null : text.trim()); }
+
+    private static void put(Context c, String key, String v) {
+        if (v == null) of(c).edit().remove(key).commit();
+        else of(c).edit().putString(key, v).commit();
+    }
+
+    /**
+     * Folders the user picked (main screen, Folders…), as /storage paths; null = the default. Kept in the app's preferences, so an APK update keeps them (an
+     * uninstall does not). "pack_<title ID>": the game's pack folder (pack.tsv and shaders/; default <game>/../<id>-work/android-pack, Pack.find; the older
+     * single-game "pack" key is still read when it holds a pack of that title, Folders.packFor); "save_<title ID>": the game's save folder, given to the host as
+     * DM_SAVE (default saveDefault).
+     */
+    static String folder(Context c, String key) { return of(c).getString("folder_" + key, null); }
+    static void folder(Context c, String key, String path) { of(c).edit().putString("folder_" + key, path).commit(); }
+
+    /** The default save folder: <Switch2 root>/saves/<id> for the play app, saves-test/<id> for the others, the root being the game folder's parent */
+    static java.io.File saveDefault(java.io.File game, String id) {
+        return new java.io.File(game.getAbsoluteFile().getParentFile(), (BuildConfig.NX_PLAY ? "saves/" : "saves-test/") + id);
+    }
+
+    /** Where a game's save backups go (SaveStore): <Switch2 root>/save-backups/<id>, the root being the game folder's parent, for the play and the test app alike
+     *  (each backup's manifest says which save folder it came from) */
+    static java.io.File backupsDir(java.io.File game, String id) {
+        return new java.io.File(game.getAbsoluteFile().getParentFile(), "save-backups/" + id);
+    }
+
+    /**
+     * Which build a log or a screenshot came from. Play app: "Banana Native 0.1 · 6a6448d · 2026-11-02" (the version up to its "-", the commit, the build date);
+     * test app: "Banana Native test · int@6a6448d · 11-02 19:51" (the branch without "android-", the commit, the build time). "+dirty" follows the commit when the
+     * tree had changes. The main screen shows it and it is the first line of every game log ("[nxlaunch] build ...").
+     */
+    static String buildTag() {
+        String c = BuildConfig.NX_COMMIT, t = BuildConfig.NX_BUILD_TIME;
+        if (c.length() > 7 && !c.equals("unknown")) c = c.substring(0, 7);
+        c += BuildConfig.NX_DIRTY;
+        if (BuildConfig.NX_PLAY) {
+            String v = BuildConfig.VERSION_NAME;
+            int d = v.indexOf('-');
+            return "Banana Native " + (d > 0 ? v.substring(0, d) : v) + " · " + c + " · " + (t.length() >= 10 ? t.substring(0, 10) : t);
+        }
+        String b = BuildConfig.NX_BRANCH.startsWith("android-") ? BuildConfig.NX_BRANCH.substring(8) : BuildConfig.NX_BRANCH;
+        return "Banana Native test · " + b + "@" + c + " · " + (t.length() == 16 ? t.substring(5) : t);
+    }
+}

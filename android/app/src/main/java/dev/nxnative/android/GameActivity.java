@@ -1,0 +1,750 @@
+package dev.nxnative.android;
+
+import android.app.Activity;
+import android.app.AlertDialog;
+import android.content.Context;
+import android.content.res.Configuration;
+import android.graphics.Color;
+import android.graphics.Typeface;
+import android.hardware.input.InputManager;
+import android.media.AudioAttributes;
+import android.media.AudioDeviceCallback;
+import android.media.AudioDeviceInfo;
+import android.media.AudioFocusRequest;
+import android.media.AudioManager;
+import android.os.Build;
+import android.os.Bundle;
+import android.os.Handler;
+import android.os.Looper;
+import android.system.ErrnoException;
+import android.system.Os;
+import android.view.Gravity;
+import android.view.InputDevice;
+import android.view.KeyEvent;
+import android.view.MotionEvent;
+import android.view.SurfaceHolder;
+import android.view.SurfaceView;
+import android.view.View;
+import android.widget.FrameLayout;
+import android.widget.TextView;
+
+import java.io.File;
+import java.io.IOException;
+import java.io.RandomAccessFile;
+import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
+import java.text.SimpleDateFormat;
+import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.Comparator;
+import java.util.Date;
+import java.util.HashMap;
+import java.util.HashSet;
+import java.util.List;
+import java.util.Locale;
+import java.util.Map;
+
+/**
+ * Runs one game in this process (":game"): sets up its folders and environment, starts nxhost_main, and shows a SurfaceView (handed to the host's Vulkan replay with
+ * nxhost_set_window) with the newest log lines and the on-screen controls (TouchControls) over it. Gamepad keys and axes, touches, the Activity lifecycle, audio focus and audio route changes go to the host through
+ * Native (libnxlaunch.so → libnxhost.so's C interface); all of it reaches the host instance of this process. Leaving ends the process: the host starts once per process.
+ */
+public final class GameActivity extends Activity implements SurfaceHolder.Callback, InputManager.InputDeviceListener {
+    private static final int KEEP_LOGS = 10;
+
+    private TextView overlay;
+    private TextView tag, fps;   // the build tag (top left) and the frame rate with the other items (top right, Overlay), drawn by the launcher over the game (no GPU work in the host)
+    private Overlay stats;
+    private static Boolean overlayEnv;   // DM_OVERLAY in env.txt: overrides the setting for this run (static: a screen created again keeps it)
+    private TouchControls controls;
+    private SidePanel panel;
+    private final HashSet<Integer> pads = new HashSet<>();   // the gamepads connected: the on-screen controls hide while there is one
+    private File log;
+    private final Handler ui = new Handler(Looper.getMainLooper());
+    private boolean input, started;
+    private InputManager inputManager;
+    private AudioManager audio;
+    private AudioFocusRequest focus;
+    private AudioDeviceCallback route;
+    private boolean routeReady;
+
+    @Override protected void onCreate(Bundle saved) {
+        super.onCreate(saved);
+        // This game's own host (libnxhost_<title ID>.so, with its profile compiled in): a game this APK has no profile for gets a sentence, not a crash
+        String id = String.valueOf(getIntent().getStringExtra("title_id"));
+        try {
+            Native.load(id);
+        } catch (IllegalStateException e) {
+            setContentView(new FrameLayout(this));
+            fail(e.getMessage());
+            return;
+        }
+        FrameLayout root = new FrameLayout(this);
+        SurfaceView surface = new SurfaceView(this);
+        surface.getHolder().addCallback(this);
+        root.addView(surface);
+        overlay = new TextView(this);
+        overlay.setTextColor(Color.WHITE);
+        overlay.setShadowLayer(3, 0, 0, Color.BLACK);
+        overlay.setTextSize(11);
+        overlay.setGravity(Gravity.BOTTOM);
+        overlay.setPadding(24, 24, 24, 24);
+        root.addView(overlay);
+        // The on-screen controls take every touch and pass it to the host, which tells controls from touchscreen fingers
+        controls = new TouchControls(this, Native.hasInput());
+        root.addView(controls, new FrameLayout.LayoutParams(FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.MATCH_PARENT));
+        // The build tag: always shown, whatever the overlay switches say, so every screenshot and recording names its build; bold white on a dark pill to read over any scene
+        tag = overlayText(Gravity.TOP | Gravity.START, 12, 1f);
+        tag.setText(Prefs.buildTag());
+        tag.setTypeface(Typeface.DEFAULT_BOLD);
+        tag.setShadowLayer(4, 0, 0, Color.BLACK);
+        android.graphics.drawable.GradientDrawable tagBg = new android.graphics.drawable.GradientDrawable();
+        tagBg.setColor(0xB3000000);
+        tagBg.setCornerRadius(6 * getResources().getDisplayMetrics().density);
+        tag.setBackground(tagBg);
+        FrameLayout.LayoutParams tagLp = new FrameLayout.LayoutParams(FrameLayout.LayoutParams.WRAP_CONTENT, FrameLayout.LayoutParams.WRAP_CONTENT, Gravity.TOP | Gravity.START);
+        tagLp.leftMargin = tagLp.topMargin = Math.round(4 * getResources().getDisplayMetrics().density);
+        root.addView(tag, tagLp);
+        fps = overlayText(Gravity.TOP | Gravity.END, 12, 0.85f);
+        root.addView(fps, new FrameLayout.LayoutParams(FrameLayout.LayoutParams.WRAP_CONTENT, FrameLayout.LayoutParams.WRAP_CONTENT, Gravity.TOP | Gravity.END));
+        stats = new Overlay(this);
+        panel = new SidePanel(this, box -> controls.controlRows(this, box));
+        root.addView(panel, new FrameLayout.LayoutParams(FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.MATCH_PARENT));
+        controls.openSettings = panel::open;
+        // The layout editor needs the whole screen: the panel closes, and Paused (over the controls: its first tap would continue the game) hides while it is open;
+        // the game stays paused
+        controls.onEditStart = () -> { panel.close(); pausedView.setVisibility(View.GONE); };
+        controls.onEditEnd = () -> { if (paused) pausedView.setVisibility(View.VISIBLE); };
+        // The panel's handle: a small translucent arrow at the right edge, a quarter of the way down (above the shoulder and face buttons of the automatic layout on both of
+        // the PNM-N49's screens; half way down it covered A on the outer screen and ZR on the inner one), over the controls so it keeps its own touches wherever they are dragged
+        TextView handle = new TextView(this);
+        handle.setText("\u2039");
+        handle.setTextColor(Color.WHITE);
+        handle.setTextSize(22);
+        handle.setGravity(Gravity.CENTER);
+        android.graphics.drawable.GradientDrawable bg = new android.graphics.drawable.GradientDrawable();
+        float dp = getResources().getDisplayMetrics().density;
+        bg.setColor(0x99000000);
+        bg.setCornerRadii(new float[] {12 * dp, 12 * dp, 0, 0, 0, 0, 12 * dp, 12 * dp});
+        handle.setBackground(bg);
+        handle.setAlpha(0.75f);
+        handle.setContentDescription("Open the in-game panel");
+        handle.setOnClickListener(v -> panel.open());
+        root.addView(handle, root.indexOfChild(panel), new FrameLayout.LayoutParams(Math.round(22 * dp), Math.round(56 * dp), Gravity.END | Gravity.TOP));
+        root.addOnLayoutChangeListener((v, l, t, r, b, ol, ot, or, ob) -> handle.setTranslationY((b - t) * 0.25f - 28 * dp));
+        // Paused (pause(): the in-game panel's Pause, or the screen coming back with pause-on-return on): the game is suspended until a tap, or A / Start on a gamepad.
+        // Under the panel and its handle, so Stop stays reachable
+        pausedView = new TextView(this);
+        pausedView.setText("Paused\n\nTap to continue  (A or Start on a gamepad)");
+        pausedView.setTextColor(Color.WHITE);
+        pausedView.setTextSize(22);
+        pausedView.setGravity(Gravity.CENTER);
+        pausedView.setBackgroundColor(0x99000000);
+        pausedView.setVisibility(View.GONE);
+        pausedView.setOnClickListener(v -> unpause());
+        root.addView(pausedView, root.indexOfChild(handle), new FrameLayout.LayoutParams(FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.MATCH_PARENT));
+        setContentView(root);
+        // The host starts once per process. A screen created again while it runs (Android recreated the activity: "Don't keep activities", a font or language
+        // change while in the background) takes its window over; a screen restored into a new process (Android ended the old one while it was in the background)
+        // has no game to show: the game was stopped, and the user starts it again
+        if (hostRunning) attach();
+        else if (saved == null) start();
+        else fail("The game was stopped while it was in the background (Android ended its process). Unsaved progress is lost; start it again from the launcher.");
+    }
+
+    private TextView overlayText(int gravity, int sp, float alpha) {
+        TextView t = new TextView(this);
+        t.setTextColor(Color.WHITE);
+        t.setShadowLayer(3, 0, 0, Color.BLACK);
+        t.setTextSize(sp);
+        t.setGravity(gravity);
+        t.setAlpha(alpha);
+        int p = Math.round(6 * getResources().getDisplayMetrics().density);
+        t.setPadding(p, p / 2, p, p / 2);
+        t.setClickable(false);
+        t.setFocusable(false);
+        return t;
+    }
+
+    private boolean overlayOn() { return overlayEnv != null ? overlayEnv : Prefs.overlay(this); }
+
+    /** The overlay, twice a second: top right the frame rate and the other items that are on (Overlay); nothing is read while it is off */
+    private void fpsTick() {
+        if (stopped || paused) { ui.postDelayed(this::fpsTick, 2000); return; }   // nothing to show: no readings (thermal, battery, the host's counters) while suspended
+        boolean on = overlayOn();
+        CharSequence t = on ? stats.tick() : null;
+        fps.setVisibility(t != null ? View.VISIBLE : View.GONE);
+        if (t != null) fps.setText(t);
+        ui.postDelayed(this::fpsTick, 500);
+    }
+
+    private String saveHow = "new", saveNote;
+
+    /**
+     * The game's save folder, on shared storage so that clearing or uninstalling the app keeps it:
+     * <Switch2 root>/saves/<id> (play app and release, BuildConfig.NX_PLAY) or saves-test/<id> (test app), the Switch2 root being the game folder's parent.
+     * An empty folder is filled from the old private save (migrated), else from <Switch2 root>/save-seed/<id> (seeded). Falls back to the private folder.
+     */
+    private File saveDir(File files, File game, String id) throws IOException {
+        File priv = new File(files, "save/" + id);
+        String chosen = Prefs.folder(this, "save_" + id);   // the user's pick (Folders…): used as it is, never migrated into or seeded (the launcher asked about copying)
+        File dir = testSave != null ? new File(testSave) : chosen != null ? new File(chosen) : Prefs.saveDefault(game, id);
+        // The save's lock first (kept while the game runs), then a restore (Restore saves…) or swap stopped part way is finished (SaveStore's journal, the host's
+        // rules); one that cannot be finished stops the start: never a half save
+        holdLock(dir);
+        try {
+            if (SaveStore.recoverLocked(dir)) saveNote = "a save restore or swap that was stopped was finished first";
+        } catch (IOException e) {
+            throw new IOException("The save folder has an unfinished restore that cannot be finished: " + e.getMessage());
+        }
+        if (testSave != null) {   // a test run's own save folder (env.txt, test app only): used as it is
+            if (!dir.isDirectory() && !dir.mkdirs()) throw new IOException("cannot create the test save folder " + dir);
+            saveHow = "DM_SAVE from env-" + id + ".txt (test app)";
+            return dir;
+        }
+        try {
+            File root = game.getAbsoluteFile().getParentFile();
+            for (String x : new String[] {".old", ".pend1", ".pend2"})   // a commit was interrupted: the host finishes it at mount (plat_swap_recover), before anything is migrated or seeded
+                if (new File(dir.getPath() + x).exists()) { saveHow = "recovering"; return dir; }
+            if (!dir.isDirectory() && !dir.mkdirs() || !dir.canWrite()) throw new IOException("cannot create " + dir);
+            if (chosen != null) { saveHow = isEmpty(dir) ? "chosen, new" : "chosen"; return dir; }
+            if (!isEmpty(dir)) { saveHow = "existing"; return dir; }
+            if (!isEmpty(priv)) { copyTree(priv, dir); saveHow = "migrated"; return dir; }
+            File seed = new File(root, "save-seed/" + id);
+            if (!isEmpty(seed)) { copyTree(seed, dir); saveHow = "seeded"; return dir; }
+            return dir;
+        } catch (IOException | RuntimeException e) {
+            saveNote = "shared save folder unusable (" + e.getMessage() + "), using the app's private folder";
+            saveHow = isEmpty(priv) ? "new" : "existing";
+            return mkdirs(priv);
+        }
+    }
+
+    private static boolean isEmpty(File d) { String[] l = d.list(); return l == null || l.length == 0; }
+
+    private static void copyTree(File from, File to) throws IOException {
+        if (from.isDirectory()) {
+            if (!to.isDirectory() && !to.mkdirs()) throw new IOException("cannot create " + to);
+            File[] l = from.listFiles();
+            if (l != null) for (File f : l) copyTree(f, new File(to, f.getName()));
+        } else Files.copy(from.toPath(), to.toPath(), java.nio.file.StandardCopyOption.REPLACE_EXISTING);
+    }
+
+    // ---- The readiness check before the host starts (Readiness.java, android/README.md "Readiness check"): the Vulkan facts of the driver this game starts with, against the
+    // host's needs and the game's readiness.tsv. Required items missing: a dialog names them with the GPU and driver, and the player goes back or tries anyway; degraded
+    // ones: a notice the player can turn off for this phone and driver. Its one line goes into the game's log after the start ([readiness] ...) ----
+    private boolean readinessDone, triedAnyway;
+    private String readinessLine;
+    private static final long READINESS_WAIT_MS = 8000;
+
+    /** true: the start waits for the check (it calls start() again when the player may go on) */
+    private boolean readinessHold(String id) {
+        if (readinessDone) return false;
+        File files = getExternalFilesDir(null);
+        List<String> drv = new ArrayList<>();   // the driver as start() will set it: the launcher's pick, then the user's lines (which win)
+        GpuDriver.env(this, id, drv);
+        drv.addAll(quietEnv(new File(files, "env.txt")));
+        drv.addAll(envLines(Prefs.gameEnv(this, id)));
+        drv.addAll(quietEnv(new File(files, "env-" + id + ".txt")));
+        String[] denv = Readiness.driverEnv(drv);
+        overlay.setText(getIntent().getStringExtra("name") + ": checking this phone's GPU…");
+        final boolean[] answered = {false};
+        Runnable decide = () -> {   // on the UI thread, once: with the facts, or without them after READINESS_WAIT_MS
+            if (answered[0] || isFinishing()) return;
+            answered[0] = true;
+            readinessDecide(id, probeFacts);
+        };
+        new Thread(() -> { probeFacts = Native.readiness(denv); probeDone = true; ui.post(decide); }, "nxreadiness").start();
+        ui.postDelayed(() -> { if (!probeDone) probeFacts = "unchecked=the GPU check did not answer in " + READINESS_WAIT_MS / 1000 + " s"; decide.run(); }, READINESS_WAIT_MS);
+        return true;
+    }
+    private volatile String probeFacts;
+    private volatile boolean probeDone;
+
+    private List<String> quietEnv(File f) {
+        try { return f.isFile() ? envLines(new String(Files.readAllBytes(f.toPath()), StandardCharsets.UTF_8)) : new ArrayList<>(); }
+        catch (IOException | SecurityException e) { return new ArrayList<>(); }
+    }
+
+    private void readinessDecide(String id, String vulkan) {
+        Profile p = Profile.of(id);
+        Map<String, String> f = Readiness.merge(vulkan, ReadinessActivity.ramGib(this), Build.VERSION.SDK_INT);
+        List<Readiness.Check> l = new ArrayList<>();
+        Readiness.Check st = Readiness.status(p != null ? p.status : null);
+        if (st != null) l.add(st);
+        l.addAll(Readiness.evaluate(f, Readiness.parseReqs(p != null ? p.reqs : null)));
+        rFacts = f;
+        rChecks = l;
+        readinessLine = Readiness.summary(id, f, l);
+        String report = Readiness.report(ReadinessActivity.header(this, (p != null ? p.name + " " : "") + id + " (start-up check)"), f, l);
+        try { Files.write(new File(getExternalFilesDir(null), "readiness-" + id + ".txt").toPath(), report.getBytes(StandardCharsets.UTF_8)); } catch (IOException ignored) { /* the screen's report leaves it out */ }
+        readinessDone = true;
+        List<Readiness.Check> fails = Readiness.of(l, Readiness.Status.FAIL), warns = Readiness.of(l, Readiness.Status.WARNING);
+        String gpu = "GPU: " + Readiness.gpu(f) + "\nMemory: " + f.get("ram_gib") + " GiB as Android reports it.";
+        // The notice is short (what is missing, by name); Details has each item's sentence, the GPU and Copy report
+        if (!fails.isEmpty()) {
+            StringBuilder m = new StringBuilder("Missing: ");
+            for (Readiness.Check c : fails) m.append(c.title).append(", ");
+            m.setLength(m.length() - 2);
+            m.append(".\n\nThe game may stop or draw wrongly. A custom GPU driver (Settings › GPU driver) may help.");
+            readinessDialog("Not ready for this game", m.toString(), details(fails, warns, gpu), report, "Try anyway", true);
+        } else if (!warns.isEmpty() && !Prefs.of(this).getString(Prefs.gameKey("readiness_seen", id), "").equals(warnKey(f, warns))) {
+            StringBuilder m = new StringBuilder("Runs with less: ");
+            for (Readiness.Check c : warns) m.append(c.title).append(", ");
+            m.setLength(m.length() - 2);
+            m.append('.');
+            readinessDialog("Ready, with limits", m.toString(), details(fails, warns, gpu), report, "Continue", false);
+        } else start();
+    }
+
+    /** The Details of the start-up notice: each failure and warning with its sentence, then the GPU and memory */
+    private static String details(List<Readiness.Check> fails, List<Readiness.Check> warns, String gpu) {
+        StringBuilder m = new StringBuilder();
+        for (Readiness.Check c : fails) m.append("✕ ").append(c.title).append(": ").append(c.message).append("\n\n");
+        for (Readiness.Check c : warns) m.append("! ").append(c.title).append(": ").append(c.message).append("\n\n");
+        return m.append(gpu).toString();
+    }
+
+    /** What the notice was about (the warnings, the GPU and driver): "Don't show again" holds until one of them changes */
+    private static String warnKey(Map<String, String> f, List<Readiness.Check> warns) {
+        StringBuilder s = new StringBuilder(Readiness.gpu(f));
+        for (Readiness.Check c : warns) s.append('|').append(c.title);
+        return Integer.toHexString(s.toString().hashCode());
+    }
+
+    /**
+     * The start-up notice. Required items missing: Try anyway, Back, Details. Only degraded items: Continue (one tap), with "Don't show this again" (until the GPU,
+     * the driver or the warnings change), Back and Details; Settings › Readiness check shows the details again at any time.
+     */
+    private void readinessDialog(String title, String msg, String details, String report, String go, boolean required) {
+        String id = titleId();
+        android.widget.CheckBox again = required ? null : new android.widget.CheckBox(this);
+        AlertDialog.Builder b = new AlertDialog.Builder(this).setTitle(title).setCancelable(false).setNeutralButton("Details", null);
+        if (again == null) b.setMessage(msg);
+        else {
+            int p = Math.round(20 * getResources().getDisplayMetrics().density);
+            android.widget.LinearLayout box = new android.widget.LinearLayout(this);
+            box.setOrientation(android.widget.LinearLayout.VERTICAL);
+            box.setPadding(p, p / 2, p, 0);
+            TextView t = new TextView(this);
+            t.setText(msg + "\n\nDetails are also in Settings › Readiness check.");
+            t.setTextSize(15);
+            box.addView(t);
+            again.setText("Don't show this again");
+            box.addView(again);
+            android.widget.ScrollView sv = new android.widget.ScrollView(this);   // a short screen with several warnings still reaches the box
+            sv.addView(box);
+            b.setView(sv);
+        }
+        b.setPositiveButton(go, (d, w) -> {
+            if (again != null && again.isChecked())
+                Prefs.of(this).edit().putString(Prefs.gameKey("readiness_seen", id), warnKey(rFacts, Readiness.of(rChecks, Readiness.Status.WARNING))).apply();
+            triedAnyway = required;
+            start();
+        });
+        b.setNegativeButton("Back", (d, w) -> end());
+        AlertDialog d = b.create();
+        // Details opens over the notice and keeps it open; Copy report there keeps Details open
+        d.setOnShowListener(x -> d.getButton(AlertDialog.BUTTON_NEUTRAL).setOnClickListener(v -> {
+            AlertDialog dd = new AlertDialog.Builder(this).setTitle("Readiness check").setMessage(details).setPositiveButton("Close", null).setNeutralButton("Copy report", null).create();
+            dd.setOnShowListener(y -> dd.getButton(AlertDialog.BUTTON_NEUTRAL).setOnClickListener(u -> ReadinessActivity.copy(this, report)));
+            dd.show();
+        }));
+        d.show();
+    }
+    private void noteOwnRate() {
+        try {
+            String[] f = Native.fpsCapStatus().split(" ");
+            if (Integer.parseInt(f[0]) >= 0 && Integer.parseInt(f[2]) > 0) Prefs.ownRate(this, titleId(), Integer.parseInt(f[1]) == 0);   // presenting: main is loaded
+        } catch (RuntimeException e) { /* no answer: left as it was */ }
+    }
+
+    private Map<String, String> rFacts;
+    private List<Readiness.Check> rChecks;
+
+    private void start() {
+        String id = getIntent().getStringExtra("title_id"), name = getIntent().getStringExtra("name");
+        File game = new File(getIntent().getStringExtra("game")), packDir = new File(getIntent().getStringExtra("pack"));
+        File files = getExternalFilesDir(null);
+        try {
+            Pack pack = Pack.read(packDir);
+            File romfs = pack.romfs(game);
+            if (romfs == null) throw new IOException("no RomFS in " + game);
+            if (readinessHold(id)) return;   // after the pack's own checks (a missing pack says so first), before the save is locked or anything is written
+            // The user's lines, read first: the paths the launcher sets cannot be changed by them (guard), but the test app's env-<id>.txt may name a test save folder (one game's file only: a global DM_SAVE would point every game at one save)
+            List<String> user = new ArrayList<>(guard(userEnv(new File(files, "env.txt")), "env.txt", false));   // diagnostic switches (every game: never DM_SAVE) (DM_SVC=1, DM_FS=1, ...), as the iPhone's Documents/env.txt
+            user.addAll(guard(envLines(Prefs.gameEnv(this, id)), "the game's settings", false));   // the game's own lines (its Game settings): after env.txt, so they win for this game
+            user.addAll(guard(userEnv(new File(files, "env-" + id + ".txt")), "env-" + id + ".txt", testApp()));   // and env-<title ID>.txt (adb), the same for one game
+            File save = saveDir(files, game, id), temp = mkdirs(new File(files, "temp/" + id)), root = mkdirs(new File(files, "root"));
+            File aoc = aocLinks(mkdirs(new File(files, "aoc/" + id)), game, pack);
+            log = new File(LogProvider.dir(this), id + "-" + new SimpleDateFormat("yyyyMMdd-HHmmss", Locale.ROOT).format(new Date()) + ".log");
+            pruneLogs(id);
+            List<String> env = new ArrayList<>(List.of(
+                    "DM_ROMFS=" + romfs, "DM_SAVE=" + save, "DM_TEMP=" + temp, "DM_ROOT=" + root, "DM_AOC_DIR=" + aoc,
+                    "HOME=" + files, "TMPDIR=" + getCacheDir(), "DM_BUILD_COMMIT=" + BuildConfig.NX_COMMIT,
+                    "DM_CTL=" + new File(files, "ctl.txt")));   // live control lines (android/TESTING.md "Live control", android/tools/nxctl.sh); DM_CTL= in env.txt turns it off
+            env.add(0, "NX_BUILD_TAG=" + Prefs.buildTag());   // nxlaunch.c writes it as the log's first line
+            env.add("DM_WINDOW_SIZE=" + Prefs.gameWindow(this, id));   // Game resolution: the game's own setting, else the main screen's: the window size the host gives the game
+            Lsfg.env(this, env);   // frame generation: the user's Lossless.dll and the settings
+            int cap = Prefs.fpsCap(this, id);   // the game's own frame rate cap (its in-game panel, its Game settings), else the main screen's (unset: the profile's fps_target)
+            if (cap >= 0) env.add("DM_FPS_TARGET=" + cap);
+            String gpuNote = GpuDriver.env(this, id, env);   // the game's GPU driver, else the main screen's (DM_VK_DRIVER)
+            env.addAll(user);
+            for (String kv : env) if (kv.startsWith("DM_OVERLAY=")) overlayEnv = !kv.substring(11).trim().equals("0");
+            String[] args = {"nxhost", packDir.getPath()};
+            int r = Native.start(args, env.toArray(new String[0]), log.getPath(), files.getPath());
+            if (r != 0) throw new IOException("the host did not start (" + r + (r == -1 ? ": a start was already tried in this process" : "") + ")");
+            // Whether this game picks its own frame rate (the host's cap status: no rate it can hold), remembered for its Game settings, which then offer no cap.
+            // Read once the game has run a while (the host finds the game's limiter after it starts); the in-game panel updates it too
+            ui.postDelayed(this::noteOwnRate, 30000);
+            hostRunning = true;
+            if (readinessLine != null) Native.note(readinessLine + (triedAnyway ? "; the player chose Try anyway" : ""));   // the readiness check (readinessHold)
+            Native.note("[nxlaunch] save: " + save + " (" + saveHow + ")" + (saveNote != null ? "; " + saveNote : ""));
+            Native.note("nxnative " + BuildConfig.VERSION_NAME + " (" + BuildConfig.NX_COMMIT + "), host libnxhost_" + id + ".so; " + name + " " + id + " version " + pack.version);
+            Native.note("device " + Build.MANUFACTURER + " " + Build.MODEL + ", Android " + Build.VERSION.RELEASE + " (SDK " + Build.VERSION.SDK_INT + "), " + Build.SUPPORTED_ABIS[0]
+                    + "; game " + game + "; pack " + packDir);
+            if (envProblem != null) Native.note("[RED] env.txt: " + envProblem);
+            if (!refused.isEmpty()) {
+                String msg = "not taken: " + String.join(", ", refused) + ": the launcher sets the game's paths (DM_SAVE, DM_ROMFS, DM_TEMP, DM_ROOT, DM_AOC_DIR, HOME)"
+                        + (testApp() ? "; DM_SAVE is taken from env-<title ID>.txt only" : "");
+                Native.note("[RED] env: " + msg);
+                android.widget.Toast.makeText(this, "Environment lines " + msg, android.widget.Toast.LENGTH_LONG).show();
+            }
+            if (testSave != null) Native.note("[nxlaunch] test app: DM_SAVE from env-" + id + ".txt: " + testSave);
+            Native.note("frame generation: " + (Lsfg.on(this) ? "on" : "off") + "; " + Lsfg.note);
+            Native.note(gpuNote + " (picked in the launcher; a DM_VK_DRIVER line in env.txt wins, the host's [vk] driver line says which ran)");
+            input = Native.hasInput();
+            started = true;
+            hostSetup();
+            overlay.setText(name + ": starting. Log: " + log);
+            ui.postDelayed(this::tail, 500);
+            ui.postDelayed(this::fpsTick, 500);
+        } catch (IOException | RuntimeException e) {
+            fail(String.valueOf(e.getMessage()));
+        }
+    }
+
+    /** Native.start returned 0 in this process: the game runs (until the process ends), and a new screen attaches to it instead of starting it */
+    private static boolean hostRunning;
+
+    /**
+     * This screen takes over the running game's window (the activity was created again while the game runs). Nothing of start() runs: the save is locked and in use
+     * by the host (its recovery must not run beside the host's commits), the DLC links and the log are the first screen's
+     */
+    private void attach() {
+        Native.note("the game's screen opened again; the running game carries on");
+        log = null;   // the run's log is the first screen's; this one shows no log
+        overlay.setVisibility(View.GONE);
+        input = Native.hasInput();
+        started = true;
+        hostSetup();
+        // The host is still stopped (the screen that went sent onStop; nothing runs before onStart). It stays paused when it was (the in-game panel's Pause, or a return
+        // not yet continued), and is paused when pause-on-return is on, as a return from the background is: the overlay shows whenever the host is paused, a tap continues
+        int hostPaused = Native.paused();
+        if (hostPaused < 0) Native.lifecycle(5);   // a host without nxhost_paused: its pause is not known, so it is continued and paused again by the setting alone
+        // Pause-on-return only after a real trip to the background: a screen recreated while it showed (a wallpaper colour or theme change) does not pause the game
+        if (hostPaused == 1 || hostInBackground && Prefs.pauseOnReturn(this, titleId())) { paused = true; Native.lifecycle(4); pausedView.setVisibility(View.VISIBLE); }
+        ui.postDelayed(this::fpsTick, 500);
+    }
+
+    /** The game's screen was stopped (the game in the background) and not started again; a stop for a configuration change is no trip to the background */
+    private static boolean hostInBackground;
+
+    /**
+     * A start that cannot go on: the reason, then the activity and its process end, as Stop does. A failed start must not leave an idle :game process: it would hold
+     * this game's host (the next Play of another game would land in it, Native.load) and the save's lock
+     */
+    private void fail(String why) {
+        new AlertDialog.Builder(this).setTitle("Cannot start " + getIntent().getStringExtra("name")).setMessage(why)
+                .setPositiveButton("OK", (d, w) -> end()).setCancelable(false).show();
+    }
+
+    private void end() {
+        finish();
+        // On its own handler: onDestroy clears ui's callbacks
+        new Handler(Looper.getMainLooper()).postDelayed(() -> android.os.Process.killProcess(android.os.Process.myPid()), 300);
+    }
+
+    /**
+     * The screen goes (Stop, or Android recreating the activity while the game runs, which then attaches a new one): what hostSetup registered is let go, and the
+     * overlay and log loops stop, so a screen created again does not double them (two deviceAdded per pad, two route resets per change) or keep this one alive.
+     * The game itself is left as it is: onStop has suspended it
+     */
+    @Override protected void onDestroy() {
+        ui.removeCallbacksAndMessages(null);
+        if (inputManager != null) inputManager.unregisterInputDeviceListener(this);
+        if (audio != null) {
+            if (focus != null) audio.abandonAudioFocusRequest(focus);
+            if (route != null) audio.unregisterAudioDeviceCallback(route);
+        }
+        super.onDestroy();
+    }
+
+    /** Play on another game while this one runs reaches this activity (singleTask, the same :game process): this game stays, and the user is told to stop it first */
+    @Override protected void onNewIntent(android.content.Intent i) {
+        super.onNewIntent(i);
+        String want = i.getStringExtra("title_id"), have = getIntent().getStringExtra("title_id");
+        if (want == null || want.equals(have)) return;
+        new AlertDialog.Builder(this).setTitle(getIntent().getStringExtra("name") + " is running")
+                .setMessage("Stop it first (the in-game panel › Stop the game), then start " + i.getStringExtra("name") + ". One game runs at a time.")
+                .setPositiveButton("OK", null).show();
+    }
+
+    // ---- The save's lock (SaveStore.Lock on <save>.lock): taken before the save is recovered and kept while this process lives, so a backup or restore of this save
+    // never runs beside the game (SaveUi asks SaveStore.inUse); the process ending releases it ----
+    private static SaveStore.Lock saveLock;
+    private static File saveLocked;
+
+    private static synchronized void holdLock(File save) throws IOException {
+        if (saveLock != null && SaveStore.same(saveLocked, save)) return;   // this process holds it already (the game's screen opened again)
+        SaveStore.Lock l = SaveStore.tryLock(save);
+        if (l == null) throw new IOException("The save " + save + " is in use: a backup or restore of it is working. Try again when it is done.");
+        if (saveLock != null) saveLock.close();
+        saveLock = l;
+        saveLocked = save;
+    }
+
+    /** Environment keys only the launcher sets: a line of env.txt, env-<id>.txt or the game's own lines that names one is refused (DM_SAVE: see allowSave) */
+    static final java.util.Set<String> PROTECTED = new java.util.HashSet<>(java.util.Arrays.asList("DM_SAVE", "DM_ROMFS", "DM_TEMP", "DM_ROOT", "DM_AOC_DIR", "HOME"));
+    private final List<String> refused = new ArrayList<>();
+    private String testSave;   // DM_SAVE from env-<id>.txt in the test app: a test run's own save folder (a copied seed), never the user's
+
+    /** lines without the protected keys; each one refused is noted (refused). allowSave: DM_SAVE may stay (the test app's files, which only adb writes) */
+    private List<String> guard(List<String> lines, String from, boolean allowSave) {
+        List<String> out = new ArrayList<>();
+        for (String kv : lines) {
+            String k = kv.substring(0, kv.indexOf('=')).trim();
+            if (k.equals("DM_SAVE") && allowSave) { testSave = kv.substring(kv.indexOf('=') + 1).trim(); continue; }   // taken as the save folder (locked, recovered) below
+            if (PROTECTED.contains(k)) { refused.add(k + " (" + from + ")"); continue; }
+            out.add(kv);
+        }
+        return out;
+    }
+
+    static boolean testApp() { return !BuildConfig.NX_PLAY; }
+
+    private static File mkdirs(File d) throws IOException {
+        if (!d.isDirectory() && !d.mkdirs()) throw new IOException("cannot create " + d);
+        return d;
+    }
+
+    /** DM_AOC_DIR/<index> → each DLC's RomFS folder in the game folder (hle_fs.c aoc_dir), as symbolic links in app storage */
+    private static File aocLinks(File dir, File game, Pack pack) {
+        File[] old = dir.listFiles();
+        if (old != null) for (File f : old) f.delete();
+        for (Map.Entry<Integer, String> e : pack.aoc.entrySet()) {
+            File target = new File(game, e.getValue());
+            if (!target.isDirectory()) continue;
+            try { Os.symlink(target.getPath(), new File(dir, String.valueOf(e.getKey())).getPath()); } catch (ErrnoException ignored) { /* the game then runs without that DLC */ }
+        }
+        return dir;
+    }
+
+    // A file `adb shell` writes here belongs to the shell user with mode 0660 and group ext_data_rw, which the app is not in: it exists but cannot be read
+    // (TESTING.md, Diagnostic switches: chmod 666 after writing it). The run goes on without the switches and the log says why
+    private String envProblem;
+    private List<String> userEnv(File f) {
+        if (!f.exists()) return new ArrayList<>();
+        try {
+            return envLines(new String(Files.readAllBytes(f.toPath()), StandardCharsets.UTF_8));
+        } catch (IOException | SecurityException e) {
+            envProblem = f + " exists but cannot be read (" + e + "): no switches from it this run; after writing it with adb, chmod 666 it";
+            return new ArrayList<>();
+        }
+    }
+
+    /** KEY=VALUE lines; blank lines and # comments skipped */
+    static List<String> envLines(String text) {
+        List<String> out = new ArrayList<>();
+        for (String l : text.split("\n")) {
+            l = l.trim();
+            if (!l.isEmpty() && !l.startsWith("#") && l.indexOf('=') > 0) out.add(l);
+        }
+        return out;
+    }
+
+    /** The newest KEEP_LOGS logs of this game are kept (each game's logs are <title ID>-<time>.log: one game's runs never push another's out) */
+    private void pruneLogs(String id) {
+        File[] logs = LogProvider.dir(this).listFiles((d, n) -> n.startsWith(id + "-") && n.endsWith(".log"));
+        if (logs == null || logs.length < KEEP_LOGS) return;
+        Arrays.sort(logs, Comparator.comparingLong(File::lastModified));
+        for (int i = 0; i <= logs.length - KEEP_LOGS; i++) logs[i].delete();
+    }
+
+    /** The last lines of the log over the surface, once a second: until the game's first frame, then only with the setting on (TouchControls.showLog), or after a crash */
+    private boolean drawing, failed;
+    private void tail() {
+        if (log == null) return;
+        if (stopped || paused) { ui.postDelayed(this::tail, 2000); return; }   // the log does not move while the game is suspended
+        try (RandomAccessFile r = new RandomAccessFile(log, "r")) {
+            long n = r.length(), from = Math.max(0, n - 2048);
+            byte[] b = new byte[(int) (n - from)];
+            r.seek(from);
+            r.readFully(b);
+            String text = new String(b, StandardCharsets.UTF_8);
+            if (text.contains("[nvn] frame ") || text.contains("[longframe]") || text.contains("window frame rate")) drawing = true;   // the host logs these once frames are presented
+            if (text.contains("CRASH sig=") || text.contains("FATAL")) failed = true;
+            overlay.setVisibility(!drawing || failed || TouchControls.showLog(this) ? View.VISIBLE : View.GONE);
+            String[] lines = text.split("\n");
+            StringBuilder s = new StringBuilder();
+            for (int i = Math.max(from > 0 ? 1 : 0, lines.length - 8); i < lines.length; i++) s.append(lines[i]).append('\n');
+            overlay.setText(s.toString().trim());
+        } catch (IOException ignored) { /* next time */ }
+        ui.postDelayed(this::tail, 1000);
+    }
+
+    // ---- The host's side of the Activity: input devices, audio focus and route, motion, lifecycle ----
+    private void hostSetup() {
+        inputManager = (InputManager) getSystemService(Context.INPUT_SERVICE);
+        inputManager.registerInputDeviceListener(this, ui);
+        for (int id : inputManager.getInputDeviceIds()) onInputDeviceAdded(id);
+        Native.motionRotation(getDisplay().getRotation());
+        audio = (AudioManager) getSystemService(Context.AUDIO_SERVICE);
+        focus = new AudioFocusRequest.Builder(AudioManager.AUDIOFOCUS_GAIN)
+                .setAudioAttributes(new AudioAttributes.Builder().setUsage(AudioAttributes.USAGE_GAME).setContentType(AudioAttributes.CONTENT_TYPE_UNKNOWN).build())
+                .setOnAudioFocusChangeListener(f -> Native.audioInterrupt(f == AudioManager.AUDIOFOCUS_LOSS || f == AudioManager.AUDIOFOCUS_LOSS_TRANSIENT
+                        || f == AudioManager.AUDIOFOCUS_LOSS_TRANSIENT_CAN_DUCK), ui)
+                .build();
+        // Granted at once calls no listener: an interruption the screen that went saw (a call while in the background) is over for this one
+        if (audio.requestAudioFocus(focus) == AudioManager.AUDIOFOCUS_REQUEST_GRANTED) Native.audioInterrupt(false);
+        else Native.note("audio focus not granted at start");
+        // The callback first reports the devices already there: only later changes reopen the streams
+        route = new AudioDeviceCallback() {
+            @Override public void onAudioDevicesAdded(AudioDeviceInfo[] d) { if (routeReady) Native.audioRouteChanged(); }
+            @Override public void onAudioDevicesRemoved(AudioDeviceInfo[] d) { if (routeReady) Native.audioRouteChanged(); }
+        };
+        audio.registerAudioDeviceCallback(route, ui);
+        ui.post(() -> routeReady = true);
+    }
+
+    // ---- Paused: the game suspended while its screen shows (nxhost_lifecycle 4 / 5); on its return from the background with pause-on-return on (the game's setting, on by
+    // default), and by the in-game panel's Pause. The host keeps it suspended (clock, graphics, guest threads, audio, focus Background) until unpause() ----
+    private boolean paused, stopped;
+    private TextView pausedView;
+
+    private String titleId() { return String.valueOf(getIntent().getStringExtra("title_id")); }
+
+    /** The in-game panel's Pause */
+    void pause() {
+        if (!started || paused) return;
+        paused = true;
+        Native.lifecycle(4);
+        Native.motionStop();
+        pausedView.setVisibility(View.VISIBLE);
+    }
+
+    private void unpause() {
+        if (!paused) return;
+        paused = false;
+        pausedView.setVisibility(View.GONE);
+        Native.lifecycle(5);
+        if (resumedNow) Native.motionStart();
+    }
+
+    @Override protected void onStart() {
+        super.onStart();
+        if (!started) return;
+        // back from the background: stays suspended (4 before 2, so the host never lets it run in between) until the tap
+        if (stopped && !paused && Prefs.pauseOnReturn(this, titleId())) {
+            paused = true; Native.lifecycle(4);
+            if (!controls.editing()) pausedView.setVisibility(View.VISIBLE);   // the layout editor stays usable; its Done shows Paused (onEditEnd)
+        }
+        stopped = false;
+        hostInBackground = false;
+        Native.lifecycle(2);
+    }
+    @Override protected void onResume() {
+        super.onResume();
+        if (!started) return;
+        resumedNow = true;
+        Native.lifecycle(3);
+        Native.motionRotation(getDisplay().getRotation());
+        if (!paused) Native.motionStart();   // paused: the sensors stay off (they would wake the host at their rate for a frozen game); unpause starts them
+    }
+    private boolean resumedNow;
+    @Override protected void onPause() {
+        resumedNow = false;
+        if (started) { Native.motionStop(); Native.lifecycle(0); }
+        super.onPause();
+    }
+    @Override protected void onStop() {
+        if (started) { stopped = true; if (!isChangingConfigurations()) hostInBackground = true; Native.lifecycle(1); }
+        super.onStop();
+    }
+    @Override public void onConfigurationChanged(Configuration c) {
+        super.onConfigurationChanged(c);
+        if (started) Native.motionRotation(getDisplay().getRotation());
+    }
+
+    @Override public void surfaceCreated(SurfaceHolder h) { Native.setSurface(h.getSurface()); }
+    // The replay letterboxes the game's 16:9 picture into the window (vka_present.c); TouchControls gives the host that rectangle (nxhost_touch_layout) with its own size
+    @Override public void surfaceChanged(SurfaceHolder h, int format, int w, int ht) { Native.setSurface(h.getSurface()); }
+    @Override public void surfaceDestroyed(SurfaceHolder h) { Native.setSurface(null); }
+
+    private static boolean gamepad(int source) {
+        return (source & InputDevice.SOURCE_GAMEPAD) == InputDevice.SOURCE_GAMEPAD || (source & InputDevice.SOURCE_JOYSTICK) == InputDevice.SOURCE_JOYSTICK
+                || (source & InputDevice.SOURCE_DPAD) == InputDevice.SOURCE_DPAD;
+    }
+
+    @Override public void onInputDeviceAdded(int id) {
+        InputDevice d = InputDevice.getDevice(id);
+        // Gamepads and joysticks only: a keyboard with arrow keys (SOURCE_DPAD) gets a player from its first pad key, if it ever sends one
+        if (d != null && !d.isVirtual() && (d.supportsSource(InputDevice.SOURCE_GAMEPAD) || d.supportsSource(InputDevice.SOURCE_JOYSTICK))) {
+            Native.deviceAdded(id, d.getName(), false);
+            padConnected(id);
+        }
+        deviceAxes.remove(id);
+    }
+    @Override public void onInputDeviceRemoved(int id) {
+        Native.deviceRemoved(id); deviceAxes.remove(id);
+        if (pads.remove(id)) controls.setGamepad(!pads.isEmpty());
+    }
+    private void padConnected(int id) { if (pads.add(id)) controls.setGamepad(true); }
+    @Override public void onInputDeviceChanged(int id) { deviceAxes.remove(id); }
+
+    @Override public boolean dispatchKeyEvent(KeyEvent e) {
+        if (panel == null) return super.dispatchKeyEvent(e);   // no host for this game (onCreate): only the message is shown
+        // A gamepad's Home / guide button opens and closes the in-game panel; while it is open the pad moves through it and the game gets no pad keys
+        if (e.getKeyCode() == KeyEvent.KEYCODE_BUTTON_MODE) { if (e.getAction() == KeyEvent.ACTION_UP) panel.toggle(); return true; }
+        if (panel.isOpen() && gamepad(e.getSource())) return panel.padKey(e) || super.dispatchKeyEvent(e);
+        if (paused && gamepad(e.getSource())) {   // paused: A or Start continues; no pad key reaches the game
+            if (e.getAction() == KeyEvent.ACTION_UP && (e.getKeyCode() == KeyEvent.KEYCODE_BUTTON_A || e.getKeyCode() == KeyEvent.KEYCODE_BUTTON_START)) unpause();
+            return true;
+        }
+        // Back from the phone and keyboard keys stay with the launcher: the host takes only pad buttons
+        if (input && gamepad(e.getSource()) && e.getDevice() != null && !e.getDevice().isVirtual()
+                && (e.getAction() == KeyEvent.ACTION_DOWN || e.getAction() == KeyEvent.ACTION_UP)
+                && Native.key(e.getDeviceId(), e.getKeyCode(), e.getAction() == KeyEvent.ACTION_DOWN)) { padConnected(e.getDeviceId()); return true; }
+        return super.dispatchKeyEvent(e);
+    }
+
+    // The axes the host reads (input_map.h), and per device the ones it has (InputDevice.getMotionRange): absent axes would read 0 and pull a stick or trigger back
+    private static final int[] AXES = {MotionEvent.AXIS_X, MotionEvent.AXIS_Y, MotionEvent.AXIS_Z, MotionEvent.AXIS_RZ, MotionEvent.AXIS_RX, MotionEvent.AXIS_RY,
+            MotionEvent.AXIS_HAT_X, MotionEvent.AXIS_HAT_Y, MotionEvent.AXIS_LTRIGGER, MotionEvent.AXIS_RTRIGGER, MotionEvent.AXIS_GAS, MotionEvent.AXIS_BRAKE};
+    private final HashMap<Integer, int[]> deviceAxes = new HashMap<>();
+    private final float[] axisValues = new float[AXES.length];
+
+    private int[] axesOf(InputDevice d, int source) {
+        int[] have = deviceAxes.get(d.getId());
+        if (have != null) return have;
+        int n = 0;
+        int[] tmp = new int[AXES.length];
+        for (int a : AXES) if (d.getMotionRange(a, source) != null) tmp[n++] = a;
+        have = Arrays.copyOf(tmp, n);
+        deviceAxes.put(d.getId(), have);
+        return have;
+    }
+
+    @Override public boolean onGenericMotionEvent(MotionEvent e) {
+        if (!input || panel.isOpen() || paused || (e.getSource() & InputDevice.SOURCE_JOYSTICK) != InputDevice.SOURCE_JOYSTICK || e.getAction() != MotionEvent.ACTION_MOVE || e.getDevice() == null)
+            return super.onGenericMotionEvent(e);
+        int[] have = axesOf(e.getDevice(), e.getSource());
+        for (int i = 0; i < have.length; i++) axisValues[i] = e.getAxisValue(have[i]);
+        return Native.axes(e.getDeviceId(), have, axisValues) || super.onGenericMotionEvent(e);   // the host reads have.length values
+    }
+
+
+    /** Back (the phone's button or its edge swipe) opens and closes the in-game panel, which has Stop */
+    @SuppressWarnings("deprecation")
+    @Override public void onBackPressed() { if (panel != null) panel.toggle(); else end(); }
+}

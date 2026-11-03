@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Dialogs: a rounded card with a thin peel-colored edge, inset from the screen's sides -->
+<inset xmlns:android="http://schemas.android.com/apk/res/android" android:insetLeft="20dp" android:insetRight="20dp" android:insetTop="24dp" android:insetBottom="24dp">
+    <shape android:shape="rectangle">
+        <corners android:radius="28dp" />
+        <solid android:color="@color/bn_card" />
+        <stroke android:width="1dp" android:color="@color/bn_card_stroke" />
+    </shape>
+</inset>

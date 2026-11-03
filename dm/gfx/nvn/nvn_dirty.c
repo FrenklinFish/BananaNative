@@ -5,11 +5,12 @@
 #include "nvn_dirty.h"
 #include "../../host/dm.h"
 #include <stdatomic.h>
+#include <errno.h>
 #include <pthread.h>
 #include <sys/mman.h>
 #include <unistd.h>
-#include <mach/mach_time.h>
 #include <sched.h>
+#include <stdio.h>
 
 // Order of page state and mprotect: the side changing protection first sets the state to BUSY and sets the final state only after mprotect has landed; other threads wait when they see BUSY.
 //   set read-only: NONE -> BUSY -> mprotect(read-only) -> PROT; unprotect: PROT -> BUSY -> mprotect(writable) -> NONE.
@@ -40,19 +41,20 @@ void nvn_dirty_stat(int *live, int *peak, int *cap) { *live = atomic_load(&g_liv
 static _Atomic int g_overflow_logged;
 static pthread_mutex_t g_slot_mu = PTHREAD_MUTEX_INITIALIZER;   // Pool creation, retirement and protection serialize descriptor lifetime; the page-fault path does not touch this mutex
 static _Atomic uint64_t g_mp_calls, g_mp_pages, g_mp_ticks;   // This module's mprotect: call count, pages covered, time spent (mach timebase, safe in the page-fault path too)
+static _Atomic uint64_t g_mp_fail; static _Atomic int g_mp_errno;
 static void mp(uintptr_t a, size_t len, int prot) {
-    uint64_t t = mach_absolute_time(); mprotect((void *)a, len, prot);
-    atomic_fetch_add(&g_mp_ticks, mach_absolute_time() - t); atomic_fetch_add(&g_mp_calls, 1); atomic_fetch_add(&g_mp_pages, len >> g_shift);
+    uint64_t t = plat_abs_time(); if (mprotect((void *)a, len, prot)) { atomic_fetch_add(&g_mp_fail, 1); atomic_store(&g_mp_errno, errno); }
+    atomic_fetch_add(&g_mp_ticks, plat_abs_time() - t); atomic_fetch_add(&g_mp_calls, 1); atomic_fetch_add(&g_mp_pages, len >> g_shift);
 }
 
-static mach_timebase_info_data_t g_tb;   // obtained when the first pool is registered (the fault path only multiplies and divides)
+static plat_timebase_t g_tb;   // obtained when the first pool is registered (the fault path only multiplies and divides)
 static _Atomic int g_busy_red;
 // Wait for this page to leave BUSY. Returns 1 = it has left; 0 = waited past the limit (reported red once). Usable in a signal handler: only atomic reads, mach_absolute_time and sched_yield
 static int busy_wait(range_t *r, uintptr_t p) {
     uint64_t t0 = 0;
     for (unsigned n = 1; atomic_load(&r->state[p]) == PG_BUSY; n++) {
         if (n & 0x3ff) continue;
-        uint64_t now = mach_absolute_time(); if (!t0) t0 = now;
+        uint64_t now = plat_abs_time(); if (!t0) t0 = now;
         if ((now - t0) * g_tb.numer / g_tb.denom > (uint64_t)BUSY_WAIT_MS * 1000000ull) {
             if (!atomic_exchange(&g_busy_red, 1)) LOG("[RED] dirty-page tracking: page %p stuck 'busy' for over %d ms (the thread changing its protection has not finished), no longer waiting", (void *)(r->base + (p << g_shift)), BUSY_WAIT_MS);
             return 0; }
@@ -125,7 +127,7 @@ static void prep_write(void *addr, size_t len) {
 
 void nvn_dirty_add_range(const void *mem, size_t size) {
     static int inited;
-    if (!inited) { inited = 1; g_pg = (uintptr_t)getpagesize(); g_shift = __builtin_ctzl(g_pg); mach_timebase_info(&g_tb); dm_fault_hook_register(on_fault); dm_guest_write_prep_register(prep_write); }
+    if (!inited) { inited = 1; g_pg = (uintptr_t)getpagesize(); g_shift = __builtin_ctzl(g_pg); plat_timebase(&g_tb); dm_fault_hook_register(on_fault); dm_guest_write_prep_register(prep_write); }
     atomic_fetch_add(&g_adds_total, 1);
     pthread_mutex_lock(&g_slot_mu);
     int n = atomic_load(&g_nr);
@@ -197,6 +199,13 @@ void nvn_dirty_protect(const void *addr, size_t len) {
     }
     pthread_mutex_unlock(&g_slot_mu);
 }
+// A swap of guest pages under the tracker (the Vulkan replay placing a pool whose textures it already tracks, vka_mem.c place): the swap reads the range's protections,
+// copies the pages and puts the protections back on the new ones, so a page this module protected or unprotected meanwhile would come out with the wrong protection for
+// its state (read-only and NONE: a writer spins forever; writable and PROT: its writes are missed). So the swap holds the tracker: every protected page of the range is
+// released first, as a host write would (stamped: its textures upload again), and g_slot_mu stays held, so nvn_dirty_protect waits until the swap ends. With no page of
+// the range protected, the fault and pre-write paths change nothing there. The holder must not wait for anything that waits on nvn_dirty_protect's callers
+void nvn_dirty_hold(const void *addr, size_t len) { pthread_mutex_lock(&g_slot_mu); if (g_pg) prep_write((void *)addr, len); }
+void nvn_dirty_unhold(void) { pthread_mutex_unlock(&g_slot_mu); }
 uint64_t nvn_dirty_now(void) { return atomic_load(&g_now); }
 int nvn_dirty_since_span(const void *span, const void *addr, size_t len, uint64_t stamp) {
     if (!len) return 0;
@@ -207,6 +216,30 @@ int nvn_dirty_since_span(const void *span, const void *addr, size_t len, uint64_
     for (uintptr_t i = p; i <= q; i++) if (atomic_load(&r->gen[i]) > stamp) return 1;   // The generation of the last write before upload is <= the stamp; any later write must be > the stamp
     return 0;
 }
+// The written part of [addr, addr+len) since stamp, by pages: [*lo, *hi) as offsets from addr (clipped to the span). 0 = nothing written; untracked = all of it
+int nvn_dirty_bounds_since(const void *span, const void *addr, size_t len, uint64_t stamp, size_t *lo, size_t *hi) {
+    *lo = 0; *hi = len;
+    if (!len) return 0;
+    range_t *r = (range_t *)span; uintptr_t a = (uintptr_t)addr;
+    if (!r || !atomic_load_explicit(&r->live, memory_order_acquire) || a < r->base || a + len > r->end) r = find_span(a, len);
+    if (!r) return 1;
+    uintptr_t p = (a - r->base) >> g_shift, q = (a + len - 1 - r->base) >> g_shift, f = UINTPTR_MAX, l = 0;
+    for (uintptr_t i = p; i <= q; i++) if (atomic_load(&r->gen[i]) > stamp) { if (f == UINTPTR_MAX) f = i; l = i; }
+    if (f == UINTPTR_MAX) return 0;
+    uintptr_t b0 = r->base + (f << g_shift), b1 = r->base + ((l + 1) << g_shift);
+    *lo = b0 > a ? b0 - a : 0; *hi = b1 - a < len ? b1 - a : len;
+    return 1;
+}
+void nvn_dirty_debug(const void *span, const void *addr, size_t len, uint64_t stamp, char *out, size_t n) {   // diagnostics (DM_VK_NANSCAN): the kept range, the range now, page states and generations
+    range_t *k = (range_t *)span, *r = find_span((uintptr_t)addr, len);
+    int live = k && atomic_load(&k->live), np = 0, nn = 0, nb = 0, nl = 0; uint64_t mg = 0;
+    if (r) { uintptr_t a = (uintptr_t)addr, p = (a - r->base) >> g_shift, q = (a + len - 1 - r->base) >> g_shift;
+        for (uintptr_t i = p; i <= q; i++) { uint8_t st = atomic_load(&r->state[i]); np += st == PG_PROT; nn += st == PG_NONE; nb += st == PG_BUSY; uint64_t g = atomic_load(&r->gen[i]); if (g > mg) mg = g; nl++; } }
+    size_t o0 = (size_t)snprintf(out, n, "mprotect failures %llu (errno %d); ", (unsigned long long)atomic_load(&g_mp_fail), atomic_load(&g_mp_errno)); out += o0; n -= o0;
+    snprintf(out, n, "kept range %p (%s, %#lx-%#lx), range now %p (%#lx-%#lx, base mem %#lx); %d pages: %d protected, %d writable, %d busy; newest page generation %llu, stamp %llu, clock %llu",
+             span, live ? "live" : "dead", k ? (unsigned long)k->base : 0ul, k ? (unsigned long)k->end : 0ul, (void *)r, r ? (unsigned long)r->base : 0ul, r ? (unsigned long)r->end : 0ul, r ? (unsigned long)r->mem : 0ul,
+             nl, np, nn, nb, (unsigned long long)mg, (unsigned long long)stamp, (unsigned long long)atomic_load(&g_now));
+}
 int nvn_dirty_since(const void *addr, size_t len, uint64_t stamp) { return nvn_dirty_since_span(NULL, addr, len, stamp); }
 void nvn_dirty_slot_stats(int *live, int *used_slots, uint64_t *adds_total) {
     int n = atomic_load(&g_nr), active = 0;
@@ -215,6 +248,6 @@ void nvn_dirty_slot_stats(int *live, int *used_slots, uint64_t *adds_total) {
 }
 void nvn_dirty_stats(uint64_t *faults, uint64_t *preps) { *faults = atomic_load(&g_faults); *preps = atomic_load(&g_preps); }
 void nvn_dirty_mp_stats(uint64_t *calls, uint64_t *pages, uint64_t *ns) {
-    static mach_timebase_info_data_t tb; if (!tb.denom) mach_timebase_info(&tb);
+    static plat_timebase_t tb; if (!tb.denom) plat_timebase(&tb);
     *calls = atomic_load(&g_mp_calls); *pages = atomic_load(&g_mp_pages); *ns = atomic_load(&g_mp_ticks) * tb.numer / tb.denom;
 }

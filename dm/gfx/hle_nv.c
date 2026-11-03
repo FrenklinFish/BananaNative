@@ -25,6 +25,11 @@ HLE_FORCE("_ZN2nv16FinalizeGraphicsEv", WHY, void, h_nv_Fin, void) { g_nv_pool =
 HLE_FORCE("_ZN2nv9InitCheckEv", WHY "; nv::InitializeGraphics recorded on the host", void, h_nv_InitCheck, void) {
     if (!g_nv_pool.inited) die("nv::InitCheck: graphics not initialised (nv::InitializeGraphics was not called)");
 }
+// The Switch 2's form of the same check: nn::gs::sdk::CheckGraphicsSystemInitialized(caller name) aborts unless BootGraphicsSystem set the sdk's flag, and BootGraphicsSystem runs only
+// inside the driver's nv::InitializeGraphics, which the host takes over. Mario Kart World 1.8.0's nn::camera::Initialize (in its main, main+0xcdebc0, at boot) aborted at sdk+0x46e8b8
+HLE_FORCE("_ZN2nn2gs3sdk30CheckGraphicsSystemInitializedEPKcm", "the graphics system's boot is nv::InitializeGraphics, recorded on the host", void, h_gs_CheckInit, const char *who, unsigned long n) {
+    if (!g_nv_pool.inited) die("%.*s: the graphics system is not booted (nv::InitializeGraphics was not called)", (int)(n < 64 ? n : 64), who ? who : "?");
+}
 // nv::MemoryInfo is 64-bit counters, the SDK fills them from sign-extended 32-bit driver counters. Its size follows the SDK: 0x20 bytes (four counters) on SDK 10 and older,
 // 0x40 bytes from SDK 11 on (where the SDK zeroes all 0x40 when nv is not initialised). Writing 0x40 on an old SDK overran the caller's record by 32 bytes (Hyrule Warriors:
 // Definitive Edition, SDK 3.5.1). Its own implementation reads the NV driver object, which the host never creates, so it faults: Well Dweller crashed there (sdk+0x4656c8,

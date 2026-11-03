@@ -790,6 +790,9 @@ namespace Ryujinx.Graphics.Shader.Translation.Optimizations
         // as an open-addressing hash set of 1 << GmemLogLog2 words from word 1 (0 = empty), word 0 set when a page found no free slot in GmemLogProbes tries. The host cannot know where
         // a store through a loaded pointer lands before the GPU runs it; it learns the pages from the log. A set, not a list: one draw of Donkey Kong Bananza stores 7,325 times into a few dozen pages
         private const int GmemLogCbOffset = 1;
+
+        // nxnative: the shared memory spill buffer (StructuredIr/SharedSpillInfo.cs, dmsh_abi.h DMSH_SHARED_SPILL_CB_OFFSET), reserved under the same sentinel slot at offset 2
+        public const int SharedSpillCbOffset = 2;
         private const int GmemLogLog2 = 10;
         private const int GmemLogProbes = 8;
 

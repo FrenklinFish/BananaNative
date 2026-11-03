@@ -25,3 +25,8 @@ ignore = ["F403", "F405", "E701", "E702", "E731", "E741", "B007", "B905", "PLW06
 source = ["dm/tools", "dm/gfx/tools", "dm/games", "scripts"]
 omit = ["*/tests/*"]
 patch = ["subprocess"]
+
+# What the tools need beyond the standard library to rewrite and pack a game (scripts/pack_android.py, dm/tools/patch_nso.py): Capstone 5 (the rewriter uses its 5.x names)
+# and lz4 (NSO segments). android/README.md has the environment.
+[dependency-groups]
+android-pack = ["capstone>=5,<6", "lz4"]

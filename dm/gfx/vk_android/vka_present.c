@@ -1,0 +1,498 @@
+// The present: the launcher's ANativeWindow (nxhost_set_window) → VkSurfaceKHR → a FIFO swapchain, and a present thread that blits the game's window texture into it.
+// As in nvn_mtl.m, the game's QueuePresentTexture only enqueues (mtl_present returns a ticket); AcquireTexture waits for the ticket of the image it hands out (mtl_present_wait).
+// The blit keeps the texture's bytes as they are (8-bit sRGB textures are stored as UNORM, vka_tex.c) into an R8G8B8A8_UNORM swapchain, the way the Metal layer is BGRA8Unorm,
+// letterboxed to the window, flipped when the window origin is lower left. Pre-rotation: when the surface's currentTransform is a rotation (a phone held in landscape whose panel
+// is portrait), the swapchain takes it as its preTransform and the panel's own orientation, and a small draw (vka_present_rot.h) copies the picture rotated, so the compositor
+// shows the image as it is instead of rotating every frame; a change of rotation (the phone turned over) recreates the swapchain. DM_VK_PRETRANSFORM=0 leaves the rotation to
+// the compositor. Pacing: FIFO, and with VK_GOOGLE_display_timing each image is shown for at least its present period (a 30 fps game on a 60 Hz panel, a 60 fps game on a
+// 120 Hz one); the window also gets the game's frame rate (ANativeWindow_setFrameRate), so the system may run the panel at it. The same extension gives the presented times
+// hle_nvn.c's frame statistics read (mtl_presented_time)
+#if defined(__ANDROID__)
+#include "vka.h"
+#include <stdio.h>
+#include "vk_android.h"
+#include "../nvn/nvn_mtl.h"
+#include "vka_present_rot.h"
+#include <android/native_window.h>
+#include <dlfcn.h>
+#include <stdlib.h>
+#include <string.h>
+#include <time.h>
+
+
+// ---------- The window ----------
+static pthread_mutex_t g_pmu = PTHREAD_MUTEX_INITIALIZER;
+static pthread_cond_t g_pcv = PTHREAD_COND_INITIALIZER;
+static ANativeWindow *g_win_new; static uint64_t g_win_gen, g_win_ack;   // set by nxhost_set_window; the present thread takes it and acknowledges the generation
+static int g_thread_up;
+static void *selftest_main(void *arg);
+void nxhost_set_window(ANativeWindow *w) {
+    static int first = 1;
+    if (w) ANativeWindow_acquire(w);
+    vka_init();
+    pthread_mutex_lock(&g_pmu);
+    if (g_win_new) ANativeWindow_release(g_win_new);   // never taken by the present thread
+    g_win_new = w; uint64_t gen = ++g_win_gen;
+    pthread_cond_broadcast(&g_pcv);
+    if (!w && g_thread_up) {   // surfaceDestroyed: the swapchain must be gone before the launcher returns
+        struct timespec dl; clock_gettime(CLOCK_REALTIME, &dl); dl.tv_sec += 2;
+        while (g_win_ack < gen) if (pthread_cond_timedwait(&g_pcv, &g_pmu, &dl)) { VRED("the present thread did not let the window go within 2 s"); break; }
+    }
+    pthread_mutex_unlock(&g_pmu);
+    VLOG("window %p%s", (void *)w, w ? "" : " (none: presents are dropped)");
+    const char *e = getenv("NXHOST_VK_SELFTEST");
+    if (first && w && e && atoi(e) > 0) { first = 0; pthread_t th; if (!pthread_create(&th, NULL, selftest_main, (void *)(intptr_t)atoi(e))) pthread_detach(th); }
+    if (w) first = 0;
+}
+
+// ---------- Swapchain ----------
+enum { NFRAME = 3, MAXIMG = 8, PQ = 8, PRING = 512 };
+static ANativeWindow *g_win; static VkSurfaceKHR g_surf; static VkSwapchainKHR g_swap; static VkFormat g_swap_fmt; static VkExtent2D g_ext;
+static VkImage g_simg[MAXIMG]; static VkSemaphore g_sdone[MAXIMG]; static uint32_t g_nimg;
+static struct { VkCommandBuffer cb; VkFence fence; VkSemaphore acq; vka_img *held; int used; } g_fr[NFRAME];
+static VkCommandPool g_ppool; static unsigned g_fi;
+static uint64_t g_refresh_ns, g_last_desired, g_drawable_ns;
+static int g_recreate;
+static struct { uint64_t n; double t; } g_pres[PRING];
+static VkSurfaceTransformFlagBitsKHR g_pre = VK_SURFACE_TRANSFORM_IDENTITY_BIT_KHR;   // the swapchain's preTransform
+static VkImageView g_sview[MAXIMG];   // the swapchain images as colour attachments (pre-rotation only)
+static int g_fps_set; static unsigned g_refresh_n;
+static _Atomic int g_place_x = 5000, g_place_y = 5000;   // nxhost_picture_place, in 1/10000 of the free space
+void nxhost_picture_place(float x, float y) {
+    x = x < 0 ? 0 : x > 1 ? 1 : x; y = y < 0 ? 0 : y > 1 ? 1 : y;
+    g_place_x = (int)(x * 10000 + 0.5f); g_place_y = (int)(y * 10000 + 0.5f);
+}
+
+// ---------- Pre-rotation: the rotated copy into the swapchain image ----------
+#define ROT_FNS(X) X(vkCreateShaderModule) X(vkDestroyShaderModule) X(vkCreatePipelineLayout) X(vkCreateGraphicsPipelines) X(vkDestroyPipeline) \
+    X(vkCmdBindPipeline) X(vkCmdBindDescriptorSets) X(vkCmdPushConstants) X(vkCmdSetViewport) X(vkCmdSetScissor) X(vkCmdDraw)
+static struct { ROT_FNS(VKA_DECL) } rk;   // loaded here: the replay's table (vka.h) does not need them
+static struct { int state; VkFormat fmt; VkPipeline pipe; VkPipelineLayout lay; VkDescriptorSetLayout dsl; VkDescriptorPool pool; VkDescriptorSet set[NFRAME]; VkSampler samp[2]; } g_rot;
+static int rot_rotates(VkSurfaceTransformFlagBitsKHR t) { return t == VK_SURFACE_TRANSFORM_ROTATE_90_BIT_KHR || t == VK_SURFACE_TRANSFORM_ROTATE_180_BIT_KHR || t == VK_SURFACE_TRANSFORM_ROTATE_270_BIT_KHR; }
+static int rot_quarter(VkSurfaceTransformFlagBitsKHR t) { return t == VK_SURFACE_TRANSFORM_ROTATE_90_BIT_KHR || t == VK_SURFACE_TRANSFORM_ROTATE_270_BIT_KHR; }
+static int rot_wanted(void) { return VKA_ENV("DM_VK_PRETRANSFORM", 1) != 0; }   // live: a change makes a new swapchain (present_one)
+// The pipeline for one swapchain format: 1 = ready. A failure is logged once and leaves the rotation to the compositor
+static int rot_ready(VkFormat fmt) {
+    if (g_rot.state > 0 && g_rot.fmt == fmt) return 1;
+    if (g_rot.state < 0) return 0;
+    if (!g_rot.state) {
+#define ROT_LOAD(f) rk.f = (PFN_##f)vk.vkGetDeviceProcAddr(V.dev, #f); if (!rk.f) { VRED("pre-rotation: no %s", #f); g_rot.state = -1; return 0; }
+        ROT_FNS(ROT_LOAD)
+#undef ROT_LOAD
+        VkDescriptorSetLayoutBinding b = {0, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1, VK_SHADER_STAGE_FRAGMENT_BIT, NULL};
+        VkDescriptorSetLayoutCreateInfo dl = {VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO, .bindingCount = 1, .pBindings = &b};
+        VkPushConstantRange pc = {VK_SHADER_STAGE_VERTEX_BIT, 0, 6 * sizeof(float)};
+        VkDescriptorPoolSize ps = {VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, NFRAME};
+        VkDescriptorPoolCreateInfo pi = {VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO, .maxSets = NFRAME, .poolSizeCount = 1, .pPoolSizes = &ps};
+        VkSamplerCreateInfo si = {VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO, .addressModeU = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE, .addressModeV = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE,
+                                  .addressModeW = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE, .maxLod = 0.25f};
+        VkResult r = vk.vkCreateDescriptorSetLayout(V.dev, &dl, NULL, &g_rot.dsl);
+        VkPipelineLayoutCreateInfo li = {VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO, .setLayoutCount = 1, .pSetLayouts = &g_rot.dsl, .pushConstantRangeCount = 1, .pPushConstantRanges = &pc};
+        if (!r) r = rk.vkCreatePipelineLayout(V.dev, &li, NULL, &g_rot.lay);
+        if (!r) r = vk.vkCreateDescriptorPool(V.dev, &pi, NULL, &g_rot.pool);
+        VkDescriptorSetLayout dsls[NFRAME]; for (int i = 0; i < NFRAME; i++) dsls[i] = g_rot.dsl;
+        VkDescriptorSetAllocateInfo ai = {VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO, .descriptorPool = g_rot.pool, .descriptorSetCount = NFRAME, .pSetLayouts = dsls};
+        if (!r) r = vk.vkAllocateDescriptorSets(V.dev, &ai, g_rot.set);
+        if (!r) r = vk.vkCreateSampler(V.dev, &si, NULL, &g_rot.samp[0]);   // nearest
+        si.magFilter = si.minFilter = VK_FILTER_LINEAR;
+        if (!r) r = vk.vkCreateSampler(V.dev, &si, NULL, &g_rot.samp[1]);
+        if (r) { VRED("pre-rotation: descriptor set, layout or sampler: %d", r); g_rot.state = -1; return 0; }
+    }
+    if (g_rot.pipe) { vka_queue_idle(); rk.vkDestroyPipeline(V.dev, g_rot.pipe, NULL); g_rot.pipe = VK_NULL_HANDLE; }   // a new swapchain format: no copy in flight
+    VkShaderModule sm[2] = {0};
+    VkShaderModuleCreateInfo mv = {VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO, .codeSize = sizeof vka_rot_vert, .pCode = vka_rot_vert}, mf = mv;
+    mf.codeSize = sizeof vka_rot_frag; mf.pCode = vka_rot_frag;
+    VkResult r = rk.vkCreateShaderModule(V.dev, &mv, NULL, &sm[0]);
+    if (!r) r = rk.vkCreateShaderModule(V.dev, &mf, NULL, &sm[1]);
+    VkPipelineShaderStageCreateInfo st[2] = {{VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, .stage = VK_SHADER_STAGE_VERTEX_BIT, .module = sm[0], .pName = "main"},
+                                             {VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, .stage = VK_SHADER_STAGE_FRAGMENT_BIT, .module = sm[1], .pName = "main"}};
+    VkPipelineVertexInputStateCreateInfo vi = {VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO};
+    VkPipelineInputAssemblyStateCreateInfo ia = {VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO, .topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST};
+    VkPipelineViewportStateCreateInfo vp = {VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO, .viewportCount = 1, .scissorCount = 1};
+    VkPipelineRasterizationStateCreateInfo rs = {VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO, .polygonMode = VK_POLYGON_MODE_FILL, .cullMode = VK_CULL_MODE_NONE, .lineWidth = 1};
+    VkPipelineMultisampleStateCreateInfo ms = {VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO, .rasterizationSamples = VK_SAMPLE_COUNT_1_BIT};
+    VkPipelineColorBlendAttachmentState cba = {.colorWriteMask = 0xf};
+    VkPipelineColorBlendStateCreateInfo cb = {VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO, .attachmentCount = 1, .pAttachments = &cba};
+    VkDynamicState dyn[2] = {VK_DYNAMIC_STATE_VIEWPORT, VK_DYNAMIC_STATE_SCISSOR};
+    VkPipelineDynamicStateCreateInfo ds = {VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO, .dynamicStateCount = 2, .pDynamicStates = dyn};
+    VkPipelineRenderingCreateInfo rci = {VK_STRUCTURE_TYPE_PIPELINE_RENDERING_CREATE_INFO, .colorAttachmentCount = 1, .pColorAttachmentFormats = &fmt};
+    VkGraphicsPipelineCreateInfo gi = {VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO, .pNext = &rci, .stageCount = 2, .pStages = st, .pVertexInputState = &vi, .pInputAssemblyState = &ia,
+        .pViewportState = &vp, .pRasterizationState = &rs, .pMultisampleState = &ms, .pColorBlendState = &cb, .pDynamicState = &ds, .layout = g_rot.lay};
+    if (!r) r = rk.vkCreateGraphicsPipelines(V.dev, VK_NULL_HANDLE, 1, &gi, NULL, &g_rot.pipe);
+    for (int i = 0; i < 2; i++) if (sm[i]) rk.vkDestroyShaderModule(V.dev, sm[i], NULL);
+    if (r) { VRED("pre-rotation: pipeline for format %d: %d; the compositor rotates", fmt, r); g_rot.state = -1; return 0; }
+    g_rot.state = 1; g_rot.fmt = fmt;
+    return 1;
+}
+// The letterboxed picture [dx, dx + dw) x [dy, dy + dh) of the display (what the user sees, g_ext turned back by g_pre) from the texture's crop, drawn into swapchain image idx
+// turned by g_pre: the preTransform is the turn applied to the content before presentation, so ROTATE_90 draws the picture a quarter turn clockwise, and the display's
+// (u, v) lands on the image's (s, t) = (1 - v, u); ROTATE_180 on (1 - u, 1 - v), ROTATE_270 on (v, 1 - u). The vertex shader maps the viewport's own (0..1) position to
+// texture coordinates with m and t
+static void rot_copy(VkCommandBuffer cb, unsigned k, uint32_t idx, vka_img *im, int ok, int cx, int cy, int cw, int ch, int dx, int dy, int dw, int dh, int linear) {
+    vka_img_barrier(cb, g_simg[idx], VK_IMAGE_ASPECT_COLOR_BIT, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL);
+    VkRenderingAttachmentInfo ca = {VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO, .imageView = g_sview[idx], .imageLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+        .loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR, .storeOp = VK_ATTACHMENT_STORE_OP_STORE, .clearValue = {.color = {{0, 0, 0, 1}}}};
+    VkRenderingInfo ri = {VK_STRUCTURE_TYPE_RENDERING_INFO, .renderArea = {{0, 0}, g_ext}, .layerCount = 1, .colorAttachmentCount = 1, .pColorAttachments = &ca};
+    vk.vkCmdBeginRendering(cb, &ri);
+    VkImageView view = ok ? vka_view(im, im->f.vk, VK_IMAGE_VIEW_TYPE_2D, VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1, NULL) : VK_NULL_HANDLE;
+    if (view) {
+        VkDescriptorImageInfo ii = {g_rot.samp[linear], view, VK_IMAGE_LAYOUT_GENERAL};
+        VkWriteDescriptorSet w = {VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, .dstSet = g_rot.set[k], .descriptorCount = 1, .descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, .pImageInfo = &ii};
+        vk.vkUpdateDescriptorSets(V.dev, 1, &w, 0, NULL);
+        float W = (float)g_ext.width, H = (float)g_ext.height;   // the image; the display is H x W for a quarter turn
+        VkViewport v = {0, 0, 0, 0, 0, 1};
+        float a, b, c, d;   // display-local (ul, vl) = (a px + b py + e, c px + d py + f) for the viewport's own (px, py)
+        float e, f;
+        switch (g_pre) {
+        case VK_SURFACE_TRANSFORM_ROTATE_90_BIT_KHR:  v.x = W - (float)(dy + dh); v.y = (float)dx; v.width = (float)dh; v.height = (float)dw; a = 0; b = 1; e = 0; c = -1; d = 0; f = 1; break;
+        case VK_SURFACE_TRANSFORM_ROTATE_270_BIT_KHR: v.x = (float)dy; v.y = H - (float)(dx + dw); v.width = (float)dh; v.height = (float)dw; a = 0; b = -1; e = 1; c = 1; d = 0; f = 0; break;
+        case VK_SURFACE_TRANSFORM_ROTATE_180_BIT_KHR: v.x = W - (float)(dx + dw); v.y = H - (float)(dy + dh); v.width = (float)dw; v.height = (float)dh; a = -1; b = 0; e = 1; c = 0; d = -1; f = 1; break;
+        default:                                      v.x = (float)dx; v.y = (float)dy; v.width = (float)dw; v.height = (float)dh; a = 1; b = 0; e = 0; c = 0; d = 1; f = 0; break;
+        }
+        // texture (u, v) = (cx + ul cw, cy + vl ch) / size, vl turned over for a lower-left origin (stored bottom-up)
+        float tw = (float)im->w, th = (float)im->h, su = cw / tw, sv = ch / th, ou = cx / tw, ov = cy / th;
+        if (vka_origin_ll()) { sv = -sv; ov = (cy + ch) / th; }
+        float pc[6] = {su * a, su * b, sv * c, sv * d, ou + su * e, ov + sv * f};
+        VkRect2D sc = {{0, 0}, g_ext};
+        rk.vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, g_rot.pipe);
+        rk.vkCmdBindDescriptorSets(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, g_rot.lay, 0, 1, &g_rot.set[k], 0, NULL);
+        rk.vkCmdPushConstants(cb, g_rot.lay, VK_SHADER_STAGE_VERTEX_BIT, 0, sizeof pc, pc);
+        rk.vkCmdSetViewport(cb, 0, 1, &v);
+        rk.vkCmdSetScissor(cb, 0, 1, &sc);
+        rk.vkCmdDraw(cb, 3, 1, 0, 0);
+    }
+    vk.vkCmdEndRendering(cb);
+    vka_img_barrier(cb, g_simg[idx], VK_IMAGE_ASPECT_COLOR_BIT, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, VK_IMAGE_LAYOUT_PRESENT_SRC_KHR);
+}
+
+static void swap_destroy(int surface_too) {
+    if (!V.dev) return;
+    vka_queue_idle();
+    for (int i = 0; i < NFRAME; i++) if (g_fr[i].held) { vka_tex_drop(g_fr[i].held); g_fr[i].held = NULL; }
+    for (uint32_t i = 0; i < g_nimg; i++) {
+        vk.vkDestroySemaphore(V.dev, g_sdone[i], NULL); g_sdone[i] = VK_NULL_HANDLE;
+        if (g_sview[i]) { vk.vkDestroyImageView(V.dev, g_sview[i], NULL); g_sview[i] = VK_NULL_HANDLE; }
+    }
+    g_nimg = 0;
+    if (g_swap) vk.vkDestroySwapchainKHR(V.dev, g_swap, NULL);
+    g_swap = VK_NULL_HANDLE;
+    if (surface_too && g_surf) { vk.vkDestroySurfaceKHR(V.inst, g_surf, NULL); g_surf = VK_NULL_HANDLE; }
+}
+static int swap_create(void) {
+    VkSurfaceCapabilitiesKHR caps; VkResult r = vk.vkGetPhysicalDeviceSurfaceCapabilitiesKHR(V.pd, g_surf, &caps);
+    if (r) { VRED("surface capabilities %d", r); return 0; }
+    uint32_t nf = 0; vk.vkGetPhysicalDeviceSurfaceFormatsKHR(V.pd, g_surf, &nf, NULL);
+    VkSurfaceFormatKHR fs[64]; if (nf > 64) nf = 64; vk.vkGetPhysicalDeviceSurfaceFormatsKHR(V.pd, g_surf, &nf, fs);
+    VkSurfaceFormatKHR pick = nf ? fs[0] : (VkSurfaceFormatKHR){VK_FORMAT_R8G8B8A8_UNORM, VK_COLOR_SPACE_SRGB_NONLINEAR_KHR};
+    for (int pass = 0; pass < 2; pass++) for (uint32_t i = 0; i < nf; i++)
+        if (fs[i].format == (pass ? VK_FORMAT_B8G8R8A8_UNORM : VK_FORMAT_R8G8B8A8_UNORM) && fs[i].colorSpace == VK_COLOR_SPACE_SRGB_NONLINEAR_KHR) { pick = fs[i]; pass = 2; break; }
+    int rot = caps.currentTransform & (VK_SURFACE_TRANSFORM_ROTATE_90_BIT_KHR | VK_SURFACE_TRANSFORM_ROTATE_270_BIT_KHR);
+    VkExtent2D ext = caps.currentExtent;
+    if (ext.width == UINT32_MAX) ext = (VkExtent2D){(uint32_t)ANativeWindow_getWidth(g_win), (uint32_t)ANativeWindow_getHeight(g_win)};
+    VkSurfaceTransformFlagBitsKHR pre = caps.supportedTransforms & VK_SURFACE_TRANSFORM_IDENTITY_BIT_KHR ? VK_SURFACE_TRANSFORM_IDENTITY_BIT_KHR : caps.currentTransform;
+    VkImageUsageFlags usage = VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT;
+    // Pre-rotation: the surface's own rotation, when the swapchain can take it and the rotated copy is ready
+    if (rot_rotates(caps.currentTransform) && (caps.supportedTransforms & caps.currentTransform) && (caps.supportedUsageFlags & VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT)
+        && rot_wanted() && rot_ready(pick.format)) pre = caps.currentTransform;
+    // The extent: the window's own size (the picture as the user sees it), turned for a quarter-turn preTransform. currentExtent is in the panel's orientation on phones but
+    // already in the window's on the emulator (gfxstream), so the window's size decides, and currentExtent is only the fallback
+    int ww = ANativeWindow_getWidth(g_win), wh = ANativeWindow_getHeight(g_win);
+    if (ww > 0 && wh > 0) ext = rot_quarter(pre) ? (VkExtent2D){(uint32_t)wh, (uint32_t)ww} : (VkExtent2D){(uint32_t)ww, (uint32_t)wh};
+    else if (rot && !rot_quarter(pre)) ext = (VkExtent2D){ext.height, ext.width};
+    if (!ext.width || !ext.height) return 0;
+    uint32_t n = caps.minImageCount < 3 ? 3 : caps.minImageCount; if (caps.maxImageCount && n > caps.maxImageCount) n = caps.maxImageCount; if (n > MAXIMG) n = MAXIMG;
+    VkCompositeAlphaFlagBitsKHR ca = caps.supportedCompositeAlpha & VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR ? VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR :
+                                     caps.supportedCompositeAlpha & VK_COMPOSITE_ALPHA_INHERIT_BIT_KHR ? VK_COMPOSITE_ALPHA_INHERIT_BIT_KHR : (VkCompositeAlphaFlagBitsKHR)(caps.supportedCompositeAlpha & -caps.supportedCompositeAlpha);
+    VkSwapchainKHR old = g_swap;
+    VkSwapchainCreateInfoKHR ci = {VK_STRUCTURE_TYPE_SWAPCHAIN_CREATE_INFO_KHR, .surface = g_surf, .minImageCount = n, .imageFormat = pick.format, .imageColorSpace = pick.colorSpace,
+        .imageExtent = ext, .imageArrayLayers = 1, .imageUsage = usage, .imageSharingMode = VK_SHARING_MODE_EXCLUSIVE,
+        .preTransform = pre, .compositeAlpha = ca, .presentMode = VK_PRESENT_MODE_FIFO_KHR, .clipped = VK_TRUE, .oldSwapchain = old};
+    if (old) { vka_queue_idle(); }
+    VkSwapchainKHR sw; r = vk.vkCreateSwapchainKHR(V.dev, &ci, NULL, &sw);
+    if (old) {
+        for (uint32_t i = 0; i < g_nimg; i++) { vk.vkDestroySemaphore(V.dev, g_sdone[i], NULL); if (g_sview[i]) vk.vkDestroyImageView(V.dev, g_sview[i], NULL); g_sview[i] = VK_NULL_HANDLE; }
+        g_nimg = 0; vk.vkDestroySwapchainKHR(V.dev, old, NULL); g_swap = VK_NULL_HANDLE;
+    }
+    if (r) { VRED("vkCreateSwapchainKHR %ux%u format %d: %d", ext.width, ext.height, pick.format, r); return 0; }
+    g_swap = sw; g_swap_fmt = pick.format; g_ext = ext; g_pre = pre;
+    g_nimg = MAXIMG; vk.vkGetSwapchainImagesKHR(V.dev, sw, &g_nimg, g_simg);
+    VkSemaphoreCreateInfo sci = {VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO};
+    for (uint32_t i = 0; i < g_nimg; i++) {
+        vk.vkCreateSemaphore(V.dev, &sci, NULL, &g_sdone[i]);
+        if (rot_rotates(pre)) {
+            VkImageViewCreateInfo vi = {VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO, .image = g_simg[i], .viewType = VK_IMAGE_VIEW_TYPE_2D, .format = pick.format, .subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1}};
+            if ((r = vk.vkCreateImageView(V.dev, &vi, NULL, &g_sview[i]))) { VRED("swapchain image view %u: %d", i, r); g_sview[i] = VK_NULL_HANDLE; }
+        }
+    }
+    g_refresh_ns = 0;
+    if (V.display_timing && vk.vkGetRefreshCycleDurationGOOGLE) { VkRefreshCycleDurationGOOGLE rc; if (!vk.vkGetRefreshCycleDurationGOOGLE(V.dev, sw, &rc)) g_refresh_ns = rc.refreshDuration; }
+    g_last_desired = 0; g_recreate = 0;
+    g_refresh_n = 0;
+    VLOG("swapchain %ux%u, %u images, format %d, FIFO, transform %#x (surface %#x%s), refresh %.2f Hz%s", ext.width, ext.height, g_nimg, pick.format, pre, caps.currentTransform,
+         rot_rotates(pre) ? ": pre-rotated" : rot_rotates(caps.currentTransform) ? ": the compositor rotates" : "", g_refresh_ns ? 1e9 / g_refresh_ns : 0.0,
+         V.display_timing ? ", display timing" : "");
+    return 1;
+}
+static void window_take(void) {   // g_pmu held
+    ANativeWindow *w = g_win_new; uint64_t gen = g_win_gen; g_win_new = NULL;
+    pthread_mutex_unlock(&g_pmu);
+    swap_destroy(1);
+    if (g_win) ANativeWindow_release(g_win);
+    g_win = w; g_fps_set = 0;
+    if (w && V.has_android_surface) {
+        VkAndroidSurfaceCreateInfoKHR si = {VK_STRUCTURE_TYPE_ANDROID_SURFACE_CREATE_INFO_KHR, .window = w};
+        VkResult r = vk.vkCreateAndroidSurfaceKHR(V.inst, &si, NULL, &g_surf); VkBool32 ok = VK_FALSE;
+        if (!r) vk.vkGetPhysicalDeviceSurfaceSupportKHR(V.pd, V.qf, g_surf, &ok);
+        if (r || !ok) { VRED("surface on window %p: %d, present support %d", (void *)w, r, ok); if (!r) vk.vkDestroySurfaceKHR(V.inst, g_surf, NULL); g_surf = VK_NULL_HANDLE; }
+        else swap_create();
+    }
+    pthread_mutex_lock(&g_pmu);
+    g_win_ack = gen; pthread_cond_broadcast(&g_pcv);
+}
+
+// ---------- The present queue ----------
+typedef struct { tex_t t; double period; int crop[4], has_crop; uint64_t ticket, fence; vka_img *src; double hold; } pq_item;   // src, hold: a generated frame (vka_framegen.c)
+static pq_item g_pq[PQ];
+static uint64_t g_pq_in, g_pq_read, g_pq_done, g_pq_fill;   // tickets: reserved, taken by the present thread, shown; filled (a ticket is reserved by the game's present, filled when the replay reaches it: vka_worker.c)
+
+static void pres_note(uint64_t n, double t) { if (!n) return; g_pres[n % PRING].n = n; g_pres[n % PRING].t = t; }
+static void timing_poll(void) {
+    if (!V.display_timing || !g_swap || !vk.vkGetPastPresentationTimingGOOGLE) return;
+    VkPastPresentationTimingGOOGLE pt[16]; uint32_t n = 16;
+    if (vk.vkGetPastPresentationTimingGOOGLE(V.dev, g_swap, &n, pt) < 0) return;
+    for (uint32_t i = 0; i < n; i++) pres_note(pt[i].presentID, pt[i].actualPresentTime / 1e9);
+}
+
+// VK_SUBOPTIMAL_KHR: recreate when the window has a new size, or the surface a new rotation that pre-rotation can follow (the phone turned over: ROTATE_90 ↔ ROTATE_270).
+// Without pre-rotation, a rotation alone stays: Android reports every frame suboptimal then, and the compositor rotates
+static void suboptimal(void) {
+    if (!g_win || g_recreate) return;
+    uint32_t ww = (uint32_t)ANativeWindow_getWidth(g_win), wh = (uint32_t)ANativeWindow_getHeight(g_win);
+    uint32_t ew = rot_quarter(g_pre) ? g_ext.height : g_ext.width, eh = rot_quarter(g_pre) ? g_ext.width : g_ext.height;
+    if ((ww != ew || wh != eh) && (ww != eh || wh != ew)) { g_recreate = 1; return; }
+    if (g_rot.state < 0 || !rot_wanted()) return;
+    VkSurfaceCapabilitiesKHR caps;
+    if (!vk.vkGetPhysicalDeviceSurfaceCapabilitiesKHR(V.pd, g_surf, &caps) && caps.currentTransform != g_pre && (rot_rotates(caps.currentTransform) || rot_rotates(g_pre))) {
+        VLOG("surface rotation %#x → %#x: new swapchain", g_pre, caps.currentTransform);
+        g_recreate = 1;
+    }
+}
+// The game's frame rate as the window's (ANativeWindow_setFrameRate): a 60 fps game on a 120 Hz panel lets the system pick 60 Hz, or keep 120 Hz and show each frame twice;
+// display timing holds each image for its period either way. The refresh period is read again after a change (the panel's rate may follow).
+// The window's rate is the highest the game used in the last DM_VK_FRAME_RATE_HOLD ms (default 5000, live; 0 = follow every change): up at once, down only when the lower
+// rate has held that long. Donkey Kong Bananza's controller switches its interval 1 <-> 2 every few seconds on the phone (60 <-> 30 fps); following each switch sent the
+// Honor panel (LTPO) to 30 Hz and back: 24-46 changes to 30 Hz in a 3-minute run (stutter-agent base1 / base2), and the first frames at 60 after each were shown at 30 Hz
+// until the panel came back up, a hitch at every switch. With the panel held at 60 Hz a 30 fps stretch is shown by display timing, each image for two refreshes
+static void frame_rate(double period) {
+    int fps = period > 0 ? (int)(1 / period + 0.5) : 0;
+    if (fps < 10 || fps > 240 || !g_win) return;
+    if (!VKA_ENV("DM_VK_FRAME_RATE", 1)) return;
+    {   static int top; static uint64_t top_t;   // the highest rate within the hold; when the game last ran at it
+        uint64_t now = now_ns(), hold = (uint64_t)VKA_ENV("DM_VK_FRAME_RATE_HOLD", 5000) * 1000000ull;
+        if (fps >= top || !hold || now - top_t > hold) { top = fps; top_t = now; }
+        fps = top;
+    }
+    if (fps == g_fps_set) return;
+    static int (*set_rate)(ANativeWindow *, float, int8_t); static int looked;   // libnativewindow (API 30), not linked: -landroid does not carry it
+    if (!looked) { looked = 1; void *h = dlopen("libnativewindow.so", RTLD_NOW); if (h) set_rate = (int (*)(ANativeWindow *, float, int8_t))dlsym(h, "ANativeWindow_setFrameRate"); }
+    int r = set_rate ? set_rate(g_win, (float)fps, ANATIVEWINDOW_FRAME_RATE_COMPATIBILITY_FIXED_SOURCE) : -1;
+    VLOG("window frame rate %d fps%s", fps, r ? " (not taken)" : "");
+    g_fps_set = fps; g_refresh_n = 1;   // the panel may switch within a few frames
+}
+static int g_fg_on;   // frame generation on (present thread): its generated frames follow the panel's refresh (vka_framegen.c), so the refresh is read on while it runs
+static void refresh_poll(void) {
+    if (!V.display_timing || !vk.vkGetRefreshCycleDurationGOOGLE) return;
+    // After a window frame rate change every 30 presents until 300; with frame generation on also every 240 after that (the panel may change on its own: LTPO, thermal)
+    static unsigned slow;
+    if (g_refresh_n ? ++g_refresh_n % 30 : !g_fg_on || ++slow % 240) return;
+    VkRefreshCycleDurationGOOGLE rc;
+    // A reading within 1 % of the last is the same refresh (the driver's estimate drifts by 0.01-0.02 Hz: 60.22 / 60.23 / 60.24 Hz): taken without a line, and the chain of
+    // desired present times goes on; before 2026-11-03 each drift logged a line and restarted the chain (one frame paced from "now" instead of its slot)
+    if (!vk.vkGetRefreshCycleDurationGOOGLE(V.dev, g_swap, &rc) && rc.refreshDuration && rc.refreshDuration != g_refresh_ns) {
+        uint64_t a = rc.refreshDuration, b = g_refresh_ns, d = a > b ? a - b : b - a;
+        if (b && d * 100 < b) g_refresh_ns = a;
+        else { VLOG("display refresh %.2f Hz", 1e9 / rc.refreshDuration); g_refresh_ns = rc.refreshDuration; g_last_desired = 0; }
+    }
+    if (g_refresh_n > 300) g_refresh_n = 0;   // settled
+}
+static int present_one(const pq_item *it) {
+    if (!g_surf || vka_hung()) return 0;
+    { static int rw = -1; int w = rot_wanted(); if (rw >= 0 && w != rw) { VLOG("DM_VK_PRETRANSFORM=%d: new swapchain", w); g_recreate = 1; } rw = w; }
+    if (!g_swap || g_recreate) { if (g_swap) { swap_destroy(0); } if (!swap_create()) return 0; }
+    vka_img *im = it->src ? vka_tex_ref(it->src) : vka_tex_acquire(it->t.serial);
+    unsigned k = g_fi++ % NFRAME;
+    if (!g_fr[k].cb) {
+        if (!g_ppool) { VkCommandPoolCreateInfo pi = {VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO, .flags = VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT, .queueFamilyIndex = V.qf}; vk.vkCreateCommandPool(V.dev, &pi, NULL, &g_ppool); }
+        VkCommandBufferAllocateInfo ai = {VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO, .commandPool = g_ppool, .level = VK_COMMAND_BUFFER_LEVEL_PRIMARY, .commandBufferCount = 1};
+        VkFenceCreateInfo fi = {VK_STRUCTURE_TYPE_FENCE_CREATE_INFO, .flags = VK_FENCE_CREATE_SIGNALED_BIT}; VkSemaphoreCreateInfo sci = {VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO};
+        vk.vkAllocateCommandBuffers(V.dev, &ai, &g_fr[k].cb); vk.vkCreateFence(V.dev, &fi, NULL, &g_fr[k].fence); vk.vkCreateSemaphore(V.dev, &sci, NULL, &g_fr[k].acq);
+    }
+    // The frame's last copy done, bounded: after a GPU hang (vka_dev.c) nothing more is presented
+    for (VkResult w; !vka_hung() && (w = vk.vkWaitForFences(V.dev, 1, &g_fr[k].fence, VK_TRUE, 100000000ull)) == VK_TIMEOUT;) {}
+    if (vka_hung()) { VRED_ONCE("GPU hang: nothing more is presented"); vka_tex_drop(im); return 0; }
+    if (g_fr[k].held) { vka_tex_drop(g_fr[k].held); g_fr[k].held = NULL; }
+    uint32_t idx; uint64_t t0 = now_ns();
+    VkResult r = vk.vkAcquireNextImageKHR(V.dev, g_swap, 1000000000ull, g_fr[k].acq, VK_NULL_HANDLE, &idx);
+    g_drawable_ns += now_ns() - t0;
+    if (r == VK_ERROR_OUT_OF_DATE_KHR) { g_recreate = 1; vka_tex_drop(im); return 0; }
+    if (r == VK_SUBOPTIMAL_KHR) suboptimal();   // presented this once; the next present recreates when the size or the rotation changed
+    if (r && r != VK_SUBOPTIMAL_KHR) { static _Atomic int n; if (atomic_fetch_add(&n, 1) < 8) VRED("vkAcquireNextImageKHR %d", r); vka_tex_drop(im); return 0; }
+    vk.vkResetFences(V.dev, 1, &g_fr[k].fence);
+    VkCommandBuffer cb = g_fr[k].cb; vk.vkResetCommandBuffer(cb, 0);
+    VkCommandBufferBeginInfo bi = {VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO, .flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT};
+    vk.vkBeginCommandBuffer(cb, &bi);
+    int cx = 0, cy = 0, cw = im ? (int)im->w : 1, ch = im ? (int)im->h : 1;
+    if (it->has_crop && it->crop[2] > 0 && it->crop[3] > 0) { cx = it->crop[0]; cy = it->crop[1]; cw = it->crop[2]; ch = it->crop[3]; }
+    int ew = (int)(rot_quarter(g_pre) ? g_ext.height : g_ext.width), eh = (int)(rot_quarter(g_pre) ? g_ext.width : g_ext.height);   // the display, as the user sees it
+    double s = (double)ew / cw < (double)eh / ch ? (double)ew / cw : (double)eh / ch;
+    int dw = (int)(cw * s + 0.5), dh = (int)(ch * s + 0.5), dx = (int)((long)(ew - dw) * g_place_x / 10000), dy = (int)((long)(eh - dh) * g_place_y / 10000);   // nxhost_picture_place
+    VkFormatProperties fp = {0}; if (im) vk.vkGetPhysicalDeviceFormatProperties(V.pd, im->f.vk, &fp);
+    int blit = im && im->inited && im->aspect == VK_IMAGE_ASPECT_COLOR_BIT && im->f.kind == 0 && im->samples == 1 && (fp.optimalTilingFeatures & VK_FORMAT_FEATURE_BLIT_SRC_BIT);
+    if (rot_rotates(g_pre)) {
+        int ok = im && im->inited && im->aspect == VK_IMAGE_ASPECT_COLOR_BIT && im->f.kind == 0 && im->samples == 1 && (im->usage & VK_IMAGE_USAGE_SAMPLED_BIT) && g_sview[idx];
+        if (ok) vka_barrier(cb);   // the replay's writes to the window texture (earlier submissions, in submission order)
+        else if (im) VRED_ONCE("window texture serial %llu (format %#x) cannot be sampled for the rotated copy: presented black", (unsigned long long)im->serial, im->d.format);
+        rot_copy(cb, k, idx, im, ok, cx, cy, cw, ch, dx, dy, dw, dh, !!(fp.optimalTilingFeatures & VK_FORMAT_FEATURE_SAMPLED_IMAGE_FILTER_LINEAR_BIT));
+        blit = -1;
+    } else vka_img_barrier(cb, g_simg[idx], VK_IMAGE_ASPECT_COLOR_BIT, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
+    if (blit < 0) {}
+    else if (!blit || dw < ew || dh < eh) {   // the bars: dx or dy is 0 for a picture against an edge
+        VkClearColorValue black = {{0, 0, 0, 1}}; VkImageSubresourceRange rg = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
+        vk.vkCmdClearColorImage(cb, g_simg[idx], VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, &black, 1, &rg);
+        vka_barrier(cb);
+    }
+    if (blit > 0) {
+        vka_barrier(cb);   // the replay's writes to the window texture (earlier submissions, in submission order)
+        int y0 = cy, y1 = cy + ch; if (vka_origin_ll()) { y0 = cy + ch; y1 = cy; }   // lower-left origin: the window texture is stored bottom-up
+        VkImageBlit b = {{VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1}, {{cx, y0, 0}, {cx + cw, y1, 1}}, {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1}, {{dx, dy, 0}, {dx + dw, dy + dh, 1}}};
+        vk.vkCmdBlitImage(cb, im->img, VK_IMAGE_LAYOUT_GENERAL, g_simg[idx], VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &b,
+                          fp.optimalTilingFeatures & VK_FORMAT_FEATURE_SAMPLED_IMAGE_FILTER_LINEAR_BIT ? VK_FILTER_LINEAR : VK_FILTER_NEAREST);
+    } else if (im && !blit) VRED_ONCE("window texture serial %llu (format %#x) cannot be blitted to the swapchain: presented black", (unsigned long long)im->serial, im->d.format);
+    if (blit >= 0) vka_img_barrier(cb, g_simg[idx], VK_IMAGE_ASPECT_COLOR_BIT, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_PRESENT_SRC_KHR);
+    if (!it->src) vka_ctl_shot_record(cb, im, cx, cy, cw, ch);   // the game's own frames only
+    vk.vkEndCommandBuffer(cb);
+    VkSemaphore ws[2] = {g_fr[k].acq, V.tl}; uint64_t wv[2] = {0, it->fence}; VkPipelineStageFlags st[2] = {VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT};   // the image's first barrier is ALL_COMMANDS
+    VkTimelineSemaphoreSubmitInfo ti = {VK_STRUCTURE_TYPE_TIMELINE_SEMAPHORE_SUBMIT_INFO, .waitSemaphoreValueCount = 2, .pWaitSemaphoreValues = wv, .signalSemaphoreValueCount = 1, .pSignalSemaphoreValues = wv};
+    VkSubmitInfo si = {VK_STRUCTURE_TYPE_SUBMIT_INFO, .pNext = &ti, .waitSemaphoreCount = it->fence ? 2 : 1, .pWaitSemaphores = ws, .pWaitDstStageMask = st,
+                       .commandBufferCount = 1, .pCommandBuffers = &cb, .signalSemaphoreCount = 1, .pSignalSemaphores = &g_sdone[idx]};
+    if (!it->fence) ti.waitSemaphoreValueCount = 1;
+    frame_rate(it->period); refresh_poll();
+    uint64_t want = 0, period = (uint64_t)((it->hold > 0 ? it->hold : it->period) * 1e9);
+    if (g_refresh_ns && period > g_refresh_ns * 3 / 2) {   // hold each image for its present period: the panel refreshes faster than the game presents
+        uint64_t now = now_ns(); want = g_last_desired ? g_last_desired + period : now;
+        if (want < now) want = now;
+        g_last_desired = want; want -= g_refresh_ns / 2;
+    } else g_last_desired = 0;
+    VkPresentTimeGOOGLE pt = {(uint32_t)it->ticket, want};
+    VkPresentTimesInfoGOOGLE ptv = {VK_STRUCTURE_TYPE_PRESENT_TIMES_INFO_GOOGLE, .swapchainCount = 1, .pTimes = &pt};
+    VkPresentInfoKHR pi = {VK_STRUCTURE_TYPE_PRESENT_INFO_KHR, .pNext = V.display_timing ? &ptv : NULL, .waitSemaphoreCount = 1, .pWaitSemaphores = &g_sdone[idx], .swapchainCount = 1, .pSwapchains = &g_swap, .pImageIndices = &idx};
+    pthread_mutex_lock(&V.qmu);
+    // Never a wait for a value no earlier submission signals: the queue runs its batches in order, so the copy would wait for a submission queued behind it, and neither ever
+    // runs (mtl_present takes vka_fence_queued for that; this holds it under the queue lock)
+    if (wv[1] > V.tl_queued) { static _Atomic int n; if (atomic_fetch_add(&n, 1) < 4) VRED("present ticket %llu waited for fence %llu, %llu is the last handed to the queue: waits for that", (unsigned long long)it->ticket, (unsigned long long)wv[1], (unsigned long long)V.tl_queued); wv[1] = V.tl_queued; }
+    // Test switch DM_VK_TEST_HANG=<mode>,<ticket>: at that present the copy waits for a timeline value no earlier batch signals, as the present did before it took
+    // vka_fence_queued. Mode 1: the next fence (a later submission signals it: the wait-before-signal on one queue); mode 2: a value nothing ever signals (a sure stall, for
+    // the hang handling). Not set in the product
+    { static int mode = -1, at; if (mode < 0) { const char *e = getenv("DM_VK_TEST_HANG"); mode = 0; if (e && sscanf(e, "%d,%d", &mode, &at) < 1) mode = 0; if (at <= 0) at = 600; }
+      if (mode && it->ticket == (uint64_t)at && it->fence) { wv[1] = mode == 1 ? vka_fence_last() + 1 : V.tl_queued + 1000000000ull;
+          VRED("DM_VK_TEST_HANG=%d: present ticket %llu waits for fence %llu (%llu handed to the queue)", mode, (unsigned long long)it->ticket, (unsigned long long)wv[1], (unsigned long long)V.tl_queued); } }
+    r = vka_hung() ? VK_ERROR_DEVICE_LOST : vk.vkQueueSubmit(V.q, 1, &si, g_fr[k].fence);
+    VkResult pr = r ? r : vk.vkQueuePresentKHR(V.q, &pi);
+    pthread_mutex_unlock(&V.qmu);
+    g_fr[k].held = im;
+    if (!r) vka_ctl_shot_done(g_fr[k].fence);
+    if (r) { static _Atomic int n; if (atomic_fetch_add(&n, 1) < 8) VRED("present submission %d", r); return 0; }
+    if (pr == VK_ERROR_OUT_OF_DATE_KHR) g_recreate = 1;
+    else if (pr == VK_SUBOPTIMAL_KHR) suboptimal();
+    else if (pr) { static _Atomic int n; if (atomic_fetch_add(&n, 1) < 8) VRED("vkQueuePresentKHR %d", pr); }
+    timing_poll();
+    return 1;
+}
+
+void vka_perf_thread(int nice); void vka_perf_frame(double period_s);   // vka_perf.c
+static void *present_main(void *arg) {
+    (void)arg; pthread_setname_np(pthread_self(), "vk-present"); vka_perf_thread(-8);
+    pthread_mutex_lock(&g_pmu);
+    for (;;) {
+        while (g_pq_read == g_pq_fill && g_win_ack == g_win_gen) pthread_cond_wait(&g_pcv, &g_pmu);
+        if (g_win_ack != g_win_gen) { window_take(); continue; }
+        pq_item it = g_pq[g_pq_read % PQ]; g_pq_read++;
+        pthread_mutex_unlock(&g_pmu);
+        vka_img *gen[VKA_FG_MAX]; double hold = 0, out_period = 0;   // frame generation: the images shown before this frame, each for hold seconds
+        int ng = g_surf ? vka_fg_frame(it.t.serial, it.has_crop ? it.crop : NULL, it.period, it.fence, gen, &hold, &out_period) : 0;
+        double game_period = it.period;
+        g_fg_on = out_period > 0;
+        if (out_period > 0) it.period = out_period;
+        for (int g = 0; g < ng; g++) { pq_item gi = it; gi.src = gen[g]; gi.has_crop = 0; gi.ticket = 0; gi.fence = 0; gi.hold = hold; vka_fps_note(present_one(&gi), 1); }
+        it.hold = ng ? hold : game_period;
+        int shown = present_one(&it);
+        if (!shown || !V.display_timing) pres_note(it.ticket, shown ? now_ns() / 1e9 : -1);
+        vka_fps_note(shown, 0);
+        pthread_mutex_lock(&g_pmu);
+        if (it.ticket > g_pq_done) g_pq_done = it.ticket;
+        pthread_cond_broadcast(&g_pcv);
+    }
+    return NULL;
+}
+void vka_present_init(void) {
+    pthread_t th;
+    if (pthread_create(&th, NULL, present_main, NULL)) { VRED("cannot start the present thread"); return; }
+    pthread_detach(th);
+    pthread_mutex_lock(&g_pmu); g_thread_up = 1; pthread_mutex_unlock(&g_pmu);
+}
+
+// The present in two steps: the ticket when the game presents (vka_present_reserve, the game's thread: its order and the bound on frames in flight), the frame when the replay
+// has handed every submission before it to the queue (vka_present_fill, the replay's thread). Without the replay worker both run at once (mtl_present)
+uint64_t vka_present_reserve(void) {
+    pthread_mutex_lock(&g_pmu);
+    if (!g_thread_up) { uint64_t tk = ++g_pq_in; g_pq_read = g_pq_done = g_pq_fill = tk; pres_note(tk, -1); pthread_mutex_unlock(&g_pmu); return tk; }
+    while (g_pq_in - g_pq_read >= PQ) pthread_cond_wait(&g_pcv, &g_pmu);
+    uint64_t tk = ++g_pq_in;
+    pthread_mutex_unlock(&g_pmu);
+    return tk;
+}
+void vka_present_fill(uint64_t tk, const tex_t *t, double period_s, const int crop[4]) {
+    vka_perf_frame(period_s);
+    pthread_mutex_lock(&g_pmu);
+    if (!g_thread_up || tk <= g_pq_fill) { pthread_mutex_unlock(&g_pmu); return; }
+    pq_item *it = &g_pq[(tk - 1) % PQ];
+    it->t = *t; it->period = period_s; it->has_crop = crop != NULL; if (crop) memcpy(it->crop, crop, sizeof it->crop);
+    // The last submission handed to the queue, not the last fence reserved: a submission another thread is still recording (its fence taken at the top of mtl_sub_commit) would
+    // be queued after this copy, which then waits for it forever (a wait-before-signal on one queue). On the Adreno 840 phone that froze the queue while the first level loaded
+    // (fence N+2 never reached at N, android-perf c1ff15fa, three runs), and the compositor waiting on the frame restarted the system server
+    it->ticket = tk; it->fence = vka_fence_queued(); it->src = NULL; it->hold = 0;
+    uint64_t res = vka_fence_last();
+    if (res > it->fence && !vka_worker_on()) { static _Atomic uint64_t n; uint64_t k = atomic_fetch_add(&n, 1) + 1;
+        if (k <= 3 || !(k & (k - 1))) VLOG("present ticket %llu came while fence %llu was still being recorded (%llu queued): the present waits for %llu (%llu such presents)",
+                                           (unsigned long long)tk, (unsigned long long)res, (unsigned long long)it->fence, (unsigned long long)it->fence, (unsigned long long)k); }
+    g_pq_fill = tk;
+    pthread_cond_broadcast(&g_pcv);
+    pthread_mutex_unlock(&g_pmu);
+}
+uint64_t vka_present_inline(const tex_t *t, double period_s, const int crop[4]) { uint64_t tk = vka_present_reserve(); vka_present_fill(tk, t, period_s, crop); return tk; }
+void mtl_present_wait(uint64_t tk) { pthread_mutex_lock(&g_pmu); while (g_pq_done < tk) pthread_cond_wait(&g_pcv, &g_pmu); pthread_mutex_unlock(&g_pmu); }
+void mtl_present_flush(void) { pthread_mutex_lock(&g_pmu); uint64_t h = g_pq_in; pthread_mutex_unlock(&g_pmu); mtl_present_wait(h); }
+// The acquire sync of a window image (hle_nvn.c WindowAcquireTexture): the fence of the commits that drew it when it was last presented, not every commit so far. By the time
+// the acquire returns, the present of that image has been handed to the queue (mtl_present_wait of its ticket), its copy waiting for that fence; the game's later
+// submissions come after it on the one queue and begin with a full barrier, so they cannot write the image before the copy has read it. Waiting for every commit made the
+// game wait for its own last frame at each acquire: Donkey Kong Bananza's level blocked ~64 ms a frame in SyncWait, recording (~45 ms) and GPU (~30 ms) one after the other
+uint64_t mtl_acquire_fence(uint64_t presented) { return presented; }
+double mtl_presented_time(uint64_t n) { return g_pres[n % PRING].n == n ? g_pres[n % PRING].t : 0; }
+int mtl_has_window(void) { return g_surf != VK_NULL_HANDLE; }
+int mtl_display_hz(void) { return !g_surf ? 0 : g_refresh_ns ? (int)(1e9 / g_refresh_ns + 0.5) : 60; }
+uint64_t vka_refresh_ns(void) { return g_refresh_ns; }   // the panel's refresh period (display timing; 0 = not known). Present thread
+int mtl_fps_target(void) { static int v = -1; if (v < 0) { const char *e = getenv("DM_FPS"); v = e && (atoi(e) == 30 || atoi(e) == 60) ? atoi(e) : 60; } return v; }
+uint64_t mtl_drawable_ns_take(void) { uint64_t v = g_drawable_ns; g_drawable_ns = 0; return v; }
+void mtl_xv_window_tex(uint64_t serial) { (void)serial; }
+// No display link on Android: hle_nvn.c paces acquires by its own clock, and FIFO plus display timing hold each image on screen
+int mtl_link_active(void) { return 0; }
+int mtl_link_rate(void) { return 0; }
+int mtl_link_stalled(void) { return 0; }
+int mtl_link_tick(uint64_t n, double *target, double *lead_ms, int *ticks, double *gap_ms) { (void)n; if (target) *target = 0; if (lead_ms) *lead_ms = 0; if (ticks) *ticks = 0; if (gap_ms) *gap_ms = 0; return 0; }
+int mtl_link_wait_tick(int vsyncs, uint64_t timeout_ns) { (void)vsyncs; (void)timeout_ns; return 0; }
+int mtl_link_wait_ticks(int ticks, uint64_t timeout_ns) { (void)ticks; (void)timeout_ns; return 0; }
+int mtl_snap_on(void) { return 0; }
+uint64_t mtl_snap_acquire_wait(void) { return 0; }
+
+static void *selftest_main(void *arg) { int r = nxhost_vk_selftest(NULL, (int)(intptr_t)arg); VLOG("selftest (NXHOST_VK_SELFTEST) ended: %s", r ? "FAILED" : "passed"); return NULL; }
+#endif

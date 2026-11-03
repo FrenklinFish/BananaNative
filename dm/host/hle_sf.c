@@ -30,6 +30,9 @@ static uint32_t sf_new(const char *name, int domain) {
     return SF_H0 + i;
 }
 
+// A host session the host hands out itself, not through sm (the camera context, hle_misc.c): answered like the served services
+uint32_t dm_sf_host_session(const char *name) { uint32_t h = sf_new(name, 0); LOG("sf: %s → host session %#x (every request succeeds with zeroed output)", name, h); return h; }
+
 HLE_FORCE("_ZN2nn2sf4hipc31InitializeHipcServiceResolutionEv", "service name resolution (connects to sm); the host resolves the names it serves itself", Result, h_sf_InitRes, void) { return RES_OK; }
 HLE_FORCE("_ZN2nn2sf4hipc29FinalizeHipcServiceResolutionEv", "service name resolution (sm)", void, h_sf_FinRes, void) {}
 HLE_FORCE("_ZN2nn2sf4hipc20ConnectToHipcServiceEPNS_3svc6HandleEPKc", "connect to a service through sm → a host session for the services the host serves", Result, h_sf_Connect,

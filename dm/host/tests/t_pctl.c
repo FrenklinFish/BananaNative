@@ -9,6 +9,7 @@ static int unexpected, checks, fails;
 void *guest_sym(const char *name) { (void)name; unexpected++; return NULL; }
 module_t *module_of(const void *p) { (void)p; unexpected++; return NULL; }
 void hle_bind_system_event(void *g, int autoclear) { (void)g; (void)autoclear; unexpected++; }
+uint32_t dm_sf_host_session(const char *name) { (void)name; unexpected++; return 0; }   // hle_sf.c: the camera library's context (h_cam_Context), not reached here
 // The big-stack take-overs' stubs (HLE_FORCE_BIG) jump here with the implementation in x16; off a guest stack the real entry calls it straight
 __asm__(".text\n.p2align 2\n.globl _dm_bigstack_enter\n_dm_bigstack_enter:\n    br x16\n");
 extern const struct mach_header_64 _mh_execute_header;

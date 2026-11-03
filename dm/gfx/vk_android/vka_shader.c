@@ -1,0 +1,377 @@
+// Shaders of the Vulkan replay: the game's library (android/SHADERS.md), its entries as VkShaderModules, and NVN programs resolved to one shader per stage.
+// The library is <pack folder>/shaders/v-<DMSH_VK_CHAIN>/dmsh_vk.lib beside its inputs.tsv (the pack folder is the one the modules came from, dm_module_dir), or the file
+// DM_VK_SHLIB names. One whose chain, Vulkan chain or game is not this host's is refused with a [RED] line: the game runs on with no draws. Modules are made at a program's
+// first draw (the submit thread), not at nvnProgramSetShaders
+#if defined(__ANDROID__)
+#include "vka.h"
+#include "../nvn/nvn_mtl.h"
+#include "../nvn/dmsh_chain.h"
+#include "../nvn/dmsh_chain_vk.h"
+#include "game_profile.h"
+#include "vka_spvpatch.h"
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <unistd.h>
+
+static vka_shlib g_lib; static int g_lib_state;   // 0 not tried, 1 loaded, -1 none
+static pthread_mutex_t g_mu = PTHREAD_MUTEX_INITIALIZER;
+
+// How each stage runs the subgroup operations of a library built for sg lanes (DMSH_VK_F_SUBGROUP shaders). A module built for 64 lanes splits ballots and shuffles into
+// 32-lane halves, so it is right on 32 or 64 lanes; one built for n lanes, on n. Per stage, in this order: no subgroup operations in the stage on this device = rewritten
+// as one-invocation subgroups (single_lane); a size the library is right for that the device may vary and lets a pipeline pin (subgroupSizeControl, the stage in
+// requiredSubgroupSizeStages) = pinned to it (VkPipelineShaderStageRequiredSubgroupSizeCreateInfo, vka_pso.c); the device's fixed size right for the library = as built;
+// otherwise (a wrong or varying size that cannot be pinned) = one-invocation subgroups too. Mesa Turnip on the Adreno 840 reports 128 lanes (64-128) with fragment and
+// compute pinnable: before this, every stage ran the 64-lane modules at up to 128 lanes (black cave walls in DKB); now fragment and compute are pinned to 64 and the
+// vertex, tessellation and geometry stages run one-lane subgroups, as on Qualcomm's driver (which has none in those stages). DM_VK_SUBGROUP_PIN (restart): 0 = no pinning,
+// 1 = every stage the device lets pin (default), any other value = a VkShaderStageFlags mask of the stages that may pin (0x30: fragment and compute)
+static uint32_t g_sg_pin[8]; static uint8_t g_sg_one[8];   // by DMSH_VK_STAGE_*
+static const uint32_t g_stage_bit[8] = {VK_SHADER_STAGE_VERTEX_BIT, VK_SHADER_STAGE_TESSELLATION_CONTROL_BIT, VK_SHADER_STAGE_TESSELLATION_EVALUATION_BIT, VK_SHADER_STAGE_GEOMETRY_BIT,
+                                        VK_SHADER_STAGE_FRAGMENT_BIT, VK_SHADER_STAGE_COMPUTE_BIT, VK_SHADER_STAGE_TASK_BIT_EXT, VK_SHADER_STAGE_MESH_BIT_EXT};
+static void sg_plan(unsigned sg) {
+    static const char *const nm[8] = {"vertex", "tess control", "tess evaluation", "geometry", "fragment", "compute", "task", "mesh"};
+#define SG_OK(n) (sg == 64 ? ((n) == 32 || (n) == 64) : (n) == sg)
+    unsigned pin = 0; int pm = VKA_ENV("DM_VK_SUBGROUP_PIN", 1); uint32_t pin_stages = pm == 1 ? V.subgroup_req_stages : V.subgroup_req_stages & (uint32_t)pm;
+    if (V.subgroup_min != V.subgroup_max && pin_stages)
+        for (unsigned c = sg; c >= 32 && !pin; c /= 2) if (SG_OK(c) && c >= V.subgroup_min && c <= V.subgroup_max) pin = c;
+    // Turnip's geometry stage computes subgroup operations wrong at a pinned 64 (T30, Mesa 26.3: DKB's terrain culling GS 5d537f7630ec3671 left the cave walls black; one-lane
+    // subgroups there drew them right, with every other stage pinned). Eden leaves geometry out of Turnip's subgroup stages too. DM_VK_SUBGROUP_GS (restart): 0 = the geometry
+    // stage runs one-lane subgroups, 1 = as the device reports; default 0 on VK_DRIVER_ID_MESA_TURNIP, 1 on other drivers
+    uint32_t stages = V.subgroup_stages;
+    if (!VKA_ENV("DM_VK_SUBGROUP_GS", V.driver_id != VK_DRIVER_ID_MESA_TURNIP)) stages &= ~(uint32_t)VK_SHADER_STAGE_GEOMETRY_BIT;
+    char q[256]; size_t qn = 0; q[0] = 0; int one_new = 0;
+    for (int i = 0; i < 8; i++) {
+        if (i >= DMSH_VK_STAGE_TS && !V.mesh) continue;
+        uint32_t b = g_stage_bit[i]; g_sg_pin[i] = 0; g_sg_one[i] = 0;
+        if (!(stages & b)) g_sg_one[i] = 1;
+        else if (pin && (pin_stages & b)) g_sg_pin[i] = pin;
+        else if (!SG_OK(V.subgroup_size) || V.subgroup_min != V.subgroup_max) g_sg_one[i] = 1, one_new = 1;
+        qn += (size_t)snprintf(q + qn, sizeof q - qn, "%s%s %s", i ? ", " : "", nm[i], g_sg_one[i] ? "one lane" : g_sg_pin[i] ? (pin == 64 ? "pinned 64" : "pinned 32") : "as built");
+        if (qn >= sizeof q) qn = sizeof q - 1;
+    }
+#undef SG_OK
+    VLOG("subgroup shaders (built for %u lanes; the device's %u, %u-%u, pinnable in %#x, pinned in %#x): %s", sg, V.subgroup_size, V.subgroup_min, V.subgroup_max, V.subgroup_req_stages, pin ? pin_stages : 0, q);
+    if (one_new) VLOG("subgroup shaders: stages whose subgroup size is wrong for the library or varies unpinned run them as one-invocation subgroups");
+}
+uint32_t vka_shader_sg_pin(int stage) { return stage >= 0 && stage < 8 ? g_sg_pin[stage] : 0; }
+
+static int lib_load(void) {
+    if (g_lib_state) return g_lib_state > 0;
+    g_lib_state = -1;
+    char path[1024]; const char *e = getenv("DM_VK_SHLIB");
+    if (e && *e) snprintf(path, sizeof path, "%s", e);
+    else { const char *dir = dm_module_dir(); snprintf(path, sizeof path, "%s/shaders/" DMSH_VK_DIR_PREFIX "%s/" DMSH_VK_LIB_FILE, dir && *dir ? dir : ".", DMSH_VK_CHAIN); }
+    if (access(path, R_OK)) { VRED("no shader library at %s (the pack's shaders/" DMSH_VK_DIR_PREFIX "%s): nothing is drawn", path, DMSH_VK_CHAIN); return 0; }
+    char err[256];
+    if (!vka_shlib_open(&g_lib, path, DMSH_CHAIN, DMSH_VK_CHAIN, DM_GAME_ID, err, sizeof err)) { VRED("shader library %s refused: %s; nothing is drawn", path, err); return 0; }
+    // The translator's answers in the header against this device: modules built for 64-lane subgroups split ballots and shuffles into 32-lane halves, so they are right on
+    // 32 or 64 lanes; storage buffers are bound rounded down to ssbo_align, which the device's alignment must divide (android/SHADERS.md "Translator answers")
+    unsigned sg = g_lib.h->subgroup_size ? g_lib.h->subgroup_size : 32, sa = g_lib.h->ssbo_align;
+    sg_plan(sg);
+    if (sa && (sa % V.sb_align)) { VRED("shader library %s refused: built for storage buffers at %u-byte boundaries, the device needs %llu; nothing is drawn", path, sa, (unsigned long long)V.sb_align); vka_shlib_close(&g_lib); return 0; }
+    char inputs[17]; vka_shlib_str(g_lib.h->inputs, inputs);
+    VLOG("shader library %s: %u shaders, %u modules, %.1f MB (chain %s, Vulkan chain %s, inputs %s; %u-lane subgroups, storage buffers at %u)", path, g_lib.h->entry_count, g_lib.h->mod_count,
+         g_lib.size / 1e6, DMSH_CHAIN, DMSH_VK_CHAIN, inputs, sg, sa ? sa : 1);
+    g_lib_state = 1;
+    const char *ck = getenv("DM_VK_SHLIB_CHECK");
+    if (ck && atoi(ck)) vka_shlib_check_all(&g_lib);
+    return 1;
+}
+
+// ---------- Static memory: buffers that live as long as the process ----------
+typedef struct { VkBuffer buf; VkDeviceMemory mem; uint8_t *ptr; VkDeviceSize size, used; } stblk;
+static stblk g_st;
+int vka_static(VkDeviceSize n, VkDeviceSize align, vka_span *out) {
+    if (!align) align = 16;
+    pthread_mutex_lock(&g_mu);
+    VkDeviceSize o = (g_st.used + align - 1) / align * align;
+    if (!g_st.buf || o + n > g_st.size) {
+        stblk b = {0}; b.size = n > (4u << 20) ? (n + 0xFFFF) & ~(VkDeviceSize)0xFFFF : 4u << 20;
+        VkBufferCreateInfo bi = {VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO, .size = b.size, .usage = VK_BUFFER_USAGE_TRANSFER_SRC_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT | VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT |
+                                 VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_VERTEX_BUFFER_BIT | VK_BUFFER_USAGE_INDEX_BUFFER_BIT};
+        VkMemoryRequirements mr; void *p = NULL; uint32_t t = UINT32_MAX;
+        if (!vk.vkCreateBuffer(V.dev, &bi, NULL, &b.buf)) {
+            vk.vkGetBufferMemoryRequirements(V.dev, b.buf, &mr);
+            t = vka_mem_type(mr.memoryTypeBits, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT, 0);
+            VkMemoryAllocateInfo ai = {VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO, .allocationSize = mr.size, .memoryTypeIndex = t};
+            if (t == UINT32_MAX || vk.vkAllocateMemory(V.dev, &ai, NULL, &b.mem) || vk.vkBindBufferMemory(V.dev, b.buf, b.mem, 0) || vk.vkMapMemory(V.dev, b.mem, 0, VK_WHOLE_SIZE, 0, &p)) p = NULL;
+        }
+        if (!p) { pthread_mutex_unlock(&g_mu); VRED("static block of %llu bytes not allocated", (unsigned long long)b.size); return 0; }
+        b.ptr = p; g_st = b; o = 0;   // the old block stays (its buffers are still bound by shaders)
+    }
+    g_st.used = o + n; *out = (vka_span){g_st.buf, g_st.ptr + o, o};
+    pthread_mutex_unlock(&g_mu);
+    return 1;
+}
+
+// ---------- Shaders by key ----------
+typedef struct { uint64_t key; vka_shader *sh; const vka_shlib *lib; } shent;
+static shent *g_sh; static size_t g_shcap, g_shn;
+static size_t hslot(uint64_t k, size_t cap) { return (size_t)((k * 0x9E3779B97F4A7C15ull) >> 17) & (cap - 1); }
+static shent *sh_find(uint64_t key, const vka_shlib *L) {
+    if (!g_shcap) return NULL;
+    for (size_t i = hslot(key, g_shcap);; i = (i + 1) & (g_shcap - 1)) { if (!g_sh[i].sh) return NULL; if (g_sh[i].key == key && g_sh[i].lib == L) return &g_sh[i]; }
+}
+static void sh_put(uint64_t key, const vka_shlib *L, vka_shader *s) {
+    if (2 * (g_shn + 1) > g_shcap) {
+        size_t nc = g_shcap ? 2 * g_shcap : 1024; shent *n = calloc(nc, sizeof *n);
+        for (size_t i = 0; i < g_shcap; i++) if (g_sh[i].sh) { size_t j = hslot(g_sh[i].key, nc); while (n[j].sh) j = (j + 1) & (nc - 1); n[j] = g_sh[i]; }
+        free(g_sh); g_sh = n; g_shcap = nc;
+    }
+    size_t j = hslot(key, g_shcap); while (g_sh[j].sh) j = (j + 1) & (g_shcap - 1);
+    g_sh[j] = (shent){key, s, L}; g_shn++;
+}
+
+static const char *stage_name(int s) { static const char *n[] = {"vertex", "tess control", "tess evaluation", "geometry", "fragment", "compute", "task", "mesh"}; return s >= 0 && s < 8 ? n[s] : "?"; }
+// What the replay cannot run yet, decided once per shader: refused shaders keep their entry, so the draws that use them are skipped and counted
+static const char *refusal(const vka_shlib *L, const dmsh_vk_entry *e) {
+    if (e->flags & (DMSH_VK_F_NV_PASSTHROUGH | DMSH_VK_F_NV_VIEWPORT)) return "NV-only geometry passthrough / viewport mask (a library built before the gs_passthrough answer)";
+    if (e->flags & DMSH_VK_F_INTERLOCK) return "fragment shader interlock";
+    if (e->stage == DMSH_VK_STAGE_GS && !V.geom) return "a geometry shader on a device without geometryShader";
+    if ((e->stage == DMSH_VK_STAGE_TCS || e->stage == DMSH_VK_STAGE_TES) && !V.tess) return "a tessellation shader on a device without tessellationShader";
+    // NVN2 task and mesh programs, and the pixel shaders that read their per-primitive outputs (valid only in a mesh pipeline): only with VK_EXT_mesh_shader (vka_dev.c)
+    if ((e->stage == DMSH_VK_STAGE_TS || e->stage == DMSH_VK_STAGE_MS || (e->flags & DMSH_VK_F_MESH_PRIM)) && !V.mesh) return "a task / mesh shader (or a pixel shader of their per-primitive outputs) on a device without VK_EXT_mesh_shader (or DM_VK_MESH=0)";
+    if (e->stage == DMSH_VK_STAGE_TS && !V.task) return "a task shader on a device with mesh shaders but without taskShader";
+    if (e->stage == DMSH_VK_STAGE_TS || e->stage == DMSH_VK_STAGE_MS) {   // the workgroup (the entry's local) within the device's limit
+        uint64_t inv = (uint64_t)e->local[0] * e->local[1] * e->local[2];
+        if (!inv || inv > (e->stage == DMSH_VK_STAGE_TS ? V.task_inv : V.mesh_inv)) return "a task / mesh workgroup larger than the device's (maxTaskWorkGroupInvocations / maxMeshWorkGroupInvocations)";
+    }
+    const dmsh_vk_bind *b = vka_shlib_binds(L, e);
+    for (unsigned i = 0; i < e->bind_count; i++) if (b[i].kind == DMSH_VK_KIND_UNKNOWN) return "a binding the build could not place";
+    return NULL;
+}
+// A module of a stage sg_plan runs as one lane (no subgroup operations there on this device, or a subgroup size the library is not right for that cannot be pinned) has them
+// rewritten as subgroups of one invocation (vka_spv_subgroup_single; Qualcomm's Adreno 840 driver has them in fragment, compute, task and mesh shaders, not in the vertex pipeline's). Logged once per shader key; a module that cannot be rewritten is used as it is, with a red line
+static void single_lane(uint64_t key, int stage, uint32_t **w, size_t *nb) {
+    if (stage < 0 || stage > 7 || !g_sg_one[stage]) return;   // sg_plan
+    // A task or mesh workgroup uses its subgroup operations across the workgroup (output counts, compaction): one-lane subgroups give it wrong results. The Adreno 840's
+    // driver has them in both stages at its fixed 64 (subgroupSupportedStages 0xf0), so this is a device the library was not made for
+    if (stage >= DMSH_VK_STAGE_TS) { static _Atomic int n; if (atomic_fetch_add(&n, 1) < 8) VRED("%s shader %016llx: its subgroup operations run as one lane (the device's subgroups in this stage do not fit the library): its output is likely wrong", stage == DMSH_VK_STAGE_TS ? "task" : "mesh", (unsigned long long)key); }
+    size_t on = 0; int ch = 0; char e[256] = ""; uint32_t *o = vka_spv_subgroup_single(*w, *nb / 4, &on, &ch, e, sizeof e);
+    if (!o) { if (e[0]) { static _Atomic int n; if (atomic_fetch_add(&n, 1) < 8) VRED("shader %016llx: subgroup operations in a stage without them not rewritten: %s", (unsigned long long)key, e); } return; }
+    static _Atomic int n; if (atomic_fetch_add(&n, 1) < 8) VLOG("shader %016llx: subgroup operations rewritten as one-invocation subgroups (%s)", (unsigned long long)key,
+                                                            stage == DMSH_VK_STAGE_GS && V.driver_id == VK_DRIVER_ID_MESA_TURNIP ? "Turnip's geometry stage (DM_VK_SUBGROUP_GS)" : V.subgroup_stages & g_stage_bit[stage] ? "the device's subgroup size in this stage is not the library's and cannot be pinned" : "the device has none in this stage");
+    free(*w); *w = o; *nb = on * 4;
+}
+static VkShaderModule spv_module(const vka_shlib *L, const dmsh_vk_entry *e, const dmsh_vk_module *m, uint64_t key, const char **why, char *err, size_t errn) {
+    size_t nb = 0; uint32_t *w = vka_shlib_spirv(L, m, &nb, err, errn);
+    if (!w) { *why = err; return VK_NULL_HANDLE; }
+    if (e->flags & DMSH_VK_F_SUBGROUP) single_lane(key, e->stage, &w, &nb);
+    VkShaderModuleCreateInfo ci = {VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO, .codeSize = nb, .pCode = w};
+    VkShaderModule mod = VK_NULL_HANDLE; VkResult r = vk.vkCreateShaderModule(V.dev, &ci, NULL, &mod);
+    free(w);
+    if (r) { snprintf(err, errn, "vkCreateShaderModule %d (variant %u of %016llx)", r, m->variant, (unsigned long long)key); *why = err; return VK_NULL_HANDLE; }
+    return mod;
+}
+VkShaderModule vka_shader_module(vka_shader *s, int variant) {
+    if (variant < 0 || variant > 3) return VK_NULL_HANDLE;
+    if (s->mods[variant]) return s->mods[variant];
+    const dmsh_vk_module *m = vka_shlib_module(s->lib, s->e, variant);
+    if (!m) return VK_NULL_HANDLE;
+    const char *why = NULL; char err[256];
+    VkShaderModule mod = spv_module(s->lib, s->e, m, s->key, &why, err, sizeof err);
+    if (!mod) { static _Atomic int n; if (atomic_fetch_add(&n, 1) < 8) VRED("shader %016llx variant %d: %s", (unsigned long long)s->key, variant, why); return VK_NULL_HANDLE; }
+    pthread_mutex_lock(&g_mu);
+    if (s->mods[variant]) { pthread_mutex_unlock(&g_mu); vk.vkDestroyShaderModule(V.dev, mod, NULL); return s->mods[variant]; }
+    s->mods[variant] = mod;
+    pthread_mutex_unlock(&g_mu);
+    return mod;
+}
+// A geometry shader that writes memory, with those writes made by one run per primitive (vka_spv_gs_claim: the Adreno 840 runs a geometry shader several times for each
+// primitive, each run writing memory). out NULL: only counts them. Made from the base module after the one-invocation subgroup rewrite
+static int gs_words(vka_shader *s, uint32_t **out, size_t *on, char *err, size_t errn) {
+    const dmsh_vk_module *m = vka_shlib_module(s->lib, s->e, DMSH_VK_MOD_BASE);
+    size_t nb = 0; uint32_t *w = m ? vka_shlib_spirv(s->lib, m, &nb, err, errn) : NULL;
+    if (!w) return -1;
+    if (s->e->flags & DMSH_VK_F_SUBGROUP) single_lane(s->key, s->e->stage, &w, &nb);
+    int r = vka_spv_gs_claim(w, nb / 4, VKA_GS_CLAIM_BINDING, out, on, err, errn);
+    free(w); return r;
+}
+VkShaderModule vka_shader_gs_module(vka_shader *s) {
+    if (s->gs_fx <= 0) return VK_NULL_HANDLE;
+    if (s->gs_claim) return s->gs_claim;
+    uint32_t *o = NULL; size_t on = 0; char err[256] = ""; VkShaderModule mod = VK_NULL_HANDLE;
+    if (gs_words(s, &o, &on, err, sizeof err) > 0 && o) {
+        VkShaderModuleCreateInfo ci = {VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO, .codeSize = on * 4, .pCode = o};
+        VkResult r = vk.vkCreateShaderModule(V.dev, &ci, NULL, &mod); if (r) { snprintf(err, sizeof err, "vkCreateShaderModule %d", r); mod = VK_NULL_HANDLE; }
+    }
+    free(o);
+    if (!mod) { static _Atomic int n; if (atomic_fetch_add(&n, 1) < 8) VRED("geometry shader %016llx: module with the claim not made: %s", (unsigned long long)s->key, err); return VK_NULL_HANDLE; }
+    pthread_mutex_lock(&g_mu);
+    if (s->gs_claim) { pthread_mutex_unlock(&g_mu); vk.vkDestroyShaderModule(V.dev, mod, NULL); return s->gs_claim; }
+    s->gs_claim = mod;
+    pthread_mutex_unlock(&g_mu);
+    return mod;
+}
+// The base vertex module with the inputs of umask / smask retyped (vka_spvpatch.c): made once per pair of masks, kept for the process like the base module
+struct vka_vinmod { struct vka_vinmod *next; uint32_t u, s; VkShaderModule mod; };
+VkShaderModule vka_shader_vin_module(vka_shader *s, uint32_t umask, uint32_t smask) {
+    pthread_mutex_lock(&g_mu);
+    for (struct vka_vinmod *v = s->vin; v; v = v->next) if (v->u == umask && v->s == smask) { VkShaderModule m = v->mod; pthread_mutex_unlock(&g_mu); return m; }
+    pthread_mutex_unlock(&g_mu);
+    VkShaderModule mod = VK_NULL_HANDLE; char err[256] = ""; int own = 0;   // own: made here (the base module of the fallback is the shader's, never destroyed)
+    const dmsh_vk_module *m = vka_shlib_module(s->lib, s->e, DMSH_VK_MOD_BASE);
+    size_t nb = 0; uint32_t *w = m ? vka_shlib_spirv(s->lib, m, &nb, err, sizeof err) : NULL;
+    if (w && (s->e->flags & DMSH_VK_F_SUBGROUP)) single_lane(s->key, s->e->stage, &w, &nb);
+    size_t on = 0; uint32_t *o = w ? vka_spv_vin_retype(w, nb / 4, umask, smask, &on, err, sizeof err) : NULL;
+    if (o) { VkShaderModuleCreateInfo ci = {VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO, .codeSize = on * 4, .pCode = o};
+             VkResult r = vk.vkCreateShaderModule(V.dev, &ci, NULL, &mod); if (r) { snprintf(err, sizeof err, "vkCreateShaderModule %d", r); mod = VK_NULL_HANDLE; } else own = 1; }
+    free(w); free(o);
+    if (!mod) { static _Atomic int n; if (atomic_fetch_add(&n, 1) < 8) VRED("vertex shader %016llx: inputs %#x (uint) / %#x (int) not retyped: %s; the base module reads them as floats", (unsigned long long)s->key, umask, smask, err);
+                mod = vka_shader_module(s, DMSH_VK_MOD_BASE); }
+    // Two threads (the frame path and a prewarm or optimizer thread) may have made it at once: the first one in the list wins, the other's module is destroyed
+    pthread_mutex_lock(&g_mu);
+    for (struct vka_vinmod *o = s->vin; o; o = o->next) if (o->u == umask && o->s == smask) {
+        VkShaderModule w = o->mod; pthread_mutex_unlock(&g_mu);
+        if (own && mod != w) vk.vkDestroyShaderModule(V.dev, mod, NULL);   // (no pipeline was made from it: it never left this function)
+        return w; }
+    struct vka_vinmod *v = malloc(sizeof *v); *v = (struct vka_vinmod){s->vin, umask, smask, mod}; s->vin = v;
+    pthread_mutex_unlock(&g_mu);
+    return mod;
+}
+// The base pixel module with the float outputs of umask / smask retyped for integer attachments (vka_spvpatch.c vka_spv_fout_retype): made once per pair of masks, as the vertex ones
+VkShaderModule vka_shader_fout_module(vka_shader *s, uint32_t umask, uint32_t smask) {
+    pthread_mutex_lock(&g_mu);
+    for (struct vka_vinmod *v = s->fout; v; v = v->next) if (v->u == umask && v->s == smask) { VkShaderModule m = v->mod; pthread_mutex_unlock(&g_mu); return m; }
+    pthread_mutex_unlock(&g_mu);
+    VkShaderModule mod = VK_NULL_HANDLE; char err[256] = ""; int own = 0;
+    const dmsh_vk_module *m = vka_shlib_module(s->lib, s->e, DMSH_VK_MOD_BASE);
+    size_t nb = 0; uint32_t *w = m ? vka_shlib_spirv(s->lib, m, &nb, err, sizeof err) : NULL;
+    if (w && (s->e->flags & DMSH_VK_F_SUBGROUP)) single_lane(s->key, s->e->stage, &w, &nb);
+    size_t on = 0; uint32_t *o = w ? vka_spv_fout_retype(w, nb / 4, umask, smask, &on, err, sizeof err) : NULL;
+    if (o) { VkShaderModuleCreateInfo ci = {VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO, .codeSize = on * 4, .pCode = o};
+             VkResult r = vk.vkCreateShaderModule(V.dev, &ci, NULL, &mod); if (r) { snprintf(err, sizeof err, "vkCreateShaderModule %d", r); mod = VK_NULL_HANDLE; } else own = 1; }
+    free(w); free(o);
+    if (!mod) { static _Atomic int n; if (atomic_fetch_add(&n, 1) < 8) VRED("pixel shader %016llx: outputs %#x (uint) / %#x (int) not retyped for their integer targets: %s; the base module, whose float outputs those targets do not take", (unsigned long long)s->key, umask, smask, err);
+                mod = vka_shader_module(s, DMSH_VK_MOD_BASE); }
+    else { static _Atomic int n; if (atomic_fetch_add(&n, 1) < 8) VLOG("pixel shader %016llx: float outputs %#x (uint) / %#x (int) retyped for their integer targets (their bits written as they are)", (unsigned long long)s->key, umask, smask); }
+    pthread_mutex_lock(&g_mu);
+    for (struct vka_vinmod *x = s->fout; x; x = x->next) if (x->u == umask && x->s == smask) {
+        VkShaderModule had = x->mod; pthread_mutex_unlock(&g_mu);
+        if (own && mod != had) vk.vkDestroyShaderModule(V.dev, mod, NULL);
+        return had; }
+    struct vka_vinmod *v = malloc(sizeof *v);
+    if (v) { *v = (struct vka_vinmod){s->fout, umask, smask, mod}; s->fout = v; }
+    pthread_mutex_unlock(&g_mu);
+    return mod;
+}
+int vka_shader_fout_retyped(vka_shader *s, uint32_t umask, uint32_t smask) {
+    VkShaderModule m = vka_shader_fout_module(s, umask, smask);
+    return m && m != vka_shader_module(s, DMSH_VK_MOD_BASE);
+}
+vka_shader *vka_shader_make(const vka_shlib *L, uint64_t key) {
+    pthread_mutex_lock(&g_mu);
+    shent *h = sh_find(key, L);
+    if (h) { vka_shader *s = h->sh; pthread_mutex_unlock(&g_mu); return s->bad ? NULL : s; }
+    pthread_mutex_unlock(&g_mu);
+    vka_shader *s = calloc(1, sizeof *s); s->key = key; s->lib = L;
+    const dmsh_vk_entry *e = vka_shlib_find(L, key);
+    const char *why = NULL; char err[256] = "";
+    if (!e) why = "not in the shader library";
+    else {
+        s->e = e; s->b = vka_shlib_binds(L, e);
+        why = refusal(L, e);
+        const dmsh_vk_module *m = why ? NULL : vka_shlib_module(L, e, DMSH_VK_MOD_BASE);
+        if (!why && !m) why = "no base module";
+        if (m) s->mods[DMSH_VK_MOD_BASE] = spv_module(L, e, m, key, &why, err, sizeof err);
+        if (!why && e->stage == DMSH_VK_STAGE_GS && VKA_ENV("DM_VK_GS_CLAIM", 1)) {   // memory writes: made once per primitive (vka_spv_gs_claim)
+            char e2[256] = ""; s->gs_fx = gs_words(s, NULL, NULL, e2, sizeof e2);
+            if (s->gs_fx < 0) VRED("geometry shader %016llx: memory writes not put under a claim (%s): drawn as it is, its writes repeated by the device's runs of each primitive", (unsigned long long)key, e2);
+            else if (s->gs_fx) VLOG("geometry shader %016llx: %d memory writes, made by one run per primitive (a claim word per primitive at set 0 binding %d)", (unsigned long long)key, s->gs_fx, VKA_GS_CLAIM_BINDING);
+        }
+        if (!why && e->c1_len) {   // the c1 bytes: a uniform buffer of their own, made once
+            if (vka_static(e->c1_len, V.ub_align, &s->c1)) { memcpy(s->c1.ptr, vka_shlib_c1(L, e), e->c1_len); s->c1_len = e->c1_len; }
+            else why = "no static memory for its c1 bytes";
+        }
+    }
+    if (why) {
+        s->bad = 1;
+        static _Atomic int n; if (atomic_fetch_add(&n, 1) < 64) VRED("shader %016llx (%s): %s; its draws are skipped", (unsigned long long)key, e ? stage_name(e->stage) : "?", why);
+    }
+    pthread_mutex_lock(&g_mu);
+    h = sh_find(key, L);
+    if (h) { if (s->mods[0]) vk.vkDestroyShaderModule(V.dev, s->mods[0], NULL); free(s); s = h->sh; }   // another thread made it meanwhile
+    else sh_put(key, L, s);
+    pthread_mutex_unlock(&g_mu);
+    return s->bad ? NULL : s;
+}
+
+// A shader of the game's library by key, the library loaded if it is not yet (the prewarm threads, vka_pso.c); NULL = no library, not in it, or refused
+vka_shader *vka_shader_by_key(uint64_t key) {
+    pthread_mutex_lock(&g_mu); int ok = lib_load(); pthread_mutex_unlock(&g_mu);
+    return ok ? vka_shader_make(&g_lib, key) : NULL;
+}
+
+// Every shader of a library through the device's compiler: each module made, each stage's set-0 layout made, each compute shader's pipeline built (graphics pipelines need
+// a pair and state, so vertex and pixel shaders stop at the module and layout). DM_VK_SHLIB_CHECK=1 runs it when the game's library loads; the selftest runs it on DM_VK_SHLIB.
+// Returns the number of failures; one log line per failure kind and a summary
+int vka_shlib_check_all(const vka_shlib *L) {
+    unsigned n = L->h->entry_count, made = 0, refused = 0, nolayout = 0, cs = 0, csfail = 0; uint64_t t0 = now_ns();
+    for (unsigned i = 0; i < n; i++) {
+        const dmsh_vk_entry *e = &L->ent[i];
+        vka_shader *s = vka_shader_make(L, e->key);
+        if (!s) { refused++; continue; }
+        made++;
+        for (int v = 1; v < 4; v++) if (vka_shlib_module(L, e, v) && !vka_shader_module(s, v)) nolayout++;   // the variants through the compiler too (counted as failures)
+        vka_shader *sh[VKA_NSTAGE] = {0}; int st = vka_nvn_stage(e->stage); if (st < 0) { nolayout++; continue; } sh[st] = s;
+        vka_layout lay;
+        if (!vka_layout_of(sh, st == 5, &lay)) { nolayout++; continue; }
+        if (st == 5) { uint64_t t = now_ns(); cs++; if (!vka_cs_pipeline(s, &lay)) csfail++;
+                       if (cs <= 3 || cs % 25 == 0) VLOG("shader library check: compute pipeline %u (%016llx) %.0f ms; %u / %u shaders", cs, (unsigned long long)e->key, (now_ns() - t) / 1e6, i + 1, n); }
+        if ((i + 1) % 2000 == 0) VLOG("shader library check: %u / %u shaders, %.1f s", i + 1, n, (now_ns() - t0) / 1e9);
+    }
+    VLOG("shader library check: %u shaders, %u modules made, %u refused, %u without a layout, %u compute pipelines (%u failed), %.1f s",
+         n, made, refused, nolayout, cs, csfail, (now_ns() - t0) / 1e9);
+    vka_pso_save(1);
+    return (int)(nolayout + csfail);
+}
+
+// ---------- Programs ----------
+// By serial (a new serial at every nvnProgramSetShaders; mtl_prog_release drops it): the program's stage keys resolved to shaders, each at the NVN stage its entry names
+typedef struct { uint64_t serial; vka_progsh ps; } prent;
+static prent *g_pr; static size_t g_prcap, g_prn;
+static prent *pr_find(uint64_t s) {
+    if (!g_prcap) return NULL;
+    for (size_t i = hslot(s, g_prcap);; i = (i + 1) & (g_prcap - 1)) { if (!g_pr[i].serial) return NULL; if (g_pr[i].serial == s) return &g_pr[i]; }
+}
+static void pr_put(uint64_t s, const vka_progsh *ps) {
+    prent *e = pr_find(s); if (e) { e->ps = *ps; return; }
+    if (2 * (g_prn + 1) > g_prcap) {
+        size_t nc = g_prcap ? 2 * g_prcap : 1024; prent *n = calloc(nc, sizeof *n);
+        for (size_t i = 0; i < g_prcap; i++) if (g_pr[i].serial && g_pr[i].serial != ~0ull) { size_t j = hslot(g_pr[i].serial, nc); while (n[j].serial) j = (j + 1) & (nc - 1); n[j] = g_pr[i]; }
+        free(g_pr); g_pr = n; g_prcap = nc; size_t live = 0; for (size_t i = 0; i < nc; i++) live += n[i].serial != 0; g_prn = live;
+    }
+    size_t j = hslot(s, g_prcap); while (g_pr[j].serial && g_pr[j].serial != ~0ull) j = (j + 1) & (g_prcap - 1);
+    if (!g_pr[j].serial) g_prn++;
+    g_pr[j] = (prent){s, *ps};
+}
+void vka_prog_put(uint64_t serial, const vka_progsh *ps) { pthread_mutex_lock(&g_mu); pr_put(serial, ps); pthread_mutex_unlock(&g_mu); }
+void mtl_prog_release(prog_t *p) {
+    if (!p || !p->serial) return;
+    pthread_mutex_lock(&g_mu); prent *e = pr_find(p->serial); if (e) { e->serial = ~0ull; memset(&e->ps, 0, sizeof e->ps); } pthread_mutex_unlock(&g_mu);   // a tombstone
+}
+void mtl_prog_prefetch(const prog_t *p) { (void)p; }   // modules are made at the program's first draw (vka_prog_shaders)
+
+int vka_prog_shaders(const prog_t *p, vka_progsh *out) {
+    memset(out, 0, sizeof *out);
+    if (!p || !p->serial) return 0;
+    pthread_mutex_lock(&g_mu); prent *e = pr_find(p->serial); if (e) *out = e->ps; pthread_mutex_unlock(&g_mu);
+    if (e) return 1;
+    pthread_mutex_lock(&g_mu); int ok = lib_load(); pthread_mutex_unlock(&g_mu);
+    if (!ok) return 0;
+    for (unsigned i = 0; i < p->nstage && i < 6; i++) {   // (a program has at most 6 shaders: hle_nvn.c nvnProgramSetShaders)
+        uint8_t md[8];
+        if (!prog_key(p, i, md)) continue;
+        uint64_t key = vka_shlib_key(md);
+        const dmsh_vk_entry *en = vka_shlib_find(&g_lib, key);
+        if (!en) { out->bad |= VKA_BAD_MISSING; static _Atomic int n; if (atomic_fetch_add(&n, 1) < 32) VRED("shader %016llx (program stage %u) is not in the shader library", (unsigned long long)key, i); continue; }
+        int st = vka_nvn_stage(en->stage);
+        if (st < 0) { out->bad |= VKA_BAD_MISSING; continue; }   // (vka_shlib_open refuses a stage past DMSH_VK_STAGE_MS)
+        if (out->sh[st]) { static _Atomic int n; if (atomic_fetch_add(&n, 1) < 8) VRED("program serial %llu has two %s shaders (%016llx, %016llx): the second is used", (unsigned long long)p->serial, stage_name(en->stage), (unsigned long long)out->sh[st]->key, (unsigned long long)key); }
+        out->sh[st] = vka_shader_make(&g_lib, key);
+        if (!out->sh[st]) out->bad |= 1u << st;
+    }
+    vka_prog_put(p->serial, out);
+    return 1;
+}
+#endif

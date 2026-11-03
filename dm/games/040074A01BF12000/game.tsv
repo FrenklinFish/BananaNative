@@ -41,3 +41,11 @@ shader_note	Donkey Kong Bananza shaders
 # agl's render buffer binding wraps its clears in render conditions (SetRenderEnableConditional(RENDER_IF_NOT_EQUAL) at main+0x12798c before the ClearColor at main+0x1279d4):
 # without the key, a clear-only rebinding of the composite target right after the composite draw wiped it before the upscaler read it, and every gameplay frame came out black
 render_cond	on
+# The window size (the nvnWindow textures the upscaler's output is copied to; the render targets scale with it) is the constant pair two leaf functions of main return (mov w0,#2880 / #1620; ret):
+# the host writes DM_WINDOW_SIZE's size into them at load (loader.c window_apply; the Android launcher's Game resolution: Phone 1080p = 1920x1080), the game's own 2880x1620 without it (the game note, Window size)
+window_fn	e25c90c1c136638885659fd55bf8a03b	0x5bf770	0x5bf780	2880x1620
+
+# ---- Test runs ----
+# DM_FASTBOOT=1: A every 12 presented frames (0.1 s held) from the first present through the boot screen, the title, Continue and the file, a [mark] once 5 frames in a row
+# have 3,000 draws or more (the title has 63, the loading screen 6-9, the first level 5,500 and more) and no presses after it. With the seed save, am start to the first level in 45-50 s on the PNM-N49
+fastboot_env	DM_KEYS=f1:A~0.1*3000/12 DM_MARK_DRAWS=3000 DM_MARK_KEYS_STOP=1

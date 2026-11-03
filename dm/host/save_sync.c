@@ -1,12 +1,11 @@
-// Saves through a cloud folder (iCloud Drive): see save_sync.h. Plain C on system calls and CommonCrypto only, so the Mac launcher links it as the host does (dm/mac/pack_app.py).
+// Saves through a cloud folder (iCloud Drive): see save_sync.h. Plain C on system calls and the platform layer's inline calls only (plat/plat.h), so the Mac launcher links it as the host does (dm/mac/pack_app.py).
 // A packed save (<folder>/<title ID>/save.dmsync), little-endian:
 //   header  "DMSYNC1\n", u32 version (1), u32 entries, 32 hex digits of the hash, i64 saved, char title[24], char device[64]
 //   entry   u8 type (1 folder, 2 file), u8 0, u16 path length, u16 guest-name length, u16 0, u64 size, i64 mtime; the path (save/... or save_device/...), the guest name, the contents
 //   end     "DMSYNCE\n", then the end of the file (a file cut off anywhere is refused)
 // The hash runs over each entry's first 16 header bytes (not the date), its path, its guest name and its contents, in the order walk() visits them.
 #include "save_sync.h"
-#include <CommonCrypto/CommonDigest.h>
-#include <TargetConditionals.h>
+#include "plat/plat.h"
 #include <ctype.h>
 #include <dirent.h>
 #include <errno.h>
@@ -18,10 +17,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <strings.h>
-#include <sys/clonefile.h>
 #include <sys/stat.h>
-#include <sys/sysctl.h>
-#include <sys/xattr.h>
 #include <time.h>
 #include <unistd.h>
 
@@ -115,8 +111,7 @@ static void when(int64_t t, char *out, size_t n) {   // a save's time in the log
 }
 
 static void device_name(char *out, size_t n) {   // the model ("Mac16,1", "iPhone17,1"): which device a save came from, for the log
-    char model[64] = ""; size_t len = sizeof model;
-    if (sysctlbyname(TARGET_OS_OSX ? "hw.model" : "hw.machine", model, &len, NULL, 0)) model[0] = 0;
+    char model[64] = ""; plat_device_model(model, sizeof model);
     snprintf(out, n, "%s", model[0] ? model : "unknown");
 }
 
@@ -126,18 +121,18 @@ static void upper_title(const char *title, char *out, size_t n) {   // one spell
 }
 
 // ---------- packing ----------
-typedef struct { CC_SHA256_CTX sha; FILE *out; ss_meta *m; uint32_t entries; uint8_t buf[CHUNK]; } packer;
+typedef struct { plat_sha256_t sha; FILE *out; ss_meta *m; uint32_t entries; uint8_t buf[CHUNK]; } packer;
 
 static int pack_entry(void *c, const char *abs, const char *rel, const struct stat *st) {
     packer *k = c;
-    char guest[1024]; ssize_t gl = getxattr(abs, GUEST_NAME, guest, sizeof guest, 0, XATTR_NOFOLLOW);
+    char guest[1024]; ssize_t gl = plat_getxattr(abs, GUEST_NAME, guest, sizeof guest);
     if (gl < 0) gl = 0;   // ENOATTR: the host name is the guest's
     size_t pl = strlen(rel); int file = S_ISREG(st->st_mode);
     if (pl > UINT16_MAX) return -1;
     uint8_t h[ENT] = {(uint8_t)(file ? 2 : 1)}; uint16_t pl16 = (uint16_t)pl, gl16 = (uint16_t)gl;
-    uint64_t size = file ? (uint64_t)st->st_size : 0; int64_t mt = st->st_mtimespec.tv_sec;
+    uint64_t size = file ? (uint64_t)st->st_size : 0; int64_t mt = st->st_mtime;
     memcpy(h + 2, &pl16, 2); memcpy(h + 4, &gl16, 2); memcpy(h + 8, &size, 8); memcpy(h + 16, &mt, 8);
-    CC_SHA256_Update(&k->sha, h, 16); CC_SHA256_Update(&k->sha, rel, (CC_LONG)pl); CC_SHA256_Update(&k->sha, guest, (CC_LONG)gl);
+    plat_sha256_update(&k->sha, h, 16); plat_sha256_update(&k->sha, rel, pl); plat_sha256_update(&k->sha, guest, (size_t)gl);
     if (k->out && (fwrite(h, 1, ENT, k->out) != ENT || fwrite(rel, 1, pl, k->out) != pl || fwrite(guest, 1, (size_t)gl, k->out) != (size_t)gl)) return -1;
     k->entries++;
     if (!file) return 0;
@@ -145,7 +140,7 @@ static int pack_entry(void *c, const char *abs, const char *rel, const struct st
     uint64_t left = size; ssize_t got = 0;
     while (left && (got = read(fd, k->buf, left < CHUNK ? (size_t)left : CHUNK)) != 0) {
         if (got < 0) { if (errno == EINTR) continue; break; }
-        CC_SHA256_Update(&k->sha, k->buf, (CC_LONG)got);
+        plat_sha256_update(&k->sha, k->buf, (size_t)got);
         if (k->out && fwrite(k->buf, 1, (size_t)got, k->out) != (size_t)got) break;
         left -= (uint64_t)got;
     }
@@ -157,12 +152,12 @@ static int pack_entry(void *c, const char *abs, const char *rel, const struct st
 }
 
 static int pack_save(const char *save, packer *k) {
-    CC_SHA256_Init(&k->sha);
+    plat_sha256_init(&k->sha);
     for (int i = 0; i < 2; i++) {
         char dir[PATH_MAX]; folder_path(save, i, dir, sizeof dir);
         if (has_entries(dir) && walk(dir, FOLDERS[i], pack_entry, k)) return -1;
     }
-    uint8_t d[CC_SHA256_DIGEST_LENGTH]; CC_SHA256_Final(d, &k->sha); hex(d, k->m->hash);
+    uint8_t d[32]; plat_sha256_final(d, &k->sha); hex(d, k->m->hash);
     if (!k->m->files) k->m->hash[0] = 0;   // no save: no hash, so that "nothing here" compares as nothing
     return 0;
 }
@@ -205,10 +200,10 @@ static int path_ok(const char *p) {
 int ss_read(const char *bundle, const char *into, ss_meta *m) {
     memset(m, 0, sizeof *m);
     FILE *f = fopen(bundle, "rb"); if (!f) return -1;
-    uint8_t *buf = malloc(CHUNK), hdr[HDR], h[ENT], end[sizeof END], d[CC_SHA256_DIGEST_LENGTH];
+    uint8_t *buf = malloc(CHUNK), hdr[HDR], h[ENT], end[sizeof END], d[32];
     char want[SS_HASH + 1] = "", path[PATH_MAX], guest[1024], out[PATH_MAX];
     uint32_t version, n; int r = -1, fd = -1;
-    CC_SHA256_CTX sha; CC_SHA256_Init(&sha);
+    plat_sha256_t sha; plat_sha256_init(&sha);
     if (!buf || fread(hdr, 1, HDR, f) != HDR || memcmp(hdr, MAGIC, 8)) goto done;
     memcpy(&version, hdr + 8, 4); memcpy(&n, hdr + 12, 4);
     if (version != 1) goto done;
@@ -221,7 +216,7 @@ int ss_read(const char *bundle, const char *into, ss_meta *m) {
         if (fread(path, 1, pl, f) != pl || fread(guest, 1, gl, f) != gl) goto done;
         path[pl] = 0;
         if (strlen(path) != pl || !path_ok(path)) goto done;
-        CC_SHA256_Update(&sha, h, 16); CC_SHA256_Update(&sha, path, pl); CC_SHA256_Update(&sha, guest, gl);
+        plat_sha256_update(&sha, h, 16); plat_sha256_update(&sha, path, pl); plat_sha256_update(&sha, guest, gl);
         if (into) {
             if (snprintf(out, sizeof out, "%s/%s", into, path) >= (int)sizeof out) goto done;
             if (h[0] == 1) { if (mkdirs(out)) goto done; }
@@ -229,12 +224,12 @@ int ss_read(const char *bundle, const char *into, ss_meta *m) {
                 *strrchr(out, '/') = 0; int made = mkdirs(out); out[strlen(out)] = '/';
                 if (made || (fd = open(out, O_WRONLY | O_CREAT | O_EXCL, 0644)) < 0) goto done;
             }
-            if (gl && setxattr(out, GUEST_NAME, guest, gl, 0, XATTR_NOFOLLOW)) goto done;
+            if (gl && plat_setxattr(out, GUEST_NAME, guest, gl)) goto done;
         }
         for (uint64_t left = size; left; ) {
             size_t k = left < CHUNK ? (size_t)left : CHUNK;
             if (fread(buf, 1, k, f) != k) goto done;
-            CC_SHA256_Update(&sha, buf, (CC_LONG)k);
+            plat_sha256_update(&sha, buf, k);
             if (fd >= 0 && write_all(fd, buf, k)) goto done;
             left -= k;
         }
@@ -245,7 +240,7 @@ int ss_read(const char *bundle, const char *into, ss_meta *m) {
         if (h[0] == 2) m->files++;
     }
     if (fread(end, 1, sizeof end, f) != sizeof end || memcmp(end, END, sizeof end) || fgetc(f) != EOF) goto done;
-    CC_SHA256_Final(d, &sha); hex(d, m->hash);
+    plat_sha256_final(d, &sha); hex(d, m->hash);
     if (!m->files) m->hash[0] = 0;
     if (strcmp(m->hash, want)) goto done;
     r = 0;
@@ -332,7 +327,7 @@ static int cloud_file(const char *title, char *out, size_t n) {
     const char *v = getenv("DM_SAVE_SYNC"); char dir[PATH_MAX], id[24];
     if (!v || !*v || !strcmp(v, "0")) return 0;
     if (!strcmp(v, "icloud")) {
-#if TARGET_OS_OSX
+#if PLAT_MAC
         const char *home = getenv("HOME"); char drive[PATH_MAX]; struct stat st;
         snprintf(drive, sizeof drive, "%s/Library/Mobile Documents/com~apple~CloudDocs", home ? home : "");
         if (!home || stat(drive, &st)) {
@@ -401,7 +396,7 @@ static int pull(const char *save, const char *bundle, ss_meta *r, char *kept, si
         if (had && !*kept && backup_dir(save, "local", kept, kn)) return -1;
         snprintf(old, sizeof old, "%s/%s", kept, FOLDERS[i]);
         if (fresh && !access(here, F_OK)) {   // swapped: here holds the cloud's, incoming this device's
-            if (renamex_np(incoming, here, RENAME_SWAP) || (had ? rename(incoming, old) : rm_tree(incoming))) return -1;
+            if (plat_rename_swap(incoming, here) || (had ? rename(incoming, old) : rm_tree(incoming))) return -1;
         } else if (fresh) { if (rename(incoming, here)) return -1; }
         else if (had && rename(here, old)) return -1;   // a folder the cloud's save does not have: this device's goes, so both hold the same
     }
@@ -565,4 +560,4 @@ __attribute__((weak)) int front_save_sync_store(const char *local, const char *c
     return !r;
 }
 
-__attribute__((weak)) int dm_fs_clone_committed(const char *dir, const char *to) { return clonefile(dir, to, 0) ? -1 : 0; }
+__attribute__((weak)) int dm_fs_clone_committed(const char *dir, const char *to) { return plat_clone_tree(dir, to); }

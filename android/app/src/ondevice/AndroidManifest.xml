@@ -1,0 +1,19 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Merged over src/main/AndroidManifest.xml in every APK (build.gradle). Preparing the game on the phone (android/ONDEVICE.md, "The service and the screen") -->
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <!-- Android 14+: the type's own permission -->
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC" />
+    <!-- Android 13+: the progress notification; asked for when the user starts a job (the job runs without it, the notification is then only in the task manager) -->
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+    <uses-permission android:name="android.permission.WAKE_LOCK" />
+    <application>
+        <!-- The job runs in a process of its own: a crash in a tool never takes the launcher or a running game with it, and the job goes on when the app is swiped away.
+             dataSync: Android 14+ allows it 6 hours a day (onTimeout pauses the job cleanly); shortService is too short -->
+        <service
+            android:name=".PackService"
+            android:exported="false"
+            android:process=":pack"
+            android:foregroundServiceType="dataSync" />
+    </application>
+</manifest>

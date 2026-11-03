@@ -1,7 +1,5 @@
 // Import resolution (implemented ones go to the host, the rest go to named stubs) and host gate dispatch.
 #include "hle.h"
-#include <mach-o/getsect.h>
-#include <mach-o/ldsyms.h>
 #include <dlfcn.h>
 #include <time.h>
 
@@ -32,7 +30,7 @@ static unsigned *g_hle_idx, g_hle_mask; static const hle_ent *g_hle_sec;
 static const hle_ent *hle_find(const char *name) {
     if (!g_hle_mask) {
         unsigned long secsz;
-        g_hle_sec = (const hle_ent *)getsectiondata(&_mh_execute_header, "__DATA", "swhle", &secsz);
+        g_hle_sec = (const hle_ent *)plat_table("swhle", &secsz);
         unsigned n = g_hle_sec ? (unsigned)(secsz / sizeof *g_hle_sec) : 0;
         unsigned cap = 16; while (cap < n * 2) cap <<= 1;
         g_hle_idx = calloc(cap, sizeof *g_hle_idx); g_hle_mask = cap - 1;
@@ -109,6 +107,9 @@ void gate_register(uint64_t ret_abs, const char *kind, int arg, uint64_t orig) {
 
 uint64_t svc_dispatch(int num, uint64_t *regs, uint64_t orig_addr);   // hle_svc.c
 
+// The suspend gate is hle_os.c's (dm_guest_suspend); units linked without it (host unit tests) take this one, which never suspends
+__attribute__((weak)) void dm_guest_suspend_wait(void) {}
+
 uint64_t gate_dispatch(uint64_t ret_addr, uint64_t *regs) {
     for (unsigned i = gate_h(ret_addr);; i = (i + 1) & ((1u << GATE_BITS) - 1)) {
         const gate_t *g = &g_gate[i];
@@ -122,10 +123,10 @@ uint64_t gate_dispatch(uint64_t ret_addr, uint64_t *regs) {
             case G_OBS: if (g_obs_fn[g->arg & 0xff]) g_obs_fn[g->arg & 0xff](regs, g->arg >> 8); return 0;   // dm_gate writes x0–x29 back: the original values, unless the callback changed one (OBS_STDALLOC_INIT)
             case G_SPIN: {   // a pass of a spin wait loop (patch_nso.py "Spin waits"), where the thread may sleep (hle_thread.c dm_spin_wait): inside an SVC frame, so that a thread paused there has its context
                 void thr_svc_enter(uint64_t *, uint64_t), thr_svc_leave(void), dm_spin_wait(uint64_t, uint64_t);
-                thr_svc_enter(regs, g->orig); dm_spin_wait(ret_addr, g->orig); thr_svc_leave(); return 0; }
+                thr_svc_enter(regs, g->orig); dm_guest_suspend_wait(); dm_spin_wait(ret_addr, g->orig); thr_svc_leave(); return 0; }
             default: {   // register the gate frame on SVC entry / exit: it is the context of a paused thread (hle_thread.c)
                 void thr_svc_enter(uint64_t *, uint64_t), thr_svc_leave(void);
-                thr_svc_enter(regs, g->orig); uint64_t r = svc_dispatch(g->arg, regs, g->orig); thr_svc_leave(); return r; }
+                thr_svc_enter(regs, g->orig); dm_guest_suspend_wait(); uint64_t r = svc_dispatch(g->arg, regs, g->orig); thr_svc_leave(); return r; }   // a suspended app stops here (hle_os.c dm_guest_suspend)
         }
         if (!g->ret) die("unknown gate at %#llx", ret_addr);
     }

@@ -8,7 +8,6 @@
 #include <sched.h>
 #include <time.h>
 #include <stdatomic.h>
-#include <mach/mach.h>
 
 // Reserve one whole block of guest address space, partitioned the Horizon way (address values are the real addresses returned by the host's mmap).
 // It only takes address space, not memory.
@@ -37,6 +36,11 @@ static uint8_t *g_stack; static size_t g_stack_cap;
 // The address lies in the guest address block (every guest thread stack is here: the game's own heap or the stack region); the big-stack entry (hle_bigstack.c) uses it to decide whether to switch stacks
 int dm_guest_as_contains(uintptr_t a) { uintptr_t b = (uintptr_t)g_as; return g_as && a >= b && a - b < g_reserve; }
 
+// Guest RAM the graphics layer may back with GPU memory (dm/gfx/vk_android, placed Vulkan memory at the guest addresses): the regions whose pages are opened and given back here,
+// each page range before it is opened, and the give-back (1 = done there). No-ops on the Apple builds
+__attribute__((weak)) void dm_gfx_guest_region(void *base, size_t size, const char *name) { (void)base; (void)size; (void)name; }
+__attribute__((weak)) void dm_gfx_guest_open(void *lo, size_t n) { (void)lo; (void)n; }
+__attribute__((weak)) int dm_gfx_guest_release(uintptr_t lo, uintptr_t hi) { (void)lo; (void)hi; return 0; }
 static void *alias_windows_thread(void *arg);
 static void *regions_thread(void *arg);
 static void mem_init_once(void) {
@@ -50,8 +54,9 @@ static void mem_init_once(void) {
     size_t alias = DM_GAME_MEM_ALIAS; const char *as = getenv("DM_ALIAS_SIZE");
     if (as && *as) { alias = (size_t)strtoull(as, NULL, 0); if (alias < 0x10000000 || (alias & (pg - 1))) die("DM_ALIAS_SIZE %s: at least 256 MB, in whole host pages", as); }
     g_reserve = RESERVE - DM_GAME_MEM_ALIAS + alias;
-    g_as = mmap(NULL, g_reserve, PROT_NONE, MAP_PRIVATE | MAP_ANON, -1, 0);
-    if (g_as == MAP_FAILED) die("reserve guest AS");
+    // On Android at a fixed address on a 64 GiB boundary, at least 2 MiB-aligned, so the regions start where placed Vulkan memory can be mapped (plat_android.c, dm/gfx/vk_android)
+    g_as = plat_mem_reserve(g_reserve);
+    if (!g_as) die("reserve guest AS (%#llx bytes, errno %d)", (unsigned long long)g_reserve, errno);
     // Fixed partition (all inside the reserved block): alias 2.875 GB, stack 256 MB, heap the remaining 1.625 GB.
     // In newer SDKs the AddressRegionManager always takes 0x3fe00000 (~1 GB) at the start of the alias region as its node area (sdk 0x134728) before handing out regions; with a 512 MB alias region the very first AllocateAddressRegion fails (0x1803).
     // SMBW also defines a 1792000 KB (1.75 GB) VirtualAddressMemory in HeapDef (System/HeapSize): it is subtracted from the memory pool before the heap is opened (SetHeapSize asks for only 0x5be00000),
@@ -64,6 +69,7 @@ static void mem_init_once(void) {
     if (!(g_alias_bits = calloc((g_alias_cap >> 18) + 1, sizeof *g_alias_bits))) die("alias region page bitmap calloc");
     if (!(g_alias_exposed = calloc(g_alias_cap / pg / 64 + 1, sizeof *g_alias_exposed))) die("alias exposure bitmap calloc");
     LOG("guest AS %p +%#llx  heap %p alias %p stack %p", g_as, (unsigned long long)g_reserve, g_heap, g_alias, g_stack);
+    dm_gfx_guest_region(g_heap, g_heap_cap, "heap"); dm_gfx_guest_region(g_alias, g_alias_cap, "alias");
     const char *aw = getenv("DM_ALIAS_WINDOWS");
     if (aw && atoi(aw) > 0) { pthread_t th; if (!pthread_create(&th, NULL, alias_windows_thread, (void *)(uintptr_t)atoi(aw))) pthread_detach(th); }
     const char *rf = getenv("DM_REGIONS");
@@ -158,6 +164,28 @@ static int64_t alias_unmapped(uint64_t off, uint64_t n) {
     return c;
 }
 static _Atomic int64_t g_alias_mapped;   // bytes mapped in the alias region (page bitmap)
+// Readers of guest memory on the host's behalf that the guest names by address (the Vulkan replay's texture uploads from pool storage): a page the guest has not mapped
+// is inaccessible here (PROT_NONE), so it is read as zeros instead. No lock: the bitmap is read atomically, and a page unmapped during the copy is the guest's race
+static int guest_page_mapped(uintptr_t p) {   // p: a guest address (page aligned)
+    uintptr_t al = (uintptr_t)g_alias, hp = (uintptr_t)g_heap;
+    if (g_alias && p >= al && p - al < g_alias_cap) { uint64_t i = (p - al) >> 12; return (int)(atomic_load(&g_alias_bits[i >> 6]) >> (i & 63) & 1); }
+    if (g_heap && p >= hp && p - hp < g_heap_cap) return p - hp < atomic_load(&g_heap_cur);
+    return 1;
+}
+uint64_t dm_guest_unmapped(uintptr_t a, size_t n) {
+    uint64_t c = 0; if (!n) return 0;
+    for (uintptr_t p = a & ~(uintptr_t)0xFFF; p < a + n; p += 0x1000) c += !guest_page_mapped(p);
+    return c;
+}
+uint64_t dm_guest_read_mapped(void *dst, uintptr_t a, size_t n) {
+    uint64_t c = 0; uint8_t *d = dst;
+    for (uintptr_t p = a; p < a + n; ) {
+        uintptr_t e = (p & ~(uintptr_t)0xFFF) + 0x1000; if (e > a + n) e = a + n;
+        if (guest_page_mapped(p & ~(uintptr_t)0xFFF)) memcpy(d + (p - a), (const void *)p, e - p); else { memset(d + (p - a), 0, e - p); c++; }
+        p = e;
+    }
+    return c;
+}
 
 // Word-at-a-time boundaries of the bitmap run containing p (guest page index).
 static uint64_t alias_mask(unsigned n) { return n == 64 ? UINT64_MAX : (UINT64_C(1) << n) - 1; }
@@ -189,6 +217,7 @@ static void alias_query(uint64_t addr, uint64_t *base, uint64_t *size, int *mapp
 // A memory pool's no-copy buffer over the range keeps the old pages for the GPU work still using it until the buffer goes. Returns 1 when the range now holds zero pages;
 // on failure the range is only inaccessible, with its old bytes
 static int guest_release(uintptr_t lo, uintptr_t hi) {
+    if (dm_gfx_guest_release(lo, hi)) return 1;
     if (mmap((void *)lo, hi - lo, PROT_NONE, MAP_PRIVATE | MAP_ANON | MAP_FIXED, -1, 0) != MAP_FAILED) return 1;
     static _Atomic int nred; if (atomic_fetch_add(&nred, 1) < 8) LOG("[RED] guest memory %#lx+%#lx not given back (errno %d): it stays resident", (unsigned long)lo, (unsigned long)(hi - lo), errno);
     if (mprotect((void *)lo, hi - lo, PROT_NONE)) die("guest_release mprotect %#lx+%#lx errno=%d", (unsigned long)lo, (unsigned long)(hi - lo), errno);
@@ -325,8 +354,8 @@ static void guest_caller(const uint64_t *r, char *buf, size_t n, uint64_t *via) 
     *via = 0;
     for (int i = 0; i < 32 && m && !strcmp(m->name, "sdk"); i++) {
         *via = lr - (uint64_t)(uintptr_t)m->base;   // AArch64 frame records: [fp] = the caller's fp, [fp + 8] = its return address
-        uint64_t rec[2]; vm_size_t got = 0;   // read safely: static constructors run on the host's main thread, whose stack is outside the guest block
-        if (!fp || (fp & 15) || vm_read_overwrite(mach_task_self(), (vm_address_t)fp, sizeof rec, (vm_address_t)rec, &got) || got != sizeof rec) break;
+        uint64_t rec[2];   // read safely: static constructors run on the host's main thread, whose stack is outside the guest block
+        if (!fp || (fp & 15) || plat_mem_read(fp, rec, sizeof rec)) break;
         lr = rec[1]; fp = rec[0]; m = module_of((void *)(uintptr_t)lr);
     }
     if (m) snprintf(buf, n, "%s+%#llx", m->name, (unsigned long long)(lr - (uint64_t)(uintptr_t)m->base));
@@ -479,7 +508,7 @@ uint64_t svc_dispatch(int num, uint64_t *regs, uint64_t orig_addr) {
             pthread_mutex_unlock(&g_map_lock); regs[0] = 0x10801; return 0;
         }
         int rc = 0;
-        if (size > g_heap_cur) rc = mprotect(g_heap + g_heap_cur, size - g_heap_cur, PROT_READ | PROT_WRITE);
+        if (size > g_heap_cur) { dm_gfx_guest_open(g_heap + g_heap_cur, size - g_heap_cur); rc = mprotect(g_heap + g_heap_cur, size - g_heap_cur, PROT_READ | PROT_WRITE); }
         else if (size < g_heap_cur) (void)guest_release((uintptr_t)g_heap + size, (uintptr_t)g_heap + g_heap_cur);
         if (rc) die("SetHeapSize mprotect failed: req=%#zx errno=%d", size, errno);
         if (g_flag.svc) LOG("SetHeapSize %#zx -> base %p mprotect=%d errno=%d", size, g_heap, rc, errno);
@@ -588,7 +617,7 @@ uint64_t svc_dispatch(int num, uint64_t *regs, uint64_t orig_addr) {
             // The address lies in "the current host thread's stack": report the whole stack (state 0xB = stack). When the SDK initializes the main thread record it queries here with the sp at that moment and takes the reported range as the main thread stack;
             // later nn::os::GetCurrentStackInfo asserts that sp is still inside that range and aborts if not. Previously every address outside the guest address space was reported as "the 4 KiB page containing it",
             // so the main thread stack was recorded as one page. Whether the sp at init and a later sp share a page depends on the absolute position of the host stack top, which moves with the total length of environment variables / launch arguments (a different environment occasionally aborts at startup).
-            uint64_t top = (uint64_t)pthread_get_stackaddr_np(pthread_self()), ssz = pthread_get_stacksize_np(pthread_self());
+            uint64_t top, ssz; plat_thread_stack(&top, &ssz);
             if (addr < top && addr >= top - ssz) { base = top - ssz; size = ssz; state = 0xB/*Stack*/; perm = 3; }
             // Other host memory: report "free, no permissions" (the 4 KiB page around it) as Horizon does for unmapped addresses. It used to report Code+RX, and GetExceptionInfo walking back from main merged on through host memory down to 0
             else { base=addr & ~0xFFFull; size=0x1000; state=0/*Free*/; perm=0; } }
@@ -640,6 +669,7 @@ uint64_t svc_dispatch(int num, uint64_t *regs, uint64_t orig_addr) {
         }
         if (changed && mhi > mlo) {
             if (commit) {
+                dm_gfx_guest_open((void *)mlo, mhi - mlo);
                 if (mprotect((void *)mlo, mhi - mlo, PROT_READ | PROT_WRITE))
                     die("SVC %#x mprotect %p+%#zx errno=%d", num, (void *)a, size, errno);
                 dm_guest_write_prepare((void *)mlo, mhi - mlo);

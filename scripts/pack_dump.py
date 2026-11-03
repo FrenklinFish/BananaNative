@@ -2,7 +2,7 @@
 # Game files already extracted (a console dump: folders, not NSPs) → the layout build_ipa_from_nsp.py extracts NSPs into. build_ipa_from_nsp.py calls this when it is given such a folder, and
 # goes on with its other steps; run on its own, this script does only this step.
 # The dump folder holds:
-#   base/exefs/ (main, main.npdm, sdk, rtld, subsdk*), base/romfs/
+#   base/exefs/ (main, main.npdm, sdk, rtld, subsdk*), base/romfs/   (base/romfs may be left out when an update has its romfs/: that one is the whole tree)
 #   updates/<version>/exefs/, updates/<version>/romfs/   (optional; <version> is the title version as a decimal number, 458752 = 0x70000)
 #   dlc/<DLC title ID>/<n>/romfs/   (optional; the DLC title ID in hex)
 # An update's RomFS in such a dump is the patched RomFS (base + the update's BKTR patch, the tree the game sees), not a patch: it is packed on its own, never laid over the base
@@ -52,16 +52,21 @@ def pack(src, img, say=print):
     say(f'  {n:,} entries, {img.stat().st_size / 2**30:.2f} GB')
 
 
-def is_dump(folder):   # whether a folder has the layout above
-    return (folder / 'base/exefs/main.npdm').is_file() and (folder / 'base/romfs').is_dir()
+def updates(dump):   # {version: its folder} of updates/<version>/
+    return {int(p.name): p for p in (dump / 'updates').iterdir() if p.is_dir() and p.name.isdigit()} if (dump / 'updates').is_dir() else {}
+
+
+def is_dump(folder):   # whether a folder has the layout above: base/exefs/main.npdm, and a RomFS in base/ or in an update (whose RomFS is the whole patched tree, so a dump
+    # that keeps only the update's, as on a phone with little room, is complete for that update; packing the base version itself then fails on its missing romfs)
+    return (folder / 'base/exefs/main.npdm').is_file() and ((folder / 'base/romfs').is_dir() or any((v / 'romfs').is_dir() for v in updates(folder).values()))
 
 
 def scan(dump):
     """What a dump folder holds: (title ID, {update version: its folder}, {DLC title ID: its RomFS folder})"""
-    if not is_dump(dump): raise Error(f'{dump}: no base/exefs/main.npdm and base/romfs')
+    if not is_dump(dump): raise Error(f'{dump}: no base/exefs/main.npdm and base/romfs (or an update\'s romfs)')
     app = program_id(dump / 'base/exefs/main.npdm')
     if app & 0xFFF: raise Error(f'{dump}: base program ID {app:016X} is not a base title ID')
-    vers = {int(p.name): p for p in (dump / 'updates').iterdir() if p.is_dir() and p.name.isdigit()} if (dump / 'updates').is_dir() else {}
+    vers = updates(dump)
     dlc = {}
     for d in sorted(p for p in (dump / 'dlc').iterdir() if p.is_dir()) if (dump / 'dlc').is_dir() else []:
         try: tid = int(d.name, 16)
@@ -90,7 +95,7 @@ def pack_dlc(app, dlc, aoc, say=print):   # {DLC title ID: its RomFS folder} →
 
 def main():
     ap = argparse.ArgumentParser(description='Pack a dumped game (base/, updates/<version>/, dlc/) into the extraction layout of build_ipa_from_nsp.py')
-    ap.add_argument('dump', type=Path, help='the dump folder (holds base/exefs and base/romfs)')
+    ap.add_argument('dump', type=Path, help='the dump folder (holds base/exefs, and base/romfs or an update\'s romfs)')
     ap.add_argument('--version', type=int, help='the update version to pack (default: the newest in updates/; 0 = the base game)')
     ap.add_argument('--work-dir', type=Path, help='the build folder (default: <dump>/<title ID>_build)')
     a = ap.parse_args()

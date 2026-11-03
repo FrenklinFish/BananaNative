@@ -2,8 +2,15 @@
 #include "nvn_capture.h"
 #include <stdlib.h>
 #include <string.h>
+#if defined(__APPLE__)
 #include <compression.h>
 __asm__(".linker_option \"-lcompression\"");   // libcompression (LZFSE) links itself: the host, the iOS app and the tests that compile this file need no link flag
+#else
+// No LZFSE outside Apple: captures are written uncompressed (CAP_RAW), and an LZFSE chunk from a Mac capture does not decode
+#define COMPRESSION_LZFSE 0
+static size_t compression_encode_buffer(uint8_t *d, size_t dn, const uint8_t *s, size_t sn, void *scratch, int alg) { (void)d; (void)dn; (void)s; (void)sn; (void)scratch; (void)alg; return 0; }
+static size_t compression_decode_buffer(uint8_t *d, size_t dn, const uint8_t *s, size_t sn, void *scratch, int alg) { (void)d; (void)dn; (void)s; (void)sn; (void)scratch; (void)alg; return 0; }
+#endif
 
 // The walk below names every pointer field of every payload by its offset. A change to a payload struct in nvn_obj.h must come here too: these asserts stop the build
 // instead of letting a capture carry a host pointer or relocate the wrong bytes. The numbers are the layout the walk was written against.

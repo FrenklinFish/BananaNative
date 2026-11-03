@@ -1,0 +1,38 @@
+<!-- dmsh_xlate for Android (android/ONDEVICE.md): the same Program.cs, compiled with .NET NativeAOT for linux-bionic-arm64, so the phone translates the game's shaders itself.
+     Not one of DMSH_CHAIN's files: it compiles ../dmsh_xlate/Program.cs unchanged and embeds that file and ../dmsh_xlate/dmsh_xlate.csproj as src0 / src1, so the embedded source
+     (the source-sha argument) is the Mac translator's. Its own files: Sha256.cs (a managed SHA-256: .NET on bionic looks for OpenSSL, which Android does not have) and Entry.cs
+     (the exported entry of the shared library the app loads). build.sh builds both forms: an executable (adb shell tests) and libdmsh_xlate.so (the app). -->
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net10.0</TargetFramework>
+    <Nullable>disable</Nullable>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    <AssemblyName>dmsh_xlate</AssemblyName>
+    <RootNamespace>dmsh_xlate</RootNamespace>
+    <EnableDefaultCompileItems>false</EnableDefaultCompileItems>
+    <PublishAot>true</PublishAot>
+    <RuntimeIdentifier>linux-bionic-arm64</RuntimeIdentifier>
+    <!-- NativeAOT for bionic is built from the Mac with the NDK's clang (build.sh); the SDK calls that a cross-OS build -->
+    <DisableUnsupportedError>true</DisableUnsupportedError>
+    <PublishAotUsingRuntimePack>true</PublishAotUsingRuntimePack>
+    <InvariantGlobalization>true</InvariantGlobalization>
+    <UseSystemResourceKeys>true</UseSystemResourceKeys>
+    <!-- CS0436: Sha256.cs's System.Security.Cryptography.SHA256 replaces the framework's on purpose -->
+    <NoWarn>$(NoWarn);CS0436</NoWarn>
+    <RyuSrc Condition="'$(RyuSrc)' == ''">$(MSBuildThisFileDirectory)../../../third_party/ryujinx</RyuSrc>
+  </PropertyGroup>
+  <ItemGroup>
+    <Compile Include="../dmsh_xlate/Program.cs" />
+    <Compile Include="Sha256.cs" />
+    <Compile Include="Entry.cs" />
+    <EmbeddedResource Include="../dmsh_xlate/Program.cs" LogicalName="src0" />
+    <EmbeddedResource Include="../dmsh_xlate/dmsh_xlate.csproj" LogicalName="src1" />
+    <!-- the source tree's digest (dm/gfx/tools/xlate_tree.py), written by build.sh before it publishes: the library's - -tree-sha, which vk_android_build.py checks -->
+    <EmbeddedResource Include="obj/tree.sha" LogicalName="tree" Condition="Exists('obj/tree.sha')" />
+  </ItemGroup>
+  <ItemGroup>
+    <ProjectReference Include="$(RyuSrc)/src/Ryujinx.Graphics.Shader/Ryujinx.Graphics.Shader.csproj" />
+    <ProjectReference Include="$(RyuSrc)/src/Ryujinx.Common/Ryujinx.Common.csproj" />
+  </ItemGroup>
+</Project>

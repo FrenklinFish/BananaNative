@@ -2,7 +2,6 @@
 // (The former 136 HLE entries for nn::os/mem/lmem/C++ ABI have been deleted: the SDK brings its own nn::os, and at load time not one of these entries was resolved and used.)
 #include <pthread.h>
 #include "hle.h"
-#include <mach/mach_time.h>
 #include <stdatomic.h>
 
 // ---------- Side table ----------
@@ -37,9 +36,9 @@ void *objmap_del(const void *k) {
     return r;
 }
 uint64_t now_ns(void) {
-    static mach_timebase_info_data_t tb;
-    if (!tb.denom) mach_timebase_info(&tb);
-    return mach_absolute_time() * tb.numer / tb.denom;
+    static plat_timebase_t tb;
+    if (!tb.denom) plat_timebase(&tb);
+    return plat_abs_time() * tb.numer / tb.denom;
 }
 // Guest clock: the system counters the guest can read (mrs cntpct gate, svc GetSystemTick) all go through here. Default = now_ns().
 // Freeze (only for the test driver DM_TICK_HOLD): while frozen the guest clock does not advance ⇒ the game's next tick never comes due; after unfreezing the frozen duration is subtracted, the guest clock is continuous with no jump
@@ -96,6 +95,28 @@ void guest_clock_freeze_for(int reason, int on) {
     pthread_mutex_unlock(&g_gfz_mu);
 }
 void guest_clock_freeze(int on) { guest_clock_freeze_for(0, on); }
+// The suspended application (Android: the game paused by the user or on its return, and in the background; nxhost_lifecycle). The clock freeze above stops only the threads
+// that read the clock: guest sleeps and timed waits run on host time, so a thread looping on a timed wait, a sleep, a yield or a spin gate went on waking hundreds of times a
+// second with the game frozen, which burns power for nothing. Horizon suspends the whole process; here each guest thread stops at its next SVC (hle.c gate_dispatch), spin
+// gate (dm_spin_wait) or sleep (dm_guest_sleep_ns), and waits on a condition variable without waking until the suspend ends. Host work (a submit or present that is under way)
+// is never stopped. Set after the graphics suspend has drained the GPU work, lifted before the graphics resume
+static pthread_mutex_t g_gs_mu = PTHREAD_MUTEX_INITIALIZER; static pthread_cond_t g_gs_cv = PTHREAD_COND_INITIALIZER; static _Atomic int g_gs;
+void dm_guest_suspend(int on) {
+    pthread_mutex_lock(&g_gs_mu);
+    atomic_store(&g_gs, on != 0);
+    if (!on) pthread_cond_broadcast(&g_gs_cv);
+    pthread_mutex_unlock(&g_gs_mu);
+}
+int dm_guest_suspended(void) { return atomic_load(&g_gs); }
+// Only guest threads stop: a host thread that runs guest code (the movie decoder calling the game's operator delete, hle_movie.c) is no guest thread of the suspended app.
+// hle_thread.c answers by its thread record; a unit linked without it has no guest threads to stop
+__attribute__((weak)) int dm_is_guest_thread(void) { return 0; }
+void dm_guest_suspend_wait(void) {
+    if (!atomic_load(&g_gs) || atomic_load(&dm_host_work) || !dm_is_guest_thread()) return;
+    pthread_mutex_lock(&g_gs_mu);
+    while (atomic_load(&g_gs)) pthread_cond_wait(&g_gs_cv, &g_gs_mu);
+    pthread_mutex_unlock(&g_gs_mu);
+}
 // Entropy source: true random by default (arc4random); with DM_DETCLOCK on it becomes a fixed-seed splitmix64 stream (so that replay pictures are byte-for-byte comparable, the camp blue fire particles differed between two passes).
 // The two outlets (libc getentropy, svc GetInfo RandomEntropy) share one stream; the call count is reported in the log (first call and every 1000 calls)
 static _Atomic uint64_t g_detrng = 0x5357444554524e47ull; static _Atomic uint64_t g_detrng_n;

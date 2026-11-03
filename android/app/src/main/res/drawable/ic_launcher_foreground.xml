@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- The happy banana (the launcher header's face, ic_banana_happy.xml; inside the 66 dp safe circle, clear of the badge) and the variant's badge (src/variant-test or src/variant-play, picked by -PnxPlay in build.gradle) -->
+<layer-list xmlns:android="http://schemas.android.com/apk/res/android">
+    <item android:drawable="@drawable/ic_banana_happy" />
+    <item android:drawable="@drawable/ic_launcher_badge" />
+</layer-list>

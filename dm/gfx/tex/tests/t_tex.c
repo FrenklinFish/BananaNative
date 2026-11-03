@@ -38,6 +38,11 @@ static void roundtrip(const char *tag, int target, int fmt, uint32_t w, uint32_t
         size_t n = (size_t)rb * rows * sl; uint8_t *out = malloc(n);
         CHECK(!nvn_deswizzle(&d, l, y, st, out, rb), "%s decode failed", tag);
         if (memcmp(out, ref[y][l], n)) { ok = 0; printf("  ✗ %s layer %u level %u round trip differs\n", tag, y, l); }
+        // The same level decoded in three parts of block rows (nvn_deswizzle_rows: the Vulkan replay's parallel uploads)
+        CHECK(nvn_deswizzle_block_rows(&d, l) == (int)rows, "%s level %u: %d block rows, expected %u", tag, l, nvn_deswizzle_block_rows(&d, l), rows);
+        memset(out, 0x5A, n);
+        for (uint32_t p = 0; p < 3; p++) CHECK(!nvn_deswizzle_rows(&d, l, y, st, out, rb, rows * p / 3, rows * (p + 1) / 3), "%s part decode failed", tag);
+        if (memcmp(out, ref[y][l], n)) { ok = 0; printf("  ✗ %s layer %u level %u decoded in parts differs\n", tag, y, l); }
         bytes += n; free(out); free(ref[y][l]);
     }
     checks++; if (!ok) fails++;
@@ -75,6 +80,65 @@ static void differential(const nvn_texdesc *d, unsigned level, unsigned layer) {
     free(storage); free(expected); free(linear); free(out);
 }
 
+// Bands (nvn_deswizzle_bands): each band deswizzled from a storage that holds only that band's bytes equals the same rows of the whole level (the Vulkan replay's sparse uploads)
+static unsigned bands_check(const nvn_texdesc *d, unsigned level, unsigned layer) {
+    uint32_t brows; uint64_t bbytes, base; uint32_t rb, rows, slices, bpb; unsigned th, td;
+    if (nvn_deswizzle_bands(d, level, &brows, &bbytes) || nvn_deswizzle_geom(d, level, layer, &rb, &rows, &slices, &base, &th, &td, &bpb)) return 0;
+    nvn_texlayout L; nvn_tex_layout(d, &L);
+    size_t pitch = rb, nlin = pitch * rows, nst = L.size;
+    uint8_t *st = malloc(nst), *only = malloc(nst), *full = malloc(nlin), *part = malloc(nlin);
+    for (size_t i = 0; i < nst; i++) st[i] = rnd();
+    nvn_deswizzle(d, level, layer, st, full, pitch);
+    unsigned n = 0;
+    for (uint32_t k = 0; k * brows < rows; k++, n++) {
+        uint64_t o = base + k * bbytes, e = o + bbytes < nst ? o + bbytes : nst;
+        memset(only, 0, nst); memcpy(only + o, st + o, e - o); memset(part, 0xCD, nlin);
+        uint32_t y0 = k * brows, y1 = y0 + brows < rows ? y0 + brows : rows;
+        CHECK(!nvn_deswizzle_rows(d, level, layer, only, part, pitch, y0, y1) && !memcmp(part + (size_t)y0 * pitch, full + (size_t)y0 * pitch, (size_t)(y1 - y0) * pitch),
+              "N band %u of format %#x %ux%u flags %#x level %u layer %u reads outside its bytes", k, d->format, d->width, d->height, d->flags, level, layer);
+    }
+    free(st); free(only); free(full); free(part);
+    return n;
+}
+static void bands_shapes(void) {
+    // Mario Kart World's sparse arrays: 6144x6144 RGBA8 x2 (0x26 is not in this table's formats: RGBA8 0x25), 8192x8192 ASTC 8x8 (0x8E) at its coarser levels; packed and sparse layouts
+    nvn_texdesc ds[] = {{4, 0x25, 0x20, 0, 1536, 1536, 2, 4, 0, 0}, {4, 0x25, 0, 0, 1536, 1536, 2, 4, 0, 0}, {4, 0x8E, 0x20, 0, 2048, 2048, 3, 6, 0, 0}, {1, 0x7D, 0x20, 0, 1024, 1024, 1, 5, 0, 0},
+                        {0, 0x29, 0, 0, 300, 200, 1, 3, 0, 0}};
+    unsigned n = 0;
+    for (unsigned i = 0; i < sizeof ds / sizeof *ds; i++) { nvn_texlayout L; nvn_tex_layout(&ds[i], &L);
+        for (unsigned l = 0; l < ds[i].levels; l++) n += bands_check(&ds[i], l, L.layers - 1); }
+    nvn_texdesc d3 = {2, 0x25, 0, 0, 64, 64, 8, 2, 0, 0}; uint32_t br; uint64_t bb;
+    CHECK(nvn_deswizzle_bands(&d3, 0, &br, &bb) == -1, "N a 3D texture has bands");
+    printf("  N %u bands: each read from its own bytes only\n", n);
+}
+// Tiles (the Vulkan replay's sparse residency images, vk_android/vka_sparse.c): in each tiled level of a sparse texture, 64 KB tile (tx, ty) of tw x th texels (nvn_tex_sparse_tiles)
+// is stored in bytes [(ty * tiles across + tx) * 64 KB, + 64 KB) from the level and layer's start, and a band is one row of tiles (the replay binds a tile per mapped page)
+static unsigned tiles_check(const nvn_texdesc *d, unsigned layer) {
+    uint32_t tw, th, td; int ntl = nvn_tex_sparse_tiles(d, &tw, &th, &td); unsigned n = 0;
+    uint32_t bw = d->format == 0x8E ? 8 : (d->format >= 0x41 && d->format <= 0x50) ? 4 : 1, bh = bw;
+    for (int l = 0; l < ntl; l++) {
+        uint32_t rb, rows, slices, bpb, brows; uint64_t base, bbytes; unsigned tH, tD;
+        if (nvn_deswizzle_geom(d, (unsigned)l, layer, &rb, &rows, &slices, &base, &tH, &tD, &bpb) || nvn_deswizzle_bands(d, (unsigned)l, &brows, &bbytes)) { CHECK(0, "T format %#x level %d: no geometry", d->format, l); continue; }
+        uint32_t w = mipd(d->width, (unsigned)l), ntx = (w + tw - 1) / tw;
+        CHECK(brows * bh == th && bbytes == (uint64_t)ntx * 0x10000, "T format %#x %ux%u level %d: bands of %u block rows / %llu bytes, tiles %ux%u x%u", d->format, d->width, d->height, l, brows,
+              (unsigned long long)bbytes, tw, th, ntx);
+        uint32_t bx = (w + bw - 1) / bw; int bad = 0;
+        for (uint32_t y = 0; y < rows && !bad; y++) for (uint32_t x = 0; x < bx && !bad; x++) {
+            uint64_t o = nvn_bl_offset(x * bpb, y, 0, rb, rows, tH, tD), t = (uint64_t)(y * bh / th) * ntx + x * bw / tw;
+            if (o / 0x10000 != t) { bad = 1; CHECK(0, "T format %#x level %d block (%u, %u) at %#llx, not in tile %llu", d->format, l, x, y, (unsigned long long)o, (unsigned long long)t); }
+            n++;
+        }
+        CHECK(base % 0x10000 == 0, "T format %#x level %d layer %u starts at %#llx, not on a tile", d->format, l, layer, (unsigned long long)base);
+    }
+    return n;
+}
+static void tiles_shapes(void) {
+    // Mario Kart World 1.8.0's sparse arrays: 8192x8192 x68 ASTC 8x8 (0x8E) and BC (0x50), 12 levels; 6144x6144 x2 RGBA8, 4 levels; and a 1-byte format
+    nvn_texdesc ds[] = {{4, 0x8E, 0x20, 0, 8192, 8192, 68, 12, 0, 0}, {4, 0x50, 0x20, 0, 8192, 8192, 68, 12, 0, 0}, {4, 0x25, 0x20, 0, 6144, 6144, 2, 4, 0, 0}, {1, 0x01, 0x20, 0, 1000, 600, 1, 4, 0, 0}};
+    unsigned n = 0;
+    for (unsigned i = 0; i < sizeof ds / sizeof *ds; i++) { nvn_texlayout L; nvn_tex_layout(&ds[i], &L); n += tiles_check(&ds[i], 0); n += tiles_check(&ds[i], L.layers - 1); }
+    printf("  T %u blocks: each in the 64 KB tile of its texels, bands are tile rows\n", n);
+}
 static void differential_shapes(void) {
     static const int formats[] = {0x01, 0x0D, 0x19, 0x1D, 0x22, 0x25, 0x29, 0x2E, 0x42, 0x44, 0x82, 0x85};
     static const int targets[] = {0, 1, 2, 3, 4, 7, 8, 9};
@@ -102,6 +166,10 @@ static void differential_shapes(void) {
 int main(void) {
     printf("D differential copy checks\n");
     differential_shapes();
+    printf("N bands of a level (sparse uploads)\n");
+    bands_shapes();
+    printf("T tiles of sparse textures (sparse residency)\n");
+    tiles_shapes();
     printf("L linear render targets without the separate LINEAR flag\n");
     {
         // Persona 5 Royal asks for 16x16 RGBA8, flags 0x44, stride 128: 2 KB,

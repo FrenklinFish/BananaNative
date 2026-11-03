@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Legacy (non-adaptive) icon: a rounded green square with the banana and the variant's badge. The manifest uses @mipmap/ic_launcher (adaptive) -->
+<layer-list xmlns:android="http://schemas.android.com/apk/res/android">
+    <item android:drawable="@drawable/ic_launcher_legacy_bg" />
+    <item android:drawable="@drawable/ic_launcher_foreground" />
+</layer-list>

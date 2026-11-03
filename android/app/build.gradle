@@ -1,0 +1,216 @@
+// The nxnative launcher: one APK with the host (libnxhost.so, built from android/host) and the launcher's JNI shim (libnxlaunch.so). No game code and no game data:
+// the user's pack and game folder stay on the phone's storage (android/README.md, android/TESTING.md)
+plugins {
+    id 'com.android.application' version '8.13.2'
+}
+
+// The games this APK runs: -PnxGames=<title ID>,<title ID>,... (default: nxGame, gradle.properties). Each has its profile (dm/games/<title ID>) compiled into a host of its
+// own, libnxhost_<title ID>.so with its libnxlaunch_<title ID>.so (src/main/cpp/CMakeLists.txt): the host has its profile compiled in, as dm/host/Makefile's GAME, so a game
+// runs only in an APK built with its profile. The first is the default (the graphics self-test loads its host)
+def nxGame = providers.gradleProperty('nxGame').get()
+def nxGames = (providers.gradleProperty('nxGames').getOrElse('') ?: nxGame).split(',').collect { it.trim() }.findAll { it }.unique()
+nxGames.each { g ->
+    if (!(g ==~ /[0-9A-F]{16}/)) throw new GradleException("nxGames: each game must be a title ID (16 upper-case hex digits), not $g")
+}
+// -PnxPlay=true builds a second app (dev.nxnative.android.play, "Banana Native") that installs beside the test app, so test installs leave it alone
+def nxPlay = providers.gradleProperty('nxPlay').getOrElse('false') == 'true'
+// -PnxApp=<suffix> builds another test app, dev.nxnative.android.<suffix> ("Banana Native <suffix>", or -PnxLabel), beside the test app: one game's bring-up (-PnxApp=mkw) installs
+// without replacing the test app other agents run. It is a test app (saves-test/), with its own files folder (Android/data/dev.nxnative.android.<suffix>/files: env.txt, logs)
+def nxApp = providers.gradleProperty('nxApp').getOrElse('')
+if (nxApp && !(nxApp ==~ /[a-z][a-z0-9]*/)) throw new GradleException("nxApp must be lower-case letters and digits, not $nxApp")
+if (nxApp && nxPlay) throw new GradleException('nxApp and nxPlay build different apps: give one of them')
+// -PnxLive=true builds the public release (dev.bananative.android, "Banana Native"): the play app's behaviour (saves/<id>, no test switches), not debuggable, signed
+// with the release key named by the environment (NX_SIGN_STORE, NX_SIGN_ALIAS, NX_SIGN_PASS; the key never lives in this repository). -PnxVersion sets its version
+def nxLive = providers.gradleProperty('nxLive').getOrElse('false') == 'true'
+if (nxLive && (nxPlay || nxApp)) throw new GradleException('nxLive builds the release app: give neither nxPlay nor nxApp')
+def nxVersion = providers.gradleProperty('nxVersion').getOrElse('0.1-bringup')
+def nxVersionCode = providers.gradleProperty('nxVersionCode').getOrElse('1') as int
+def signStore = System.getenv('NX_SIGN_STORE'), signAlias = System.getenv('NX_SIGN_ALIAS'), signPass = System.getenv('NX_SIGN_PASS')
+if (nxLive && !(signStore && signAlias && signPass && new File(signStore).isFile()))
+    throw new GradleException('nxLive needs the release key: NX_SIGN_STORE (an existing keystore), NX_SIGN_ALIAS and NX_SIGN_PASS')
+def nxLabel = providers.gradleProperty('nxLabel').getOrElse(nxApp ? "Banana Native $nxApp" : '')
+// The build tag the launcher shows over the game and in its main screen, and writes as the first line of each game log: branch@commit[+dirty] and the build time
+def gitOut = { List<String> a -> try { providers.exec { commandLine(['git'] + a); ignoreExitValue = true }.standardOutput.asText.get().trim() } catch (Exception e) { '' } }
+def commit = gitOut(['rev-parse', '--short=12', 'HEAD'])
+def branch = gitOut(['rev-parse', '--abbrev-ref', 'HEAD'])
+def dirty = gitOut(['status', '--porcelain', '--untracked-files=no']) ? '+dirty' : ''
+def buildTime = new Date().format('yyyy-MM-dd HH:mm')
+// Lossless Scaling frame generation (GPL-3.0-or-later, dm/gfx/vk_android/lsfg): in by default, which makes the APK GPL-3.0-or-later; -PnxLsfg=false builds without it (the packer's libdmsh_xlate.so is GPL-3.0-or-later too: android/NOTICE.md)
+def nxLsfg = providers.gradleProperty('nxLsfg').getOrElse('true') != 'false'
+// Preparing the game on the phone (android/ONDEVICE.md): "+ Add game" on a dump without a usable pack offers Prepare, which runs PackService (a foreground service
+// in :pack) with the embedded packer: CPython 3.14 with the repository's tools, the translator (libdmsh_xlate.so) and SPIRV-Tools (libSPIRV-Tools-shared.so). Part of
+// every APK (test and play). -PnxPackStage=<android/ondevice/build.sh work dir>/stage (or NX_PACK_STAGE) names the native side's stage; -PnxPackEngine=fake builds a
+// simulated engine instead (FakeEngine: the flow without the tools, for UI work; no stage needed, the pack it makes is a placeholder that is never started)
+def nxPackEngine = providers.gradleProperty('nxPackEngine').getOrElse('native')
+if (!(nxPackEngine in ['fake', 'native'])) throw new GradleException("nxPackEngine must be native or fake, not $nxPackEngine")
+// What the on-device job checks a dump against and stamps its outputs with: the profile's builds (game.tsv build rows: version, then module=NSO build ID) and the
+// shader chain versions (a job translated with other versions starts its translation over, ONDEVICE.md "Versions")
+def repo = file('../..')
+nxGames.each { g -> if (!new File(repo, "dm/games/$g/game.tsv").isFile()) throw new GradleException("nxGames: $g has no profile (dm/games/$g/game.tsv)") }
+def tsvRows = { String game, String key -> def t = new File(repo, "dm/games/$game/game.tsv"); t.isFile() ? t.readLines().findAll { it.startsWith(key + '\t') }.collect { it.split('\t') } : [] }
+def buildsOf = { String game -> tsvRows(game, 'build').collect { c -> def m = (c[1] =~ /\d+/); (m.find() ? m.group() : c[1]) + ' ' + c.drop(3).join(' ') }.join(';') }
+def nameOf = { String game -> tsvRows(game, 'name').collect { it[1] }.find() ?: game }
+def defineOf = { String path, String name -> def f = new File(repo, path); def m = f.isFile() ? (f.text =~ /#define\s+${name}\s+"([^"]*)"/) : null; (m != null && m.find()) ? m.group(1) : 'unknown' }
+def shaderTotalOf = { String game -> def f = new File(repo, "dm/games/$game/shader_map.tsv"); f.isFile() ? f.readLines().count { it && !it.startsWith('#') && !it.startsWith('package\t') } : 0 }
+def nxRewriter = { def m = (new File(repo, 'scripts/pack_android.py').text =~ /(?m)^REWRITER = \(([^)]*)\)/); if (!m.find()) throw new GradleException('scripts/pack_android.py has no REWRITER tuple'); (m.group(1) =~ /'([^']+)'/).collect { it[1] }.join(' ') }()
+def shaderInputsOf = { String game -> try { def r = providers.exec { commandLine('python3', new File(repo, 'dm/gfx/tools/dmsh_chain.py').path, '--inputs'); environment('DM_GAME', game); ignoreExitValue = true }.standardOutput.asText.get().trim(); r ==~ /[0-9a-f]{12}/ ? r : 'unknown' } catch (Exception e) { 'unknown' } }
+// The games' profiles as the launcher reads them (Profile.java): one line per game, tab-separated: title ID, name, the shader count Prepare translates (the profile's
+// shader_map.tsv rows: vk_android_build.py's total), the shader inputs digest (dmsh_chain.py --inputs: a pack's library is current only when its stamp
+// shaders/v-<V>/inputs.tsv names it, as pack_android.py's library_current asks; "unknown" without a Python 3 at build time: the launcher then checks the library's path
+// only), and the profile's builds (game.tsv build rows: version, then module=NSO build ID, ';' between builds), which the on-device job checks a dump against
+// then the readiness check's rows (the profile's readiness.tsv: required / degraded rows as level|fact|min|what, ';' between them; Readiness.java) and the game's status
+// on Android (its status row: playable / bring-up)
+def readinessRows = { String game -> def t = new File(repo, "dm/games/$game/readiness.tsv"); t.isFile() ? t.readLines().findAll { it.trim() && !it.startsWith('#') }.collect { it.split('\t') } : [] }
+def reqText = { String s -> s.replaceAll(/[\t\n\\"]/, ' ').replaceAll(/[;|]/, ',').trim() }
+def reqsOf = { String game -> readinessRows(game).findAll { it.size() >= 4 && it[0] in ['required', 'degraded'] }.collect { c -> (c.take(3) + [c.drop(3).join(' ')]).collect { reqText(it) }.join('|') }.join(';') }
+def statusOf = { String game -> readinessRows(game).find { it.size() >= 2 && it[0] == 'status' }?.getAt(1)?.trim() ?: '' }
+def nxProfiles = nxGames.collect { g -> [g, nameOf(g).replaceAll(/[\t\n\\"]/, ' '), shaderTotalOf(g), shaderInputsOf(g), buildsOf(g), reqsOf(g), statusOf(g)].join('\\t') }.join('\\n')
+def lockOf = { String key -> def f = new File(repo, 'dm/gfx/tools/dmsh_chain.lock'); f.isFile() ? (f.readLines().find { it.startsWith(key + '\t') }?.split('\t')?.getAt(1) ?: 'unknown') : 'unknown' }
+
+android {
+    namespace 'dev.nxnative.android'
+    compileSdk 36
+    ndkVersion '28.2.13676358'
+
+    defaultConfig {
+        applicationId nxLive ? 'dev.bananative.android' : nxPlay ? 'dev.nxnative.android.play' : nxApp ? "dev.nxnative.android.$nxApp" : 'dev.nxnative.android'
+        resValue 'string', 'app_name', nxPlay || nxLive ? 'Banana Native' : nxApp ? nxLabel : 'Banana Native test'
+        minSdk 33
+        targetSdk 35
+        versionCode nxVersionCode
+        versionName nxVersion
+        ndk { abiFilters 'arm64-v8a' }
+        // The games this APK runs, with what the launcher needs of their profiles (Profile.java)
+        buildConfigField 'String', 'NX_PROFILES', "\"$nxProfiles\""
+        buildConfigField 'String', 'NX_COMMIT', "\"${commit ?: 'unknown'}\""
+        buildConfigField 'String', 'NX_BRANCH', "\"${branch ?: 'unknown'}\""
+        buildConfigField 'String', 'NX_DIRTY', "\"${commit ? dirty : ''}\""
+        buildConfigField 'String', 'NX_BUILD_TIME', "\"$buildTime\""
+        buildConfigField 'boolean', 'NX_LSFG', "$nxLsfg"
+        // The play app and the release behave alike (saves/<id>, the user's build tag, no test switches); every other app is a test app
+        buildConfigField 'boolean', 'NX_PLAY', "${nxPlay || nxLive}"
+        // The shader library the host loads: <pack>/shaders/v-<DMSH_VK_CHAIN>/dmsh_vk.lib (vka_shader.c); the launcher checks a pack has it before starting the game
+        buildConfigField 'String', 'NX_DMSH_CHAIN', "\"${defineOf('dm/gfx/nvn/dmsh_chain.h', 'DMSH_CHAIN')}\""
+        buildConfigField 'String', 'NX_DMSH_VK_CHAIN', "\"${defineOf('dm/gfx/nvn/dmsh_chain_vk.h', 'DMSH_VK_CHAIN')}\""
+        buildConfigField 'String', 'NX_PACK_ENGINE', "\"$nxPackEngine\""
+        buildConfigField 'String', 'NX_XLATE_SOURCE', "\"${lockOf('xlate_source')}\""
+        // The rewriter's files in pack_android.py's rewrite key (its REWRITER tuple): the launcher computes the key a pack's code must have (PackCheck)
+        buildConfigField 'String', 'NX_REWRITER', "\"$nxRewriter\""
+        externalNativeBuild {
+            cmake {
+                arguments "-DNX_GAMES=${nxGames.join(',')}", '-DANDROID_SUPPORT_FLEXIBLE_PAGE_SIZES=ON', "-DNX_LSFG=${nxLsfg ? 'ON' : 'OFF'}"
+                // a host and its shim per game, then the custom GPU drivers' loader and hooks (DM_VK_DRIVER)
+                targets(*(nxGames.collectMany { ["nxhost_$it".toString(), "nxlaunch_$it".toString()] } + ['nxadreno', 'hook_impl', 'main_hook']))
+            }
+        }
+    }
+    buildFeatures { buildConfig true }
+    // The icon's variant badge: a "T" dot on the test app, none on the play app (res/drawable/ic_launcher_badge*.xml)
+    sourceSets {
+        main {
+            res.srcDirs += nxPlay || nxLive ? 'src/variant-play/res' : 'src/variant-test/res'
+            java.srcDirs += 'src/ondevice/java'
+        }
+        // The service and its permissions, merged over the main manifest (a build type's manifest is an overlay)
+        release { manifest.srcFile 'src/ondevice/AndroidManifest.xml' }
+        debug { manifest.srcFile 'src/ondevice/AndroidManifest.xml' }
+    }
+    signingConfigs {
+        if (nxLive) live { storeFile file(signStore); storePassword signPass; keyAlias signAlias; keyPassword signPass }
+    }
+    buildTypes {
+        debug { jniDebuggable true }
+        release {
+            minifyEnabled false
+            debuggable !nxLive       // bring-up builds: run-as and the app's files stay reachable over adb; the release is not debuggable
+            signingConfig nxLive ? signingConfigs.live : signingConfigs.debug
+        }
+    }
+    externalNativeBuild {
+        cmake { path 'src/main/cpp/CMakeLists.txt'; version '3.22.1' }
+    }
+    packaging {
+        jniLibs { useLegacyPackaging false }   // stored uncompressed and 16 KB-aligned in the APK, mapped in place
+    }
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_17
+        targetCompatibility JavaVersion.VERSION_17
+    }
+    lint { abortOnError false; checkReleaseBuilds false }
+}
+
+// ./gradlew apk → out/nxnative-android.apk (-PnxPlay=true: nxnative-android-play.apk; -PnxApp=<suffix>: nxnative-android-<suffix>.apk)
+tasks.register('apk', Copy) {
+    dependsOn 'assembleRelease'
+    from(layout.buildDirectory.dir('outputs/apk/release')) { include '*.apk' }
+    into layout.projectDirectory.dir('out')
+    rename { nxLive ? "banana-native-${nxVersion}.apk" : nxPlay ? 'nxnative-android-play.apk' : nxApp ? "nxnative-android-${nxApp}.apk" : 'nxnative-android.apk' }
+}
+
+// The on-device packer's native side (android/ONDEVICE.md "In the APK"; not with -PnxPackEngine=fake). android/ondevice/build.sh makes its stage on the Mac;
+// -PnxPackStage=<that stage> (or the environment's NX_PACK_STAGE) names it. Into the APK go:
+//   lib/arm64-v8a/libpython3.14.so, libnxpack.so      (jniLibs: loaded by PackNative in the :pack process only)
+//   lib/arm64-v8a/libdmsh_xlate.so, libSPIRV-Tools-shared.so   the translator and the validator, which vk_android_build.py loads through ctypes in that process
+//   assets/pack/python.zip   the Python home (lib/python3.14 with lib-dynload, capstone, lz4), unpacked to filesDir by PackNative
+//   assets/pack/tools.zip    the repository's tools the job runs (scripts, dm/tools, dm/games/<game>, dm/gfx/tools without the Mac binaries, and the other sources DMSH_CHAIN
+//                            hashes), likewise
+//   assets/pack/version.txt  the two zips' digest: PackNative unpacks them again only when it changes
+if (nxPackEngine == 'native') {
+    def stageProp = providers.gradleProperty('nxPackStage').orElse(providers.environmentVariable('NX_PACK_STAGE')).getOrNull()
+    if (!stageProp) throw new GradleException('The APK carries the on-device packer: pass -PnxPackStage=<android/ondevice/build.sh work dir>/stage (or set NX_PACK_STAGE); -PnxPackEngine=fake builds a simulated one instead')
+    def stage = file(stageProp)
+    def nxPack = layout.buildDirectory.dir('nxpack')
+    def need = ['lib/libpython3.14.so', 'lib/libnxpack.so', 'lib/libdmsh_xlate.so', 'lib/libSPIRV-Tools-shared.so', 'python/lib/python3.14/os.py']
+    need.each { if (!new File(stage, it).isFile()) throw new GradleException("$stage has no $it: run android/ondevice/build.sh <work dir> (it makes <work dir>/stage)") }
+    def jni = tasks.register('nxPackJni', Sync) {
+        from(new File(stage, 'lib')) { include 'libpython3.14.so', 'libnxpack.so', 'libdmsh_xlate.so', 'libSPIRV-Tools-shared.so' }
+        into nxPack.map { it.dir('jni/arm64-v8a') }
+    }
+    def pyZip = tasks.register('nxPackPython', Zip) {
+        from(new File(stage, 'python')) { exclude '**/__pycache__/**' }
+        archiveFileName = 'python.zip'
+        destinationDirectory = nxPack.map { it.dir('zips') }
+        preserveFileTimestamps = false
+        reproducibleFileOrder = true
+    }
+    def toolsZip = tasks.register('nxPackTools', Zip) {
+        from(repo) {
+            include 'scripts/*.py', 'dm/tools/*.py', 'dm/games/*.py', 'dm/gfx/nvn/*.h'
+            nxGames.each { include "dm/games/$it/**" }   // the profile of each game the APK runs
+            include 'dm/games/*/patches.py'   // every profile's rewriter patches: patch_nso.py lists them all in build_src.sha256, as on the Mac
+            include 'dm/gfx/tools/*.py', 'dm/gfx/tools/*.lock', 'dm/gfx/tools/*.metal', 'dm/gfx/tools/*.tsv', 'dm/gfx/tools/dmsh_xlate/Program.cs', 'dm/gfx/tools/dmsh_xlate/*.csproj'
+            // the other files DMSH_CHAIN hashes (dmsh_chain.py FILES): vk_android_build.py recomputes the version on the phone
+            include 'dm/ios/tools/ios_metal.py', 'dm/third_party/ryujinx/src/**/*.cs', 'dm/third_party/ryujinx/src/**/*.csproj'
+            // and the translator library's own sources: xlate_tree.py checks libdmsh_xlate.so was built from this tree
+            include 'dm/gfx/tools/dmsh_xlate_android/*.cs', 'dm/gfx/tools/dmsh_xlate_android/*.csproj'
+            exclude '**/bin/**', '**/obj/**'
+            exclude '**/__pycache__/**', '**/.DS_Store'
+        }
+        archiveFileName = 'tools.zip'
+        destinationDirectory = nxPack.map { it.dir('zips') }
+        preserveFileTimestamps = false
+        reproducibleFileOrder = true
+    }
+    def assets = tasks.register('nxPackAssets') {
+        dependsOn pyZip, toolsZip
+        def zips = nxPack.map { it.dir('zips') }
+        def out = nxPack.map { it.dir('assets/pack') }
+        inputs.files(pyZip, toolsZip)
+        outputs.dir out
+        doLast {
+            def o = out.get().asFile
+            project.delete(o); o.mkdirs()
+            def md = java.security.MessageDigest.getInstance('SHA-256')
+            ['python.zip', 'tools.zip'].each { n ->
+                def f = zips.get().file(n).asFile
+                md.update(n.bytes); md.update(f.bytes)
+                java.nio.file.Files.copy(f.toPath(), new File(o, n).toPath())
+            }
+            new File(o, 'version.txt').text = md.digest().encodeHex().toString().substring(0, 16) + '\n'
+        }
+    }
+    android.sourceSets.main.jniLibs.srcDir(nxPack.map { it.dir('jni') })
+    android.sourceSets.main.assets.srcDir(nxPack.map { it.dir('assets') })
+    android.androidResources.noCompress.add('zip')   // the zips are deflated already; stored, they are read from the APK as they are
+    tasks.named('preBuild') { dependsOn jni, assets }
+}

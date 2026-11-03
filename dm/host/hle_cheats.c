@@ -53,15 +53,8 @@
 //   DM_CHEATS_DEBUG=1       log every applied write (cheat name, where, value)
 #include "dm.h"
 #include "dm_input.h"   // dm_cheats_keys, the key mask the type-8 conditional reads
-#include <libkern/OSCacheControl.h>
 #include <sys/mman.h>
 #include <sys/stat.h>
-#include <mach/mach.h>       // vm_read_overwrite / vm_write: guest pages the game maps and unmaps while a pass runs (guest_page_read / _write)
-#if !TARGET_OS_IPHONE
-#include <mach/mach_vm.h>    // the alias mapping of main's pages (mach_vm_remap), below; the iPhone SDK has no mach_vm.h
-#include <mach/vm_prot.h>
-#endif
-#include <dispatch/dispatch.h>   // the state files are written off the presenting thread (files_queue)
 #include <errno.h>
 #include <dirent.h>
 #include <unistd.h>
@@ -74,7 +67,7 @@
 // hand-made one can exhaust the arrays
 #define CHEAT_MAX 256          // cheats in one file
 #define INS_MAX  0x2000        // dwords of one cheat's program
-#define NAME_MAX 128           // characters of a [Name] / {Name} header
+#define CHEAT_NAME_MAX 128           // characters of a [Name] / {Name} header
 #define OTHER_MAX 24           // another build's .txt files listed in the menu
 #define CAND_MAX 64            // .txt files scanned in the cheats folder and its Atmosphère tree
 #define VM_STEP_CAP 4000000    // instructions of one cheat in one pass (the reference has none; a runaway loop must never stall a frame)
@@ -87,7 +80,7 @@
 #define ATM_PROGRAM 0x400      // ... and words of all enabled cheats together (the load report warns past them)
 
 typedef struct {
-    char name[NAME_MAX];       // the [Name] / {Name} header line, trimmed
+    char name[CHEAT_NAME_MAX];       // the [Name] / {Name} header line, trimmed
     uint32_t ins[INS_MAX];     // the cheat's code words, one program run per pass
     int nins;
     uint8_t master;            // {Name} header: always on, applied first, not toggleable from the menu
@@ -114,10 +107,10 @@ typedef struct {
     int dup;                   // how many earlier entries carry the same name (its <build>.enabled key is "Name #dup+1")
     char why[80];              // the reason text the menu appends to the name: the disabled state (broken, dead) filled at load or
                                // at run time, or, on a running cheat, the failed-access note (" (no effect: N accesses …)")
-    char section[NAME_MAX];    // the section it lies in ("" outside any)
+    char section[CHEAT_NAME_MAX];    // the section it lies in ("" outside any)
     char note[200];            // the meta file's "resolved" and "note", for the panel's tooltip
     char type[8];              // the meta type (u8 … u64, s8 … s64, f32, f64), "" unknown
-    char pairname[NAME_MAX];   // the meta pair's name, linked to an index after the meta file is read
+    char pairname[CHEAT_NAME_MAX];   // the meta pair's name, linked to an index after the meta file is read
     int vw[VW_MAX], nvw;       // the program words holding the value (an 8-byte value: its high word, then its low word)
     double vmin, vmax; uint8_t has_min, has_max;   // the meta ask bounds
     uint8_t nd_region; uint64_t nd_off;            // never-decrease: region 0 main / 1 heap, offset in it
@@ -133,8 +126,8 @@ static char g_tid[17];         // this game's title ID (the profile's DM_GAME_PR
 static char g_others[OTHER_MAX][17]; static int g_nothers;   // builds on disk that are not this game's build
 static char g_other_ver[OTHER_MAX][24];                      // their display versions, from their meta files ("" unknown)
 static char g_version[24];     // this build's display version (the profile's build rows, else the meta file), "" unknown
-static char g_on[16][NAME_MAX]; static int g_non;            // the names of DM_CHEATS_ON, turned on at load time
-static char g_skip_name[SKIP_MAX][NAME_MAX], g_skip_why[SKIP_MAX][160]; static int g_nskip;   // the compiler's left-outs
+static char g_on[16][CHEAT_NAME_MAX]; static int g_non;            // the names of DM_CHEATS_ON, turned on at load time
+static char g_skip_name[SKIP_MAX][CHEAT_NAME_MAX], g_skip_why[SKIP_MAX][160]; static int g_nskip;   // the compiler's left-outs
 static char g_src[SRC_MAX][256]; static int g_nsrc;          // *.cheats.toml sources in the folder
 static char g_report[4096];    // the load report (dm_cheats_report)
 static int g_have_meta;        // the loaded file came with a meta file
@@ -172,26 +165,14 @@ static uint8_t *g_alias;       // the alias mapping of main's image (same layout
 // guest starts, so nothing protects or tracks these pages yet); the mapping stays for the process's lifetime, the
 // loader's per-page protections never change after load. Not on the iPhone: its SDK has no mach_vm.h, and its code pages
 // are the app's signed pages, which no mapping can make writable; cheats write only data there
-#if TARGET_OS_IPHONE
-static void alias_setup(void) { g_alias = NULL; }
-#else
 static void alias_setup(void) {
     module_t *m = g_main_mod;
     long pg = sysconf(_SC_PAGESIZE); if (pg <= 0) pg = 0x4000;   // 16 KB on Apple Silicon, a safe floor elsewhere
-    uint64_t size = ((uint64_t)m->size + (uint64_t)pg - 1) & ~((uint64_t)pg - 1);   // mach_vm_remap wants whole pages
-    mach_vm_address_t dst = 0;
-    vm_prot_t cur = 0, mx = 0;
-    kern_return_t kr = mach_vm_remap(mach_task_self(), &dst, size, 0, VM_FLAGS_ANYWHERE,
-                                     mach_task_self(), (mach_vm_address_t)(uintptr_t)m->base, FALSE,
-                                     &cur, &mx, VM_INHERIT_SHARE);
-    if (kr) { g_alias = NULL; return; }
-    // The alias's protections are independent of the original mapping's: make everything writable once. The key page
+    uint64_t size = ((uint64_t)m->size + (uint64_t)pg - 1) & ~((uint64_t)pg - 1);   // the remap wants whole pages
+    // The alias's protections are independent of the original mapping's: plat_mem_alias makes everything writable once. The key page
     // stays refused by the write path; the alias is only ever used by a check-passing write
-    kr = mach_vm_protect(mach_task_self(), dst, size, 0, VM_PROT_READ | VM_PROT_WRITE);
-    if (kr) { mach_vm_deallocate(mach_task_self(), dst, size); g_alias = NULL; return; }
-    g_alias = (uint8_t *)(uintptr_t)dst;
+    g_alias = plat_mem_alias(m->base, size);
 }
-#endif
 
 // The cheats list, the toggles and one VM pass at a time
 static pthread_mutex_t g_lock = PTHREAD_MUTEX_INITIALIZER;
@@ -502,17 +483,14 @@ static int where_get(uint64_t addr, uint64_t len, where_t *w) {
 
 // Copy len bytes of a WH_GUEST page out (0) or fail (-1) without faulting: the kernel's copy refuses an unmapped or
 // PROT_NONE page (KERN_INVALID_ADDRESS / KERN_PROTECTION_FAILURE) where a memcpy would take the signal
-static int guest_page_read(uint64_t addr, void *out, uint64_t len) {
-    vm_size_t got = 0;
-    return vm_read_overwrite(mach_task_self(), (vm_address_t)addr, (vm_size_t)len, (vm_address_t)(uintptr_t)out, &got) == KERN_SUCCESS && got == len ? 0 : -1;
-}
+static int guest_page_read(uint64_t addr, void *out, uint64_t len) { return plat_mem_read(addr, out, (size_t)len); }
 
 // The counterpart for a write: the write-protect dirty tracking of the graphics layer is told first (a page it holds
 // read-only is unprotected and marked dirty, as every guest write path does), then the kernel copies, failing on a page
 // that is not mapped writable right now
 static int guest_page_write(uint64_t addr, const void *src, uint64_t len) {
     dm_guest_write_prepare((void *)(uintptr_t)addr, (size_t)len);
-    return vm_write(mach_task_self(), (vm_address_t)addr, (vm_offset_t)(uintptr_t)src, (mach_msg_type_number_t)len) == KERN_SUCCESS ? 0 : -1;
+    return plat_mem_write(addr, src, (size_t)len);
 }
 
 // Read len bytes at a guest address into a zero-extended little-endian value: 0, or -1 when the range is not readable
@@ -587,7 +565,7 @@ static int main_write_check(cheat_t *c, uint64_t addr, uint64_t len) {
     }
     if (off < main_rx_end()) {   // the text, to its last page as the loader sealed it
         if (!g_alias) {
-            cheat_kill(c, "%s", TARGET_OS_IPHONE ? "code writes are not possible on the iPhone (the app's signed code pages)" : "code write without the writable alias of main");
+            cheat_kill(c, "%s", PLAT_IOS ? "code writes are not possible on the iPhone (the app's signed code pages)" : "code write without the writable alias of main");
             return -1;
         }
         int k = g_changed_state == 1 ? changed_hit(off, len) : -2;
@@ -604,7 +582,7 @@ static void main_write_pages(uint64_t addr, uint64_t len, const void *src) {
     uint64_t off = addr - (uint64_t)(uintptr_t)g_main_mod->base; int code = off < main_rx_end();
     dm_guest_write_prepare((void *)(uintptr_t)addr, len);   // the write-protect dirty tracking must see this write coming
     memcpy(g_alias ? g_alias + (size_t)off : (uint8_t *)(uintptr_t)addr, src, len);
-    if (code) sys_icache_invalidate((void *)(uintptr_t)addr, len);   // the game's own fetches must see the new instructions
+    if (code) plat_icache_invalidate((void *)(uintptr_t)addr, len);   // the game's own fetches must see the new instructions
 }
 
 // Read len bytes at a guest address without any consequence for a cheat: 0 and the value, or -1 when unmapped (the dry run
@@ -1093,20 +1071,27 @@ static void flag_file(char *out, size_t n, const char *what) { snprintf(out, n, 
 // left them. files_drain waits for everything queued: before the engine reads <build>.enabled back (states_load) and at
 // a clean exit, so nothing is lost or read stale. The queue's blocks take no lock of this file: a drain under g_lock
 // cannot deadlock
-static dispatch_queue_t files_queue(void) {
-    static dispatch_queue_t q; static dispatch_once_t once;
-    dispatch_once(&once, ^{ q = dispatch_queue_create("nxnative.cheats.files", DISPATCH_QUEUE_SERIAL); });
-    return q;
-}
-static void files_drain(void) { dispatch_sync(files_queue(), ^{}); }
+static plat_queue_t *g_files_q; static pthread_once_t g_files_once = PTHREAD_ONCE_INIT;
+static void files_queue_make(void) { g_files_q = plat_queue_create("nxnative.cheats.files"); }
+static plat_queue_t *files_queue(void) { pthread_once(&g_files_once, files_queue_make); return g_files_q; }
+static void files_drain(void) { plat_queue_drain(files_queue()); }
 
 // The safe-mode flag: <dir>/.cheats-running-<title> exists while some cheat runs (a plain cheat on, or the masters while
 // not in safe mode, with the master switch on); a clean exit removes it (dm_cheats_exit), a crash leaves it for the next
 // launch. Not on iOS: an iOS app usually ends killed (swiped away, or while suspended), and the app has no cheats panel
 // to leave safe mode with. The verdict is taken here, under g_lock; the file itself is written by the files queue, where
 // it checks g_exiting again: a flag queued just before a clean exit must not come back after the exit removed it
+typedef struct { char *path, *build; int want; } running_job;
+static void running_write(void *p) {
+    running_job *j = p;
+    if (!atomic_load(&g_exiting)) {
+        if (j->want) { FILE *f = fopen(j->path, "w"); if (f) { fprintf(f, "%s\n", j->build); fclose(f); } }
+        else unlink(j->path);
+    }
+    free(j->path); free(j->build); free(j);
+}
 static void running_update(void) {
-#if TARGET_OS_IPHONE
+#if PLAT_IOS
     return;
 #endif
     if (!g_dir[0] || atomic_load(&g_exiting)) return;
@@ -1118,44 +1103,43 @@ static void running_update(void) {
     }
     char p[1100]; flag_file(p, sizeof p, "running");
     int want = any && atomic_load(&g_master);
-    char *path = strdup(p), *build = strdup(g_build);
-    if (!path || !build) { free(path); free(build); return; }
-    dispatch_async(files_queue(), ^{
-        if (!atomic_load(&g_exiting)) {
-            if (want) { FILE *f = fopen(path, "w"); if (f) { fprintf(f, "%s\n", build); fclose(f); } }
-            else unlink(path);
-        }
-        free(path); free(build);
-    });
+    char *path = strdup(p), *build = strdup(g_build); running_job *j = malloc(sizeof *j);
+    if (!path || !build || !j) { free(path); free(build); free(j); return; }
+    *j = (running_job){path, build, want};
+    plat_queue_async(files_queue(), running_write, j);
 }
 
 // Save the enabled states: one key per line, <build>.enabled in the cheats folder (masters are always on, labels never
 // run, and a "set" cheat or a pending restore runs one pass only, so none of them is saved). Rewritten on every menu
 // toggle and when a one-pass cheat fired, read at each load; the safe-mode flag follows the states. The content is
 // built here under g_lock and written by the files queue
+typedef struct { char *text, *path; } states_job;
+static void states_write(void *p) {
+    states_job *j = p; const char *path = j->path;
+    // Written to a temporary beside it and renamed over the old file: fopen("w") truncates first, so an exit (or a
+    // crash) in the middle would leave the saved toggles empty; the rename is atomic, the old file stays until then
+    char tmp[1500]; snprintf(tmp, sizeof tmp, "%s.tmp", path);
+    FILE *f = fopen(tmp, "w");
+    if (!f) LOG("cheats: cannot write %s (errno %d)", tmp, errno);
+    else if (fputs(j->text, f) < 0 || fclose(f)) { LOG("cheats: cannot write %s (errno %d)", tmp, errno); unlink(tmp); }
+    else if (rename(tmp, path)) { LOG("cheats: cannot rename %s over %s (errno %d)", tmp, path, errno); unlink(tmp); }
+    free(j->text); free(j->path); free(j);
+}
 static void states_save(void) {
     if (!g_dir[0] || !g_build[0]) return;
     char p[1400]; snprintf(p, sizeof p, "%s/%s.enabled", g_dir, g_build);
-    size_t cap = (size_t)g_ncheat * (NAME_MAX + 16) + 1, o = 0;   // every key with its newline fits
-    char *text = malloc(cap), *path = strdup(p);
-    if (!text || !path) { free(text); free(path); return; }
+    size_t cap = (size_t)g_ncheat * (CHEAT_NAME_MAX + 16) + 1, o = 0;   // every key with its newline fits
+    char *text = malloc(cap), *path = strdup(p); states_job *j = malloc(sizeof *j);
+    if (!text || !path || !j) { free(text); free(path); free(j); return; }
     text[0] = 0;
     for (int i = 0; i < g_ncheat; i++) {
         const cheat_t *c = &g_cheat[i];
         if (!c->on || c->master || c->label || c->once || c->restore_once) continue;   // one-pass cheats are never saved as on
-        char k[NAME_MAX + 16]; cheat_key(c, k, sizeof k);
+        char k[CHEAT_NAME_MAX + 16]; cheat_key(c, k, sizeof k);
         o += (size_t)snprintf(text + o, cap - o, "%s\n", k);
     }
-    dispatch_async(files_queue(), ^{
-        // Written to a temporary beside it and renamed over the old file: fopen("w") truncates first, so an exit (or a
-        // crash) in the middle would leave the saved toggles empty; the rename is atomic, the old file stays until then
-        char tmp[1500]; snprintf(tmp, sizeof tmp, "%s.tmp", path);
-        FILE *f = fopen(tmp, "w");
-        if (!f) LOG("cheats: cannot write %s (errno %d)", tmp, errno);
-        else if (fputs(text, f) < 0 || fclose(f)) { LOG("cheats: cannot write %s (errno %d)", tmp, errno); unlink(tmp); }
-        else if (rename(tmp, path)) { LOG("cheats: cannot rename %s over %s (errno %d)", tmp, path, errno); unlink(tmp); }
-        free(text); free(path);
-    });
+    *j = (states_job){text, path};
+    plat_queue_async(files_queue(), states_write, j);
     running_update();
 }
 
@@ -1172,7 +1156,7 @@ static int states_read(const char *path) {
         int hit = -1;
         for (int i = 0; i < g_ncheat && hit < 0; i++) {
             cheat_t *c = &g_cheat[i];
-            char k[NAME_MAX + 16]; cheat_key(c, k, sizeof k);
+            char k[CHEAT_NAME_MAX + 16]; cheat_key(c, k, sizeof k);
             if (!c->master && !c->label && !c->on && !strcmp(k, s)) hit = i;
         }
         for (int i = 0; i < g_ncheat && hit < 0; i++)
@@ -1299,7 +1283,7 @@ static void values_save(void) {
     if (!f) { LOG("cheats: cannot write %s (errno %d)", path, errno); return; }
     for (int i = 0; i < g_ncheat; i++) {
         if (!g_cheat[i].ask) continue;
-        char k[NAME_MAX + 16], v[64]; cheat_key(&g_cheat[i], k, sizeof k); value_get(&g_cheat[i], v, sizeof v);
+        char k[CHEAT_NAME_MAX + 16], v[64]; cheat_key(&g_cheat[i], k, sizeof k); value_get(&g_cheat[i], v, sizeof v);
         fprintf(f, "%s\t%s\n", k, v);
     }
     fclose(f);
@@ -1318,7 +1302,7 @@ static void values_load(void) {
         char *save = NULL;
         *tab = 0; char *v = strtok_r(tab + 1, "\r\n", &save);
         for (int i = 0; i < g_ncheat && v; i++) {
-            char k[NAME_MAX + 16]; cheat_key(&g_cheat[i], k, sizeof k);
+            char k[CHEAT_NAME_MAX + 16]; cheat_key(&g_cheat[i], k, sizeof k);
             if (!strcmp(k, line)) { value_set_locked(&g_cheat[i], v); break; }
         }
     }
@@ -1427,7 +1411,7 @@ static void parse_file(const char *path) {
     if (!text) { LOG("[RED] cheats: cannot read %s (errno %d)", path, errno); return; }
     cheat_t *cur = NULL;
     int lineno = 1, warned = 0;   // the file line of the next piece
-    char section[NAME_MAX] = "";
+    char section[CHEAT_NAME_MAX] = "";
     static uint32_t got[INS_MAX];   // one line's words (static: 32 KB, parse_file runs under g_lock only)
     for (char *line = text, *next; line; line = next) {
         // one piece: a file line, or part of one when a glued header was split off with '\v'
@@ -1453,18 +1437,18 @@ static void parse_file(const char *path) {
             cur = &g_cheat[g_ncheat++];
             memset(cur, 0, sizeof *cur);
             cur->pair = -1;
-            // the name keeps NAME_MAX - 1 characters: a shorter cut once let two long-named cheats share a line in <build>.enabled
+            // the name keeps CHEAT_NAME_MAX - 1 characters: a shorter cut once let two long-named cheats share a line in <build>.enabled
             // a cut name ends on a UTF-8 character boundary: the first byte left out must not be a continuation byte
             int keep = (int)(nl > 127 ? 127 : nl);
             if (nl > 127) while (keep > 0 && ((unsigned char)p[1 + keep] & 0xC0) == 0x80) keep--;
-            snprintf(cur->name, NAME_MAX, "%.*s", keep, p + 1);
+            snprintf(cur->name, CHEAT_NAME_MAX, "%.*s", keep, p + 1);
             cur->master = end == '}';
             cur->on = cur->master;
-            char sec[NAME_MAX];
+            char sec[CHEAT_NAME_MAX];
             int mark = section_marker(cur->name, sec, sizeof sec);
             if (mark == 1) snprintf(section, sizeof section, "%s", sec);
             if (mark) cur->sec_mark = (uint8_t)mark;
-            snprintf(cur->section, NAME_MAX, "%s", mark == 1 ? sec : section);
+            snprintf(cur->section, CHEAT_NAME_MAX, "%s", mark == 1 ? sec : section);
             if (mark == 2) section[0] = 0;
             for (int i = 0; i < g_ncheat - 1; i++) if (!strcmp(g_cheat[i].name, cur->name)) cur->dup++;
             p = q + 1;                 // dmnt reads on after the header: code words may follow on the same line
@@ -1613,7 +1597,7 @@ static void meta_load(const char *txt_path) {
         #define COL(k) (at[k] >= 0 && at[k] < nf ? fld[at[k]] : "")
         const char *name = COL(NAME), *kind = COL(KIND);
         if (!strcmp(kind, "unresolved")) {
-            if (g_nskip < SKIP_MAX) { snprintf(g_skip_name[g_nskip], NAME_MAX, "%s", name); snprintf(g_skip_why[g_nskip], 160, "%s", COL(NOTE)); g_nskip++; }
+            if (g_nskip < SKIP_MAX) { snprintf(g_skip_name[g_nskip], CHEAT_NAME_MAX, "%s", name); snprintf(g_skip_why[g_nskip], 160, "%s", COL(NOTE)); g_nskip++; }
             continue;
         }
         int j = cursor;
@@ -1621,11 +1605,11 @@ static void meta_load(const char *txt_path) {
         if (j >= g_ncheat) continue;   // no entry of that name after the previous one: the row is ignored
         cursor = j + 1;
         cheat_t *c = &g_cheat[j];
-        if (COL(SECTION)[0] && !c->section[0]) snprintf(c->section, NAME_MAX, "%s", COL(SECTION));
+        if (COL(SECTION)[0] && !c->section[0]) snprintf(c->section, CHEAT_NAME_MAX, "%s", COL(SECTION));
         snprintf(c->type, sizeof c->type, "%s", COL(TYPE));
         if (!strcmp(COL(ONCE), "1")) c->once = 1;
         if (!strcmp(kind, "patch-off")) c->pair_off = 1;
-        snprintf(c->pairname, NAME_MAX, "%s", COL(PAIR));
+        snprintf(c->pairname, CHEAT_NAME_MAX, "%s", COL(PAIR));
         if (strstr(COL(RESOLVED), "weak")) c->weak = 1;
         snprintf(c->note, sizeof c->note, "%s%s%s", COL(RESOLVED), COL(RESOLVED)[0] && COL(NOTE)[0] ? "; " : "", COL(NOTE));
         if (COL(ASK)[0]) {   // "min..max", either side may be empty
@@ -1686,10 +1670,10 @@ static void pairs_link(void) {
         }
     }
     for (int i = 0; i < g_ncheat; i++) {
-        cheat_t *a = &g_cheat[i]; char ba[NAME_MAX]; int offa;
+        cheat_t *a = &g_cheat[i]; char ba[CHEAT_NAME_MAX]; int offa;
         if (a->pair >= 0 || a->master || a->label || a->nd || !onoff_split(a->name, ba, sizeof ba, &offa)) continue;
         for (int j = i + 1; j < g_ncheat; j++) {
-            cheat_t *b = &g_cheat[j]; char bb[NAME_MAX]; int offb;
+            cheat_t *b = &g_cheat[j]; char bb[CHEAT_NAME_MAX]; int offb;
             if (b->pair >= 0 || b->master || b->label || b->nd || !onoff_split(b->name, bb, sizeof bb, &offb)) continue;
             if (offa == offb || strcasecmp(ba, bb)) continue;
             a->pair = j; b->pair = i; a->pair_off = (uint8_t)offa; b->pair_off = (uint8_t)offb;
@@ -1805,7 +1789,7 @@ static void load_all(void) {
     if (g_main_mod && !g_alias) {
         alias_setup();
         if (g_alias) LOG("cheats: writable alias of main mapped");
-        else if (TARGET_OS_IPHONE) LOG("cheats: the iPhone's code pages are signed: cheats write data only");
+        else if (PLAT_IOS) LOG("cheats: the iPhone's code pages are signed: cheats write data only");
         else LOG("[RED] cheats: no writable alias of main (mach_vm_remap failed): cheats write data only");
     }
     if (g_alias) changed_load();   // which text words a code write must leave alone (only where code can be written at all)
@@ -1838,7 +1822,7 @@ static void folder_flags(void) {
     char p[1100];
     flag_file(p, sizeof p, "off");
     atomic_store(&g_master, access(p, F_OK) != 0);
-#if !TARGET_OS_IPHONE   // iOS keeps no safe mode (running_update)
+#if !PLAT_IOS   // iOS keeps no safe mode (running_update)
     flag_file(p, sizeof p, "running");
     g_safe = access(p, F_OK) == 0;
 #endif
@@ -1867,7 +1851,7 @@ void dm_cheats_init(void) {
         while (s && g_non < 16) {
             char *t = strchr(s, ',');
             if (t) *t = 0;
-            if (*s) snprintf(g_on[g_non++], NAME_MAX, "%s", s);
+            if (*s) snprintf(g_on[g_non++], CHEAT_NAME_MAX, "%s", s);
             s = t ? t + 1 : NULL;
         }
         free(dup);

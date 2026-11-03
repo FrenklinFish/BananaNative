@@ -39,6 +39,25 @@ namespace Ryujinx.Graphics.Shader
         }
 
         /// <summary>
+        /// nxnative (after azmasm/switch2mac, MIT): the layout of a Switch 2 task / mesh program (TranslationFlags.TaskShader / MeshShader): max vertices, max primitives,
+        /// task memory (payload) bytes, then the per-vertex planes (0-3 position x y z w, 4 + 4 g + c generic g component c), optionally -1 and the per-primitive values,
+        /// optionally -2 and generic locations to declare unwritten (StructuredIr/MeshShaderInfo.cs).
+        /// </summary>
+        int[] QueryMeshShaderLayout()
+        {
+            return null;
+        }
+
+        /// <summary>
+        /// nxnative: the SpecId of a bool specialization constant under which a Switch 2 mesh program rewrites its positions' depth to the GL convention
+        /// (z' = z / 2 + w / 2, near = -w, NVN's default) before it hands them over; -1 for none.
+        /// </summary>
+        int QueryMeshShaderGlDepthSpecId()
+        {
+            return -1;
+        }
+
+        /// <summary>
         /// Gets a span of the specified memory location, containing shader code.
         /// </summary>
         /// <param name="address">GPU virtual address of the data</param>
@@ -128,6 +147,23 @@ namespace Ryujinx.Graphics.Shader
         int QueryComputeSharedMemorySize()
         {
             return 0xc000;
+        }
+
+        /// <summary>
+        /// nxnative: the host's limit of shared memory a compute workgroup may declare, in bytes; 0 = no limit. A program whose shared memory (with the translator's own HMMA
+        /// scratch) is over it keeps its main shared memory in a storage buffer (StructuredIr/SharedSpillInfo.cs).
+        /// </summary>
+        int QueryHostComputeSharedMemoryMax()
+        {
+            return 0;
+        }
+
+        /// <summary>
+        /// nxnative: told when a compute program's shared memory moved to a storage buffer: the bytes of one workgroup's slice, and the bytes left in workgroup memory
+        /// (the HMMA scratch).
+        /// </summary>
+        void RecordSharedSpill(int sliceBytes, int workgroupBytes)
+        {
         }
 
         /// <summary>

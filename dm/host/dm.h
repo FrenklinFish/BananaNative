@@ -30,6 +30,7 @@ static inline int dm_host_thread_join(pthread_t thread, void **result) {
 // The message and its newline under one stream lock: written apart, another thread's line could land between them and two messages share a log line
 #define LOG(...) do { flockfile(stderr); fprintf(stderr, "[dm] " __VA_ARGS__); fputc('\n', stderr); funlockfile(stderr); } while (0)
 #define die(...) do { LOG("FATAL " __VA_ARGS__); abort(); } while (0)
+#include "plat/plat.h"   // the services whose system interface differs between Apple and Android (time, thread slots, thread suspension, memory copies, ...)
 
 typedef struct { uint32_t st_name; uint8_t st_info, st_other; uint16_t st_shndx; uint64_t st_value, st_size; } Elf64_Sym;
 typedef struct { int64_t d_tag; union { uint64_t d_val, d_ptr; } d_un; } Elf64_Dyn;
@@ -79,8 +80,8 @@ extern module_t *g_mod;         // allocated once from the NSO list and NRO mani
 extern int g_nmod;
 // main's build ID (empty if none): code with fixed addresses in a game's module runs only on the build they were found in
 static inline const char *dm_main_build(void) { for (int i = 0; i < g_nmod; i++) if (!strcmp(g_mod[i].name, "main")) return g_mod[i].build_id; return ""; }
-// Four thread-local slots: K18 = the Switch's x18, KTLS = tpidr_el0, KTLR = tpidrro_el0 (ThreadLocalRegion), KGATE = host gate entry; the actual key numbers are written into the key page by the loader
-extern pthread_key_t g_key18, g_keytls, g_keytlr, g_keygate;
+// Four thread-local slots: K18 = the Switch's x18, KTLS = tpidr_el0, KTLR = tpidrro_el0 (ThreadLocalRegion), KGATE = host gate entry (dm_slot_get / dm_slot_set, plat.h);
+// where each lies is written into the key page by the loader
 
 void load_modules(const char *dir, const char **names, int n);
 const char *dm_module_dir(void);   // the folder load_modules read the modules and the rewriter's tables from (the cheat engine reads main.changed.tsv there)
@@ -93,6 +94,7 @@ int svc_nro_deactivate(module_t *m);   // mark inactive under the memory map loc
 void *module_sym(module_t *m, const char *name);
 int dm_sdk_major(void);   // SDK major version from the sdk module's version string (loader.c); 0 = unknown
 int dm_sdk_ounce(void);   // 1 when the sdk module was built for the Switch 2 (its spec string "spec: Ounce", loader.c)
+int dm_sdk_nvn2_item(unsigned item, int *out);   // a constant NVN2's own nvnDeviceGetInteger answers for item, read from the sdk module (loader.c); 0 when it has none
 #define DM_SDK_OLD(major) ((major) > 0 && (major) <= 10)   // SDK 10 and older: NVN API 53, the shared-font address points at the TTF itself
 int dm_main_imports(const char *prefix);   // main imports a symbol whose name starts with prefix (loader.c)
 void *guest_sym(const char *name);
@@ -111,6 +113,8 @@ enum { OBS_UE_MALLOC = 21,                                       // Unreal's FMa
 void gate_obs_set(int id, void (*fn)(uint64_t *regs, int param));
 int gate_obs_present(int id);
 uint64_t now_ns(void);
+void dm_fs_time(uint64_t *open_ns, uint64_t *read_ns, uint64_t *read_bytes);   // cumulative host time in open / pread for the game, all threads (hle_fs.c)
+int dm_guest_wait_take(uint64_t *total_ns, uint64_t *max_ns, uint64_t *sleep_ns, uint64_t *native_ns, char *what, size_t n);   // this thread's guest waits since its last call: in all, the longest (and what ended it), SleepThread's sleeps, native HLE waits; 0 = not a guest thread (hle_thread.c)
 uint64_t guest_ns(void);              // Guest clock (hle_os.c; does not advance while frozen, guest_clock_freeze)
 uint64_t guest_ticks(void);           // The guest's system counter on that clock: 19.2 MHz, or 31.25 MHz for the Switch 2 (hle_os.c)
 int dm_detclock_enabled(void);
@@ -118,6 +122,11 @@ void dm_guest_clock_advanced(void);
 void guest_clock_freeze(int on);
 void guest_clock_freeze_for(int reason, int on);   // Freeze by reason (1 background, 2 system keyboard); see hle_os.c
 void guest_clock_read_wait(void);     // A guest read of the system counter: waits while the app is in the background (hle_os.c)
+void dm_guest_suspend(int on);         // The application suspended as Horizon suspends it (hle_os.c): guest threads stop at their next SVC, spin gate or sleep (dm_guest_suspend_wait)
+void dm_guest_suspend_wait(void);      // where a guest thread stops while suspended (not inside host work)
+int dm_guest_suspended(void);
+int dm_is_guest_thread(void);          // hle_thread.c: the calling thread has a guest thread record (host threads running guest code do not stop at the suspend gate)
+void crash_watch_hold(int on);         // crash.c: the watchdog counts no stall while the app is suspended (paused, background)
 void dm_guest_frame_tick(void);        // Called on every present (hle_nvn.c): when DM_DETCLOCK is on, advances the guest clock by one fixed step
 uint64_t dm_nvn_frame_count(void);
 uint64_t dm_nvn_sub_cpu_ns(void);     // Cumulative CPU nanoseconds of submit (excluding present)
@@ -147,6 +156,8 @@ void dm_guest_write_prepare(void *addr, size_t len);
 void dm_guest_heap_range(uint64_t *base, size_t *open_len);   // hle_svc.c: the guest heap's base and opened length (guest addresses), 0 / 0 when none
 int dm_guest_heap_read(uint64_t addr, void *out, size_t len);    // hle_svc.c: hole-free guest heap read for the cheat VM (under the memory lock); 0 = ok, 1 = a byte outside the opened span
 int dm_guest_heap_write(uint64_t addr, const void *src, size_t len);   // hle_svc.c: hole-free guest heap write (the dirty tracking sees it first)
+uint64_t dm_guest_unmapped(uintptr_t a, size_t n);   // hle_svc.c: 4 KiB pages of [a, a+n) the guest has not mapped (alias region pages not mapped, heap past its opened size); 0 outside those regions
+uint64_t dm_guest_read_mapped(void *dst, uintptr_t a, size_t n);   // hle_svc.c: [a, a+n) into dst, pages the guest has not mapped as zeros (they are inaccessible: never read); → those pages
 // Cheats (hle_cheats.c): Atmosphère-format cheat code files applied to the running game (docs/development.md "Cheats")
 void dm_cheats_init(void);            // Called once in host_preload after loading the modules (main.c): reads DM_CHEATS and friends, loads the build's file
 void dm_cheats_present(void);         // Per presented frame (hle_nvn.c presents): applies the enabled cheats once

@@ -36,7 +36,25 @@ namespace Ryujinx.Graphics.Shader.Translation
             bool ampere = options.Flags.HasFlag(TranslationFlags.Ampere);
             int headerSize = ampere ? AmpereHeaderSize : HeaderSize;
 
-            if (options.Flags.HasFlag(TranslationFlags.Compute))
+            // nxnative: a Switch 2 task / mesh program runs as compute (StructuredIr/MeshShaderInfo.cs), but its code area starts with a graphics SPH (it says vertex or
+            // domain), which gives its local memory size; the instructions follow it as in the graphics stages
+            bool meshStage = options.Flags.HasFlag(TranslationFlags.TaskShader) || options.Flags.HasFlag(TranslationFlags.MeshShader);
+
+            if (meshStage)
+            {
+                if (!ampere || !options.Flags.HasFlag(TranslationFlags.Compute))
+                {
+                    throw new NotSupportedException("task / mesh programs are translated as Ampere compute (TranslationFlags.Compute | Ampere)");
+                }
+
+                ShaderHeader header = new(gpuAccessor, address);
+
+                definitions = CreateComputeDefinitions(gpuAccessor);
+                localMemorySize = GetLocalMemorySize(header);
+
+                program = Decoder.DecodeAmpere(definitions, gpuAccessor, address + (ulong)headerSize);
+            }
+            else if (options.Flags.HasFlag(TranslationFlags.Compute))
             {
                 definitions = CreateComputeDefinitions(gpuAccessor);
                 localMemorySize = gpuAccessor.QueryComputeLocalMemorySize();
@@ -68,7 +86,7 @@ namespace Ryujinx.Graphics.Shader.Translation
                 }
             }
 
-            int size = (int)maxEndAddress + (options.Flags.HasFlag(TranslationFlags.Compute) ? 0 : headerSize);
+            int size = (int)maxEndAddress + (options.Flags.HasFlag(TranslationFlags.Compute) && !meshStage ? 0 : headerSize);
 
             return new TranslatorContext(address, size, localMemorySize, definitions, gpuAccessor, options, program);
         }

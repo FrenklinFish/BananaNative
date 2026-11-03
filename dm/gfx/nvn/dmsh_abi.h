@@ -27,7 +27,10 @@
 #define DMSH_C0_SSBO_CS 0x310            // compute stage storage buffer table
 #define DMSH_C0_SSBO_GS 0x410            // geometry stage storage buffer table (NieR:Automata); the hull and domain stages' bases were never seen
 #define DMSH_C0_SSBO_PS 0x510            // pixel stage storage buffer table
+#define DMSH_C0_SSBO_TS 0x670            // NVN2 task stage storage buffer table (Mario Kart World 1.8.0's task programs read 0x670 / 0x680; after azmasm/switch2mac, MIT)
+#define DMSH_C0_SSBO_MS 0x770            // NVN2 mesh stage storage buffer table (its mesh programs read 0x770 .. 0x7b0)
 #define DMSH_C0_DISPATCH 0x200           // compute: the dispatch's workgroup counts x, y, z (32 bits each; Link's Awakening's light culling)
+#define DMSH_C0_DISPATCH_NVN2 4          // NVN2 compute keeps them here, below its per-shader layout at 0x10 (x and y read by Fire Emblem Fortune's Weave's light culling; z by their order)
 #define DMSH_C0_CS_UBO 0x210             // compute: uniform slot r's address and size at 0x210 + 0x10 r, read through global memory (the build's ubo_ptr bindings); it ends where the storage buffer table starts
 #define DMSH_C0_CS_UBO_SLOTS 16          // uniform slots of that table
 
@@ -77,6 +80,10 @@
 #define DMSH_KIND_GMEM_LOG "gmem_log"    // that write log: the host gives each draw or dispatch its own, cleared (nvn_mtl.m gml_take)
 #define DMSH_GMEM_LOG_CB_OFFSET 1
 #define DMSH_GMEM_LOG_LOG2 10
+// Android Vulkan only: a compute program's shared memory past the device's limit (job shared_max), reserved under the same slot at offset 2 (Ryujinx GlobalToStorage.SharedSpillCbOffset,
+// StructuredIr/SharedSpillInfo.cs): one slice per workgroup (dmsh_abi_vk.h DMSH_VK_KIND_SHARED_SPILL). The Apple build never sets shared_max (dmsh_build.py shared_spill instead)
+#define DMSH_KIND_SHARED_SPILL "shared_spill"
+#define DMSH_SHARED_SPILL_CB_OFFSET 2
 
 // A pool binding points at a buffer the host keeps (nvn_mtl.m pool_gpu): a 32-bit bound n (the highest index the shader may read), then from DMSH_POOL_HEAD one 8-byte resource ID per ID
 #define DMSH_POOL_HEAD 8                 // bytes before element 0 of a pool buffer

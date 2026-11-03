@@ -23,8 +23,7 @@
 // 14 IsInternallyThreadSafe (1), 20 GetAllocationSize (stores a 32-bit size), 21 the TLS cache setup, 22 Trim (main+0x329a408). Its object is in the bss and its constructor is inlined into
 // the GMalloc setup, which the cut skips (the game's patches.py). It has no Binned3 name to find, so it keeps a row of fixed addresses, which runs only on the main build it was found in (AGENTS.md)
 #include "hle.h"
-#include <malloc/malloc.h>
-#include <mach/mach.h>
+#include <sys/mman.h>
 #include <stdatomic.h>
 
 // Slot layouts: which slots the host fills and which do nothing (up to 6; 0 ends the list); the others keep the guest's own functions
@@ -42,7 +41,7 @@ static const struct { const char *build, *what; int layout; uint64_t obj, vtable
 };
 enum { NSLOT = 32 };
 
-static malloc_zone_t *g_zone;
+static plat_zone_t *g_zone;
 static _Atomic int64_t g_used, g_peak;   // bytes in use (usable sizes) and their high-water mark, for the [mem] line (one per 256 MB of new peak)
 static void used(int64_t d) {
     int64_t after = atomic_fetch_add(&g_used, d) + d, peak = atomic_load(&g_peak);
@@ -51,16 +50,16 @@ static void used(int64_t d) {
 }
 static size_t align_of(uint32_t a) { return a > 16 ? a : 16; }   // 0 = DEFAULT_ALIGNMENT, 16 bytes as Binned3 gives
 static void *alloc(size_t n, uint32_t a) {
-    void *p = align_of(a) == 16 ? malloc_zone_malloc(g_zone, n ? n : 1) : malloc_zone_memalign(g_zone, align_of(a), n ? n : 1);
-    if (p) used((int64_t)malloc_size(p));
+    void *p = align_of(a) == 16 ? plat_zone_malloc(g_zone, n ? n : 1) : plat_zone_memalign(g_zone, align_of(a), n ? n : 1);
+    if (p) used((int64_t)plat_malloc_size(p));
     return p;
 }
-static void release(void *p) { if (p) { used(-(int64_t)malloc_size(p)); malloc_zone_free(g_zone, p); } }
+static void release(void *p) { if (p) { used(-(int64_t)plat_malloc_size(p)); plat_zone_free(g_zone, p); } }
 static void *realloc_aligned(void *p, size_t n, uint32_t a) {
     if (!p) return alloc(n, a);
     if (!n) { release(p); return NULL; }
-    size_t old = malloc_size(p);
-    if (align_of(a) == 16) { void *q = malloc_zone_realloc(g_zone, p, n); if (q) used((int64_t)malloc_size(q) - (int64_t)old); return q; }
+    size_t old = plat_malloc_size(p);
+    if (align_of(a) == 16) { void *q = plat_zone_realloc(g_zone, p, n); if (q) used((int64_t)plat_malloc_size(q) - (int64_t)old); return q; }
     if (!((uintptr_t)p & (align_of(a) - 1)) && old >= n) return p;
     void *q = alloc(n, a); if (!q) return NULL;
     memcpy(q, p, old < n ? old : n); release(p); return q;
@@ -79,12 +78,12 @@ static void *m_Realloc(void *self, void *p, size_t n, uint32_t a) {
 }
 static void *m_TryRealloc(void *self, void *p, size_t n, uint32_t a) { (void)self; return realloc_aligned(p, n, a); }
 static void m_Free(void *self, void *p) { (void)self; release(p); }
-static size_t m_QuantizeSize(void *self, size_t n, uint32_t a) { (void)self; (void)a; return malloc_good_size(n); }
-static bool m_GetAllocationSize(void *self, void *p, size_t *out) { (void)self; if (!p) return false; *out = malloc_size(p); return true; }
+static size_t m_QuantizeSize(void *self, size_t n, uint32_t a) { (void)self; (void)a; return plat_malloc_good_size(n); }
+static bool m_GetAllocationSize(void *self, void *p, size_t *out) { (void)self; if (!p) return false; *out = plat_malloc_size(p); return true; }
 static void *m_Malloc32(void *self, uint32_t n, uint32_t a) { return m_Malloc(self, n, a); }
 static void *m_Realloc32(void *self, void *p, uint32_t n, uint32_t a) { return m_Realloc(self, p, n, a); }
-static uint32_t m_QuantizeSize32(void *self, uint32_t n, uint32_t a) { (void)self; (void)a; size_t q = malloc_good_size(n); return q > UINT32_MAX ? n : (uint32_t)q; }
-static bool m_GetAllocationSize32(void *self, void *p, uint32_t *out) { (void)self; if (!p) return false; *out = (uint32_t)malloc_size(p); return true; }
+static uint32_t m_QuantizeSize32(void *self, uint32_t n, uint32_t a) { (void)self; (void)a; size_t q = plat_malloc_good_size(n); return q > UINT32_MAX ? n : (uint32_t)q; }
+static bool m_GetAllocationSize32(void *self, void *p, uint32_t *out) { (void)self; if (!p) return false; *out = (uint32_t)plat_malloc_size(p); return true; }
 static void m_Nothing(void *self) { (void)self; }   // Trim (its bool argument is ignored), the thread-local cache setup and teardown, DumpAllocatorStats
 static void *g_vt[NSLOT];
 static const char *g_what;
@@ -104,9 +103,9 @@ int dm_ue_heap_owns(uint64_t a, uint64_t n) {
     if (!g_zone || !a || !n) return 0;
     int dm_guest_as_contains(uintptr_t a);   // hle_svc.c
     if (dm_guest_as_contains((uintptr_t)a) || dm_guest_as_contains((uintptr_t)(a + n - 1))) return 0;   // inside the guest block: not this heap
-    vm_address_t at = (vm_address_t)a; vm_size_t sz = 0; vm_region_basic_info_data_64_t info; mach_msg_type_number_t cnt = VM_REGION_BASIC_INFO_COUNT_64; mach_port_t obj;
-    if (vm_region_64(mach_task_self(), &at, &sz, VM_REGION_BASIC_INFO_64, (vm_region_info_t)&info, &cnt, &obj) != KERN_SUCCESS) return 0;   // vm_region_64: iOS has no mach_vm.h
-    return at <= a && a + n <= at + sz && (info.protection & (VM_PROT_READ | VM_PROT_WRITE)) == (VM_PROT_READ | VM_PROT_WRITE);
+    uint64_t at = 0, sz = 0; int prot = 0;
+    if (plat_mem_region(a, &at, &sz, &prot)) return 0;
+    return at <= a && a + n <= at + sz && (prot & (PROT_READ | PROT_WRITE)) == (PROT_READ | PROT_WRITE);
 }
 
 // The host's vtable over the guest's (the trivial slots stay the guest's), and the zone behind it
@@ -119,7 +118,7 @@ static void fill(const uint8_t *vtable, int L, const char *what) {
     g_vt[k_lay[L].free_] = (void *)m_Free;
     g_vt[k_lay[L].quantize] = s32 ? (void *)m_QuantizeSize32 : (void *)m_QuantizeSize; g_vt[k_lay[L].get_size] = s32 ? (void *)m_GetAllocationSize32 : (void *)m_GetAllocationSize;
     for (int s = 0; s < 6 && k_lay[L].nothing[s]; s++) g_vt[k_lay[L].nothing[s]] = (void *)m_Nothing;
-    g_zone = malloc_create_zone(0, 0); malloc_set_zone_name(g_zone, "guest Unreal heap"); g_what = what;
+    g_zone = plat_zone_create("guest Unreal heap"); g_what = what;
 }
 
 // Called once the modules are loaded and relocated, before any guest code runs

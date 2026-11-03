@@ -1,14 +1,10 @@
-#include <TargetConditionals.h>
 // Crash state: prints the faulting address, pc, lr (converted to module-relative offsets) and the registers; dispatches page fault hooks.
 // Only signal handling itself lives here: diagnostic features (probes / UI messages / sampling) are in diag.c, and this file does not depend on them (the graphics unit tests link only this file).
 #include "dm.h"
 #include <signal.h>
 #include <dlfcn.h>
-#include <sys/ucontext.h>
 #include <unistd.h>
 #include <sys/mman.h>
-#include <libkern/OSCacheControl.h>
-#include <mach/mach.h>
 #include <stdatomic.h>
 #include <time.h>
 
@@ -35,6 +31,9 @@ void crash_watch_progress(uint32_t tick, const char *stage) {
     atomic_fetch_add(&g_watch_count, 1);
     atomic_store(&g_watch_last_ns, watch_now_ns());
 }
+// While the app is suspended (paused, in the background: nxhost_lifecycle) nothing progresses on purpose: the watchdog counts no stall then, and counts from the resume
+static _Atomic int g_watch_hold;
+void crash_watch_hold(int on) { atomic_store(&g_watch_hold, on != 0); atomic_store(&g_watch_last_ns, watch_now_ns()); }
 void crash_watch_frame(void) { if (atomic_load(&g_watch_pregame)) crash_watch_progress(0, "present frame"); }
 void crash_watch_pregame_done(void) { atomic_store(&g_watch_pregame, 0); }
 void crash_watch_pregame_again(void) { atomic_store(&g_watch_pregame, 1); }   // Back from a run to the front end: count progress by presented frames again (diag.c)
@@ -47,6 +46,7 @@ static void *watchdog_main(void *arg) {
         // which is misjudged on the spot as a hang and exits (accept inv_drag_out, local load 11, the watchdog thread was switched out between the two reads). Reading this way gives last ≤ now; and if the clock ever wraps around it is not judged either
         uint64_t last = atomic_load(&g_watch_last_ns), now = watch_now_ns();
         if (last > now) continue;
+        if (atomic_load(&g_watch_hold)) { atomic_store(&g_watch_last_ns, now); continue; }   // suspended: no stall (crash_watch_hold)
         // Second-scale stall (progress has stopped for more than 1 second but has not yet reached the kill threshold): do not exit, dump what each thread is waiting on. When hitting a case of "only one frame every 2 seconds", the 15-second threshold cannot catch it and the log has nothing on what it is waiting for.
         // Dump only after entering a run; at most 3 dumps per process, at least 10 seconds between two dumps (the loading screen and the pause menu also stop ticks, do not let them flood the log)
         { static int dumps; static uint64_t last_dump, dumped_for;
@@ -59,7 +59,7 @@ static void *watchdog_main(void *arg) {
                 atomic_load(&g_watch_tick), g_watch_stage[idx]);
             if (g_dump_hook) g_dump_hook();
             if (g_wait_dump) g_wait_dump();   // State of all blocking wait points on the graphics side (registered when nvn_mtl.m initializes)
-#if TARGET_OS_OSX
+#if PLAT_MAC
             { const char *d = getenv("DM_WATCH_SAMPLE");   // Mac diagnostics: when stuck, sample itself for 1 second and write the thread stacks to this path
               if (d) { char c[1200]; snprintf(c, sizeof c, "/usr/bin/sample %d 1 -f '%s' >/dev/null 2>&1", (int)getpid(), d); if (system(c)) LOG("watchdog: sampling failed"); else LOG("watchdog: thread stacks written to %s", d); } }
 #endif
@@ -83,8 +83,8 @@ void crash_off(const char *tag, uint64_t a) {   // Also used by diag.c
 void dm_backtrace(uint64_t fp) {
     fprintf(stderr, "[dm] bt:");
     for (int i = 0; i < 32 && fp && !(fp & 7); i++) {
-        uint64_t w[2]; vm_size_t got = 0;
-        if (vm_read_overwrite(mach_task_self(), (vm_address_t)fp, sizeof w, (vm_address_t)w, &got) != KERN_SUCCESS || got != sizeof w) break;
+        uint64_t w[2];
+        if (plat_mem_read((uint64_t)fp, w, sizeof w)) break;
         uint64_t nfp = w[0], ra = w[1];
         off("", ra);
         if (nfp <= fp) break;
@@ -129,11 +129,14 @@ static void crash_gate(int sig) {
     if (none == me) _exit(128 + sig);
     for (;;) pause();
 }
+#if PLAT_ANDROID
+static struct sigaction crash_prev[NSIG];   // the handlers before ours (crash_install), for the tombstone
+#endif
 static void on_crash(int sig, siginfo_t *si, void *uc_) {
     ucontext_t *uc = uc_;
     if (sig == SIGTRAP && g_trap_hook && g_trap_hook(uc)) return;
     if (sig == SIGSEGV || sig == SIGBUS) {
-        int is_write = (int)((uc->uc_mcontext->__es.__esr >> 6) & 1);   // The WnR bit of ESR
+        int is_write = (int)((PLAT_UC_ESR(uc) >> 6) & 1);   // The WnR bit of ESR
         for (int i = 0; i < g_nfault_hook; i++) if (g_fault_hook[i](si->si_addr, is_write, uc)) return;
     }
     crash_gate(sig);
@@ -142,7 +145,7 @@ static void on_crash(int sig, siginfo_t *si, void *uc_) {
     for (int i = 0; ftrylockfile(stderr); i++) {
         if (i < 100) { usleep(10000); continue; }
         char b[256]; int n = snprintf(b, sizeof b, "[dm] CRASH sig=%d (stderr held for 1 s, no dump)", sig);
-        uint64_t at[2] = {uc->uc_mcontext->__ss.__pc, uc->uc_mcontext->__ss.__lr};
+        uint64_t at[2] = {PLAT_UC_PC(uc), PLAT_UC_LR(uc)};
         for (int k = 0; k < 2; k++) { module_t *m = module_of((void *)at[k]);
             n += m ? snprintf(b + n, sizeof b - n, " %s=%s+%#llx", k ? "lr" : "pc", m->name, at[k] - (uint64_t)m->base) : snprintf(b + n, sizeof b - n, " %s=%#llx", k ? "lr" : "pc", at[k]); }
         n += snprintf(b + n, sizeof b - n, "\n");
@@ -151,25 +154,25 @@ static void on_crash(int sig, siginfo_t *si, void *uc_) {
     }
     funlockfile(stderr);
     fprintf(stderr, "[dm] CRASH sig=%d", sig);
-    off("addr", (uint64_t)si->si_addr); off("pc", uc->uc_mcontext->__ss.__pc); off("lr", uc->uc_mcontext->__ss.__lr);
-    fprintf(stderr, " sp=%#llx\n", uc->uc_mcontext->__ss.__sp);
-    for (int i = 0; i < 29; i++) fprintf(stderr, "x%d=%#llx%s", i, uc->uc_mcontext->__ss.__x[i], i % 6 == 5 ? "\n" : " ");
+    off("addr", (uint64_t)si->si_addr); off("pc", PLAT_UC_PC(uc)); off("lr", PLAT_UC_LR(uc));
+    fprintf(stderr, " sp=%#llx\n", (unsigned long long)PLAT_UC_SP(uc));
+    for (int i = 0; i < 29; i++) fprintf(stderr, "x%d=%#llx%s", i, (unsigned long long)PLAT_UC_X(uc, i), i % 6 == 5 ? "\n" : " ");
     fprintf(stderr, "\n");
     // What the registers point at: the first six words of each readable target (read with vm_read_overwrite, which fails instead of faulting); a word inside a module prints as a module offset, so an object's vtable names its class
     for (int i = 0; i < 29; i++) {
-        uint64_t a = uc->uc_mcontext->__ss.__x[i], w[6]; vm_size_t got = 0;
-        if (a < 0x100000000ull || (a & 7) || vm_read_overwrite(mach_task_self(), (vm_address_t)a, sizeof w, (vm_address_t)w, &got) != KERN_SUCCESS || got != sizeof w) continue;
+        uint64_t a = PLAT_UC_X(uc, i), w[6];
+        if (a < 0x100000000ull || (a & 7) || plat_mem_read(a, w, sizeof w)) continue;
         fprintf(stderr, "[dm] *x%d:", i);
         for (int k = 0; k < 6; k++) off("", w[k]);
         fputc('\n', stderr);
     }
-    dm_backtrace(uc->uc_mcontext->__ss.__fp);
+    dm_backtrace(PLAT_UC_FP(uc));
     // Stack scan: when the frame chain is broken (a return address was overwritten, pc = lr lands on garbage) the backtrace prints nothing; scan 512 words up from sp and list everything that resolves to a module / host symbol (nearest callers first)
-    {   uint64_t sp = uc->uc_mcontext->__ss.__sp;   // The frame just popped (when a return address was overwritten, the bad value and the leftovers of whatever overwrote it sit below sp)
-        fprintf(stderr, "[dm] fp=%#llx  0x100 bytes below sp:", (unsigned long long)uc->uc_mcontext->__ss.__fp);
+    {   uint64_t sp = PLAT_UC_SP(uc);   // The frame just popped (when a return address was overwritten, the bad value and the leftovers of whatever overwrote it sit below sp)
+        fprintf(stderr, "[dm] fp=%#llx  0x100 bytes below sp:", (unsigned long long)PLAT_UC_FP(uc));
         for (int i = -32; i < 0 && sp && !(sp & 7); i++) fprintf(stderr, "%s%llx", (i + 32) % 4 ? " " : "\n[dm]   ", (unsigned long long)((uint64_t *)sp)[i]);
         fputc('\n', stderr); }
-    {   uint64_t sp = uc->uc_mcontext->__ss.__sp; int n = 0;
+    {   uint64_t sp = PLAT_UC_SP(uc); int n = 0;
         fprintf(stderr, "[dm] stack scan sp=%#llx:", (unsigned long long)sp);
         for (int i = -32; i < 512 && n < 24 && sp && !(sp & 7); i++) {
             uint64_t v = ((uint64_t *)sp)[i]; Dl_info di;
@@ -180,6 +183,16 @@ static void on_crash(int sig, siginfo_t *si, void *uc_) {
         }
         fputc('\n', stderr); }
     if (g_dump_hook) g_dump_hook();
+#if PLAT_ANDROID
+    // Hand the signal on to the handler that was there before ours (debuggerd's, behind ART's libsigchain), so the phone also writes a tombstone and logs a native backtrace with
+    // libnxhost's symbols. A fault returns and runs the instruction again into that handler; abort and the others are raised again. SIGALRM (the watchdogs) ends here
+    if (sig != SIGALRM && crash_prev[sig].sa_handler != SIG_IGN) {
+        fflush(stderr); sigaction(sig, &crash_prev[sig], 0);
+        if (sig == SIGSEGV || sig == SIGBUS || sig == SIGILL || sig == SIGTRAP) return;
+        sigset_t un; sigemptyset(&un); sigaddset(&un, sig); pthread_sigmask(SIG_UNBLOCK, &un, 0);   // the handler runs with sig blocked
+        raise(sig);
+    }
+#endif
     _exit(128 + sig);
 }
 // The signal alternate stack is per thread: every guest thread must call this when it starts running (only then can the crash state be printed on the alternate stack on a stack overflow)
@@ -208,8 +221,16 @@ void crash_install(void) {
         pthread_t th; if (pthread_create(&th, NULL, watchdog_main, NULL)) die("watchdog thread");
         pthread_detach(th);
     }
+#if PLAT_ANDROID
+    // In an app these calls reach ART's libsigchain, which keeps its own handler in front: a SIGSEGV or SIGBUS goes to ART's fault manager first (implicit null checks, stack
+    // overflow and the userfaultfd GC, all for ART's own threads and code) and comes here when ART declines it, with SA_ONSTACK kept. Guest threads are plain pthreads that ART
+    // never attaches, so it declines every guest fault. What was installed before (debuggerd's handler) is kept for on_crash to hand on to
+    sigaction(SIGSEGV, &sa, &crash_prev[SIGSEGV]); sigaction(SIGBUS, &sa, &crash_prev[SIGBUS]); sigaction(SIGILL, &sa, &crash_prev[SIGILL]); sigaction(SIGTRAP, &sa, &crash_prev[SIGTRAP]);
+    sigaction(SIGABRT, &sa, &crash_prev[SIGABRT]);
+#else
     sigaction(SIGSEGV, &sa, 0); sigaction(SIGBUS, &sa, 0); sigaction(SIGILL, &sa, 0); sigaction(SIGTRAP, &sa, 0);
     // abort() too (an assertion or an uncaught exception in the host or a framework): Big Brain Academy: Brain vs. Brain died once with SIGABRT 11 minutes into a run with nothing
     // in the log and no crash report, so where it came from was lost
     sigaction(SIGABRT, &sa, 0);
+#endif
 }

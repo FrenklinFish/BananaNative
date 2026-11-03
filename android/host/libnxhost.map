@@ -1,0 +1,13 @@
+/* What libnxhost.so exports: the entry the Android front end calls (dm/host/plat/front_android.c), the launcher interface (dm/host/android/input_android.h), the window and the
+   Vulkan selftest (dm/gfx/vk_android/vk_android.h), and JNI_OnLoad; everything else stays inside */
+{
+  global:
+    nxhost_main;
+    nxhost_*;
+    nxhost_set_window;
+    nxhost_vk_selftest;
+    JNI_OnLoad;
+    Java_*;
+  local:
+    *;
+};

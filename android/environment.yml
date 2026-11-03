@@ -1,0 +1,12 @@
+# The Mac's packer for the Android app (scripts/pack_android.py): Python 3.14 (zstd), Capstone 5 and lz4 for the rewriter, SPIRV-Tools' spirv-val for the
+# shader build. The translator also needs the .NET 10 runtime (brew install --cask dotnet-sdk). Keep the environment on the dump drive:
+#   micromamba create -p <dump drive>/bananative-env -f android/environment.yml
+name: bananative
+channels: [conda-forge]
+dependencies:
+  - python=3.14
+  - spirv-tools
+  - pip
+  - pip:
+      - capstone>=5,<6
+      - lz4

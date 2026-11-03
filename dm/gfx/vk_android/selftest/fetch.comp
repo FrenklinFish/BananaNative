@@ -1,0 +1,11 @@
+#version 450
+// DM_VK_NANSCAN (vka_nanscan.c): the texels of a small test texture as the device samples them (texelFetch, level 0, layer 0), into a buffer
+layout(local_size_x = 8, local_size_y = 8) in;
+layout(set = 0, binding = 0) uniform sampler2DArray img;
+layout(set = 0, binding = 1) buffer O { vec4 t[]; } o;
+layout(push_constant) uniform P { uvec2 size; uint layer; uint pad; } pc;
+void main() {
+    uvec2 p = gl_GlobalInvocationID.xy;
+    if (p.x >= pc.size.x || p.y >= pc.size.y) return;
+    o.t[p.y * pc.size.x + p.x] = texelFetch(img, ivec3(p, pc.layer), 0);
+}

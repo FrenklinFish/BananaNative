@@ -1,14 +1,12 @@
 // Multi-module loading (playing the role of Horizon's rtld): mapping, claiming thread slots, gate registration, cross-module relocation, take-over by name, segment permissions.
 // The code area (original text and patch area) is set to read-only+execute as soon as it is copied in, and from then on the loader only writes data: on iOS these two blocks must be embedded as is as signed code segments.
+#include <pthread.h>
 #include "dm.h"
-#include <TargetConditionals.h>
 #include <fcntl.h>
 #include <sys/mman.h>
 #include <sys/stat.h>
 #include <unistd.h>
 #include <limits.h>
-#include <mach-o/getsect.h>
-#include <mach-o/ldsyms.h>
 #include "hle.h"
 
 module_t *g_mod;
@@ -16,33 +14,17 @@ int g_nmod;
 // Stable module addresses live in g_mod; lookup order follows activation, including unload/reload.
 static module_t **g_loaded; static int g_nloaded, g_mod_capacity;
 static pthread_rwlock_t g_modules_mu = PTHREAD_RWLOCK_INITIALIZER;
-pthread_key_t g_key18, g_keytls, g_keytlr, g_keygate;
-enum { KEY_K18, KEY_KTLS, KEY_KTLR, KEY_KGATE, KEY_N };
+#if PLAT_APPLE
+pthread_key_t g_key18, g_keytls, g_keytlr, g_keygate;   // the thread slots (plat_apple.h)
+#endif
+enum { KEY_K18 = PLAT_SLOT_K18, KEY_KTLS = PLAT_SLOT_KTLS, KEY_KTLR = PLAT_SLOT_KTLR, KEY_KGATE = PLAT_SLOT_KGATE, KEY_N = PLAT_SLOT_N };
 
 uint64_t resolve_import(module_t *m, const char *name);
 int hle_implements(const char *name);
 void gate_register(uint64_t ret_addr, const char *kind, int arg, uint64_t orig);
 
-static pthread_key_t key_value(unsigned i) {
-    switch (i) {
-    case KEY_K18: return g_key18; case KEY_KTLS: return g_keytls; case KEY_KTLR: return g_keytlr;
-    default: return g_keygate;
-    }
-}
-static void create_keys(void) {
-    if (pthread_key_create(&g_key18, NULL) || pthread_key_create(&g_keytls, NULL) ||
-        pthread_key_create(&g_keytlr, NULL) || pthread_key_create(&g_keygate, NULL)) die("cannot create the host key");
-    LOG("key numbers K18=%lu KTLS=%lu KTLR=%lu KGATE=%lu", g_key18, g_keytls, g_keytlr, g_keygate);
-}
-
-// K slot check: the pthread TSD layout is fixed, slot = tpidrro_el0 + 8*key
-static void tsd_check(void) {
-    pthread_setspecific(g_key18, (void *)0x1234);
-    uint64_t base; __asm__ volatile("mrs %0, tpidrro_el0" : "=r"(base));
-    uint64_t off = *(uint64_t *)(g_mod[0].base + g_mod[0].key_page_off + g_mod[0].key_idx[KEY_K18] * 8);
-    if (((uint64_t *)(base & ~7ull))[off / 8] != 0x1234) die("TSD layout mismatch");
-    pthread_setspecific(g_key18, 0);
-}
+// K slot check: the main thread reaches the K18 slot through the key page entry the rewritten code reads (plat.h "Guest thread slots")
+static void tsd_check(void) { plat_slot_check(*(uint64_t *)(g_mod[0].base + g_mod[0].key_page_off + g_mod[0].key_idx[KEY_K18] * 8)); }
 
 static void build_symhash(module_t *m);
 static void parse_dynamic(module_t *m) {
@@ -160,6 +142,51 @@ int dm_sdk_ounce(void) {
     return ounce;
 }
 
+// The constants NVN2's own nvnDeviceGetInteger answers: the driver is compiled into the game's sdk, and its API and GPU code versions move with the SDK (20.5.19: API 231.30, GPU code minor 17;
+// 21.4.4: 231.39 and 20). Games check them: Splatoon Raiders requires minor >= 39 and otherwise creates no graphics system (main+0x31b86b0). The driver's switch over the items loads w0 with the
+// major first, then jumps through a byte table: mov w0, #231 / adr / adrp + add (the table) / ldrb / add, lsl #2 / br, with cmp wN, #<last item> before it. A case that is a constant is mov w0, #v; b.
+// Returns 1 with *out set when item has such a case; 0 for a case that reads something else (most items go through the driver's table lookup or read the GPU's description), or no such switch
+// The switch is found once (pthread_once: several guest threads ask for device items at once, and a reader seeing found set before table and cases would read through null)
+static const uint8_t *g_nvn2_table; static const uint32_t *g_nvn2_cases; static unsigned g_nvn2_last; static int g_nvn2_found;
+static pthread_once_t g_nvn2_once = PTHREAD_ONCE_INIT;
+static void nvn2_find_switch(void) {
+    const uint8_t *table = NULL; const uint32_t *cases = NULL; unsigned last = 0; int found = 0;
+    {
+        for (int i = 0; i < g_nmod && !found; i++) if (!strcmp(g_mod[i].name, "sdk")) {
+            const uint32_t *t = (const uint32_t *)g_mod[i].base; size_t n = g_mod[i].ro_off / 4;
+            for (size_t p = 8; p + 9 < n && !found; p++) if (t[p] == 0x52801CE0) {   // mov w0, #231
+                const uint8_t *tb = NULL; const uint32_t *adr = NULL; int lim = -1, ldrb = 0, br = 0;
+                for (size_t q = p - 8; q <= p + 8; q++) {
+                    uint32_t w = t[q];
+                    if ((w & 0xFFC0001F) == 0x7100001F) lim = (w >> 10) & 0xFFF;   // cmp wN, #imm
+                    else if ((w & 0x9F000000) == 0x90000000 && (t[q + 1] & 0xFFC00000) == 0x91000000) {   // adrp + add
+                        int64_t pg = (int64_t)(((w >> 3) & 0x1FFFFC) | ((w >> 29) & 3)); if (pg & 0x100000) pg -= 0x200000;
+                        tb = (const uint8_t *)(((uintptr_t)&t[q] & ~(uintptr_t)0xFFF) + (uintptr_t)(pg * 4096) + ((t[q + 1] >> 10) & 0xFFF));
+                    } else if ((w & 0x9F000000) == 0x10000000) {   // adr
+                        int64_t off = (int64_t)(((w >> 3) & 0x1FFFFC) | ((w >> 29) & 3)); if (off & 0x100000) off -= 0x200000;
+                        adr = (const uint32_t *)((const char *)&t[q] + off);
+                    } else if ((w & 0xFFE0FC00) == 0x38606800) ldrb = 1;   // ldrb wK, [xT, xI]
+                    else if ((w & 0xFFFFFC1F) == 0xD61F0000) br = 1;       // br
+                }
+                if (!tb || !adr || lim <= 1 || !ldrb || !br) continue;
+                const char *ro = (const char *)g_mod[i].base + g_mod[i].ro_off, *ro_end = (const char *)g_mod[i].base + g_mod[i].key_page_off;
+                if ((const char *)tb < ro || (const char *)tb + lim >= ro_end) continue;
+                table = tb; cases = adr; last = (unsigned)lim; found = 1;
+            }
+        }
+        if (dm_sdk_ounce() && !found) LOG("[RED] sdk: NVN2's nvnDeviceGetInteger switch not found; the device answers the newest versions known");
+    }
+    g_nvn2_table = table; g_nvn2_cases = cases; g_nvn2_last = last; g_nvn2_found = found;
+}
+int dm_sdk_nvn2_item(unsigned item, int *out) {
+    pthread_once(&g_nvn2_once, nvn2_find_switch);
+    if (!g_nvn2_found || item > g_nvn2_last) return 0;
+    const uint32_t *c = g_nvn2_cases + g_nvn2_table[item];
+    if ((c[0] & 0xFFE0001F) != 0x52800000 || (c[1] & 0xFC000000) != 0x14000000) return 0;   // mov w0, #imm16; b
+    *out = (int)((c[0] >> 5) & 0xFFFF);
+    return 1;
+}
+
 // Cross-module symbol resolution: first look for a definition in the loaded modules, and only if not found hand over to HLE / stubs
 static uint64_t resolve_sym(module_t *m, const char *name) {
     void *p = loaded_sym(name); if (p) return (uint64_t)p;
@@ -170,7 +197,7 @@ static uint64_t resolve_sym(module_t *m, const char *name) {
 static const hle_force_ent *g_force; static unsigned g_nforce; static unsigned *g_force_hits;
 static unsigned *g_fidx, g_fmask;   // name hash over the table: force_lookup runs for every named relocation, and each lookup used to strcmp its way through all 722 entries (the swhle table's scan is hashed the same way, hle.c)
 static void force_init(void) {
-    unsigned long sz; g_force = (const hle_force_ent *)getsectiondata(&_mh_execute_header, "__DATA", "swforce", &sz);
+    unsigned long sz; g_force = (const hle_force_ent *)plat_table("swforce", &sz);
     g_nforce = g_force ? (unsigned)(sz / sizeof *g_force) : 0;
     g_force_hits = calloc(g_nforce + 1, sizeof *g_force_hits);
     unsigned cap = 16; while (cap < g_nforce * 2) cap <<= 1;
@@ -207,7 +234,7 @@ static void read_layout(module_t *m, const char *dir) {
     FILE *f = fopen(path, "r");
     if (!f) die("open %s", path);
     static const char *kn[KEY_N] = {"K18", "KTLS", "KTLR", "KGATE"};
-    char line[256], key[48]; unsigned long v; unsigned seen = 0;
+    char line[256], key[48]; unsigned long v; unsigned seen = 0, android = 0;
     while (fgets(line, sizeof line, f)) {
         if (sscanf(line, "# %47s %lx", key, &v) != 2) die("%s: the output comes from an old rewriter; rewrite the modules again with dm/tools/patch_nso.py", path);
         if (!strcmp(key, "PATCH_OFF")) m->patch_off = strtoll(line + 2 + strlen(key), NULL, 16);   // may be negative (patch area before the base)
@@ -228,6 +255,7 @@ static void read_layout(module_t *m, const char *dir) {
             strcpy(m->ue_cvar[m->n_ue_cvar].name, key + 8); m->ue_cvar[m->n_ue_cvar++].off = v;
         }
         else if (!strcmp(key, "BUILD_ID")) sscanf(line, "# %*s %32s", m->build_id);
+        else if (!strcmp(key, "TARGET_ANDROID")) android = v != 0;   // patch_nso.py --target android: the slot base the rewritten code reads (plat.h "Guest thread slots")
         else for (int k = 0; k < KEY_N; k++) {
             size_t n = strlen(kn[k]);
             if (!strncmp(key, "KEY_", 4) && !strncmp(key + 4, kn[k], n) && !strcmp(key + 4 + n, "_IDX")) {
@@ -236,6 +264,7 @@ static void read_layout(module_t *m, const char *dir) {
         }
     }
     fclose(f);
+    if ((int)android != PLAT_ANDROID) die("%s: rewritten for %s, this host runs on %s: rewrite the modules with dm/tools/patch_nso.py%s", path, android ? "Android" : "Apple", PLAT_ANDROID ? "Android" : "Apple", PLAT_ANDROID ? " --target android" : "");
     if (!m->patch_off || m->key_page_off % 0x4000 || m->key_page_size != 0x4000 || seen != (1u << KEY_N) - 1)
         die("%s: the output comes from an old rewriter; rewrite the modules again with dm/tools/patch_nso.py", path);
     if (m->patch_off < 0 && (!m->image_size || !m->file_image_len || m->file_image_len % 0x4000 || m->patch_off % 0x4000 || m->key_page_off + m->key_page_size > m->image_size))
@@ -273,8 +302,13 @@ static void install_key_page(module_t *m) {
     if (m->key_page_off + m->key_page_size > m->size) die("%s: key page out of range", m->name);
     uint64_t *page = (uint64_t *)(m->base + m->key_page_off);
     memset(page, 0, m->key_page_size);
-    for (unsigned i = 0; i < KEY_N; i++) page[m->key_idx[i]] = (uint64_t)key_value(i) * 8;
+    for (unsigned i = 0; i < KEY_N; i++) page[m->key_idx[i]] = plat_slot_key_entry(i);
+    // Apple: an entry is pthread key × 8, and 0 means the key was never created (the game would read TSD slot 0, the pthread self pointer). Android: the entries are the slots'
+    // offsets in the thread's slot block, and K18's is 0 by design. On both, two slots must not share an entry
+#if PLAT_APPLE
     for (int k = 0; k < KEY_N; k++) if (!page[m->key_idx[k]]) die("%s: key page entry %d is 0 (host key not created) -- the game would read TSD slot 0", m->name, k);
+#endif
+    for (int k = 0; k < KEY_N; k++) for (int j = 0; j < k; j++) if (page[m->key_idx[k]] == page[m->key_idx[j]]) die("%s: key page entries %d and %d are both %#llx", m->name, j, k, (unsigned long long)page[m->key_idx[k]]);
     if (mprotect(m->base + m->key_page_off, m->key_page_size, PROT_READ)) die("%s key page mprotect", m->name);
     if (m->fps_state_off) install_fps_state(m);
 }
@@ -289,7 +323,8 @@ static void register_gates(module_t *m, const char *dir) {
             if (sscanf(line, "%lx %15s %d %lx", &ret, kind, &arg, &orig) == 4) { gate_register((uint64_t)m->base + ret, kind, arg, orig); ng++; }
         fclose(f);
     }
-    LOG("%s: gates %d patch_off %#llx keys %lu/%lu/%lu/%lu", m->name, ng, m->patch_off, g_key18, g_keytls, g_keytlr, g_keygate);
+    LOG("%s: gates %d patch_off %#llx keys %lu/%lu/%lu/%lu", m->name, ng, m->patch_off, (unsigned long)(plat_slot_key_entry(KEY_K18) / 8),
+        (unsigned long)(plat_slot_key_entry(KEY_KTLS) / 8), (unsigned long)(plat_slot_key_entry(KEY_KTLR) / 8), (unsigned long)(plat_slot_key_entry(KEY_KGATE) / 8));
 }
 
 // DT_RELR (from SDK 20; all three modules of The Legend of Zelda: Breath of the Wild 1.9.0 have it): a compact table of relative relocations with the addend in the slot (*slot += base).
@@ -485,7 +520,6 @@ void nro_unload(module_t *m) {
 // DM_LOADHASH=1 (diagnostics): after loading, output an address-independent sha256 per module, to prove that the load results of "early start / no early start" are byte-identical.
 // Module base addresses and host ASLR differ every run, and only the values of the relocation slots change with them: copy the image and, using the same relocation table, replace every slot with an address-independent token --
 // RELATIVE → (0, addend); symbol target falls in some module → (1 + module number, offset within the module); otherwise (host forced take-over / host symbol) → (name FNV, addend); all other bytes as is.
-#include <CommonCrypto/CommonDigest.h>
 void loader_hash_log(void) {
     if (!getenv("DM_LOADHASH")) return;
     for (int k = 0; k < g_nmod; k++) {
@@ -513,7 +547,7 @@ void loader_hash_log(void) {
                 memcpy(cp + r->r_offset, &tok[0], 8);                // The 8 slot bytes are replaced by the token head; the token tail is appended below in slot order
                 nslot++;
             }
-        CC_SHA256_CTX c; CC_SHA256_Init(&c); CC_SHA256_Update(&c, cp, (CC_LONG)m->size);
+        plat_sha256_t c; plat_sha256_init(&c); plat_sha256_update(&c, cp, m->size);
         for (int t = 0; t < 2; t++)                                // Token tails (addend / offset) are appended in slot order, and together with the slot head uniquely determine the slot value
             for (uint64_t i = 0; i < sizes[t] / sizeof(Elf64_Rela); i++) {
                 const Elf64_Rela *r = &tabs[t][i]; uint64_t tail = (uint64_t)r->r_addend;
@@ -521,15 +555,15 @@ void loader_hash_log(void) {
                     uint64_t v = *(const uint64_t *)(m->base + r->r_offset);
                     for (int j = 0; j < g_nmod; j++) if (v >= (uint64_t)g_mod[j].base && v < (uint64_t)g_mod[j].base + g_mod[j].size) { tail = v - (uint64_t)g_mod[j].base; break; }
                 }
-                CC_SHA256_Update(&c, &tail, 8);
+                plat_sha256_update(&c, &tail, 8);
             }
-        uint8_t d[32]; CC_SHA256_Final(d, &c); free(cp);
+        uint8_t d[32]; plat_sha256_final(d, &c); free(cp);
         char hx[65]; for (int i = 0; i < 32; i++) sprintf(hx + 2 * i, "%02x", d[i]);
         LOG("DM_LOADHASH %s size %#zx relocation slots %u sha256 %s", m->name, m->size, nslot, hx);
     }
 }
 
-#if TARGET_OS_IPHONE
+#if PLAT_IOS
 // iOS does not allow code loaded at run time to execute, and Apple allows an executable only one segment with execute permission (ITMS-90999): the image is compiled into this executable by dm/ios/tools/gen_embed.py --
 // the two code blocks (original text, patch area) are sections in __TEXT, and W (the rest of ro + data + bss) is a separate RW segment. The three blocks are not adjacent in the file; here one contiguous address range is reserved,
 // and they are vm_remap'ed back at their original relative positions: code pages with copy=FALSE (sharing the same signed pages with __TEXT, r-x), W with copy=TRUE (copy-on-write, paged only when used).
@@ -590,6 +624,37 @@ static void map_image(module_t *m, const char *dir) {
     m->base = (uint8_t *)base; install_key_page(m);
 }
 #else
+// The game's window size (profile key window_fn): two leaf functions of main return the width and the height (movz w0,#imm; ret: Donkey Kong Bananza's main+0x5bf770 / +0x5bf780).
+// DM_WINDOW_SIZE=<w>x<h> writes that size into them (the Android launcher's Game resolution); unset, empty or "original" writes the game's own size from the profile, so a pack
+// rewritten with the older cut of the constants gives the game's size too. Only for the main build the row names, while the text is still writable (map_image, before the
+// seal), and after checking each function's shape: fixed addresses never run on another build. Not on iOS: the text is embedded there as signed code (map_image above)
+static void window_apply(module_t *m) {
+    if (strcmp(m->name, "main") || m->nro) return;
+    const char *e = getenv("DM_WINDOW_SIZE");
+    static const struct { const char *build; uint64_t wfn, hfn; unsigned w, h; } rows[] = DM_GAME_WINDOW_FN;
+    int r = -1, own = !e || !*e || !strcmp(e, "original");
+    for (int i = 0; i < DM_GAME_NWINDOW_FN; i++) if (!strcmp(rows[i].build, m->build_id)) r = i;
+    if (r < 0) { if (!own) LOG("[RED] DM_WINDOW_SIZE=%s: the profile has no window_fn row for main build %s; the window stays the game's", e, m->build_id); return; }
+    unsigned w = rows[r].w, h = rows[r].h;
+    if (!own) {
+        unsigned a, b; char x;
+        if (sscanf(e, "%ux%u%c", &a, &b, &x) != 2 || !a || !b || a > 0xFFFF || b > 0xFFFF) LOG("[RED] DM_WINDOW_SIZE=%s: must be <width>x<height> or original; the window stays %ux%u", e, w, h);
+        else w = a, h = b;
+    }
+    uint64_t fn[2] = {rows[r].wfn, rows[r].hfn}; unsigned v[2] = {w, h}, was[2];
+    for (int i = 0; i < 2; i++) {
+        if (fn[i] + 8 > m->text_end) { LOG("[RED] window_fn: main+%#llx is outside main's text; the window stays the pack's", (unsigned long long)fn[i]); return; }
+        const uint32_t *p = (const uint32_t *)(m->base + fn[i]);
+        if ((p[0] & 0xFFE0001Fu) != 0x52800000u || p[1] != 0xD65F03C0u) {
+            LOG("[RED] window_fn: main+%#llx is %08x %08x, not movz w0,#imm; ret: the window stays the pack's", (unsigned long long)fn[i], p[0], p[1]); return;
+        }
+        was[i] = (p[0] >> 5) & 0xFFFF;
+    }
+    for (int i = 0; i < 2; i++) *(uint32_t *)(m->base + fn[i]) = 0x52800000u | (v[i] << 5);   // movz w0,#v (the old cut's bytes: 1920 = 00f08052, 1080 = 00878052)
+    LOG("window: %ux%u (%s; main+%#llx / +%#llx; the game's own %ux%u, the pack's %ux%u)", w, h, own ? "the game's own" : "DM_WINDOW_SIZE",
+        (unsigned long long)fn[0], (unsigned long long)fn[1], rows[r].w, rows[r].h, was[0], was[1]);
+}
+
 static uint8_t *slurp(const char *path, size_t *n) {
     int fd = open(path, O_RDONLY);
     if (fd < 0) die("open %s", path);
@@ -615,7 +680,7 @@ static void map_image(module_t *m, const char *dir) {
         if (a == MAP_FAILED) die("%s mmap %#llx", m->name, (unsigned long long)(pre + m->size));
         m->base = a + pre;
         memcpy(m->base, raw, fl); memcpy(a, raw + fl, sz - bl - fl); if (bl) memcpy(m->base + m->back_off, raw + sz - bl, bl);
-        free(raw); install_key_page(m);
+        free(raw); install_key_page(m); window_apply(m);
         if (bl && mprotect(m->base + m->back_off, bl, PROT_READ | PROT_EXEC)) die("%s mprotect back patch", m->name);
         uint64_t rx = (m->text_end + 0x3FFF) & ~0x3FFFull;
         if (mprotect(m->base, rx, PROT_READ | PROT_EXEC)) die("%s mprotect text", m->name);
@@ -626,7 +691,7 @@ static void map_image(module_t *m, const char *dir) {
     m->size = (sz + 0x3FFF) & ~0x3FFFull;
     m->base = mmap(NULL, m->size, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANON, -1, 0);
     if (m->base == MAP_FAILED) die("%s mmap", m->name);
-    memcpy(m->base, raw, sz); free(raw); install_key_page(m);
+    memcpy(m->base, raw, sz); free(raw); install_key_page(m); window_apply(m);
     uint64_t rx = (m->text_end + 0x3FFF) & ~0x3FFFull;
     if (mprotect(m->base, rx, PROT_READ | PROT_EXEC)) die("%s mprotect text", m->name);
     uint64_t po = m->patch_off & ~0x3FFFull;
@@ -649,7 +714,7 @@ void load_modules(const char *dir, const char **names, int n) {
         strlcpy(m->name, names[i], sizeof m->name);
         read_layout(m, dir);
     }
-    create_keys();
+    plat_slots_init();
     for (int i = 0; i < n; i++) {
         module_t *m = &g_mod[i];
         t = now_ns(); map_image(m, dir); tm += now_ns() - t;   // On return the code area is already read-only+execute; from here on the loader only writes data

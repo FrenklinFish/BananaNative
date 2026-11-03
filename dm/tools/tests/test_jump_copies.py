@@ -101,6 +101,12 @@ class AdrOffsetBounds(unittest.TestCase):
             with self.subTest(wide=wide):
                 self.assertIsNone(self.run_site(clobber=mov(9, 0, wide)))
 
+    def test_floating_point_register_of_the_same_number_is_not_the_index(self):
+        # Mario Kart World main+0xea494: ldr s1,[x18,#0xc] between cmp w1,#5 and ldrsw x2,[x17,x1,lsl #2]; s9 / d9 are not w9
+        for fp in (0xbd400e49, 0xfd400e49):   # ldr s9, [x18, #0xc] / ldr d9, [x18, #0x18]
+            with self.subTest(fp=hex(fp)):
+                self.assertEqual(self.run_site(clobber=fp), self.TARGETS)
+
     def test_a_copy_must_be_bounded_by_its_source(self):
         self.assertEqual(self.run_site(index=0, clobber=mov(9, 0, False)), self.TARGETS)
 

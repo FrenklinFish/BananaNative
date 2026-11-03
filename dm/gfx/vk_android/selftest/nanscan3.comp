@@ -1,0 +1,15 @@
+#version 450
+// DM_VK_NANSCAN (vka_nanscan.c): counts the NaN and infinite texels of one level of a 3D texture (a shader input) and keeps the first one's position (x, y)
+layout(local_size_x = 8, local_size_y = 8) in;
+layout(set = 0, binding = 0) uniform sampler3D img;
+layout(set = 0, binding = 1) buffer O { uint nan; uint inf; uint first; uint pad; } o;
+layout(push_constant) uniform P { uvec2 size; uint depth; uint pad; } pc;
+void main() {
+    uvec2 p = gl_GlobalInvocationID.xy;
+    if (p.x >= pc.size.x || p.y >= pc.size.y || gl_GlobalInvocationID.z >= pc.depth) return;
+    vec4 v = texelFetch(img, ivec3(p, gl_GlobalInvocationID.z), 0);
+    bool n = any(isnan(v)), i = any(isinf(v));
+    if (n) atomicAdd(o.nan, 1u);
+    if (i) atomicAdd(o.inf, 1u);
+    if (n || i) atomicMin(o.first, p.y << 16 | p.x);
+}

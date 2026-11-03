@@ -3,7 +3,6 @@
 // The host takes over Decoder (below; VP8 / VP9 are decoded with libvpx, H.264 with VideoToolbox in hle_movie_avc.c, Vorbis audio with stb_vorbis): Engage's movies are 103 VP9 WebM files under RomFS/Data/StreamingAssets/Movie (2.7 GB, no audio track), and the game does not go on until the opening movie S01F has played.
 #include "hle.h"
 #include <arm_neon.h>
-#include <mach/mach.h>
 #include <pthread.h>
 #include <stdatomic.h>
 #include <unistd.h>
@@ -11,7 +10,11 @@
 #include "vpx/vp8dx.h"
 #include "hle_movie_avc.h"   // H.264 on VideoToolbox
 #include "hle_movie_yuv.h"   // md_nv12 / md_rgba, shared with hle_codec_video.c
+#if PLAT_APPLE
 #include <AudioToolbox/AudioToolbox.h>   // AAC
+#else
+#include "android/aac_android.h"         // AAC on AMediaCodec
+#endif
 // Vorbis (movie audio tracks, Link's Awakening): stb_vorbis, built into this file (dm/third_party/stb_vorbis); only its push-data API, floats out
 #define STB_VORBIS_NO_STDIO
 #define STB_VORBIS_NO_PULLDATA_API
@@ -91,7 +94,11 @@ typedef struct {
     uint8_t *vhdr[2]; int vhdr_n[2]; stb_vorbis *vb; int ch, rate; uint32_t ogg_seq; int64_t ogg_gran; int red_vb;
     int16_t *hold; size_t hold_n, hold_cap; int vb_prev;   // decoded samples (interleaved values) not handed out yet, and the last packet's blocksize, 0 at a stream's start (md_vorbis)
     // AAC (Monster Hunter Rise's movies): AudioToolbox's converter, opened at the first packet from the AudioSpecificConfig (Configure's csd-0, kept in vhdr[0]); the packet being fed
+#if PLAT_APPLE
     AudioConverterRef aac; const uint8_t *aac_pkt; UInt32 aac_pkt_n; AudioStreamPacketDescription aac_desc;
+#else
+    maac *aac;   // AMediaCodec (android/aac_android.c), opened at the first packet as on the Mac
+#endif
     uint64_t dec_n, dec_ns, dec_max;            // decode timing (on the host thread, per packet)
     unsigned long ncall[24];
 } mdec_t;
@@ -134,16 +141,16 @@ static void md_syms(void) {
 static mdec_t *md_of(void **self) { return self ? (mdec_t *)self[1] : NULL; }
 // An EventType pointer that can be signalled: 8-byte aligned and readable (vm_read_overwrite fails instead of faulting)
 static int ev_ok(const void *p) {
-    uint64_t w; vm_size_t got = 0; uintptr_t a = (uintptr_t)p;
-    return a >= 0x100000000ull && !(a & 7) && vm_read_overwrite(mach_task_self(), (vm_address_t)a, sizeof w, (vm_address_t)&w, &got) == KERN_SUCCESS && got == sizeof w;
+    uint64_t w; uintptr_t a = (uintptr_t)p;
+    return a >= 0x100000000ull && !(a & 7) && !plat_mem_read(a, &w, sizeof w);
 }
 // The SDK keeps only the pointer to the client's struct (DecoderImpl::RegisterClientEvents: str x1, [x0, #0xd0]) and reads the entry each time it signals, skipping a null one
 // (SendOutputBufferEventAvailableToClient and the others, subsdk0+0x1feb0 in DRAGON QUEST XI S). That game's movie player registers its struct before it fills it (main+0x39edab0, right after
 // the Decoder constructor: leftover values such as 0xe00000010, sometimes 0 or a stray pointer), so the entry is read at signal time; when it is not an event (any longer), the event it held
 // at registration is used, if any
 static void md_event(mdec_t *d, int i) {   // 0 input 1 output 2 format 3 error
-    void *p = NULL; vm_size_t got = 0;
-    if (d->evc && (vm_read_overwrite(mach_task_self(), (vm_address_t)&d->evc[i], sizeof p, (vm_address_t)&p, &got) != KERN_SUCCESS || got != sizeof p)) p = NULL;
+    void *p = NULL;
+    if (d->evc && plat_mem_read((uint64_t)(uintptr_t)&d->evc[i], &p, sizeof p)) p = NULL;
     void *live = p;
     if (!p || !ev_ok(p)) p = d->ev[i];
     if (p) G.signal(p);
@@ -188,7 +195,7 @@ static void md_defer_body(void *arg) {
             continue;
         }
         if (!next) pthread_cond_wait(&g_dfcv, &g_dfmu);
-        else { uint64_t w = next - now; struct timespec ts = { (time_t)(w / 1000000000u), (long)(w % 1000000000u) }; pthread_cond_timedwait_relative_np(&g_dfcv, &g_dfmu, &ts); }
+        else { uint64_t w = next - now; struct timespec ts = { (time_t)(w / 1000000000u), (long)(w % 1000000000u) }; plat_cond_timedwait_rel(&g_dfcv, &g_dfmu, &ts); }
     }
 }
 // log the first 12 calls one by one, then every 2^k-th (DM_MOVIE_TRACE=1: every call, with the calling thread and the decoder: Unity drives a movie's audio and video decoders from one thread)
@@ -364,6 +371,7 @@ static int md_vorbis(mdec_t *d, const uint8_t *p, int n, int slot) {
 // ---------- AAC ----------
 // The demuxer hands over raw AAC frames (1024 samples each) and the AudioSpecificConfig in csd-0. AudioToolbox takes the configuration as an MPEG-4 ES descriptor (the magic cookie built
 // here as FFmpeg's AudioToolbox decoder builds it); without csd-0 an AAC-LC configuration is made from the sample rate and channel count
+#if PLAT_APPLE
 static uint8_t *esds_descr(uint8_t *p, int tag, unsigned n) { *p++ = (uint8_t)tag; for (int i = 3; i > 0; i--) *p++ = (uint8_t)(n >> (7 * i) | 0x80); *p++ = (uint8_t)(n & 0x7f); return p; }
 static OSStatus aac_feed(AudioConverterRef c, UInt32 *np, AudioBufferList *bl, AudioStreamPacketDescription **pd, void *ud) {
     (void)c; mdec_t *d = ud;
@@ -410,6 +418,21 @@ static int md_aac(mdec_t *d, const uint8_t *p, int n, int slot) {
     d->out[slot].bytes = (size_t)frames * 2 * d->ch;
     return frames > 0;
 }
+static void md_aac_close(mdec_t *d) { AudioConverterDispose(d->aac); d->aac = NULL; }
+#else
+// one packet → at most one AAC frame of PCM16 in the slot (the size GetOutputBufferSize promised); samples the decoder gave beyond it wait in maac for the next packet
+static int md_aac(mdec_t *d, const uint8_t *p, int n, int slot) {
+    if (!d->aac) { if (d->red_vb) return 0; if (!(d->aac = maac_new(&d->rate, &d->ch, d->vhdr[0], d->vhdr_n[0]))) { d->red_vb++; return 0; } }
+    if (n <= 0) return 0;
+    if (d->out[slot].cap < MD_PCM_CAP) { free(d->out[slot].frm); d->out[slot].frm = malloc(MD_PCM_CAP); d->out[slot].cap = MD_PCM_CAP; }
+    int sbr = d->vhdr_n[0] > 0 && ((d->vhdr[0][0] >> 3) == 5 || (d->vhdr[0][0] >> 3) == 29);
+    int max = 1024 * (sbr ? 2 : 1) * d->ch; if (max * 2 > MD_PCM_CAP) max = MD_PCM_CAP / 2;
+    int v = maac_decode(d->aac, p, n, d->jpts, (int16_t *)d->out[slot].frm, max);
+    d->out[slot].bytes = (size_t)v * 2;
+    return v > 0;
+}
+static void md_aac_close(mdec_t *d) { maac_free(d->aac); d->aac = NULL; }
+#endif
 // The H.264 decoder, made by Configure (when the stream's parameter sets come with it) or by the first packet; RGBA pictures in the native texture mode either way.
 // Absolum's movies bring csd-0 / csd-1 to Configure, and a decoder made there used to stay NV12: the frames' bytes went into the RGBA texture as they were
 static void md_avc_open(mdec_t *d) { if (!d->avc) { d->avc = mavc_new(); if (d->fmt == MD_FMT_ABGR) mavc_set_rgba(d->avc); } }
@@ -422,12 +445,12 @@ static int md_avc(mdec_t *d, const uint8_t *p, int n, int slot, int take_only) {
     if (d->out[slot].cap < need) { free(d->out[slot].frm); d->out[slot].frm = malloc(need); d->out[slot].cap = need; }
     return mavc_take(d->avc, d->jflush, d->out[slot].frm, d->w, d->h, &d->jpts_out);
 }
-static void md_close(mdec_t *d) { if (d->vpx_on) { vpx_codec_destroy(&d->vpx); d->vpx_on = 0; } if (d->vb) { stb_vorbis_close(d->vb); d->vb = NULL; } if (d->aac) { AudioConverterDispose(d->aac); d->aac = NULL; } if (d->avc) { mavc_free(d->avc); d->avc = NULL; } }
-void dm_host_helper_qos(qos_class_t q);   // hle_thread.c
+static void md_close(mdec_t *d) { if (d->vpx_on) { vpx_codec_destroy(&d->vpx); d->vpx_on = 0; } if (d->vb) { stb_vorbis_close(d->vb); d->vb = NULL; } if (d->aac) md_aac_close(d); if (d->avc) { mavc_free(d->avc); d->avc = NULL; } }
+void dm_host_helper_qos(plat_qos_t q);   // hle_thread.c
 static void *md_worker(void *arg) {
     mdec_t *d = arg;
-    pthread_setname_np("dm movie decoder");
-    dm_host_helper_qos(QOS_CLASS_USER_INITIATED);   // under DM_QOS_MAP: decodes ahead of playback, not on the frame's critical path
+    plat_thread_set_name("dm movie decoder");
+    dm_host_helper_qos(PLAT_QOS_USER_INITIATED);   // under DM_QOS_MAP: decodes ahead of playback, not on the frame's critical path
     dm_host_mutex_lock(&d->wmu);
     for (;;) {
         while (d->job == MDJ_NONE) pthread_cond_wait(&d->wcv, &d->wmu);

@@ -4823,6 +4823,34 @@ namespace Spv.Generator
             return result;
         }
 
+        // SPV_EXT_mesh_shader (nxnative, after azmasm/switch2mac, MIT: Switch 2 task / mesh programs)
+        public Instruction EmitMeshTasksEXT(Instruction groupCountX, Instruction groupCountY, Instruction groupCountZ, Instruction payload)
+        {
+            Instruction result = NewInstruction(Op.OpEmitMeshTasksEXT);
+
+            result.AddOperand(groupCountX);
+            result.AddOperand(groupCountY);
+            result.AddOperand(groupCountZ);
+            if (payload != null)
+            {
+                result.AddOperand(payload);
+            }
+            AddToFunctionDefinitions(result);
+
+            return result;
+        }
+
+        public Instruction SetMeshOutputsEXT(Instruction vertexCount, Instruction primitiveCount)
+        {
+            Instruction result = NewInstruction(Op.OpSetMeshOutputsEXT);
+
+            result.AddOperand(vertexCount);
+            result.AddOperand(primitiveCount);
+            AddToFunctionDefinitions(result);
+
+            return result;
+        }
+
         public Instruction WritePackedPrimitiveIndices4x8NV(Instruction indexOffset, Instruction packedIndices)
         {
             Instruction result = NewInstruction(Op.OpWritePackedPrimitiveIndices4x8NV);

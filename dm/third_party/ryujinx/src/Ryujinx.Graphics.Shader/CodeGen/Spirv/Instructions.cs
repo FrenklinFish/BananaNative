@@ -253,9 +253,17 @@ namespace Ryujinx.Graphics.Shader.CodeGen.Spirv
             context.ControlBarrier(
                 context.Constant(context.TypeU32(), Scope.Workgroup),
                 context.Constant(context.TypeU32(), Scope.Workgroup),
-                context.Constant(context.TypeU32(), MemorySemanticsMask.WorkgroupMemory | MemorySemanticsMask.AcquireRelease));
+                context.Constant(context.TypeU32(), SharedSemantics(context)));
 
             return OperationResult.Invalid;
+        }
+
+        // nxnative: the memory a workgroup barrier orders: workgroup memory, and uniform (storage buffer) memory when shared memory lives in a storage buffer (SharedSpillInfo)
+        private static MemorySemanticsMask SharedSemantics(CodeGenContext context)
+        {
+            MemorySemanticsMask semantics = MemorySemanticsMask.WorkgroupMemory | MemorySemanticsMask.AcquireRelease;
+
+            return context.Properties.SharedSpill != null ? semantics | MemorySemanticsMask.UniformMemory : semantics;
         }
 
         // nxnative: the lanes of one subgroup (Metal: simdgroup_barrier), with their workgroup memory accesses ordered
@@ -264,7 +272,7 @@ namespace Ryujinx.Graphics.Shader.CodeGen.Spirv
             context.ControlBarrier(
                 context.Constant(context.TypeU32(), Scope.Subgroup),
                 context.Constant(context.TypeU32(), Scope.Subgroup),
-                context.Constant(context.TypeU32(), MemorySemanticsMask.WorkgroupMemory | MemorySemanticsMask.AcquireRelease));
+                context.Constant(context.TypeU32(), SharedSemantics(context)));
 
             return OperationResult.Invalid;
         }
@@ -1792,6 +1800,17 @@ namespace Ryujinx.Graphics.Shader.CodeGen.Spirv
 
         private static OperationResult GenerateLoadOrStore(CodeGenContext context, AstOperation operation, bool isStore)
         {
+            // nxnative (after azmasm/switch2mac, MIT): a Switch 2 mesh program's store into its per-vertex / per-primitive planes goes straight into the mesh outputs
+            // (CodeGenContext.MeshPlaneStore, written by SpirvGenerator.GenerateMeshEntry), so the values are not held twice
+            if (isStore && operation.StorageKind == StorageKind.SharedMemory && context.Properties.Mesh is { IsMesh: true } mesh && operation.SourcesCount == 3 &&
+                operation.GetSource(0) is AstOperand { Type: OperandType.Constant } memory && memory.Value == mesh.PlaneMemoryId)
+            {
+                SpvInstruction word = context.Get(AggregateType.U32, operation.GetSource(1));
+                SpvInstruction value = context.Get(AggregateType.U32, operation.GetSource(2));
+                context.FunctionCall(context.TypeVoid(), context.MeshPlaneStore, word, value);
+                return OperationResult.Invalid;
+            }
+
             SpvInstruction pointer = GetStoragePointer(context, operation, out AggregateType varType);
 
             // nxnative: a load or store through a physical storage buffer pointer must state its alignment (a 32-bit word)
@@ -1863,7 +1882,7 @@ namespace Ryujinx.Graphics.Shader.CodeGen.Spirv
                         : context.Properties.StorageBuffers[bindingIndex.Value];
                     StructureField field = buffer.Type.Fields[fieldIndex.Value];
 
-                    storageClass = StorageClass.Uniform;
+                    storageClass = context.BufferStorageClass(storageKind == StorageKind.StorageBuffer);
                     varType = field.Type & AggregateType.ElementTypeMask;
                     baseObj = storageKind == StorageKind.ConstantBuffer
                         ? context.ConstantBuffers[bindingIndex.Value]
@@ -1883,9 +1902,13 @@ namespace Ryujinx.Graphics.Shader.CodeGen.Spirv
                         varType = context.Properties.LocalMemories[bindingId.Value].Type & AggregateType.ElementTypeMask;
                         baseObj = context.LocalMemories[bindingId.Value];
                     }
+                    else if (context.Properties.SharedSpill is SharedSpillInfo spill && spill.MemoryId == bindingId.Value)
+                    {
+                        return GetSharedSpillPointer(context, operation, spill, srcIndex, out varType);
+                    }
                     else
                     {
-                        storageClass = StorageClass.Workgroup;
+                        storageClass = Declarations.SharedStorageClass(StorageClass.Workgroup, context.Properties.SharedMemories[bindingId.Value]);
                         varType = context.Properties.SharedMemories[bindingId.Value].Type & AggregateType.ElementTypeMask;
                         baseObj = context.SharedMemories[bindingId.Value];
                     }
@@ -2031,6 +2054,26 @@ namespace Ryujinx.Graphics.Shader.CodeGen.Spirv
             }
 
             return pointer;
+        }
+
+        // nxnative: a word of shared memory that lives in the spill buffer (SharedSpillInfo): data[slice base + index]
+        private static SpvInstruction GetSharedSpillPointer(CodeGenContext context, AstOperation operation, SharedSpillInfo spill, int srcIndex, out AggregateType varType)
+        {
+            bool isStoreOrAtomic = operation.Inst == Instruction.Store || operation.Inst.IsAtomic();
+            int inputsCount = (isStoreOrAtomic ? operation.SourcesCount - 1 : operation.SourcesCount) - srcIndex - (operation.Inst == Instruction.AtomicCompareAndSwap ? 1 : 0);
+
+            if (inputsCount != 1)
+            {
+                throw new InvalidOperationException($"{operation.Inst} on shared memory in the spill buffer has {inputsCount} indexes, not 1.");
+            }
+
+            varType = AggregateType.U32;
+
+            SpvInstruction u32 = context.TypeU32();
+            SpvInstruction index = context.IAdd(u32, context.Get(AggregateType.U32, operation.GetSource(srcIndex)), context.Load(u32, context.SharedSpillBase));
+            StorageClass storageClass = context.BufferStorageClass(true);
+
+            return context.AccessChain(context.TypePointer(storageClass, u32), context.StorageBuffers[spill.Binding], context.Constant(context.TypeS32(), 0), index);
         }
 
         private static SpvInstruction GetScalarInput(CodeGenContext context, IoVariable ioVariable)

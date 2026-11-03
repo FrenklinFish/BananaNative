@@ -510,7 +510,11 @@ namespace Ryujinx.Graphics.Shader.Decoders
                 return op.Props.HasFlag(InstProps.Bra) && IsUnconditionalAmpere(new AmpereOp(op));
             }
 
-            return IsUnconditional(ref op) && op.Props.HasFlag(InstProps.Bra);
+            // A call returns to the instruction after it: CAL carries the Bra property (it ends its block) and no predicate, so it was taken for an unconditional
+            // branch, the block after it lost its fall-through edge and was dropped, and the caller ran on into whatever block followed in memory. In switch2mac's
+            // Maxwell-lowered Mario Kart World, "CAL sqrt slow path; BRA merge" lost its BRA: the fast path's rsqrt ran on 0 after the call, 0 x inf = NaN, the
+            // world lit white (fix after azmasm/switch2mac, MIT, which adds the edge in DecodeFunction; here HasNext and BRX's successors agree with it too)
+            return op.Name != InstName.Cal && IsUnconditional(ref op) && op.Props.HasFlag(InstProps.Bra);
         }
 
         private static bool IsUnconditional(ref InstOp op)

@@ -6,7 +6,7 @@
 typedef struct { const char *name; void *fn; } hle_ent;
 #define HLE(mangled, ret, cname, ...)                                                             \
     static ret cname(__VA_ARGS__);                                                                \
-    __attribute__((used, section("__DATA,swhle"))) static const hle_ent hle_ent_##cname = {mangled, (void *)cname}; \
+    PLAT_TABLE(swhle) static const hle_ent hle_ent_##cname = {mangled, (void *)cname}; \
     static ret cname(__VA_ARGS__)
 
 typedef uint32_t Result;   // nn::Result: w0, 0 = success
@@ -35,16 +35,16 @@ void guest_clock_read_wait(void);     // A guest read of the system counter: wai
 typedef struct { const char *name; void *fn; const char *why; } hle_force_ent;
 #define HLE_FORCE(mangled, why, ret, cname, ...)                                                   \
     static ret cname(__VA_ARGS__);                                                                \
-    __attribute__((used, section("__DATA,swforce"))) static const hle_force_ent hle_force_##cname = {mangled, (void *)cname, why}; \
+    PLAT_TABLE(swforce) static const hle_force_ent hle_force_##cname = {mangled, (void *)cname, why}; \
     static ret cname(__VA_ARGS__)
 // Same as above, but the implementation runs on this thread's big host stack (hle_bigstack.c): what is registered is a stub generated at compile time (the implementation's address goes into x16, then a jump to dm_bigstack_enter).
 // For take-overs with large stack use (the file system sizes its buffers by PATH_MAX): a game thread's stack can be as small as 8 KB. Only register arguments are carried over (<= 8 integer, <= 8 floating point); not for variadic functions
 #define HLE_FORCE_BIG(mangled, why, ret, cname, ...)                                               \
     static ret cname(__VA_ARGS__) __attribute__((used));                                          \
     extern const char cname##_bs[];                                                               \
-    __asm__(".text\n.p2align 2\n.globl _" #cname "_bs\n.private_extern _" #cname "_bs\n_" #cname "_bs:\n" \
-            "    adrp x16, _" #cname "@PAGE\n    add x16, x16, _" #cname "@PAGEOFF\n    b _dm_bigstack_enter\n"); \
-    __attribute__((used, section("__DATA,swforce"))) static const hle_force_ent hle_force_##cname = {mangled, (void *)(uintptr_t)cname##_bs, why}; \
+    __asm__(".text\n.p2align 2\n.globl " PLAT_ASM_SYM(cname##_bs) "\n" PLAT_ASM_HIDDEN " " PLAT_ASM_SYM(cname##_bs) "\n" PLAT_ASM_SYM(cname##_bs) ":\n" \
+            "    adrp x16, " PLAT_ASM_PAGE(cname) "\n    add x16, x16, " PLAT_ASM_PAGEOFF(cname) "\n    b " PLAT_ASM_SYM(dm_bigstack_enter) "\n"); \
+    PLAT_TABLE(swforce) static const hle_force_ent hle_force_##cname = {mangled, (void *)(uintptr_t)cname##_bs, why}; \
     static ret cname(__VA_ARGS__)
 // The game's call site inside a HLE_FORCE_BIG implementation: pass __builtin_return_address(0), which after a stack switch is the entry's own (hle_bigstack.c)
 void *dm_bigstack_caller(void *ra);
@@ -67,3 +67,6 @@ int dm_movie_playing(void);   // hle_movie.c: a video decoder of the SDK's movie
 void dm_audio_suspend(int on);
 uint64_t dm_audio_render_calls(void);   // Cumulative sound card callback count (the silent sink is not counted)
 void dm_audio_reset(void);   // iOS media services reset: recreate the AudioUnits (hle_audio.c)
+// An nn::gs::NativeSyncHandle (16 bytes, magic first) the host made that never signals: GameChat's camera pictures, which never come (no camera; hle_misc.c). nn::gs::TryWaitNativeSync (hle_codec_video.c) reads it as not reached
+#define DM_SYNC_NEVER 0x4e436d44u   // 'DmCN'
+uint32_t dm_sf_host_session(const char *name);   // hle_sf.c: a session the host answers (success, zeroed output) for a service the game reaches without sm

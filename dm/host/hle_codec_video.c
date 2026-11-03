@@ -9,7 +9,7 @@
 //   - SubmitVp9DecoderInputBuffer takes one packet with its time and an end-of-stream flag; description 3603 when the decoder cannot take more (the client retries after the
 //     submission-ready event).
 // Pictures go into the released buffers in release order. Packets decode on the submitting thread; pictures with no released buffer to go into wait in a short queue, and a full
-// queue refuses packets. The SDK's opaque types hold a host pointer at +0 (pool: 0x20 bytes are the SDK's; decoder: 0x400), the decoder's event lives in its type at +0x100.
+// queue refuses packets. The SDK's opaque types hold a host pointer at +0 (pool: 0x20 bytes are the SDK's; decoder: 0x400, 0x260 in SDK 21), the decoder's event lives in its type at +0x100.
 // VP8, VP9 and H.264 decoders share it all (cv_dec_*). Not served: AV1 (no decoder on the host), encrypted input, native image handles (the GPU route) and alias pools
 #include "hle.h"
 #include <pthread.h>
@@ -332,9 +332,9 @@ CV_FAMILY(h264, CV_H264, "_ZN2nn5codec30CalculateH264DecoderWorkBufferEPmS1_mtt"
     "_ZN2nn5codec36GetH264DecoderOutputBufferPropertiesEPtS1_S1_S1_PNS_8TimeSpanEPbPNS0_15H264DecoderTypeEj")
 #undef CV_FAMILY
 HLE_FORCE("_ZN2nn5codec21InitializeH264DecoderEPNS0_15H264DecoderTypeEPvmmttjNS0_23VideoDecoderInputFormatENS0_24VideoDecoderOutputFormatENS0_22VideoDecoderOutputModeEPKvm",
-          "decoded with VideoToolbox on the host", Result, h_cv_h264init3, void *t, void *work, uint64_t wsize, uint64_t bs, uint16_t w, uint16_t h, uint32_t refs, uint32_t in, uint32_t out,
-          uint32_t mode, const void *csd, uint64_t csd_n) {
-    (void)work; (void)wsize; (void)bs; (void)refs; (void)mode; return cv_dec_init(t, CV_H264, w, h, in, out, csd, csd_n);
+          "decoded with VideoToolbox on the host", Result, h_cv_h264init3, void *t, void *work, uint64_t wsize, uint64_t bs, uint16_t w, uint16_t h, uint32_t refs, uint32_t in, uint64_t out,
+          uint64_t mode, const void *csd, uint64_t csd_n) {   // (out, mode, csd, csd_n on the stack in 8-byte slots: uint64_t so that Apple's arm64 ABI reads them there too)
+    (void)work; (void)wsize; (void)bs; (void)refs; (void)mode; return cv_dec_init(t, CV_H264, w, h, in, (uint32_t)out, csd, csd_n);
 }
 // AV1: no decoder on the host; Initialize fails (the client's error path) instead of reaching the decoder service. Open
 static Result cv_av1(void) { static int once; if (!once++) LOG("[RED] nn::codec AV1 decoder: no AV1 decoder on the host, Initialize fails"); return CV_R(2004); }
@@ -346,8 +346,74 @@ HLE_FORCE("_ZN2nn5codec20InitializeAv1DecoderEPNS0_14Av1DecoderTypeEPvmmttjNS0_2
 HLE_FORCE("_ZN2nn5codec20InitializeAv1DecoderEPNS0_14Av1DecoderTypeEmttjNS0_23VideoDecoderInputFormatENS0_24VideoDecoderOutputFormatE", "AV1: no decoder on the host",
           Result, h_cv_av1init2, void *t) { *(void **)t = NULL; return cv_av1(); }
 HLE_FORCE("_ZN2nn5codec18FinalizeAv1DecoderEPNS0_14Av1DecoderTypeE", "AV1: nothing was made", Result, h_cv_av1fin, void *t) { (void)t; return 0; }
-// The host's sync handles signal when their buffer holds the picture of that release; a handle the host did not make (another nn::gs user) reads as signalled
+// SDK 21 (21.4.0, Mario Kart World 1.8.0) renamed the entry points that make things: the decoders' Initialize overloads are Initialize…DecoderByTransferMemory (a work buffer)
+// and …ByRemoteMemory (none), both with an output mode; MakeDecodeImagePreference takes an ImageTilingMode where it took a CodecMode, InitializeDecoderImagePool lost its
+// CodecMode, and Get…DecoderSubmissionReadyEvent returns the event (the SDK's: the type's +8). Register / Acquire / Release / Submit / Finalize kept their names, so with only the
+// old names taken over the SDK's own Initialize ran, asked the decoder service the host does not serve, and the SDK aborted on its result (sdk+0x32f994, result 0x106c6f: a movie
+// at a teleport on the map). SDK 21 has no Calculate…DecoderWorkBuffer and its decoder types are 0x260 bytes (the host event at +0x100 fits). Stack arguments are taken as 64-bit slots: the guest passes AAPCS64 (each in 8 bytes), which Apple's arm64 ABI packs for narrower types
+HLE_FORCE("_ZN2nn5codec25MakeDecodeImagePreferenceEttNS0_24VideoDecoderOutputFormatENS0_15ImageTilingModeE", "the preference only carries the size and format to the host's pool (SDK 21: 0x40 bytes)",
+          cv_pref, h_cv_pref21, uint16_t w, uint16_t h, uint32_t fmt, uint32_t tiling) {
+    return (cv_pref){w, h, fmt, tiling, CV_MAGIC, {0, 0}};
+}
+HLE_FORCE("_ZN2nn5codec26InitializeDecoderImagePoolEPNS0_25VideoDecoderImagePoolTypeEPvmRKNS0_27VideoDecoderImagePreferenceEj", "a host pool of decoded pictures (SDK 21)",
+          Result, h_cv_pool21, void *t, void *mem, uint64_t size, const cv_pref *p, uint32_t n) { return h_cv_pool(t, mem, size, p, n, 0); }
+// (the SDK returns its type's +8 whatever the type holds; the host's event is bound only while the host decoder lives: NULL otherwise, logged)
+static void *cv_event21(void *t) {
+    void *e = NULL; cv_dec_event(&e, t);
+    if (!e) { static int once; if (!once++) LOG("[RED] nn::codec: the submission-ready event of a decoder the host did not make or has finalized: NULL"); }
+    return e;
+}
+#define CV_INIT21(tag, codec, s_tm, s_rm, s_ev)                                                                                                                         \
+    HLE_FORCE(s_tm, "decoded on the host (SDK 21)", Result, h_cv_##tag##init21, void *t, void *work, uint64_t wsize, uint64_t bs, uint16_t w, uint16_t h, uint32_t refs, \
+              uint32_t in, uint64_t out, uint64_t mode) { (void)work; (void)wsize; (void)bs; (void)refs; (void)mode; return cv_dec_init(t, codec, w, h, in, (uint32_t)out, NULL, 0); } \
+    HLE_FORCE(s_rm, "decoded on the host (SDK 21)", Result, h_cv_##tag##init21r, void *t, uint64_t bs, uint16_t w, uint16_t h, uint32_t refs, uint32_t in, uint32_t out,    \
+              uint32_t mode) { (void)bs; (void)refs; (void)mode; return cv_dec_init(t, codec, w, h, in, out, NULL, 0); }                                              \
+    HLE_FORCE(s_ev, "the host decoder's submission-ready event (SDK 21: returned)", void *, h_cv_##tag##event21, void *t) { return cv_event21(t); }
+CV_INIT21(vp9, CV_VP9,
+    "_ZN2nn5codec36InitializeVp9DecoderByTransferMemoryEPNS0_14Vp9DecoderTypeEPvmmttjNS0_23VideoDecoderInputFormatENS0_24VideoDecoderOutputFormatENS0_22VideoDecoderOutputModeE",
+    "_ZN2nn5codec34InitializeVp9DecoderByRemoteMemoryEPNS0_14Vp9DecoderTypeEmttjNS0_23VideoDecoderInputFormatENS0_24VideoDecoderOutputFormatENS0_22VideoDecoderOutputModeE",
+    "_ZN2nn5codec33GetVp9DecoderSubmissionReadyEventEPNS0_14Vp9DecoderTypeE")
+CV_INIT21(vp8, CV_VP8,
+    "_ZN2nn5codec36InitializeVp8DecoderByTransferMemoryEPNS0_14Vp8DecoderTypeEPvmmttjNS0_23VideoDecoderInputFormatENS0_24VideoDecoderOutputFormatENS0_22VideoDecoderOutputModeE",
+    "_ZN2nn5codec34InitializeVp8DecoderByRemoteMemoryEPNS0_14Vp8DecoderTypeEmttjNS0_23VideoDecoderInputFormatENS0_24VideoDecoderOutputFormatENS0_22VideoDecoderOutputModeE",
+    "_ZN2nn5codec33GetVp8DecoderSubmissionReadyEventEPNS0_14Vp8DecoderTypeE")
+#undef CV_INIT21
+HLE_FORCE("_ZN2nn5codec37InitializeH264DecoderByTransferMemoryEPNS0_15H264DecoderTypeEPvmmttjNS0_23VideoDecoderInputFormatENS0_24VideoDecoderOutputFormatENS0_22VideoDecoderOutputModeEPKvm",
+          "decoded with the host's H.264 decoder (SDK 21)", Result, h_cv_h264init21, void *t, void *work, uint64_t wsize, uint64_t bs, uint16_t w, uint16_t h, uint32_t refs, uint32_t in,
+          uint64_t out, uint64_t mode, const void *csd, uint64_t csd_n) {
+    (void)work; (void)wsize; (void)bs; (void)refs; (void)mode; return cv_dec_init(t, CV_H264, w, h, in, (uint32_t)out, csd, csd_n);
+}
+HLE_FORCE("_ZN2nn5codec35InitializeH264DecoderByRemoteMemoryEPNS0_15H264DecoderTypeEmttjNS0_23VideoDecoderInputFormatENS0_24VideoDecoderOutputFormatENS0_22VideoDecoderOutputModeEPKvm",
+          "decoded with the host's H.264 decoder (SDK 21)", Result, h_cv_h264init21r, void *t, uint64_t bs, uint16_t w, uint16_t h, uint32_t refs, uint32_t in, uint32_t out, uint32_t mode,
+          const void *csd, uint64_t csd_n) {
+    (void)bs; (void)refs; (void)mode; return cv_dec_init(t, CV_H264, w, h, in, out, csd, csd_n);
+}
+HLE_FORCE("_ZN2nn5codec34GetH264DecoderSubmissionReadyEventEPNS0_15H264DecoderTypeE", "the host decoder's submission-ready event (SDK 21: returned)", void *, h_cv_h264event21, void *t) {
+    return cv_event21(t);
+}
+// Alias pools (pictures written into the client's own NVN texture, the GPU route) are not served: the pool holds no host pool (+0 NULL) and Initialize fails. Open
+HLE_FORCE("_ZN2nn5codec31InitializeDecoderAliasImagePoolEPNS0_25VideoDecoderImagePoolTypeENS_2gs17NativeImageHandleEj", "alias pools (the GPU route) are not served",
+          Result, h_cv_aliaspool, void *t) {
+    *(void **)t = NULL; static int once; if (!once++) LOG("[RED] nn::codec::InitializeDecoderAliasImagePool: alias pools (the GPU route) are not served, Initialize fails");
+    return CV_R(2004);
+}
+HLE_FORCE("_ZN2nn5codec36InitializeAv1DecoderByTransferMemoryEPNS0_14Av1DecoderTypeEPvmmttjNS0_23VideoDecoderInputFormatENS0_24VideoDecoderOutputFormatENS0_22VideoDecoderOutputModeE",
+          "AV1: no decoder on the host", Result, h_cv_av1init21, void *t) { *(void **)t = NULL; return cv_av1(); }
+HLE_FORCE("_ZN2nn5codec34InitializeAv1DecoderByRemoteMemoryEPNS0_14Av1DecoderTypeEmttjNS0_23VideoDecoderInputFormatENS0_24VideoDecoderOutputFormatENS0_22VideoDecoderOutputModeE",
+          "AV1: no decoder on the host", Result, h_cv_av1init21r, void *t) { *(void **)t = NULL; return cv_av1(); }
+// SDK 21's HDR reads of a pool picture: not served (the host keeps 8-bit pictures); the destination is cleared, logged once. Open
+static Result cv_hdr(const char *what, void *dst, uint64_t size) { static int once; if (!once++) LOG("[RED] nn::codec::%s: HDR reads of decoded pictures are not served (cleared)", what); memset(dst, 0, size); return 0; }
+HLE_FORCE("_ZN2nn5codec29ReadDecoderOutputImageRgbaHdrEPKNS0_25VideoDecoderImagePoolTypeEjttttPvmm", "HDR pictures are not served", Result, h_cv_rgbahdr,
+          const void *t, uint32_t i, uint16_t x, uint16_t y, uint16_t w, uint16_t h, void *dst, uint64_t stride, uint64_t size) {
+    (void)t; (void)i; (void)x; (void)y; (void)w; (void)h; (void)stride; return cv_hdr("ReadDecoderOutputImageRgbaHdr", dst, size);
+}
+HLE_FORCE("_ZN2nn5codec34ReadDecoderOutputImageRgbaHdrFloatEPKNS0_25VideoDecoderImagePoolTypeEjttttPvmm", "HDR pictures are not served", Result, h_cv_rgbahdrf,
+          const void *t, uint32_t i, uint16_t x, uint16_t y, uint16_t w, uint16_t h, void *dst, uint64_t stride, uint64_t size) {
+    (void)t; (void)i; (void)x; (void)y; (void)w; (void)h; (void)stride; return cv_hdr("ReadDecoderOutputImageRgbaHdrFloat", dst, size);
+}
+// The host's sync handles signal when their buffer holds the picture of that release (GameChat's never: DM_SYNC_NEVER); a handle the host did not make (another nn::gs user) reads as signalled
 static bool sync_reached(const cv_sync *s) {
+    if (s->magic == DM_SYNC_NEVER) return false;   // GameChat's camera pictures: no camera (hle_misc.c)
     if (s->magic != CV_SYNC) { static int once; if (!once++ && (s->magic || s->dec)) LOG("[RED] nn::codec: a sync handle the host did not make (%#x): signalled", s->magic); return true; }
     if (!s->gen) return true;
     pthread_mutex_lock(&g_cv_mu);   // held until the decoder's lock is: FinalizeVp9Decoder cannot free it in between

@@ -22,6 +22,13 @@ namespace Ryujinx.Graphics.Shader.StructuredIr
         // nxnative: a global memory access traced to no storage buffer goes through a physical storage buffer pointer (GlobalToStorage.TryGenerateRawStorageOp)
         public bool UsesPhysicalPointers { get; set; }
 
+        // nxnative (after azmasm/switch2mac, MIT): a Switch 2 task / mesh program's layout and stage memories (TranslatorContext.Translate)
+        public MeshShaderInfo Mesh { get; set; }
+
+        // nxnative: a compute program's shared memory past the host's limit (IGpuAccessor.QueryHostComputeSharedMemoryMax) lives in a storage buffer instead, one slice of
+        // SharedSpillInfo.Words words per workgroup (TranslatorContext.Translate; CodeGen/Spirv: Declarations, Instructions.GetStoragePointer). null: none
+        public SharedSpillInfo SharedSpill { get; set; }
+
         public ShaderProperties()
         {
             _constantBuffers = new Dictionary<int, BufferDefinition>();

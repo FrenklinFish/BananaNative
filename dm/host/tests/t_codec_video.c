@@ -125,6 +125,25 @@ int main(void) {
         h_cv_vp8rel(d8, 0, sync); assert(!h_cv_vp8unreg(d8, 0) && h_cv_vp8acq(&idx, &sync, d8) == CV_NONE && !cv_of(d8)->buf[0].reg);
         assert(!h_cv_vp8fin(d8) && !cv_of(d8)); h_cv_poolfin(p8);
     }
+    // SDK 21 names (Mario Kart World 1.8.0): preference with a tiling mode in a 0x40-byte slot, pool without a codec mode, Initialize…ByTransferMemory / ByRemoteMemory,
+    // the submission-ready event returned; a VP9 picture goes through as with the older names. (Called from C here: the AAPCS64 stack slots of out / mode, which the hooks take
+    // as uint64_t so that Apple's arm64 ABI reads them at sp+0 / sp+8 too, are checked against the SDK's prologues, not by this test)
+    {   _Alignas(16) static uint8_t d9[0x400], p9[0x40], m9[16 * 16 * 4]; _Alignas(16) uint8_t slot[0x40]; memset(slot, 0xee, sizeof slot);
+        cv_pref p21 = h_cv_pref21(16, 16, 3, 1); assert(sizeof p21 <= sizeof slot); memcpy(slot, &p21, sizeof p21);
+        assert(!h_cv_poolsize(&size, &align, (const cv_pref *)slot, 1) && size >= 16 * 16 * 4 && !h_cv_pool21(p9, m9, size, (const cv_pref *)slot, 1) && pool_of(p9));
+        assert(!h_cv_vp9init21(d9, m9, 0, 0x10000, 16, 16, 1, 1, 3, 0) && cv_of(d9) && cv_of(d9)->codec == CV_VP9 && cv_of(d9)->vpx_ok);
+        void *e21 = h_cv_vp9event21(d9); assert(e21 == d9 + CV_EVENT_OFF && ev_set(e21));
+        assert(!h_cv_vp9reg(d9, 0, p9, 0) && !h_cv_vp9acq(&idx, &sync, d9) && idx == 0);
+        h_cv_vp9rel(d9, 0, sync); assert(!h_cv_vp9acq(&idx, &sync, d9) && !h_gs_trywait(&sync));
+        assert(!h_cv_vp9submit(&id, d9, vp9, sizeof vp9, 8000, false) && h_gs_trywait(&sync));
+        assert(!h_cv_vp9props(&w, &h, &cw, &ch, &ts, &eos, d9, 0) && w == 16 && h == 16 && ts == 8000);
+        assert(!h_cv_vp9fin(d9) && !cv_of(d9));
+        memset(d9, 0, sizeof d9); assert(!h_cv_vp9init21r(d9, 0x10000, 16, 16, 1, 1, 3, 0) && cv_of(d9) && h_cv_vp9event21(d9) == d9 + CV_EVENT_OFF);
+        assert(!h_cv_vp9fin(d9) && !cv_of(d9) && h_cv_vp9event21(d9) == NULL);
+        memset(d9, 0, sizeof d9); assert(h_cv_av1init21(d9) == CV_R(2004) && h_cv_av1init21r(d9) == CV_R(2004));
+        _Alignas(16) uint8_t pa[0x40]; memset(pa, 0x55, sizeof pa); assert(h_cv_aliaspool(pa) == CV_R(2004) && !pool_of(pa));
+        h_cv_poolfin(p9);
+    }
     {   _Alignas(16) static uint8_t dh[0x400], ph[0x40], mh[64 * 64 * 4]; static uint8_t yuv[64 * 64 * 3 / 2];
         cv_pref p64 = h_cv_pref(64, 64, 3, 0);
         assert(!h_cv_poolsize(&size, &align, &p64, 1) && !h_cv_pool(ph, mh, size, &p64, 1, 0));

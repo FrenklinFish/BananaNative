@@ -15,5 +15,9 @@ namespace Ryujinx.Graphics.Shader.Translation
         // Ampere (sm_86) machine code, as NVN2 (Switch 2) ships it: a 0x80-byte shader header (SPH version 4, its first 0x50 bytes laid out as version 3)
         // and 128-bit instructions, decoded and emitted by the Ampere frontend.
         Ampere = 1 << 4,
+        // nxnative (after azmasm/switch2mac, MIT): a Switch 2 task / mesh program (with Compute and Ampere): translated as compute, emitted as a SPIR-V TaskEXT / MeshEXT
+        // entry point (StructuredIr/MeshShaderInfo.cs)
+        TaskShader = 1 << 5,
+        MeshShader = 1 << 6,
     }
 }

@@ -168,6 +168,13 @@ Most service calls can be found before they crash, before the first boot or the 
 - **Check:** `dm/host/tests/t_fs.c` section 8 makes `clonefile` fail with `ENOTSUP` (read-only mount, one front-end notice, committed save unchanged, writable again once cloning works) and deletes save folders holding a symlink to a folder outside the save (the target keeps its files).
 - **Found on:** South Park: The Fractured But Whole 1.05, whose port is [PR #662](https://github.com/seedds/nxnative/pull/662) (not yet in the games table): a development Mac run with its save folder on a Journaled HFS+ external drive.
 
+### New save folders on Android shared storage
+
+- **Symptom:** Android, save on `/sdcard` (`/storage/emulated/0/Switch2/saves/<id>`): the first commit succeeds, then `fs mkdir name …/<id>.work/0 failed errno=95` and the game's saving icon spins forever while play goes on. Only a save that does not yet have the folder (a new game) hits it.
+- **Cause:** after `mkdir` / file creation the host clears a stale guest-name xattr (`set_guest_name`, `hle_fs.c`) and accepts only "no such attribute" as success. Android's shared storage is FUSE and keeps no `user.` attributes: `lremovexattr` answers `EOPNOTSUPP` (95), so `CreateDirectory` failed.
+- **Fix:** `plat_android.c` reports `EOPNOTSUPP` from `getxattr` / `removexattr` as `ENODATA` (`PLAT_ENOATTR`): on a filesystem with no attributes, none is present, as `plat.h` promises. Setting one still fails; FUSE `/sdcard` is case-insensitive, so two guest names differing only in case (a `.dm-case-N` alias, which needs the attribute) still cannot be created there (open; no game has needed it).
+- **Found on:** [Donkey Kong Bananza](../../dm/games/040074A01BF12000/README.md) on Android, a new game in the play app (its save had only `config.sav`); the test seed already had the slot folder `0`.
+
 ### Save data size queries
 
 - **Symptom:** SIGSEGV at address 0 in `nn::fs::GetSaveDataSizeMax`, about 13 minutes into a new game.
@@ -487,6 +494,13 @@ Most service calls can be found before they crash, before the first boot or the 
 - **Cause:** the SDK's version dereferences vi service objects the host never made.
 - **Fix:** `SetLayerCrop` only records the crop for the present ([The NVN present crops by the vi layer crop](rendering.md#the-nvn-present-crops-by-the-vi-layer-crop)); `DestroyLayer`, `CloseDisplay` and `vi::Finalize` are host no-ops. Also hooked: `vi::GetIndirectImageMemoryRequirement` (asked by the inline keyboard's `GetImageMemoryRequirement`, [The inline keyboard as a resident library applet](#the-inline-keyboard-as-a-resident-library-applet)); `vi::ListDisplays` (one display, "Default"; the game lists 10 into a stack buffer and does not read them, `main+0x808f08`), found from the import list before it was met.
 - **Found on:** [The Legend of Zelda: Link's Awakening](../../dm/games/01006BB00C6F0000/README.md) (SDK 8.2.0); [Super Mario 3D World + Bowser's Fury](../../dm/games/010028600EBDA000/README.md) (SDK 10: `vi::GetIndirectImageMemoryRequirement`); [The Great Ace Attorney Chronicles](../../dm/games/010036E00FB20000/README.md) (SDK 10.4.1: `vi::ListDisplays`).
+
+### Switch 2 vi HDR, VRR and layer metadata calls
+
+- **Symptom:** a call through null (`CRASH sig=11 addr=0 pc=0`) with `lr` just past a game call to a `vi::SetLayerNextHdr…Metadata` / `vi::QueryDisplayHdr…` / VRR import; in the SDK the call goes on to `vi2`, whose backend table (or layer object) is still zero.
+- **Cause:** the Switch 2 SDK's `vi` versions forward to `vi2`, which is set up by the vi service the host replaces: its layer object and its dispatch table are never made.
+- **Fix:** `hle_vi.c` (block "Switch 2 SDKs: HDR, VRR and extended swap intervals") answers them as an SDR display at a fixed refresh rate: HDR off, no VRR, layer metadata accepted with nothing to apply, the extended swap interval left to NVN's. Every `vi::` import a Switch 2 game's `main` has should be checked against the hooks before the first boot ([Listing a game's unhooked imports](#listing-a-games-unhooked-imports-before-they-are-met)).
+- **Found on:** [Donkey Kong Bananza](../../dm/games/040074A01BF12000/README.md) (`SetLayerNextHdrContentGamutMetadata`, `main+0x2036f4`); [Mario Kart World](../../dm/games/0400C3F00006E000/README.md) 1.8.0 (`SetLayerNextHdrAdjustableBezierMetadata`, `main+0x959ae4`, at the world-map loading screen; the only `vi::` import of its `main` no hook named).
 
 ### Layer frame numbers
 
@@ -820,3 +834,52 @@ Most service calls can be found before they crash, before the first boot or the 
 - **Cause:** code that calls fixed module addresses. d2r-mobile's 3D render scale read a renderer pointer at `main+0x31e0848` and called `main+0x8582f0`; in Mario v0 that is the middle of a static initializer and only did nothing because the pointer happened to read 0.
 - **Fix:** such code checks `module_t.build_id` now (written into `fixups.tsv` by the rewriter) and stays off on other builds.
 - **Found on:** [Super Mario Bros. Wonder](../../dm/games/010015100B514000/README.md) (v0, code inherited from d2r-mobile).
+
+### Built-in fonts and the audio device notification of SDK 21
+
+- **Symptom:** an abort connecting to `pl:u` at boot; a failed `nn::audio` call at boot.
+- **Cause:** SDK 21 has new names: `nn::pl::GetBuiltInFontData` (a Switch 1 and a Switch 2 overload, each filling type, address and size, and returning whether the font is loaded) and `nn::audio::AcquireAudioOutputDeviceNotification`. Unhooked, they reach the services the host does not have.
+- **Fix:** both hooked (`hle_sdk16.c`, `hle_audren.c`), with the same stand-in fonts and the same never-signaled event as their older names.
+- **Found on:** Splatoon Raiders (upstream nxnative, c8521eeb; its profile is not on this branch).
+
+### The Joy-Con mouse pointer
+
+- **Symptom:** `[RED] sf: the game connects to service hid itself, which the host does not serve`, then `game called nn::diag abort: Result 0xe15` in `sdk`, at boot of a Switch 2 game that sets up the Joy-Con's mouse mode.
+- **Cause:** `InitializeJcms` and `InitializeNmouse` open the hid service themselves, and the host has neither the service nor the sensor.
+- **Fix:** the Jcms and Nmouse calls are hooked (`hle_hid.c`): no handles, a merged handle with no states, and the pointer's settings (`SetNmousePointerRanges`, `EnableNmousePointer`, `SetNmousePointerPosition`) with nothing to set. From upstream nxnative (0a759de7, 03d92a9f), with the pointer settings added here.
+- **Found on:** [Mario Kart World](../../dm/games/0400C3F00006E000/README.md) 1.8.0, on the phone, right after its graphics system came up; upstream: Fire Emblem Fortune's Weave, Pokémon Pokopia.
+
+### GameShare guest displays
+
+- **Symptom:** a crash at boot in `nn::vi` under `nn::streamplay::CreateIndividualDisplays`.
+- **Cause:** a game can create its guest displays at boot, before any session, and the call starts a second display service the host does not have.
+- **Fix:** `CreateIndividualDisplays`, `DestroyIndividualDisplays` and `GetNativeWindowHandle` answer that there is no guest (`hle_misc.c`; upstream seedds/nxnative 03d92a9f).
+- **Found on:** [Pokémon Pokopia](../../dm/games/0400A3A01EE4C000/README.md).
+
+### GameChat at boot
+
+- **Symptom:** `[RED] sf: the game connects to service chat:u itself, which the host does not serve`, then `game called nn::diag abort: Result 0xe15` under `nn::chat::Initialize`; with `Initialize` taken over, a null read or an abort in another `nn::chat` call (`sdk+0x6bc148`, `sdk+0x6bf2c8`).
+- **Cause:** a Switch 2 game can initialize GameChat at boot. The SDK's `Initialize` opens `chat:u`, and its other calls go through the service object that `Initialize` makes.
+- **Fix:** `nn::chat::Initialize` (ready, no chat), `IsChatting` (no) and `SetScreenSharingMode` (nobody to share with) are hooked (`hle_misc.c`), and `AttachToRoomInfoChangedEvent` (bound, never signalled), `SetSharingKey` and `ClearSharingKey` (nothing to share). Another GameChat call a game imports needs a hook of its own: unhooked, it reads the service object `Initialize` would have made (Mario Kart World 1.8.0: a null read at `sdk+0x6bc148` in `AttachToRoomInfoChangedEvent`). Every GameChat call Mario Kart World 1.8.0 imports is hooked now, as one state: no room (`GetRoomInfo`: no members), applets that close at once, and no camera. Its camera storage is set up at boot whatever the chat state, and each picture becomes a texture (an `nn::gs::NativeImageHandle` through `nvnNativeImage`; it aborts if one fails); the SDK's own `CalculateLocalCameraVideoBufferSize` aborted first (`sdk+0x6bf2c8`), because the taken-over `Initialize` never counts GameChat initialized. The host sizes the storage for its own layout (linear RGBA8, 256-byte rows, each picture 4 KiB aligned), keeps the pictures black in the game's buffer, makes the textures over them (`dm_chat_camera_image`, read by the native images of `hle_nvn.c`, from upstream's Fire Emblem Fortune's Weave work), and answers `RequestNext*CameraImage` with a sync handle that never signals (`DM_SYNC_NEVER`, which `nn::gs::TryWaitNativeSync` reads as not reached): no picture ever comes, so nothing shows.
+- **Found on:** Hyrule Warriors: Age of Imprisonment (upstream nxnative, d70ee900; its profile is not on this branch); [Mario Kart World](../../dm/games/0400C3F00006E000/README.md) 1.8.0 on the phone.
+
+### The camera library's context and the graphics system check
+
+- **Symptom:** at boot, `game called nn::diag abort` at `sdk+0x46e8b8` in `nn::gs::sdk::CheckGraphicsSystemInitialized`; with that answered, an abort on Result `0x30af3` from `nn::camera::sdk::CreateCameraContext`.
+- **Cause:** a Switch 2 game can link the camera library into its own `main` and initialize it at boot whether or not a camera is there. `nn::camera::Initialize` first checks the sdk's graphics-system flag, which only `BootGraphicsSystem` sets, inside the driver's `nv::InitializeGraphics` that the host takes over. It then asks the sdk for a context, a session through the graphics server's user session, which the host does not have.
+- **Fix:** `CheckGraphicsSystemInitialized` is answered from the host's record of `nv::InitializeGraphics` (`dm/gfx/hle_nv.c`). `CreateCameraContext` hands out a host session (`hle_misc.c`, `dm_sf_host_session` in `hle_sf.c`) on which every request succeeds with zeroed output. This is a stub, not a camera: zeroed answers read as no camera (command 3 "Default" gives context 0). Open: the context is closed through `svcCloseHandle`, which ignores host session handles, so its slot stays taken (one context per boot so far).
+- **Found on:** [Mario Kart World](../../dm/games/0400C3F00006E000/README.md) 1.8.0 on the phone (`nn::camera::Initialize` at `main+0xcdebc0`).
+
+### Whether the language selection is limited
+
+- **Symptom:** a null read at boot in `nn::oe::IsLanguageSelectionLimited`, right after the game asks for its language.
+- **Cause:** the SDK asks the `am` session at vtable +0x238, and the host never opens that session (`oe::Initialize` is taken over).
+- **Fix:** hooked: no limit; the host's language is `DM_LANG` alone (`hle_oe.c`).
+- **Found on:** Hyrule Warriors: Age of Imprisonment (upstream nxnative, d70ee900; its profile is not on this branch).
+
+### The target frame rate (graphics frame length)
+
+- **Symptom:** a null read at boot in `nn::os::SdkMutexType` under `nn::gs::sdk::SetGraphicsFrameLengthMode`, called from `nn::oe::SetGraphicsTargetFrameRate`.
+- **Cause:** `SetGraphicsTargetFrameRate` maps up to 59 fps to mode 1, up to 119 to mode 2 and above to mode 3 (`SetGraphicsTargetFrameRateAuto` to mode 0) and calls `SetGraphicsFrameLengthMode`, which locks the gs graphics server's context and sends it the mode. The host has no graphics server, so the context is null.
+- **Fix:** `SetGraphicsFrameLengthMode` is hooked and logs the mode once per change; both `oe` paths reach it. The host paces by the window's present interval (`hle_oe.c`).
+- **Found on:** Hyrule Warriors: Age of Imprisonment (upstream nxnative, d70ee900; its profile is not on this branch): 60 / its present interval at boot.

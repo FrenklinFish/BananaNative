@@ -32,6 +32,8 @@ namespace Spv.Generator
         private readonly List<Instruction> _typeDeclarationsList;
         // In the declaration block.
         private readonly List<Instruction> _globals;
+        // nxnative (after azmasm/switch2mac, MIT): a SPIR-V 1.4 entry point lists every global variable it uses
+        public IReadOnlyList<Instruction> GlobalVariables => _globals;
         // In the declaration block.
         private readonly Dictionary<ConstantKey, Instruction> _constants;
         // In the declaration block, for function that aren't defined in the module.
@@ -131,6 +133,17 @@ namespace Spv.Generator
 
             _typeDeclarations[key] = instruction;
             _typeDeclarationsList.Add(instruction);
+        }
+
+        // nxnative: a bool specialization constant among the declarations, after the types declared before it (the grammar's SpecConstantFalse goes into the
+        // function being written)
+        public Instruction DeclareSpecConstantFalse(Instruction resultType)
+        {
+            Instruction result = NewInstruction(Op.OpSpecConstantFalse, Instruction.InvalidId, resultType);
+
+            AddTypeDeclaration(result, true);
+
+            return result;
         }
 
         public void AddEntryPoint(ExecutionModel executionModel, Instruction function, string name, params ReadOnlySpan<Instruction> interfaces)

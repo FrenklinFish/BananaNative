@@ -196,6 +196,13 @@ namespace Ryujinx.Graphics.Shader.Translation
         {
             ResourceManager resourceManager = CreateResourceManager(asCompute);
 
+            // nxnative: a Switch 2 task / mesh program's stage memories, declared before any instruction is emitted (Instructions/InstEmitAmpereMesh.cs)
+            if (MeshShaderInfo.Create(Options.Flags, GpuAccessor) is MeshShaderInfo mesh)
+            {
+                resourceManager.Properties.Mesh = mesh;
+                mesh.Declare(resourceManager.Properties);
+            }
+
             bool usesLocalMemory = _program.UsedFeatures.HasFlag(FeatureFlags.LocalMemory);
 
             resourceManager.SetCurrentLocalMemory(_localMemorySize, usesLocalMemory);
@@ -209,7 +216,47 @@ namespace Ryujinx.Graphics.Shader.Translation
 
             FunctionCode[] code = EmitShader(this, resourceManager, _program, asCompute, initializeOutputs: true, out _);
 
+            if (Stage == ShaderStage.Compute && resourceManager.Properties.Mesh == null)
+            {
+                SpillSharedMemory(resourceManager);
+            }
+
             return Translate(code, resourceManager, _program.UsedFeatures, _program.ClipDistancesWritten, asCompute);
+        }
+
+        // nxnative: shared memory past the host's limit (StructuredIr/SharedSpillInfo.cs). Decided after the instructions were emitted, when the HMMA scratch (which stays in
+        // workgroup memory) is known: the program's main shared memory moves when it alone, or with that scratch, is over the limit
+        private void SpillSharedMemory(ResourceManager resourceManager)
+        {
+            int max = GpuAccessor.QueryHostComputeSharedMemoryMax();
+            int id = resourceManager.SharedMemoryId;
+
+            if (max <= 0 || id < 0)
+            {
+                return;
+            }
+
+            int words = resourceManager.Properties.SharedMemories[id].ArrayLength;
+            int total = 0;
+
+            foreach (MemoryDefinition memory in resourceManager.Properties.SharedMemories.Values)
+            {
+                total += memory.ArrayLength * sizeof(uint);
+            }
+
+            if (total <= max)
+            {
+                return;
+            }
+
+            if (!resourceManager.TryGetStorageBufferBinding(GlobalToStorage.GmemMapCbSlot, GlobalToStorage.SharedSpillCbOffset, write: true, out int binding))
+            {
+                throw new InvalidOperationException($"Shared memory of {total} bytes is over the host's {max} and no storage buffer binding is left for it.");
+            }
+
+            resourceManager.Properties.SharedSpill = new SharedSpillInfo(id, binding, words);
+            GpuAccessor.RecordSharedSpill(words * sizeof(uint), total - words * sizeof(uint));
+            GpuAccessor.Log($"shared memory of {words * sizeof(uint)} bytes moved to a storage buffer slice per workgroup ({total} bytes in all, the host's limit {max})");
         }
 
         public ShaderProgram Translate(TranslatorContext other, bool asCompute = false)

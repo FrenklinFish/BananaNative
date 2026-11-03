@@ -170,6 +170,12 @@ namespace Ryujinx.Graphics.Shader.CodeGen.Spirv
                 Generate(context, info, funcIndex);
             }
 
+            // nxnative: a Switch 2 task / mesh program's entry point wraps function 0 (SpirvMeshEntry.cs)
+            if (context.Properties.Mesh != null)
+            {
+                SpirvMeshEntry.Generate(context, context.Properties.Mesh);
+            }
+
             byte[] result = context.Generate();
 
             lock (_poolLock)
@@ -195,6 +201,11 @@ namespace Ryujinx.Graphics.Shader.CodeGen.Spirv
 
             Declarations.DeclareLocals(context, function);
 
+            if (funcIndex == 0 && context.Properties.SharedSpill != null)
+            {
+                Declarations.GenerateSharedSpillBase(context, context.Properties.SharedSpill);
+            }
+
             Generate(context, function.MainBlock);
 
             // Functions must always end with a return.
@@ -206,7 +217,7 @@ namespace Ryujinx.Graphics.Shader.CodeGen.Spirv
 
             context.FunctionEnd();
 
-            if (funcIndex == 0)
+            if (funcIndex == 0 && context.Properties.Mesh == null)   // a task / mesh program's entry point is SpirvMeshEntry's
             {
                 context.AddEntryPoint(context.Definitions.Stage.Convert(), spvFunc, "main", context.GetMainInterface());
 

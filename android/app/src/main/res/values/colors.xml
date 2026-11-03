@@ -1,0 +1,22 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- The icon's background (deep green) behind the banana -->
+    <color name="ic_launcher_background">#FF1E5B3A</color>
+
+    <!-- The launcher's palette (Ui.java, themes.xml): ripe banana, cream, peel brown and the icon's leaf green. values-night has the dark set -->
+    <color name="bn_bg">#FFFFF6E0</color>            <!-- the screen: cream -->
+    <color name="bn_card">#FFFFFDF6</color>          <!-- cards and dialogs -->
+    <color name="bn_card_stroke">#FFF1DFAE</color>
+    <color name="bn_tint">#FFFFF0C2</color>          <!-- tonal buttons, icon tiles, chips -->
+    <color name="bn_banana">#FFFFD43B</color>        <!-- primary buttons -->
+    <color name="bn_banana_deep">#FFF2B705</color>
+    <color name="bn_on_banana">#FF3B2611</color>     <!-- text on banana yellow (both modes) -->
+    <color name="bn_text">#FF3B2A1A</color>
+    <color name="bn_text_2">#FF7A6347</color>
+    <color name="bn_accent">#FF9A6400</color>        <!-- check boxes, switches, dialog buttons: a deep gold that reads on cream -->
+    <color name="bn_leaf">#FF1E5B3A</color>
+    <color name="bn_on_leaf">#FFFFF6E0</color>
+    <color name="bn_danger">#FFB83A12</color>
+    <color name="bn_danger_tint">#FFFDE3D8</color>
+    <color name="bn_warn_tint">#FFFFE7B0</color>
+</resources>

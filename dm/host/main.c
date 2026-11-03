@@ -2,11 +2,8 @@
 #include "dm.h"
 #include "front.h"
 #include "../gfx/nvn/dmsh_chain.h"
-#include <CoreFoundation/CoreFoundation.h>
 #include <stdatomic.h>
 #include <sys/resource.h>
-#include <sys/sysctl.h>
-#include <sys/time.h>
 #include <unistd.h>
 void probe_install(void); void hid_keys_init(void); void stubs_report(void); void crash_install(void); void guest_thread_init(void); void guest_gate_stack(int own_stack); uint32_t svc_thread_main_init(void);
 typedef void (*fn0)(void); typedef void (*fn2)(uint64_t, uint64_t); typedef void (*fnp)(void *);
@@ -50,10 +47,7 @@ static void flags_init(void) {
 
 // Zero point of the boot timeline = process creation time (p_starttime from sysctl KERN_PROC_PID, wall clock) converted to the now_ns monotonic time base; same definition on Mac / iOS
 static uint64_t proc_start_mono_ns(void) {
-    struct kinfo_proc kp; size_t n = sizeof kp; int mib[4] = {CTL_KERN, KERN_PROC, KERN_PROC_PID, getpid()};
-    uint64_t mono = now_ns(); struct timeval tv; gettimeofday(&tv, NULL);
-    if (sysctl(mib, 4, &kp, &n, NULL, 0) || !n) return mono;
-    int64_t age = (int64_t)(tv.tv_sec - kp.kp_proc.p_starttime.tv_sec) * 1000000000ll + (tv.tv_usec - kp.kp_proc.p_starttime.tv_usec) * 1000ll;
+    uint64_t mono = now_ns(); int64_t age = plat_process_age_ns();
     return age > 0 ? mono - (uint64_t)age : mono;
 }
 
@@ -62,8 +56,22 @@ static uint64_t proc_start_mono_ns(void) {
 static pthread_key_t g_race_keys[512];
 static unsigned g_race_n, g_race_want;
 static void *keyrace_thread(void *unused);
+// DM_FASTBOOT=1 (test runs): sets the profile's fastboot_env switches (KEY=VALUE, separated by spaces), the scripted input and markers that take a run to its test scene as fast as the
+// game allows, without overriding a switch the environment (or env.txt) already sets. One line in env.txt instead of a list of presses each agent copies
+static void fastboot_apply(void) {
+    const char *e = getenv("DM_FASTBOOT"); if (!e || !strcmp(e, "0")) return;
+    if (!*DM_GAME_FASTBOOT_ENV) { LOG("[RED] DM_FASTBOOT: the game profile has no fastboot_env"); return; }
+    char *s = strdup(DM_GAME_FASTBOOT_ENV), *save = NULL; if (!s) return;
+    for (char *kv = strtok_r(s, " ", &save); kv; kv = strtok_r(NULL, " ", &save)) {
+        char *eq = strchr(kv, '='); if (!eq) continue; *eq = 0;
+        int had = getenv(kv) != NULL; if (!had) setenv(kv, eq + 1, 0);
+        LOG("DM_FASTBOOT: %s=%s%s", kv, had ? getenv(kv) : eq + 1, had ? " (set by the environment, kept)" : "");
+    }
+    free(s);
+}
 static void host_preload(int argc, char **argv) {
     g_t0_ns = proc_start_mono_ns();
+    fastboot_apply();
     flags_init();
     if (argc < 2) die("usage: dmhost <dir> [mod...] [-- game arguments...]");
     // Time zone: the game converts absolute time to local time along two paths, both ending in the host libc -- nn::time::ToCalendarTime (hle_time.c, localtime_r) and the guest libc's
@@ -77,8 +85,7 @@ static void host_preload(int argc, char **argv) {
     }
     crash_install();
     {   // Which build this is: the commit the packer stamped into the app (DMCommit; a run outside an app has none), the shader chain the host loads, the profile
-        CFBundleRef b = CFBundleGetMainBundle(); CFTypeRef c = b ? CFBundleGetValueForInfoDictionaryKey(b, CFSTR("DMCommit")) : NULL; char cs[64] = "not recorded";
-        if (c && CFGetTypeID(c) == CFStringGetTypeID()) CFStringGetCString((CFStringRef)c, cs, sizeof cs, kCFStringEncodingUTF8);
+        char cs[64] = "not recorded"; plat_build_commit(cs, sizeof cs);
         LOG("build: commit %s, shader chain %s, profile %s", cs, DMSH_CHAIN, DM_GAME_ID);
     }
     const char *race = getenv("DM_TEST_KEYRACE");

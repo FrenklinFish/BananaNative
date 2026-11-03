@@ -40,7 +40,7 @@ static uint8_t *frostbite(uint8_t *base, uint8_t *inst) {
 }
 
 static void check(int which) {
-    size_t len = 0x13000000;
+    size_t len = 0x27000000;   // up to the floor row's global (main+0x26cc208)
     uint8_t *base = mmap(NULL, len, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANON, -1, 0);
     assert(base != MAP_FAILED);
     g_nmod = 1; strcpy(g_mod[0].name, "main"); g_mod[0].base = base;
@@ -74,13 +74,21 @@ static void check(int which) {
         frostbite(base, object);
         *(float *)(object + 0x34) = 30; *(int32_t *)(object + 0x38) = 30;
         if (which == 16) *(uint64_t *)(object + 8) = 0;   // the cache word holds something else
+    } else if (which >= 17 && which <= 19) {   // Donkey Kong Bananza's dynamic interval controller: [main+0x26cc208] app, [app] framework, [framework+0x218] controller, its floor at +0, its maximum at +4
+        strcpy(g_mod[0].build_id, "e25c90c1c136638885659fd55bf8a03b");
+        uint8_t *app = object + 0x100, *fw = object + 0x200, *ctl = object + 0x400;
+        *(uintptr_t *)(base + 0x26cc208) = (uintptr_t)app; *(uintptr_t *)app = (uintptr_t)fw; *(uintptr_t *)(fw + 0x218) = which == 19 ? 0 : (uintptr_t)ctl;   // 19: the controller made later
+        sync = (int32_t *)ctl; sync[0] = 1; sync[1] = 3;
     } else if (which >= 9) {   // the present interval alone (UE 4.18's nvn.SyncInterval); 12: a main the rewriter found no variable in
         strcpy(g_mod[0].build_id, "0123456789abcdef0123456789abcdef");
         if (which != 12) cvar("nvn.SyncInterval", 0x8adca10);
         *(uintptr_t *)(base + 0x8adca10 + 0x10) = which == 13 ? 0 : (uintptr_t)object;
         sync = (int32_t *)object; sync[0] = sync[1] = which == 10 ? 1 : 2;
     }
-    int engine = which != 3 && which != 12;   // a limiter the host writes: any but another build's main (3) and a main the rewriter found no Unreal variable in (12)
+    if (which == 17) setenv("DM_FPS_TARGET", "30", 1);
+    if (which == 18) setenv("DM_FPS_TARGET", "0", 1);
+    if (which == 19) setenv("DM_FPS_TARGET", "15", 1);   // a saved cap the controller cannot hold (4 vsyncs, its maximum 3)
+    int engine = which != 3 && which != 12 && which < 17;   // 17-19: a floor does not fix the rate, so presentation keeps the game's interval   // a limiter the host writes: any but another build's main (3) and a main the rewriter found no Unreal variable in (12)
     if (which & 1) assert(dm_fps_lock_engine() == engine);   // the graphics layer's present cap may ask before the first present (the acquire)
     dm_fps_lock_tick();
     assert(dm_fps_lock_engine() == engine);
@@ -92,7 +100,12 @@ static void check(int which) {
     else if (which >= 2 && which <= 5) {
         assert(writes == 0);
         assert(*unity == (which == 4 ? -1 : which == 5 ? 0 : 30));
-    } else if (which == 6) assert(*f == 60 && writes == 1);
+    } else if (which == 6) {
+        assert(*f == 60 && writes == 1);
+        assert(dm_fps_lock_rates() == 63);   // a rate the engine paces itself: any cap
+        dm_fps_target_set(45, "test"); dm_fps_lock_tick(); assert(*f == 45 && writes == 2);   // set while the game runs
+        dm_fps_target_set(0, "test"); dm_fps_lock_tick(); assert(*f == 30 && writes == 3);   // back to the game's own
+    }
     else if (which == 7) assert(fabsf(*f - (1000.0f / 60 - 0.5f)) < 0.001f && writes == 1);
     else if (which == 8) assert(f[0] == 60 && f[1] == 60 && sync[0] == 1 && sync[1] == 1 && writes == 4);
     else if (which == 9) {
@@ -113,16 +126,40 @@ static void check(int which) {
         dm_fps_lock_tick();
         assert(sync[0] == 1 && sync[1] == 1 && writes == 2);
     }
+    else if (which == 17) {
+        assert(sync[0] == 2 && sync[1] == 3 && writes == 1);   // the floor alone: the game may still go to 3
+        assert(dm_fps_lock_rates() == (2 | 4 | 32));   // 20, 30, 60: whole vsyncs only, and no more than the controller's maximum of 3 (15 would need 4)
+        dm_fps_target_set(40, "test"); dm_fps_lock_tick(); assert(sync[0] == 2 && writes == 1);   // 40 is no whole vsync: left alone
+        dm_fps_target_set(20, "test"); dm_fps_lock_tick(); assert(sync[0] == 3 && writes == 2);
+        dm_fps_target_set(0, "test"); dm_fps_lock_tick(); assert(sync[0] == 1 && writes == 3);   // back to the game's own floor
+        dm_fps_lock_tick(); assert(writes == 3);
+        dm_fps_target_set(33, "test"); assert(dm_fps_target() == 0);   // not a cap: unchanged
+    } else if (which == 18) {
+        assert(sync[0] == 1 && writes == 0);   // the game's own at start: nothing written, nothing to restore
+        dm_fps_target_set(30, "test"); dm_fps_lock_tick(); assert(sync[0] == 2 && writes == 1);
+        dm_fps_target_set(60, "test"); dm_fps_lock_tick(); assert(sync[0] == 1 && writes == 2);
+    } else if (which == 19) {
+        uint8_t *fw = object + 0x200;
+        assert(writes == 0 && dm_fps_target() == 15);   // no controller yet: its maximum is unknown, the cap waits
+        assert(dm_fps_lock_rates() == (1 | 2 | 4 | 32));   // offered by kind until the maximum can be read
+        *(uintptr_t *)(fw + 0x218) = (uintptr_t)(object + 0x400);
+        dm_fps_lock_tick(); assert(sync[0] == 1 && sync[1] == 3 && writes == 0 && dm_fps_target() == 0);   // the start cap becomes the game's own; nothing written
+        assert(dm_fps_lock_rates() == (2 | 4 | 32));   // 15 is not offered
+        dm_fps_lock_tick(); assert(sync[0] == 1 && writes == 0);
+        dm_fps_target_set(15, "test"); dm_fps_lock_tick(); dm_fps_lock_tick(); assert(sync[0] == 1 && writes == 0);   // set while running (DM_CTL): still never above the maximum
+        dm_fps_target_set(30, "test"); dm_fps_lock_tick(); assert(sync[0] == 2 && writes == 1);   // another cap still applies
+        dm_fps_target_set(0, "test"); dm_fps_lock_tick(); assert(sync[0] == 1 && writes == 2);
+    }
     else assert(sync[0] == 2 && sync[1] == 2 && writes == 0);
     munmap(base, len);
 }
 
 int main(void) {
     // Each process starts the production one-time initialization with a fresh build and target.
-    for (int i = 0; i < 17; i++) {
+    for (int i = 0; i < 20; i++) {
         pid_t p = fork(); assert(p >= 0);
         if (!p) { check(i); _exit(0); }
         int status; assert(waitpid(p, &status, 0) == p); assert(WIFEXITED(status) && WEXITSTATUS(status) == 0);
     }
-    puts("Frame limits: integer/float FPS, milliseconds, vsync copies, build gates and overrides passed");
+    puts("Frame limits: integer/float FPS, milliseconds, vsync copies, floors behind pointers and under the controller's maximum, caps set while running, build gates and overrides passed");
 }

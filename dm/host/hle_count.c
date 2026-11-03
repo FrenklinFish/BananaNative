@@ -7,20 +7,32 @@
 #include <stdatomic.h>
 #include <sys/mman.h>
 #include <unistd.h>
-#include <libkern/OSCacheControl.h>
-#if !TARGET_OS_IPHONE
+#if !PLAT_IOS
 #define HC_MAX 8192
 static struct { const char *kind, *name; void *fn; _Atomic uint64_t n; } g_hc[HC_MAX];
 static unsigned g_nhc; static uint32_t *g_hcode; static int g_hon = -1, g_hsealed; static const char *g_hpath;
 static _Atomic uint64_t g_hsvc[256];
 static int hc_on(void) { if (g_hon < 0) { g_hpath = getenv("DM_HLECOUNT"); g_hon = g_hpath != NULL; } return g_hon; }
-static void hc_write(void) {
-    char pth[1024]; snprintf(pth, sizeof pth, g_hpath, (int)getpid());   // %d in the path is replaced with the process id (parallel runs each write their own copy)
+static void hc_write_to(const char *suffix) {
+    char pth[1024]; int n = snprintf(pth, sizeof pth, g_hpath, (int)getpid());   // %d in the path is replaced with the process id (parallel runs each write their own copy)
+    if (suffix && n > 0 && n < (int)sizeof pth) snprintf(pth + n, sizeof pth - (size_t)n, "%s", suffix);
     FILE *f = fopen(pth, "w"); if (!f) { LOG("[RED] DM_HLECOUNT cannot write %s", pth); return; }
     fprintf(f, "kind\tname\tcount\n");
     for (unsigned i = 0; i < g_nhc; i++) fprintf(f, "%s\t%s\t%llu\n", g_hc[i].kind, g_hc[i].name, (unsigned long long)atomic_load(&g_hc[i].n));
     for (int k = 0; k < 256; k++) if (atomic_load(&g_hsvc[k])) fprintf(f, "SVC\t%#x\t%llu\n", k, (unsigned long long)atomic_load(&g_hsvc[k]));
     fclose(f); LOG("DM_HLECOUNT: %u entries → %s", g_nhc, pth);
+}
+static void hc_write(void) { hc_write_to(NULL); }
+// DM_HLECOUNT_AT=<s>[,<s>…]: also a snapshot at those seconds from process start, as <file>.<s>: the difference of two shows what the guest calls in between (where the exit
+// never comes, as on Android, where the launcher kills the game process; or to see what a game polls while it waits, Donkey Kong Bananza's boot screen)
+extern uint64_t g_t0_ns;
+static void *hc_at_main(void *arg) {
+    char *list = arg, *save = NULL;
+    for (char *t = strtok_r(list, ",", &save); t; t = strtok_r(NULL, ",", &save)) {
+        double at = atof(t); while ((now_ns() - g_t0_ns) / 1e9 < at) usleep(20000);
+        char suf[32]; snprintf(suf, sizeof suf, ".%s", t); hc_write_to(suf);
+    }
+    free(list); return NULL;
 }
 void *hlecount_wrap(const char *kind, const char *name, void *fn) {
     if (!hc_on() || !fn) return fn;
@@ -43,8 +55,10 @@ void hlecount_seal(void) {
     if (!hc_on() || !g_hcode) return;
     if (mprotect(g_hcode, HC_MAX * 48, PROT_READ | PROT_EXEC)) die("DM_HLECOUNT mprotect");
     g_hsealed = 1;
-    sys_icache_invalidate(g_hcode, HC_MAX * 48);
+    plat_icache_invalidate(g_hcode, HC_MAX * 48);
     LOG("DM_HLECOUNT: %u counting stubs sealed", g_nhc);
+    const char *at = getenv("DM_HLECOUNT_AT"); pthread_t th;
+    if (at && *at && !pthread_create(&th, NULL, hc_at_main, strdup(at))) pthread_detach(th);
 }
 void hlecount_svc(int num) { if (g_hon > 0 && num >= 0 && num < 256) atomic_fetch_add(&g_hsvc[num], 1); }
 void hlecount_flush(void) { if (hc_on() && g_hcode) hc_write(); }   // Also write a copy on the graceful exit path (SIGTERM / scene disconnect)

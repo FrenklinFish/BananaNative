@@ -339,6 +339,13 @@ To enroll a cut for any game's own module:
 - **Cause:** a newer SDK reads a register macOS traps (`CTR_EL0` in SDK 16's `FlushDataCache`).
 - **Fix:** rewrite to a constant (`patch_nso.py`, the `ctr` site kind).
 
+### Key page entry 0 on Android
+
+- **Symptom:** every Android boot stops right after `thread slots: tpidr_el0 + 0x10 → K18 +0 …` with `FATAL main: key page entry 0 is 0 (host key not created) -- the game would read TSD slot 0`.
+- **Cause:** the loader's check after `install_key_page` took an entry of 0 for a pthread key that was never created, which holds only on Apple (entry = key × 8). With `--target android` the entries are the slots' offsets in the thread's slot block (`plat_slots_t`), and K18's offset is 0 by design ([android/PORTING.md, Thread slots](../../android/PORTING.md#thread-slots)).
+- **Fix:** the zero check runs on Apple only (`loader.c`); on both platforms the loader now checks that no two slots share an entry.
+- **Found on:** [Donkey Kong Bananza](../../dm/games/040074A01BF12000/README.md), the first game booted on Android (arm64 emulator).
+
 ## Relocations and module layout
 
 ### Packed relative relocations (DT_RELR)
