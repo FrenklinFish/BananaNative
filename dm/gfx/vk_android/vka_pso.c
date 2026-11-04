@@ -222,11 +222,14 @@ void vka_pso_save(int force) {
     pthread_mutex_lock(&g_save_mu); save_now(); pthread_mutex_unlock(&g_save_mu);
 }
 void vka_gpl_line(char *out, size_t n);
+void vka_pso_async_line(char *out, size_t n);
 void mtl_pso_line(char *out, size_t n) {
     if (!n) return;
     int k = snprintf(out, n, "%llu graphics + %llu compute pipelines (%llu failed, %llu compute (program, layout) pairs not made for shared memory, %llu on the frame path), %llu set layouts, %.0f ms creating", (unsigned long long)g_ngfx, (unsigned long long)g_ncs,
                      (unsigned long long)g_nfail, (unsigned long long)g_ncs_over, (unsigned long long)g_frame_made, (unsigned long long)g_nlayouts, g_create_ms);
     if (V.gpl && k > 0 && (size_t)k + 3 < n) { memcpy(out + k, "; ", 3); vka_gpl_line(out + k + 2, n - (size_t)k - 2); }
+    size_t o = strlen(out); char a[200]; vka_pso_async_line(a, sizeof a);
+    if (a[0] && o + 2 < n) snprintf(out + o, n - o, "; %s", a);
 }
 
 // The long-frame log's counters (hle_nvn.c): pipelines made on the frame path and the time it took, cumulative (it takes each frame's difference). Background and prewarm
@@ -728,7 +731,8 @@ static void pw_mark_bad(size_t off) {   // the record at off of the loaded list:
 // fields in which the nearest of them differs from the key asked for. "no record with these shaders" = new to the list (an area or effect no earlier run reached: prewarm
 // cannot help, only GPL or a faster compile); fields named = the list held a pipeline of the same shaders in another state (a state the key keeps that earlier runs did
 // not meet, or a field the key should not keep because the pipeline does not depend on it)
-static void pw_explain(vka_shader *const sh[5], const vka_gkey *k, uint32_t klen, double ms, int linked) {
+// where: " on the frame path", or " in the background" for an asynchronous one (DM_VK_PSO_ASYNC; ms then counts from the miss)
+static void pw_explain(vka_shader *const sh[5], const vka_gkey *k, uint32_t klen, double ms, int linked, const char *where) {
     static _Atomic int nlog; int lim = VKA_ENV("DM_VK_PREWARM_WHY", 64);
     if (!g_pw_load || atomic_load(&nlog) >= lim || atomic_fetch_add(&nlog, 1) >= lim) return;
     static const struct { const char *name; size_t lo, hi; } F[] = {
@@ -755,9 +759,9 @@ static void pw_explain(vka_shader *const sh[5], const vka_gkey *k, uint32_t klen
     }
     char d[256] = ""; size_t q = 0;
     for (int f = 0; f < NF && q < sizeof d; f++) if (bestmask >> f & 1) q += (size_t)snprintf(d + q, sizeof d - q, "%s%s", q ? ", " : "", F[f].name);
-    if (!same_sh) VLOG("pipeline made on the frame path (%.1f ms%s), not in the prewarm list: no record with these shaders (vs %016llx fs %016llx; first met in this run)",
+    if (!same_sh) VLOG("pipeline made%s (%.1f ms%s), not in the prewarm list: no record with these shaders (vs %016llx fs %016llx; first met in this run)", where,
                        ms, linked ? ", linked" : "", (unsigned long long)want[0], (unsigned long long)want[4]);
-    else VLOG("pipeline made on the frame path (%.1f ms%s), not in the prewarm list: %d records with these shaders, the nearest differs in %s",
+    else VLOG("pipeline made%s (%.1f ms%s), not in the prewarm list: %d records with these shaders, the nearest differs in %s", where,
               ms, linked ? ", linked" : "", same_sh, d[0] ? d : "nothing: the same key (the prewarm threads had not reached it yet)");
 }
 static gval *gfx_obtain(const gkey_full *fk, uint64_t h, size_t len, vka_shader *const sh[VKA_NSTAGE], const vka_layout *lay, const vka_gkey *k, int prewarm, int *made);
@@ -824,12 +828,63 @@ static void busy_wait(gval *g) {
     while (g->busy) pthread_cond_wait(&g_busy_cv, &g_mu);
     atomic_fetch_add(&g_pw_wait_ns, now_ns() - t0);
 }
+// DM_VK_PSO_ASYNC=N (restart; default 0 = off): a stopgap for frame-path pipelines on slow compilers (Turnip on the Adreno 740 made Donkey Kong Bananza's fragment shader
+// libraries in 77-213 ms, 96 pipelines and 13.7 s of frame waits in 40 s of wall punching). The frame path still makes the cache-only try (a fraction of a millisecond when
+// the pipeline cache has it); on a miss the entry is made on one of N background threads (at most 4) and its draws are skipped until it is there, as Eden's asynchronous
+// shaders do. A skipped draw is missing from that frame only, except where the game keeps what it drew (a texture drawn once and reused): that stays wrong until redrawn.
+// Compute and mesh pipelines are still made on the frame path. Open: the cause, slow library compiles on Turnip, is not addressed
+typedef struct as_job { struct as_job *next; gval *g; size_t len; vka_shader *sh[VKA_NSTAGE]; vka_layout lay; vka_gkey k; uint64_t t0; } as_job;
+static as_job *g_as_head, **g_as_tail = &g_as_head; static pthread_mutex_t g_as_mu = PTHREAD_MUTEX_INITIALIZER; static pthread_cond_t g_as_cv = PTHREAD_COND_INITIALIZER;
+static _Atomic uint64_t g_as_queued, g_as_made, g_as_skips, g_as_ns, g_as_lat_max_ns; static _Atomic int g_as_depth, g_as_depth_max;
+static void gfx_build(gval *g, size_t len, vka_shader *const sh[VKA_NSTAGE], const vka_layout *lay, const vka_gkey *k, int prewarm, int async, uint64_t t_make);
+static void *as_main(void *a) {
+    (void)a; pthread_setname_np(pthread_self(), "vk-psoasync");
+    for (;;) {
+        pause_point();
+        pthread_mutex_lock(&g_as_mu);
+        while (!g_as_head) pthread_cond_wait(&g_as_cv, &g_as_mu);
+        as_job *j = g_as_head; g_as_head = j->next; if (!g_as_head) g_as_tail = &g_as_head;
+        pthread_mutex_unlock(&g_as_mu);
+        uint64_t t0 = now_ns();
+        gfx_build(j->g, j->len, j->sh, &j->lay, &j->k, 0, 1, j->t0);
+        uint64_t t1 = now_ns(), lat = t1 - j->t0, cur = atomic_load(&g_as_lat_max_ns);
+        while (lat > cur && !atomic_compare_exchange_weak(&g_as_lat_max_ns, &cur, lat)) {}
+        atomic_fetch_add(&g_as_ns, t1 - t0); atomic_fetch_add(&g_as_made, 1); atomic_fetch_sub(&g_as_depth, 1);
+        free(j);
+    }
+    return NULL;
+}
+static int g_as_n;
+static void as_start(void) {
+    int v = VKA_ENV("DM_VK_PSO_ASYNC", 0); v = v < 0 ? 0 : v > 4 ? 4 : v;
+    for (int i = 0; i < v; i++) { pthread_t th; if (!pthread_create(&th, NULL, as_main, NULL)) { pthread_detach(th); g_as_n++; } }
+    if (v) VLOG("asynchronous pipelines: %d of %d background threads (DM_VK_PSO_ASYNC): a pipeline the cache lacks is made off the frame path and its draws are skipped until then", g_as_n, v);
+}
+static int as_threads(void) { static pthread_once_t once = PTHREAD_ONCE_INIT; pthread_once(&once, as_start); return g_as_n; }
+static void as_queue(gval *g, size_t len, vka_shader *const sh[VKA_NSTAGE], const vka_layout *lay, const vka_gkey *k, uint64_t t0) {
+    as_job *j = malloc(sizeof *j);
+    if (!j) { gfx_build(g, len, sh, lay, k, 0, 0, t0); return; }
+    j->next = NULL; j->g = g; j->len = len; memcpy(j->sh, sh, sizeof j->sh); j->lay = *lay; j->k = *k; j->t0 = t0;
+    int d = atomic_fetch_add(&g_as_depth, 1) + 1, m = atomic_load(&g_as_depth_max);
+    while (d > m && !atomic_compare_exchange_weak(&g_as_depth_max, &m, d)) {}
+    atomic_fetch_add(&g_as_queued, 1);
+    pthread_mutex_lock(&g_as_mu); *g_as_tail = j; g_as_tail = &j->next; pthread_cond_signal(&g_as_cv); pthread_mutex_unlock(&g_as_mu);
+}
+void vka_pso_async_line(char *out, size_t n) {
+    if (!n) return;
+    out[0] = 0;
+    if (as_threads() <= 0) return;
+    snprintf(out, n, "asynchronous: %llu queued, %llu made (%.0f ms in all, longest wait from the miss %.0f ms), deepest queue %d, draws skipped waiting %llu",
+             (unsigned long long)atomic_load(&g_as_queued), (unsigned long long)atomic_load(&g_as_made), atomic_load(&g_as_ns) / 1e6, atomic_load(&g_as_lat_max_ns) / 1e6,
+             atomic_load(&g_as_depth_max), (unsigned long long)atomic_load(&g_as_skips));
+}
 static gval *gfx_obtain(const gkey_full *fk, uint64_t h, size_t len, vka_shader *const sh[VKA_NSTAGE], const vka_layout *lay, const vka_gkey *k, int prewarm, int *made) {
     *made = 0;
+    int async = !prewarm && !sh[7] && as_threads() > 0;
     pthread_mutex_lock(&g_mu);
     gval *g = km_get(&g_gfx, fk, h);
     if (g) {
-        if (g->busy && prewarm) { pthread_mutex_unlock(&g_mu); return NULL; }
+        if (g->busy && (prewarm || async)) { pthread_mutex_unlock(&g_mu); return prewarm ? NULL : g; }
         if (g->busy) busy_wait(g);
         pthread_mutex_unlock(&g_mu);
         return g;
@@ -837,11 +892,48 @@ static gval *gfx_obtain(const gkey_full *fk, uint64_t h, size_t len, vka_shader 
     g = calloc(1, sizeof *g); g->busy = 1; g->pw = (uint8_t)(prewarm != 0); g->tid = prewarm ? gettid() : 0; km_put(&g_gfx, fk, h, g);
     pthread_mutex_unlock(&g_mu);
     uint64_t t_make = now_ns();
+    if (async) {
+        pc_open();
+        VkPipeline p = VK_NULL_HANDLE;
+        pstate *P = malloc(sizeof *P);
+        if (P && gpl_on() && pstate_fill(P, sh, lay, k)) {   // (the cache-only try needs pipelineCreationCacheControl, which GPL is on with)
+            P->ci.flags |= VK_PIPELINE_CREATE_FAIL_ON_PIPELINE_COMPILE_REQUIRED_BIT;
+            uint64_t t0 = now_ns();
+            VkResult r = vk.vkCreateGraphicsPipelines(V.dev, g_pc, 1, &P->ci, NULL, &p);
+            uint64_t dns = now_ns() - t0;
+            if (r != VK_SUCCESS) p = VK_NULL_HANDLE;
+            pthread_mutex_lock(&g_mu);
+            if (p) { g_ngfx++; g_made++; g_frame_made++; g_probe_hit++; g_create_ms += dns / 1e6; } else { g_probe_miss++; g_probe_miss_ns += dns; }
+            g_create_ns += dns;
+            pthread_mutex_unlock(&g_mu);
+        }
+        free(P);
+        if (p) {
+            pw_note(0, sh, k, (uint32_t)(len - offsetof(gkey_full, k))); pw_explain(sh, k, (uint32_t)(len - offsetof(gkey_full, k)), (now_ns() - t_make) / 1e6, 0, " on the frame path");
+            pthread_mutex_lock(&g_mu); __atomic_store_n(&g->p, p, __ATOMIC_RELEASE); __atomic_store_n(&g->busy, 0, __ATOMIC_RELEASE); pthread_cond_broadcast(&g_busy_cv); pthread_mutex_unlock(&g_mu);
+            *made = 1;
+            return g;
+        }
+        as_queue(g, len, sh, lay, k, t_make);
+        *made = 1;
+        return g;
+    }
+    gfx_build(g, len, sh, lay, k, prewarm, 0, t_make);
+    *made = 1;
+    return g;
+}
+// A new entry g (busy) made and published. async: a frame-path miss made on a background thread (as_main): linked from parts like the frame path, its time not the frame's
+static void gfx_build(gval *g, size_t len, vka_shader *const sh[VKA_NSTAGE], const vka_layout *lay, const vka_gkey *k, int prewarm, int async, uint64_t t_make) {
     pc_open();
     VkPipeline p = VK_NULL_HANDLE; int linked = 0;
     pstate *P = malloc(sizeof *P);
     if (P && pstate_fill(P, sh, lay, k)) {   // (else logged by vka_shader_module)
-        if (!prewarm && gpl_on() && !P->mesh) {   // (a mesh pipeline is made whole: the libraries here are cut for vertex input pipelines)
+        if (async && gpl_on() && !P->mesh) {
+            uint64_t t1 = now_ns();
+            p = gpl_link(P, k);
+            if (p) { linked = 1; pthread_mutex_lock(&g_mu); g_ngfx++; g_create_ms += (now_ns() - t1) / 1e6; pthread_mutex_unlock(&g_mu); }
+        }
+        else if (!prewarm && !async && gpl_on() && !P->mesh) {   // (a mesh pipeline is made whole: the libraries here are cut for vertex input pipelines)
             // The pipeline cache may already hold the optimized one (made in an earlier run): then it is made at once (a fraction of a millisecond), else linked from parts
             P->ci.flags |= VK_PIPELINE_CREATE_FAIL_ON_PIPELINE_COMPILE_REQUIRED_BIT;
             uint64_t t0 = now_ns();
@@ -859,23 +951,23 @@ static gval *gfx_obtain(const gkey_full *fk, uint64_t h, size_t len, vka_shader 
                 else { uint64_t d2 = now_ns() - t1; pthread_mutex_lock(&g_mu); g_create_ns += d2; pthread_mutex_unlock(&g_mu); }   // the refused parts' time is the frame's too
             }
         }
-        if (!p && !linked) p = full_pipeline(P, sh, prewarm ? " (prewarm)" : NULL);
+        if (!p && !linked) p = full_pipeline(P, sh, prewarm ? " (prewarm)" : async ? " in the background (asynchronous)" : NULL);
     }
     free(P);
     // (mesh pipelines stay out of the prewarm list: its records name the five vertex pipeline stages only; open)
-    if (!prewarm && !sh[7]) { pw_note(0, sh, k, (uint32_t)(len - offsetof(gkey_full, k))); pw_explain(sh, k, (uint32_t)(len - offsetof(gkey_full, k)), (now_ns() - t_make) / 1e6, linked); }
+    if (!prewarm && !sh[7]) { pw_note(0, sh, k, (uint32_t)(len - offsetof(gkey_full, k))); pw_explain(sh, k, (uint32_t)(len - offsetof(gkey_full, k)), (now_ns() - t_make) / 1e6, linked, async ? " in the background" : " on the frame path"); }
     pthread_mutex_lock(&g_mu);
-    g->p = p; g->linked = (uint8_t)linked; g->busy = 0;
+    __atomic_store_n(&g->linked, (uint8_t)linked, __ATOMIC_RELEASE); __atomic_store_n(&g->p, p, __ATOMIC_RELEASE); __atomic_store_n(&g->busy, 0, __ATOMIC_RELEASE);
     pthread_cond_broadcast(&g_busy_cv);
     pthread_mutex_unlock(&g_mu);
     if (linked) opt_queue(g, sh, lay, k);
-    *made = 1;
-    return g;
 }
 static inline VkPipeline gval_use(gval *g) {
     if (!g) return VK_NULL_HANDLE;
     if (__atomic_load_n(&g->linked, __ATOMIC_ACQUIRE)) atomic_fetch_add_explicit(&g_hy_draws, 1, memory_order_relaxed);
-    return __atomic_load_n(&g->p, __ATOMIC_ACQUIRE);
+    VkPipeline p = __atomic_load_n(&g->p, __ATOMIC_ACQUIRE);
+    if (!p && __atomic_load_n(&g->busy, __ATOMIC_ACQUIRE)) atomic_fetch_add_explicit(&g_as_skips, 1, memory_order_relaxed);
+    return p;
 }
 VkPipeline vka_gfx_pipeline(vka_shader *const sh[VKA_NSTAGE], const vka_layout *lay, const vka_gkey *k) {
     static gkey_full fk, last; static gval *last_g;
