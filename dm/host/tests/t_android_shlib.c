@@ -50,12 +50,22 @@ static img_t make_lib(void) {
 
 static void test_made(void) {
     img_t I = make_lib(); vka_shlib L; char err[256];
-    CHECK(vka_shlib_check(&L, I.p, I.n, DMSH_CHAIN, DMSH_VK_CHAIN, "0100000000001000", err, sizeof err), "made library refused: %s", err);
-    CHECK(!vka_shlib_check(&L, I.p, I.n, "000000000000", DMSH_VK_CHAIN, NULL, err, sizeof err) && strstr(err, "translator chain"), "chain mismatch: %s", err);
-    CHECK(!vka_shlib_check(&L, I.p, I.n, DMSH_CHAIN, "000000000000", NULL, err, sizeof err) && strstr(err, "Vulkan chain"), "vk chain mismatch: %s", err);
-    CHECK(!vka_shlib_check(&L, I.p, I.n, DMSH_CHAIN, DMSH_VK_CHAIN, "040074A01BF12000", err, sizeof err) && strstr(err, "game"), "game mismatch: %s", err);
-    CHECK(!vka_shlib_check(&L, I.p, I.n - 1, NULL, NULL, NULL, err, sizeof err), "a cut file passed");
-    vka_shlib_check(&L, I.p, I.n, NULL, NULL, NULL, err, sizeof err);
+    CHECK(vka_shlib_check(&L, I.p, I.n, DMSH_CHAIN, DMSH_VK_CHAIN, "0100000000001000", NULL, err, sizeof err), "made library refused: %s", err);
+    CHECK(!vka_shlib_check(&L, I.p, I.n, "000000000000", DMSH_VK_CHAIN, NULL, NULL, err, sizeof err) && strstr(err, "translator chain"), "chain mismatch: %s", err);
+    CHECK(!vka_shlib_check(&L, I.p, I.n, DMSH_CHAIN, "000000000000", NULL, NULL, err, sizeof err) && strstr(err, "Vulkan chain"), "vk chain mismatch: %s", err);
+    CHECK(!vka_shlib_check(&L, I.p, I.n, DMSH_CHAIN, DMSH_VK_CHAIN, "040074A01BF12000", NULL, err, sizeof err) && strstr(err, "game"), "game mismatch: %s", err);
+    CHECK(!vka_shlib_check(&L, I.p, I.n - 1, NULL, NULL, NULL, NULL, err, sizeof err), "a cut file passed");
+    // Another version is taken by the ABI its header records (an older library while the delta update runs), only with that exact ABI; one without the field never
+    dmsh_vk_header *H = (dmsh_vk_header *)I.p;
+    CHECK(!vka_shlib_check(&L, I.p, I.n, DMSH_CHAIN, "000000000000", NULL, DMSH_VK_ABI, err, sizeof err) && strstr(err, "ABI none"), "a library without abi taken by ABI: %s", err);
+    memcpy(H->abi, DMSH_VK_ABI, sizeof H->abi);
+    CHECK(vka_shlib_check(&L, I.p, I.n, "000000000000", "000000000000", "0100000000001000", DMSH_VK_ABI, err, sizeof err) && L.by_abi, "same ABI refused: %s", err);
+    CHECK(vka_shlib_check(&L, I.p, I.n, DMSH_CHAIN, DMSH_VK_CHAIN, NULL, DMSH_VK_ABI, err, sizeof err) && !L.by_abi, "own version marked by_abi");
+    CHECK(!vka_shlib_check(&L, I.p, I.n, DMSH_CHAIN, "000000000000", NULL, NULL, err, sizeof err), "another version taken without an ABI asked");
+    CHECK(!vka_shlib_check(&L, I.p, I.n, DMSH_CHAIN, "000000000000", NULL, "0123456789ab", err, sizeof err) && strstr(err, "Vulkan chain"), "another ABI taken: %s", err);
+    CHECK(!vka_shlib_check(&L, I.p, I.n, DMSH_CHAIN, "000000000000", "040074A01BF12000", DMSH_VK_ABI, err, sizeof err) && strstr(err, "game"), "same ABI, other game taken: %s", err);
+    memset(H->abi, 0, sizeof H->abi);
+    vka_shlib_check(&L, I.p, I.n, NULL, NULL, NULL, NULL, err, sizeof err);
     uint8_t md[8] = {0xa0, 0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77};
     const dmsh_vk_entry *fs = vka_shlib_find(&L, vka_shlib_key(md)), *vs = vka_shlib_find(&L, 0x0011223344556677ull);
     CHECK(fs && fs->stage == DMSH_VK_STAGE_FS && vs && vs->stage == DMSH_VK_STAGE_VS, "lookup");
@@ -71,12 +81,12 @@ static void test_made(void) {
     w = vka_shlib_spirv(&L, &bad, &nb, err, sizeof err); CHECK(!w, "a short destination was accepted"); free(w);
     // Out-of-order entries are refused
     dmsh_vk_entry *e = (dmsh_vk_entry *)(I.p + 128); uint64_t k = e[0].key; e[0].key = e[1].key + 1;
-    CHECK(!vka_shlib_check(&L, I.p, I.n, NULL, NULL, NULL, err, sizeof err) && strstr(err, "order"), "order: %s", err);
+    CHECK(!vka_shlib_check(&L, I.p, I.n, NULL, NULL, NULL, NULL, err, sizeof err) && strstr(err, "order"), "order: %s", err);
     e[0].key = k;
     // NVN2 task and mesh entries (stages 6 and 7) are accepted; a stage past them is refused
-    e[0].stage = DMSH_VK_STAGE_TS; CHECK(vka_shlib_check(&L, I.p, I.n, NULL, NULL, NULL, err, sizeof err), "task entry refused: %s", err);
-    e[0].stage = DMSH_VK_STAGE_MS; CHECK(vka_shlib_check(&L, I.p, I.n, NULL, NULL, NULL, err, sizeof err), "mesh entry refused: %s", err);
-    e[0].stage = DMSH_VK_STAGE_MS + 1; CHECK(!vka_shlib_check(&L, I.p, I.n, NULL, NULL, NULL, err, sizeof err) && strstr(err, "stage"), "stage 8 accepted: %s", err);
+    e[0].stage = DMSH_VK_STAGE_TS; CHECK(vka_shlib_check(&L, I.p, I.n, NULL, NULL, NULL, NULL, err, sizeof err), "task entry refused: %s", err);
+    e[0].stage = DMSH_VK_STAGE_MS; CHECK(vka_shlib_check(&L, I.p, I.n, NULL, NULL, NULL, NULL, err, sizeof err), "mesh entry refused: %s", err);
+    e[0].stage = DMSH_VK_STAGE_MS + 1; CHECK(!vka_shlib_check(&L, I.p, I.n, NULL, NULL, NULL, NULL, err, sizeof err) && strstr(err, "stage"), "stage 8 accepted: %s", err);
     e[0].stage = DMSH_VK_STAGE_VS;
     free(I.p);
 }
@@ -192,7 +202,7 @@ static void test_real(void) {
     const char *p = getenv("DM_VK_SHLIB");
     if (!p || access(p, R_OK)) { printf("t_android_shlib: no real library (DM_VK_SHLIB=%s): skipped\n", p ? p : "unset"); return; }
     vka_shlib L; char err[256];
-    if (!vka_shlib_open(&L, p, DMSH_CHAIN, DMSH_VK_CHAIN, NULL, err, sizeof err)) { CHECK(0, "real library refused: %s", err); return; }
+    if (!vka_shlib_open(&L, p, DMSH_CHAIN, DMSH_VK_CHAIN, NULL, NULL, err, sizeof err)) { CHECK(0, "real library refused: %s", err); return; }
     char game[17]; vka_shlib_str(L.h->game, game);
     int all = getenv("DM_VK_SHLIB_ALL") != NULL;
     static vka_bstate s; memset(&s, 0, sizeof s);   // every slot bound, at 256-byte aligned addresses

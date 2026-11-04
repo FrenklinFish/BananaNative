@@ -1,5 +1,6 @@
 package dev.nxnative.android;
 
+import android.app.ActivityManager;
 import android.content.Context;
 import android.content.Intent;
 import android.content.IntentFilter;
@@ -21,10 +22,13 @@ import java.nio.file.Files;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Locale;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
 
 /**
  * The overlay's top-right text over the game (GameActivity polls it twice a second while the overlay is on; nothing is read while it is off): the frame rate and frame
- * time (nxhost_fps), the throttle dot, the GPU's time a frame (nxhost_fps), the CPU clock caps and the battery. Android text only, no GPU work. Each item has its own
+ * time (nxhost_fps), the throttle dot, the GPU's time a frame (nxhost_fps), the CPU clock caps, the battery and the memory (MemText: the game process's VmRSS and
+ * the phone's RAM in use, read every 2 s on a thread of its own). Android text only, no GPU work. Each item has its own
  * switch (Prefs.overlayItem), all on by default, under the master switch (Prefs.overlay). The build tag top left is not one of them: it is always shown (GameActivity),
  * so every screenshot and recording names its build.
  *
@@ -47,6 +51,7 @@ final class Overlay {
             {"gpu", "GPU time a frame"},
             {"cpu", "CPU clock caps"},
             {"battery", "Battery temperature and level"},
+            {"memory", "Memory: the game's and the phone's"},
     };
 
     /** The master switch and, below it, one switch per item (main screen dialog, in-game settings) */
@@ -82,7 +87,32 @@ final class Overlay {
     private long notedAt;
     private final float[] rate = new float[6];
 
-    Overlay(Context c) { ctx = c; power = c.getSystemService(PowerManager.class); }
+    // The memory, read every 2 s on a thread of its own (ActivityManager.getMemoryInfo is a call into the system server; the UI thread only formats what it last read)
+    private static ExecutorService memThread;
+    private final ActivityManager am;
+    private final ActivityManager.MemoryInfo memInfo = new ActivityManager.MemoryInfo();
+    private final Runnable readMem = this::readMemory;
+    private volatile long rss = -1, memTotal, memAvail;
+    private volatile boolean memLow;
+
+    Overlay(Context c) { ctx = c; power = c.getSystemService(PowerManager.class); am = c.getSystemService(ActivityManager.class); }
+
+    /** On the memory thread: this process's resident set (the host and the game run in it) and the phone's memory */
+    private void readMemory() {
+        try { rss = MemText.vmRss(new String(Files.readAllBytes(new File("/proc/self/status").toPath()), StandardCharsets.US_ASCII)); }
+        catch (IOException | RuntimeException e) { rss = -1; }
+        if (am == null) return;
+        am.getMemoryInfo(memInfo);
+        memAvail = memInfo.availMem; memLow = memInfo.lowMemory; memTotal = memInfo.totalMem;
+    }
+
+    private void askMemory() {
+        if (ticks % 4 != 1 && memTotal > 0) return;   // every 2 s
+        synchronized (Overlay.class) {
+            if (memThread == null) memThread = Executors.newSingleThreadExecutor(r -> { Thread t = new Thread(r, "overlay-mem"); t.setDaemon(true); return t; });
+        }
+        memThread.execute(readMem);
+    }
 
     private static long readLong(File f) {
         try { return Long.parseLong(new String(Files.readAllBytes(f.toPath()), StandardCharsets.US_ASCII).trim()); }
@@ -161,8 +191,9 @@ final class Overlay {
     CharSequence tick() {
         ticks++;
         boolean fps = Prefs.overlayItem(ctx, "fps"), dot = Prefs.overlayItem(ctx, "throttle"), gpu = Prefs.overlayItem(ctx, "gpu"),
-                cpu = Prefs.overlayItem(ctx, "cpu"), bat = Prefs.overlayItem(ctx, "battery");
-        if (!fps && !dot && !gpu && !cpu && !bat) return null;
+                cpu = Prefs.overlayItem(ctx, "cpu"), bat = Prefs.overlayItem(ctx, "battery"), mem = Prefs.overlayItem(ctx, "memory");
+        if (!fps && !dot && !gpu && !cpu && !bat && !mem) return null;
+        if (mem) askMemory();
         if (dot || cpu) readCpu();
         if (dot) { readThermal(); level = level(); note(); }
         if (bat) readBattery();
@@ -181,7 +212,6 @@ final class Overlay {
             else if (rate[3] == 1 || rate[3] == 2) s.append(String.format(Locale.ROOT, "%.0f→%.0f fps", rate[0], rate[1]));
             else s.append(String.format(Locale.ROOT, "%.0f fps", rate[0]));
         }
-        int small = s.length();
         if (fps && fresh) line(s, String.format(Locale.ROOT, "%.1f ms", rate[2]));
         if (fps && (rate[3] == 1 || rate[3] == 2)) line(s, "LSFG");
         if (fps && rate[3] < 0) line(s, "no LSFG");
@@ -189,8 +219,15 @@ final class Overlay {
         if (cpu) caps(s);
         if (bat && batLevel >= 0)
             line(s, (Float.isNaN(batTemp) ? "" : String.format(Locale.ROOT, "%.0f°C ", batTemp)) + batLevel + (charging ? "% ⚡\uFE0E" : "%"));
-        if (s.length() > small) s.setSpan(new RelativeSizeSpan(0.8f), small, s.length(), Spanned.SPAN_EXCLUSIVE_EXCLUSIVE);
-        return s;
+        if (mem && memTotal > 0) {   // two short lines, as the others: the game process's resident set, then the phone's RAM in use / total, "low" in red when Android says so
+            line(s, MemText.app(rss));
+            line(s, MemText.system(memTotal, memAvail));
+            if (memLow) {
+                s.append(" low");
+                s.setSpan(new ForegroundColorSpan(DOT[2]), s.length() - 3, s.length(), Spanned.SPAN_EXCLUSIVE_EXCLUSIVE);
+            }
+        }
+        return s;   // every line at the overlay's one size (GameActivity.OVERLAY_SP): at 8 sp a smaller second size would no longer read
     }
 
     /** The log gets the dot's colour and why when it changes (at most every 10 s), so a slow stretch in a log can be matched with throttling */

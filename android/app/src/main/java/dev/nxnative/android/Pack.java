@@ -20,7 +20,7 @@ final class Pack {
     final String romfsRel;
     final String shadersRel;   // the shader library's path in the pack (its "shaders" row), null when the pack has none
     final boolean simulated;   // made by the on-device flow's simulated engine (FakeEngine): a placeholder, never started
-    final Map<Integer, String> aoc = new LinkedHashMap<>();   // DLC index → its RomFS folder inside the game folder
+    final Map<Integer, String> aoc = new LinkedHashMap<>();   // DLC index → its RomFS folder inside the game folder (a .nup game: <name>.nup:addon/<tid>/romfs beside it)
     final String[] modules;   // the profile's modules, rewritten in the pack
     final List<String> builds;   // "main=<build ID>" rows: the NSO builds the code was rewritten from (PackCheck.build)
     final String packer;   // the commit of the tools that made it ("" when not recorded)
@@ -56,6 +56,27 @@ final class Pack {
         File f = new File(dir, "shaders/v-" + BuildConfig.NX_DMSH_VK_CHAIN + "/dmsh_vk.lib");
         return f.isFile() ? f : null;
     }
+
+    /**
+     * A library of another version the host plays while the shader update makes this APK's (ShaderLibs.playable: the game's, with this APK's DMSH_VK_ABI), null when none;
+     * only asked when {@link #libraryProblem} finds this version's missing
+     */
+    /** This version's library made from an older one by its header alone, when the profile's manifest has a "stamp" row for it (ShaderLibs.restamp; seconds, no job) */
+    static String restamp(File dir, String titleId) {
+        Profile p = Profile.of(titleId);
+        return p == null ? null : ShaderLibs.restamp(dir, titleId, BuildConfig.NX_DMSH_VK_CHAIN, BuildConfig.NX_DMSH_VK_ABI, p.stamp);
+    }
+
+    /** Shaders a delta update of this pack translates (the profile's manifest rows for the pack's older libraries, ShaderLibs.toTranslate), -1 when the manifest has none of them */
+    static int deltaShaders(File dir, String titleId) {
+        Profile p = Profile.of(titleId);
+        return p == null ? -1 : ShaderLibs.toTranslate(p.delta, ShaderLibs.older(dir, titleId, BuildConfig.NX_DMSH_VK_CHAIN));
+    }
+
+    static File playableLibrary(File dir, String titleId) { return ShaderLibs.playable(dir, titleId, BuildConfig.NX_DMSH_VK_CHAIN, BuildConfig.NX_DMSH_VK_ABI); }
+
+    /** A library of another version made before versioned shader updates (no ABI): played with a warning when no playable one is there (ShaderLibs.legacy), null when none */
+    static File legacyLibrary(File dir, String titleId) { return ShaderLibs.legacy(dir, titleId, BuildConfig.NX_DMSH_VK_CHAIN); }
 
     /**
      * The first module whose code is unfinished: its &lt;module&gt;.android.key is missing (scripts/pack_android.py removes it before a rewrite and writes it last,
@@ -126,6 +147,28 @@ final class Pack {
         return new Pack(dir, rows);
     }
 
+    /**
+     * Whether a game folder or .nup is a whole dump Prepare can start from (DumpCheck then checks it fully against the profile's builds): base/exefs/main.npdm and a
+     * version to prepare, an update (updates/) or the base game itself (base/exefs/main and base/romfs: a game whose supported build is its base, version 0, such as
+     * Mario Kart World 1.8.0, has no update). A .nup the same: a base package, and an update package or a base with an ExeFS and a RomFS (its records only, not hashed:
+     * quick enough for a card). One version's folder (exefs/, romfs/) is not one: it needs a pack made elsewhere.
+     */
+    static boolean isDump(File dir) {
+        if (Nup.isNup(dir)) {
+            try {
+                Nup n = Nup.peek(dir);
+                Nup.Pkg base = n.base();
+                return base != null && (!n.of(Nup.UPDATE).isEmpty() || base.exefsDir != Nup.NONE && base.romfsDir != Nup.NONE);
+            } catch (IOException e) {
+                return false;
+            }
+        }
+        if (!new File(dir, "base/exefs/main.npdm").isFile()) return false;
+        if (new File(dir, "updates").isDirectory()) return true;
+        String[] romfs = new File(dir, "base/romfs").list();
+        return new File(dir, "base/exefs/main").isFile() && romfs != null && romfs.length > 0;
+    }
+
     /** The ACI0 program ID of a main.npdm, as 16 upper-case hex digits (scripts/pack_dump.py program_id). */
     static String programId(File npdm) throws IOException {
         try (RandomAccessFile r = new RandomAccessFile(npdm, "r")) {
@@ -136,10 +179,36 @@ final class Pack {
             byte[] aci = new byte[0x18];
             r.seek(off);
             r.readFully(aci);
-            if (aci[0] != 'A' || aci[1] != 'C' || aci[2] != 'I' || aci[3] != '0') throw new IOException(npdm + ": no ACI0 section");
-            long id = le32(aci, 0x10) | (le32(aci, 0x14) << 32);
-            return String.format(Locale.ROOT, "%016X", id);
+            return aciProgramId(aci, npdm.toString());
         }
+    }
+
+    /** The same, of a main.npdm's bytes (a .nup's: Nup.programId); name says which in an error */
+    static String programId(byte[] npdm, String name) throws IOException {
+        if (npdm.length < 0x80 || npdm[0] != 'M' || npdm[1] != 'E' || npdm[2] != 'T' || npdm[3] != 'A') throw new IOException(name + ": not an NPDM");
+        long off = le32(npdm, 0x70);
+        if (off + 0x18 > npdm.length) throw new IOException(name + ": no ACI0 section");
+        return aciProgramId(java.util.Arrays.copyOfRange(npdm, (int) off, (int) off + 0x18), name);
+    }
+
+    private static String aciProgramId(byte[] aci, String name) throws IOException {
+        if (aci[0] != 'A' || aci[1] != 'C' || aci[2] != 'I' || aci[3] != '0') throw new IOException(name + ": no ACI0 section");
+        long id = le32(aci, 0x10) | (le32(aci, 0x14) << 32);
+        return String.format(Locale.ROOT, "%016X", id);
+    }
+
+    /** The title ID of a game: a folder's main.npdm (npdmOf), or a .nup's (Nup.programId). The IOException's message says what is wrong in a sentence */
+    static String titleIdOf(File game) throws IOException {
+        if (Nup.isNup(game)) {
+            try {
+                return Nup.open(game).programId();
+            } catch (IOException e) {
+                throw new IOException(game.getName() + " cannot be used: " + e.getMessage(), e);
+            }
+        }
+        File npdm = npdmOf(game);
+        if (npdm == null) throw new IOException(game + " has neither base/exefs/main.npdm nor exefs/main.npdm.");
+        return programId(npdm);
     }
 
     private static long le32(byte[] b, int o) {
@@ -181,5 +250,77 @@ final class Pack {
             if (best == null || Long.parseLong(u.getName()) > Long.parseLong(best.getName())) best = u;
         }
         return best != null ? new File(best, "romfs") : null;
+    }
+
+    /**
+     * The host's DM_ROMFS for a game: a folder's RomFS folder (romfs), or for a .nup the package pack.tsv's romfs names, applied to this .nup:
+     * &lt;the .nup's absolute path&gt;:&lt;selector&gt;/romfs (NUP.md). The selector is pack.tsv's ({@code <name>.nup:update/<v>/romfs}; its file name is not used,
+     * so a renamed .nup still plays), or, for a pack made from a folder, the pack's version's package (update/&lt;version&gt;, base for 0). null when the .nup has
+     * no such package or it has no RomFS; IOException when the .nup cannot be read
+     */
+    String romfsPath(File game) throws IOException {
+        if (!Nup.isNup(game)) {
+            File f = romfs(game);
+            return f == null ? null : f.getPath();
+        }
+        String sel = romfsSelector();
+        Nup n = Nup.open(game);
+        Nup.Pkg p = n.find(sel);
+        if (p == null || p.romfsDir == Nup.NONE) return null;
+        return Nup.spec(game, sel, "romfs");
+    }
+
+    /** The package of a .nup game's RomFS: pack.tsv's romfs selector when it names a .nup package, else the pack's version's */
+    String romfsSelector() {
+        Nup.Ref r;
+        try {
+            r = Nup.parse(romfsRel);
+        } catch (IllegalArgumentException e) {
+            r = null;
+        }
+        if (r != null && r.selector != null) return r.selector;
+        long v;
+        try { v = Long.parseLong(version); } catch (NumberFormatException e) { v = 0; }
+        return Nup.versionSelector(v);
+    }
+
+    /** Whether a .nup has the addon the host would pick for an index (the low 12 bits of its title ID, NUP.md) */
+    private static boolean hasAddon(File nup, int index) {
+        try {
+            for (Nup.Pkg p : Nup.open(nup).of(Nup.ADDON)) if ((p.titleId & 0xFFF) == index) return true;
+        } catch (IOException e) {
+            // unreadable: the row's .nup when it is there
+        }
+        return false;
+    }
+
+    /**
+     * The links GameActivity makes in DM_AOC_DIR (hle_fs.c aoc_dir), link name → target. A folder game: &lt;index&gt; → its DLC's RomFS folder in the game
+     * folder, for each aoc row whose folder is there (as before). A .nup game: &lt;index&gt;.nup → a .nup file (the host picks the addon package by the index,
+     * NUP.md), for each aoc row: the game's own .nup when it has that addon, else the .nup the row names (relative to the folder holding the game) when it is
+     * there, else the game's own
+     */
+    Map<String, String> aocLinks(File game) {
+        Map<String, String> out = new LinkedHashMap<>();
+        boolean nup = Nup.isNup(game);
+        for (Map.Entry<Integer, String> e : aoc.entrySet()) {
+            if (!nup) {
+                File target = new File(game, e.getValue());
+                if (target.isDirectory()) out.put(String.valueOf(e.getKey()), target.getPath());
+                continue;
+            }
+            File target = game.getAbsoluteFile();
+            if (!hasAddon(game, e.getKey())) {
+                try {
+                    Nup.Ref r = Nup.parse(e.getValue());
+                    File parent = game.getAbsoluteFile().getParentFile();
+                    if (r != null && parent != null && Nup.isNup(new File(parent, r.path)) && new File(parent, r.path).isFile()) target = new File(parent, r.path);
+                } catch (IllegalArgumentException ex) {
+                    // not a .nup name: the game's own
+                }
+            }
+            out.put(e.getKey() + ".nup", target.getPath());
+        }
+        return out;
     }
 }

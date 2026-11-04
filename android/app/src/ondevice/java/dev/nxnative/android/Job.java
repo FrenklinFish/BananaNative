@@ -46,13 +46,16 @@ final class Job {
 
     static File fileOf(File work) { return new File(new File(work, "ondevice"), "job.json"); }
 
-    /** A new job for a checked dump; not written yet */
-    static Job create(DumpCheck.Result r) throws JSONException {
+    /**
+     * A new job for a checked dump; not written yet. pack: where its pack goes, the app's packs/&lt;title ID&gt; (AppStorage.pack); the working files stay in the
+     * dump's work folder (&lt;dump&gt;/../&lt;id&gt;-work/ondevice)
+     */
+    static Job create(DumpCheck.Result r, File appPack) throws JSONException {
         JSONObject o = new JSONObject().put("format", FORMAT).put("title_id", r.titleId).put("name", Profile.of(r.titleId) != null ? Profile.of(r.titleId).name : r.titleId).put("version", r.version)
                 .put("dump", r.dump.getPath()).put("work", r.work.getPath()).put("apk", apk()).put("state", "pending").put("reason", "").put("error", "")
                 .put("step", STEPS[0]).put("created", System.currentTimeMillis());
         // the fake engine never writes over a real pack: its pack is a placeholder in ondevice/
-        File pack = new File(r.work, "fake".equals(BuildConfig.NX_PACK_ENGINE) ? "ondevice/fake-pack" : "android-pack");
+        File pack = "fake".equals(BuildConfig.NX_PACK_ENGINE) ? new File(r.work, "ondevice/fake-pack") : appPack;
         o.put("pack", pack.getPath());
         o.put("own_pack", isNew(pack));
         JSONObject steps = new JSONObject();
@@ -67,7 +70,7 @@ final class Job {
      * into a real pack: its rebuild goes to ondevice/fake-pack.
      */
     static Job adopt(DumpCheck.Result r, File packDir, boolean code, boolean shaders) throws JSONException {
-        Job j = create(r);
+        Job j = create(r, packDir);
         boolean fake = "fake".equals(BuildConfig.NX_PACK_ENGINE);
         boolean ready = !code && !shaders;
         if (ready || !fake) j.o.put("pack", packDir.getPath());
@@ -172,7 +175,7 @@ final class Job {
     /** Whether the job made its pack folder (own_pack): a folder that was there before, a Mac pack say, is the user's and is never deleted by the app */
     synchronized boolean ownsPack() { return o.optBoolean("own_pack", false) && adopted().isEmpty(); }
 
-    /** Another pack folder for a new job (Ondevice's ondevice_pack: agents' test runs, never the user's android-pack) */
+    /** Another pack folder for a new job (Ondevice's ondevice_pack: agents' test runs, never the app's packs/&lt;id&gt; or a pack beside the dump) */
     synchronized void pack(File dir) {
         try {
             o.put("own_pack", isNew(dir));
@@ -278,7 +281,8 @@ final class Job {
 
     /** The shaders translated so far and their total (the game's profile's shader map, Profile.shaderTotal, until the tool says its own) */
     synchronized long shadersDone() { return "done".equals(stepState(STEPS[SHADERS])) ? shadersTotal() : stepDone(SHADERS); }
-    synchronized long shadersTotal() { long t = stepTotal(SHADERS); Profile p = Profile.of(titleId()); return t > 1 ? t : p != null ? p.shaderTotal : 0; }
+    // the tool's total once it reported one: the shaders it translates (a delta update keeps the others, android/SHADERS.md#delta-updates), else the profile's count
+    synchronized long shadersTotal() { long t = stepTotal(SHADERS); Profile p = Profile.of(titleId()); return t > 1 || !step(STEPS[SHADERS]).optString("stage").isEmpty() ? t : p != null ? p.shaderTotal : 0; }
 
     /** "Translating shaders: 12,345 of 22,852" during the shaders step ("Writing the shader library" at its end), else the step and its count when it has one */
     synchronized String stepText() {
@@ -286,6 +290,7 @@ final class Job {
         if (i == SHADERS) {
             String stage = step(STEPS[i]).optString("stage");
             if (stage.equals("library") || stage.equals("done")) return "Writing the shader library";
+            if (stage.equals("check")) return "Checking the shader library";
             return String.format(Locale.getDefault(), "%s: %,d of %,d", STEP_TEXT[i], shadersDone(), shadersTotal());
         }
         long d = stepDone(i), t = stepTotal(i);

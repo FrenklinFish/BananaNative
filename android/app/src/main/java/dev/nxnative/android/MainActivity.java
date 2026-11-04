@@ -32,15 +32,17 @@ import java.util.List;
  * <p>
  * Home: the All files access card while it is missing, a game being prepared (Ondevice: shown while there is a job), then the games, each a card with its state and
  * one big button: Play, or Prepare when its pack does not fit yet; ⋯ (or a long press) opens Manage (its folders, its own settings, saves, Prepare again, removal),
- * kept away from Play. With no game, a single card says what to do and has Add game. "Add game" takes a dump folder of any game this APK has a profile for (Profile:
- * one host per game): its pack (beside it, or the game's picked pack folder) is used when it fits (PackCheck), else the app offers to prepare one on the phone.
- * A game without a profile in this APK is refused with a sentence (Profile.missing), never started.
+ * kept away from Play. With no game, a single card says what to do and has Add game. "Add game" takes a dump folder or .nup of any game this APK has a profile for
+ * (Profile: one host per game), or a folder that holds several (all added, one summary: addAll): the best pack PackFind finds (the picked pack folder, the app's,
+ * beside the game, &lt;id&gt;-work/&lt;any&gt; up to three folders above it) is used when it fits or only needs the automatic shader update, else the app offers to
+ * prepare one on the phone (or a card with Prepare, from a folder of games). A game without a profile in this APK is refused with a sentence (Profile.missing),
+ * never started.
  * <p>
  * Each page sits in one ScrollView over the drifting bananas, so it scrolls on any screen (the folded phone's outer display, landscape, a split window), at a
  * readable width, centered on a wide window. The activity handles rotation itself (configChanges), so a size change builds the page again (onConfigurationChanged).
  */
 public final class MainActivity extends Activity {
-    private static final int PICK_GAME = 1, PICK_PACK = 2, PICK_DLL = 3, PICK_DRIVER = 4;
+    private static final int PICK_GAME = 1, PICK_PACK = 2, PICK_DLL = 3, PICK_DRIVER = 4, PICK_NUP = 5;
 
     private final List<Game> games = new ArrayList<>();
     private LinearLayout gameBox;   // the game cards (refresh)
@@ -48,7 +50,7 @@ public final class MainActivity extends Activity {
     private BananaBackgroundView bananas;   // the drifting bananas behind the screen
     private Ui.Setting overlayRow, resRow, capRow, lsfgRow, gpuRow;
     private boolean resumed, settingsPage;
-    private File pendingGame;   // a game folder waiting for its pack folder
+    private File pendingGame;   // a game folder (or .nup) waiting for its pack folder
     private String pendingId;
     private File pendingPackPick;   // the pack folder the user just picked (remembered in Prefs once it is accepted)
 
@@ -144,6 +146,7 @@ public final class MainActivity extends Activity {
         play.addView(overlayRow.view);
         resRow = new Ui.Setting(this, "🖼️", "Resolution", v -> gameRes()).chevron(this);
         play.addView(resRow.view);
+        if (!Profile.anyResolution()) resRow.view.setVisibility(View.GONE);   // no game of this APK has a window_fn or graphics_scale lever: the default would do nothing
         capRow = new Ui.Setting(this, "⏱️", "Frame rate cap", v -> fpsCap()).chevron(this);
         play.addView(capRow.view);
         lsfgRow = new Ui.Setting(this, "✨", "Frame generation", v -> frameGen()).chevron(this);
@@ -167,7 +170,7 @@ public final class MainActivity extends Activity {
 
         Ui.add(content, Ui.section(this, "About"), Ui.SECTION_GAP);
         LinearLayout about = Ui.add(content, Ui.card(this), 8);
-        TextView tag = Ui.chip(this, Prefs.buildTag());   // which build this is (also the first line of every log)
+        TextView tag = Ui.chip(this, Prefs.buildTag(this));   // which build this is (also the first line of every log)
         tag.setTextIsSelectable(true);
         about.addView(tag, Ui.wrap());
         StringBuilder ids = new StringBuilder();
@@ -207,18 +210,21 @@ public final class MainActivity extends Activity {
     }
 
     /** adb: am start -n dev.nxnative.android/.MainActivity --es game <game folder> [--es pack <pack folder>] [--es save <save folder>] [--ez run true] adds the game without
-     *  the pickers (android/TESTING.md); save is the save folder Folders would pick for it (test runs of a play or release app keep away from the user's saves/<id>) */
+     *  the pickers (android/TESTING.md); --es add_game <folder or .nup> takes Add game's own path instead (gamePicked: all of a folder's games added, Prepare asked); save is the save folder Folders would pick for it (test runs of a play or release app keep away from the user's saves/<id>) */
     private void fromIntent(Intent i) {
-        if (settingsPage && (i.hasExtra("game") || i.hasExtra("ondevice_dump") || i.hasExtra("ondevice_pause"))) page(false);   // these act on Home's cards
+        if (settingsPage && (i.hasExtra("game") || i.hasExtra("add_game") || i.hasExtra("ondevice_dump") || i.hasExtra("ondevice_pause"))) page(false);   // these act on Home's cards
         Ondevice.fromIntent(this, i);   // --es ondevice_dump <dump folder> [--ez ondevice_start true] (Ondevice)
         GpuDriver.fromIntent(this, i);   // --es gpu_driver_zip <zip> / --es gpu_driver <name | system>
+        PackUi.fromIntent(this, i);   // test app: --es pack_title <id> --es pack_export <folder> | --es pack_import <zip or folder>
+        String fg = i.getStringExtra("frontend_game");   // FrontendLaunch: a game it could not start at once
+        if (fg != null) { fromFrontend(new File(fg)); return; }
+        String ag = i.getStringExtra("add_game");   // Add game's own path for a picked folder or .nup (gamePicked), without the picker
+        if (ag != null) { if (!needAccess()) gamePicked(new File(ag)); return; }
         String game = i.getStringExtra("game");
         if (game == null) return;
-        File dir = new File(game);
-        File npdm = Pack.npdmOf(dir);
-        if (npdm == null) { error(game + " has neither base/exefs/main.npdm nor exefs/main.npdm."); return; }
+        File dir = new File(game);   // a game folder or a .nup (NUP.md)
         String id;
-        try { id = Pack.programId(npdm); } catch (IOException e) { error(e.getMessage()); return; }
+        try { id = Pack.titleIdOf(dir); } catch (IOException e) { error(e.getMessage()); return; }
         String p = i.getStringExtra("pack");
         File pack = p != null ? new File(p) : Folders.packFor(this, dir, id);
         if (pack == null) { error("No pack found for " + id + " next to " + game + "."); return; }
@@ -228,9 +234,19 @@ public final class MainActivity extends Activity {
         if (i.getBooleanExtra("run", false)) for (Game g : games) if (g.gameDir.equals(dir.getPath())) { launch(g); break; }
     }
 
+    /** A game a frontend sent that needs the user (FrontendLaunch.ready): its card's Play says what is missing and offers the fix; a new game takes the steps of a picked one */
+    private void fromFrontend(File game) {
+        if (settingsPage) page(false);
+        refresh();   // FrontendLaunch may have added its card
+        if (needAccess()) return;
+        for (Game g : games) if (Frontend.same(g.gameDir, game.getPath())) { launch(g); return; }
+        gamePicked(game);
+    }
+
     @Override protected void onResume() {
         super.onResume();
         resumed = true;
+        if (gameBox != null && Game.load(this).size() != games.size()) refresh();   // a card FrontendLaunch added while Home was in the background
         onResumeViews();
         Ondevice.resume(this);
     }
@@ -282,7 +298,7 @@ public final class MainActivity extends Activity {
         TextView h = Ui.heading(this, "Add your game");
         h.setGravity(Gravity.CENTER);
         Ui.add(c, h, 12, Ui.wrap());
-        TextView t = Ui.small(this, "Pick your dump folder, the one with base/ and updates/.");
+        TextView t = Ui.small(this, "Pick your dump folder, the one with base/ (and updates/), or your game's .nup file.");
         t.setGravity(Gravity.CENTER);
         Ui.add(c, t, 6, Ui.wrap());
         LinearLayout steps = Ui.row(this);
@@ -333,6 +349,8 @@ public final class MainActivity extends Activity {
         final String label;
         final boolean prepare;   // Prepare (on the phone, from the dump) makes what is missing
         boolean shadersOnly;   // only the shader library is missing
+        boolean playable;      // ... and an older library of the same ABI plays while the update makes it (Pack.playableLibrary)
+        boolean legacy;        // ... or only one made before versioned updates, played with a warning (Pack.legacyLibrary)
 
         Problem(String label, boolean prepare) { this.label = label; this.prepare = prepare; }
     }
@@ -346,22 +364,41 @@ public final class MainActivity extends Activity {
         if (p.unfinishedModule() != null) return new Problem(dump ? "Needs preparing" : "Pack unfinished", dump);
         if (PackCheck.rewriting(this, pd, gd, p.titleId) != null) return new Problem("Preparing…", false);
         if (PackCheck.build(p, gd) != null) return new Problem("Pack is for another build", dump);
-        if (Pack.libraryProblem(pd, g.titleId) != null) { Problem s = new Problem("Shaders needed", dump); s.shadersOnly = true; return s; }
+        if (Pack.libraryProblem(pd, g.titleId) != null) {
+            Problem s = new Problem("Shaders needed", dump);
+            s.shadersOnly = true;
+            s.playable = Pack.playableLibrary(pd, g.titleId) != null;
+            s.legacy = !s.playable && Pack.legacyLibrary(pd, g.titleId) != null;
+            return s;
+        }
         return null;
     }
 
     /** The card's state, checked off the main thread (NSO headers, the stamp, and for a ready pack the rewriter's key, which hashes the modules) */
     private void check(Game g, TextView st, Ui.Action play, LinearLayout info) {
         new Thread(() -> {
+            // An APK update whose shaders did not change: the pack's older library becomes this version's by its header (Pack.restamp), before anything else is decided
+            String restamped = Pack.restamp(new File(g.packDir), g.titleId);
+            if (restamped != null) android.util.Log.i("nxnative", g.titleId + ": shader library v-" + restamped + " taken over as v-" + BuildConfig.NX_DMSH_VK_CHAIN + " (restamp)");
             Problem problem = problem(g);
             Boolean ok = null;
             if (problem == null) try { ok = PackCheck.code(this, Pack.read(new File(g.packDir)), new File(g.gameDir)); } catch (IOException e) { ok = null; }
             Boolean code = ok;
             runOnUiThread(() -> {
                 if (info.getParent() == null) return;
+                // An APK update's new shaders: made in the background with no question when the pack's older library is one the delta manifest knows (Ondevice.autoUpdate)
+                if (problem != null && problem.shadersOnly && problem.prepare) Ondevice.autoUpdate(this, new File(g.gameDir), new File(g.packDir), g.titleId);
                 if (problem == null) Ui.status(st, "Ready", R.color.bn_leaf);
+                else if (problem.playable) Ui.status(st, "Ready · updating shaders", R.color.bn_leaf);
+                else if (problem.legacy) Ui.status(st, "Ready · shaders need one update", R.color.bn_accent);
                 else Ui.status(st, problem.label, problem.prepare ? R.color.bn_accent : R.color.bn_danger);
-                if (problem != null && problem.prepare) {   // the big button prepares (Ondevice asks first and says what it will make)
+                if (problem != null && problem.legacy) {   // Play stays Play; a chip says why the shaders want one more update
+                    TextView n = Ui.warnChip(this, "Shaders need one update", "Shaders need one update", ShaderLibs.LEGACY_WARNING);
+                    LinearLayout.LayoutParams wl = Ui.wrap();
+                    wl.topMargin = dp(6);
+                    info.addView(n, wl);
+                }
+                if (problem != null && problem.prepare && !problem.playable && !problem.legacy) {   // the big button prepares (Ondevice asks first and says what it will make)
                     play.setText(problem.shadersOnly ? "Prepare shaders" : "Prepare");
                     play.setIcon(R.drawable.ic_build);
                     play.setOnClickListener(v -> { if (!needAccess()) Ondevice.prepare(this, new File(g.gameDir), false); });
@@ -397,8 +434,12 @@ public final class MainActivity extends Activity {
         Ui.add(box, new Ui.Setting(this, "📥", "Import save", v -> { d[0].dismiss(); SaveUi.importPick(this, g); }).chevron(this).view, 0);
         if (Ondevice.isDump(new File(g.gameDir)) && noProfile == null)
             Ui.add(box, new Ui.Setting(this, "🔁", "Prepare again", v -> { d[0].dismiss(); Ondevice.prepare(this, new File(g.gameDir), true); }).value("Remakes what does not fit").chevron(this).view, 0);
+        // The pack as one .zip, out and in (PackUi, PackZip): an import goes into the app's packs/<id> and is checked before it replaces anything
+        Ui.add(box, new Ui.Setting(this, "📦", "Export pack…", v -> { d[0].dismiss(); PackUi.exportPick(this, g); }).value("One .zip, into a folder you pick").chevron(this).view, 0);
+        if (noProfile == null)
+            Ui.add(box, new Ui.Setting(this, "📲", "Import pack…", v -> { d[0].dismiss(); PackUi.importPick(this, g); }).value("A .zip or a pack folder").chevron(this).view, 0);
         Ui.add(box, new Ui.Setting(this, "📨", "Share log", v -> { d[0].dismiss(); shareLog(g.titleId); }).chevron(this).view, 0);
-        TextView info = Ui.small(this, "Title ID: " + g.titleId + "\nGame: " + g.gameDir + "\nPack: " + g.packDir
+        TextView info = Ui.small(this, "Title ID: " + g.titleId + "\nGame: " + g.gameDir + (Nup.isNup(new File(g.gameDir)) ? " (.nup)" : "") + "\nPack: " + g.packDir
                 + "\nShaders: " + (lp == null ? "present (" + BuildConfig.NX_DMSH_VK_CHAIN + ")" : lp) + "\nSaves: " + (save != null ? save.getPath() : "not set"));
         info.setTextIsSelectable(true);
         info.setTextSize(12);
@@ -431,9 +472,23 @@ public final class MainActivity extends Activity {
         startActivityForResult(i, request);
     }
 
+    /** Add game: the dump is a folder (base/, updates/) or one .nup file (NUP.md); the user says which, then the system picker opens for it */
     void addGame() {
         if (needAccess()) return;
-        pickFolder(PICK_GAME, "Pick your dump folder (with base/ and updates/)");
+        new AlertDialog.Builder(this).setTitle("Add game: your dump is…")
+                .setItems(new String[] {"A folder (with base/, and updates/ if any)", "A .nup file"}, (d, w) -> {
+                    if (w == 0) pickFolder(PICK_GAME, "Pick your dump folder (with base/, and updates/ if any)");
+                    else pickNup();
+                })
+                .setNegativeButton("Cancel", null).show();
+    }
+
+    /** The system file picker for a .nup; its document is turned into its /storage path (PathUtil.documentToPath), as a picked folder is */
+    private void pickNup() {
+        Toast.makeText(this, "Pick your game's .nup file", Toast.LENGTH_LONG).show();
+        Intent i = new Intent(Intent.ACTION_OPEN_DOCUMENT).addCategory(Intent.CATEGORY_OPENABLE).setType("*/*");
+        i.putExtra(DocumentsContract.EXTRA_INITIAL_URI, Uri.parse("content://com.android.externalstorage.documents/document/primary%3A"));
+        startActivityForResult(i, PICK_NUP);
     }
 
     @Override protected void onActivityResult(int request, int result, Intent data) {
@@ -442,6 +497,13 @@ public final class MainActivity extends Activity {
         if (request == ReadinessActivity.REQUEST) { if (result == ReadinessActivity.FIX_DRIVER) GpuDriver.dialog(this, PICK_DRIVER); return; }   // its "Pick a GPU driver"
         if (result != RESULT_OK || data == null || data.getData() == null) return;
         if (request == PICK_DRIVER) { GpuDriver.picked(this, data.getData()); return; }
+        if (PackUi.documentResult(this, request, data.getData())) return;
+        if (request == PICK_NUP) {
+            String p = PathUtil.documentToPath(data.getData());
+            if (p == null) { error("That file is not on this phone's storage by a path the app can read (" + data.getData() + "). Pick it from the phone's storage (☰ › the phone's name), not from Recent or Downloads."); return; }
+            gamePicked(new File(p));
+            return;
+        }
         if (request == PICK_DLL) {
             String err = Lsfg.install(this, data.getData());
             Toast.makeText(this, err == null ? "Lossless.dll installed" : "Lossless.dll not installed: " + err, Toast.LENGTH_LONG).show();
@@ -452,59 +514,176 @@ public final class MainActivity extends Activity {
         File dir = new File(path);
         if (Folders.activityResult(this, request, dir)) return;
         if (SaveUi.activityResult(this, request, dir)) return;
+        if (PackUi.activityResult(this, request, dir)) return;
         if (request == PICK_GAME) gamePicked(dir);
         else if (request == PICK_PACK && pendingGame != null) { pendingPackPick = dir; addWithPack(pendingGame, pendingId, dir); }
     }
 
+    /**
+     * A picked game: one .nup, one dump folder (base/exefs/main.npdm or exefs/main.npdm), or a folder that holds games (PackFind.gamesIn: its .nup files and
+     * dump subfolders), all of which are added (addAll); a folder with one game is that game
+     */
     private void gamePicked(File game) {
-        File npdm = Pack.npdmOf(game);
-        if (npdm == null) { error(game + " has neither base/exefs/main.npdm nor exefs/main.npdm. Pick the game's own folder."); return; }
-        String id;
-        try { id = Pack.programId(npdm); } catch (IOException e) { error(e.getMessage()); return; }
-        String why = Profile.missing(id, "This game");   // its host is not in this APK: adding it would only give a card that cannot start
-        if (why != null) { error(why); return; }
-        File pack = Folders.packFor(this, game, id);
-        // A pack that fits (this game build, this app's shaders) is used as it is, with no question: a pack made on a computer keeps working. A dump of this
-        // app's game without one, or with one that does not fit, goes to Prepare (Ondevice), which says what it will do and asks first
-        boolean prepare = Ondevice.isDump(game);
-        if (pack != null && (!prepare || fits(game, pack))) { addWithPack(game, id, pack); return; }
-        if (prepare) { Ondevice.prepare(this, game, false); return; }
-        pendingGame = game;
-        pendingId = id;
-        new AlertDialog.Builder(this).setTitle("Pack not found")
-                .setMessage("No pack found for this folder. Pick the pack folder (with pack.tsv), or pick the full dump (with base/ and updates/) to prepare one on this phone.")
-                .setPositiveButton("Pick the pack folder", (d, w) -> pickFolder(PICK_PACK, "Pick the pack folder (android-pack, with pack.tsv)"))
-                .setNegativeButton("Cancel", null).show();
+        if (Nup.isNup(game) || Nup.wrongCase(game)) { nupPicked(game); return; }
+        if (Pack.npdmOf(game) != null) { addAll(List.of(game), true); return; }
+        List<File> found = PackFind.gamesIn(game);
+        if (found.size() == 1) { gamePicked(found.get(0)); return; }
+        if (found.isEmpty()) {
+            error(game + " has neither base/exefs/main.npdm nor exefs/main.npdm, no .nup file and no game folder in it. Pick the game's own folder, its .nup file, or the folder that holds your games.");
+            return;
+        }
+        addAll(found, false);
     }
 
-    /** Whether a pack fits a game folder well enough to play: it reads, its code is finished and of the folder's game build (PackCheck.blocking), and its shader library is current */
-    private boolean fits(File game, File packDir) {
-        try {
-            Pack p = Pack.read(packDir);
-            return PackCheck.blocking(this, p, game) == null && Pack.libraryProblem(packDir, p.titleId) == null;
-        } catch (IOException e) {
-            return false;
+    /** A single .nup (NUP.md): its name and access checked here, the rest as every game (addAll) */
+    private void nupPicked(File nup) {
+        if (Nup.wrongCase(nup)) { error(nup.getName() + ": rename it so that its name ends in \".nup\" (lower case); the game and the tools read only that name."); return; }
+        if (!nup.canRead()) { error(nup + " cannot be read. Check that All files access is on."); return; }
+        addAll(List.of(nup), true);
+    }
+
+    /** What the background check of Add game found for one game */
+    private static final class Pick {
+        final File game;
+        String id, name, error;   // error: why it cannot be added (unreadable, no profile in this APK), in a sentence
+        boolean unsupported;      // no profile in this APK
+        boolean dump;             // a dump Prepare starts from (Pack.isDump)
+        PackFind.Found pack;      // a pack that plays now or after the automatic shader update (Folders.find), null: none
+
+        Pick(File game) { this.game = game; name = game.getName(); }
+    }
+
+    /**
+     * Add game for one or more games: each is identified off the main thread (a .nup's TOC is hashed) with its best pack (Folders.find: the picked folder,
+     * the app's, beside the game, &lt;id&gt;-work/&lt;any&gt; above it) and checked (PackCheck.blocking), then added on the main thread. A game with a pack that plays
+     * now or after the automatic shader update is added with it, with no question. single: one picked game, as before: a dump without such a pack goes to Prepare
+     * (Ondevice asks first; it offers an existing pack folder or Import pack… too), a one-version folder to the pack folder picker, and a problem is one message.
+     * Several (a picked folder's games): a dump without a usable pack gets a card with its Prepare button (one job at a time is the user's to start), and one
+     * message sums up what was added, what this app cannot run and what needs Prepare
+     */
+    private void addAll(List<File> picked, boolean single) {
+        Toast.makeText(this, single ? "Checking " + picked.get(0).getName() + "…" : "Checking " + picked.size() + " games…", Toast.LENGTH_SHORT).show();
+        new Thread(() -> {
+            List<Pick> out = new ArrayList<>();
+            for (File g : picked) {
+                Pick k = new Pick(g);
+                out.add(k);
+                if (Nup.wrongCase(g)) { k.error = g.getName() + ": rename it so that its name ends in \".nup\" (lower case)."; continue; }
+                try { k.id = Pack.titleIdOf(g); } catch (IOException e) { k.error = e.getMessage(); continue; }
+                String why = Profile.missing(k.id, single ? "This game" : g.getName());
+                if (why != null) { k.unsupported = true; k.error = why; continue; }
+                k.name = Profile.of(k.id).name;
+                k.dump = Pack.isDump(g);
+                String pp = Folders.pickedPack(this, k.id);
+                File pd = pp == null ? null : new File(pp);
+                try { if (pd != null && !Pack.read(pd).titleId.equals(k.id)) pd = null; } catch (IOException e) { pd = null; }
+                k.pack = Folders.find(this, pd, g, k.id);
+                android.util.Log.i("nxnative", "Add game: " + g + " (" + k.id + "): " + (k.pack == null ? "no usable pack" : "pack " + k.pack.dir + (k.pack.tier == PackFind.READY ? " (ready)" : " (shader update)")));
+            }
+            runOnUiThread(() -> { if (!isFinishing()) added(out, single); });
+        }, "nx-add-game").start();
+    }
+
+    private void added(List<Pick> picks, boolean single) {
+        if (single) {
+            Pick k = picks.get(0);
+            if (k.error != null) { error(k.error); return; }
+            if (k.pack != null) { addWithPack(k.game, k.id, k.pack.dir); return; }
+            if (k.dump) { Ondevice.prepare(this, k.game, false); return; }
+            pendingGame = k.game;
+            pendingId = k.id;
+            new AlertDialog.Builder(this).setTitle("Pack not found")
+                    .setMessage("No pack found for this " + (Nup.isNup(k.game) ? ".nup" : "folder") + ". Pick the pack folder (with pack.tsv), or pick the full dump (with base/ and updates/ or the base game's romfs/, or a .nup with the base game) to prepare one on this phone.")
+                    .setPositiveButton("Pick the pack folder", (d, w) -> pickFolder(PICK_PACK, "Pick the pack folder (android-pack, with pack.tsv)"))
+                    .setNegativeButton("Cancel", null).show();
+            return;
         }
+        List<String> ok = new ArrayList<>(), unsupported = new ArrayList<>(), prepare = new ArrayList<>(), noPack = new ArrayList<>(), failed = new ArrayList<>();
+        for (Pick k : picks) {
+            if (k.unsupported) { unsupported.add(k.game.getName() + " (" + k.id + ")"); continue; }
+            if (k.error != null) { failed.add(k.error); continue; }
+            if (k.pack != null) {
+                String err = add(k.game, k.id, k.pack.dir);
+                if (err == null) ok.add(k.pack.pack.name.isEmpty() ? k.name : k.pack.pack.name);
+                else failed.add(k.game.getName() + ": " + err);
+            } else if (k.dump) {
+                cardFor(k.game, k.id);
+                prepare.add(k.name);
+            } else noPack.add(k.game.getName());
+        }
+        refresh();
+        StringBuilder m = new StringBuilder();
+        if (!ok.isEmpty()) m.append("Added: ").append(TextUtils.join(", ", ok)).append(".");
+        if (!prepare.isEmpty()) m.append(m.length() > 0 ? "\n\n" : "").append("Needs Prepare: ").append(TextUtils.join(", ", prepare))
+                .append(". No pack that fits was found: its card's Prepare makes one on this phone (one game at a time).");
+        if (!unsupported.isEmpty()) m.append(m.length() > 0 ? "\n\n" : "").append("Not supported by this app: ").append(TextUtils.join(", ", unsupported))
+                .append(". This app runs: ").append(TextUtils.join(", ", profileIds())).append(".");
+        if (!noPack.isEmpty()) m.append(m.length() > 0 ? "\n\n" : "").append("No pack found: ").append(TextUtils.join(", ", noPack))
+                .append(". Add it on its own to pick its pack folder.");
+        if (!failed.isEmpty()) m.append(m.length() > 0 ? "\n\n" : "").append("Not added: ").append(TextUtils.join(" ", failed));
+        android.util.Log.i("nxnative", "Add game: " + m.toString().replace("\n\n", " | "));
+        new AlertDialog.Builder(this).setTitle(ok.isEmpty() && prepare.isEmpty() ? "No game added" : "Games added").setMessage(m).setPositiveButton("OK", null).show();
+    }
+
+    private static List<String> profileIds() {
+        List<String> ids = new ArrayList<>();
+        for (Profile p : Profile.all()) ids.add(p.titleId);
+        return ids;
+    }
+
+    /**
+     * The list entry of a game, made when it has none: a game that still needs its pack gets a card whose pack folder is the app's packs/&lt;id&gt;, where Prepare
+     * and Import pack… put it (the card says "Needs preparing" and its button prepares). An existing entry of the same game path is kept as it is
+     */
+    Game cardFor(File game, String id) {
+        List<Game> list = Game.load(this);
+        for (Game g : list) if (g.gameDir.equals(game.getPath())) return g;
+        Profile p = Profile.of(id);
+        Game g = new Game(id, p == null ? id : p.name, game.getPath(), AppStorage.pack(this, id).getPath());
+        list.add(g);
+        Game.save(this, list);
+        refresh();
+        return g;
+    }
+
+    /** Prepare's "Use an existing pack…": the picked pack folder becomes the game's (addWithPack; remembered for this title like a pack picked in Folders) */
+    void pickPackFor(File game, String id) {
+        pendingGame = game;
+        pendingId = id;
+        pickFolder(PICK_PACK, "Pick the pack folder (the one with pack.tsv and shaders/)");
     }
 
     private boolean addWithPack(File game, String id, File packDir) {
-        Pack pack;
-        try { pack = Pack.read(packDir); } catch (IOException e) { error(e.getMessage()); return false; }
-        if (!pack.titleId.equals(id)) { error("The pack is for " + pack.titleId + ", the game folder holds " + id + "."); return false; }
-        String why = Profile.missing(id, pack.name.isEmpty() ? null : pack.name);
-        if (why != null) { error(why); return false; }
-        if (pack.romfs(game) == null) { error("No RomFS in " + game + " (looked for " + pack.romfsRel + ", romfs/ and updates/<version>/romfs)."); return false; }
-        List<Game> list = Game.load(this);
-        list.removeIf(g -> g.gameDir.equals(game.getPath()));
-        list.add(new Game(id, pack.name.isEmpty() ? id : pack.name, game.getPath(), packDir.getPath()));
-        Game.save(this, list);
+        String err = add(game, id, packDir);
+        if (err != null) { error(err); return false; }
         refresh();
         if (packDir.equals(pendingPackPick)) Folders.pickedPack(this, id, packDir.getPath());   // a pack folder the user picked is remembered for this game's next pick and updates
         String note = "";
         String lp = Pack.libraryProblem(packDir, id);
         if (lp != null) note += " " + lp;
-        Toast.makeText(this, "Added " + pack.name + "." + note, Toast.LENGTH_LONG).show();
+        String name;
+        try { name = Pack.read(packDir).name; } catch (IOException e) { name = id; }
+        Toast.makeText(this, "Added " + (name.isEmpty() ? id : name) + "." + note, Toast.LENGTH_LONG).show();
         return true;
+    }
+
+    /** The game into the list with this pack folder (replacing an entry of the same game path); null when added, else why not in a sentence */
+    private String add(File game, String id, File packDir) {
+        Pack pack;
+        try { pack = Pack.read(packDir); } catch (IOException e) { return e.getMessage(); }
+        if (!pack.titleId.equals(id)) return "The pack is for " + pack.titleId + ", the game " + (Nup.isNup(game) ? ".nup" : "folder") + " holds " + id + ".";
+        String why = Profile.missing(id, pack.name.isEmpty() ? null : pack.name);
+        if (why != null) return why;
+        if (Nup.isNup(game)) {
+            String romfs;
+            try { romfs = pack.romfsPath(game); } catch (IOException e) { return game.getName() + " cannot be used: " + e.getMessage(); }
+            if (romfs == null) return game.getName() + " has no " + pack.romfsSelector() + " with a RomFS (the pack is for version " + pack.version + ").";
+        } else if (pack.romfs(game) == null) return "No RomFS in " + game + " (looked for " + pack.romfsRel + ", romfs/ and updates/<version>/romfs).";
+        List<Game> list = Game.load(this);
+        list.removeIf(g -> g.gameDir.equals(game.getPath()));
+        list.add(new Game(id, pack.name.isEmpty() ? id : pack.name, game.getPath(), packDir.getPath()));
+        Game.save(this, list);
+        return null;
     }
 
     /** Remove from the list (the Manage sheet): says exactly what goes (the list entry) and what stays (the folders and the saves) */
@@ -525,6 +704,7 @@ public final class MainActivity extends Activity {
         String why = Profile.missing(g.titleId, g.name);
         if (why != null) { error(why); return; }
         if (SaveUi.busy(g.titleId)) { error("A save backup or restore of " + g.name + " is still working: Play waits for it."); return; }
+        if (PackUi.busy(g.titleId)) { error("An export or import of " + g.name + "'s pack is still working: Play waits for it."); return; }
         File gd = new File(g.gameDir);
         boolean dump = Ondevice.isDump(gd);
         Runnable pickPack = () -> { pendingGame = gd; pendingId = g.titleId; pickFolder(PICK_PACK, "Pick the pack folder (the one with pack.tsv and shaders/)"); };
@@ -543,9 +723,20 @@ public final class MainActivity extends Activity {
         // The host loads <pack>/shaders/v-<its DMSH_VK_CHAIN>/dmsh_vk.lib: without it the game runs but draws nothing. Say so, and offer to prepare the shaders
         // (a dump) or another pack folder
         String lp = Pack.libraryProblem(new File(g.packDir), g.titleId);
+        if (lp != null && Pack.playableLibrary(new File(g.packDir), g.titleId) != null) {   // the older library plays while the update makes this version's (vka_shader.c lib_load)
+            if (dump) Ondevice.autoUpdate(this, gd, new File(g.packDir), g.titleId);
+            start(g);
+            return;
+        }
+        if (lp != null && Pack.legacyLibrary(new File(g.packDir), g.titleId) != null) {   // made before versioned updates: never blocks Play, says so (the host warns in its log too)
+            if (dump) Ondevice.autoUpdate(this, gd, new File(g.packDir), g.titleId);
+            Toast.makeText(this, ShaderLibs.LEGACY_WARNING, Toast.LENGTH_LONG).show();
+            start(g);
+            return;
+        }
         if (lp != null) {
             AlertDialog.Builder b = new AlertDialog.Builder(this).setTitle("Shaders missing")
-                    .setMessage((dump ? "Prepare makes them from your dump on this phone (about 20-35 minutes, in the background)." : "Without them the game draws nothing.")
+                    .setMessage((dump ? "Prepare " + Ondevice.shadersText(new File(g.packDir), g.titleId).replaceFirst("^Updates", "updates").replaceFirst("^Makes", "makes") : "Without them the game draws nothing.")
                             + "\n\n" + lp)
                     .setNeutralButton("Pick pack folder", (d, w) -> pickPack.run()).setNegativeButton("Cancel", null);
             if (dump) b.setPositiveButton("Prepare", (d, w) -> Ondevice.prepare(this, gd, false));
@@ -579,7 +770,7 @@ public final class MainActivity extends Activity {
         Ui.sheet(this, "Overlay", box).setPositiveButton("Done", null).setOnDismissListener(d -> refreshSettings()).show();
     }
 
-    private String resLabel() { int i = java.util.Arrays.asList(Prefs.WINDOWS).indexOf(Prefs.window(this)); return i == 1 ? "Original" : "1080p"; }
+    private String resLabel() { return Prefs.windowName(Prefs.window(this), true); }
 
     /** Game resolution: the window size the host gives the game (DM_WINDOW), from the next start */
     private void gameRes() {

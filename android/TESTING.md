@@ -52,13 +52,14 @@ adb shell appops set --uid dev.nxnative.android MANAGE_EXTERNAL_STORAGE allow
 
 ## 5. Add the game
 
-Tap **Add game**, open `SW2`, then `DonkeyKongBananza`, and tap **Use this folder** (allow access when asked). The launcher finds the pack in `SW2/040074A01BF12000-work/android-pack` and lists "Donkey Kong Bananza (040074A01BF12000)" with no question when the pack fits (the dump's game build, this APK's shader library). Without a pack that fits it offers **Prepare** (above), or **Pick another pack folder**.
+Tap **Add game**, open `SW2`, then `DonkeyKongBananza`, and tap **Use this folder** (allow access when asked). The launcher finds the pack in `SW2/040074A01BF12000-work/android-pack` (or any `<title ID>-work/<name>/` with a `pack.tsv` in the game's folder or up to three folders above it, `PackFind`) and lists "Donkey Kong Bananza (040074A01BF12000)" with no question when the pack fits (the dump's game build, this APK's shader library, or an older library the automatic shader update brings current). Without one it offers **Prepare** (above), **Use an existing pack…** or **Import pack…**. Picking `SW2` itself adds every game in it (each `.nup` and dump subfolder) and says in one message what was added, what this app cannot run and what needs Prepare.
 
 With adb, adding and starting it in one step:
 
 ```sh
 adb shell am start -n dev.nxnative.android/.MainActivity --es game /sdcard/SW2/DonkeyKongBananza --ez run true
-# a play or release app (saves/<id> by default): --es save <folder> names the save folder, as Folders does, so a test run never opens the user's save
+# any app (files/saves/<id> by default): --es save <folder> names the save folder, as Folders does, so a test run never opens the user's save
+adb shell am start -n dev.nxnative.android/.MainActivity --es add_game /sdcard/SW2   # Add game's own path for a picked folder or .nup: all its games, one summary
 ```
 
 ## 6. Start it and watch the log
@@ -104,18 +105,30 @@ A crash prints `[dm] CRASH sig=… pc=… lr=…` with module offsets (`main+0x�
 
 ## Saves
 
-Saves are on shared storage (the app has All files access), so uninstalling the app or clearing its data keeps them. The Switch2 root is the game folder's parent (`/sdcard/Switch2`):
+A game's save is in the app's own storage (`AppStorage`, as Eden keeps its user folder): `/sdcard/Android/data/<app>/files/saves/<title ID>/`, its device save `saves/<title ID>_device/` beside it. Each app (test `dev.nxnative.android`, play `dev.nxnative.android.play`, release `dev.bananative.android`) has its own. A save folder picked in the game's ⋯ › Folders is used as it is instead. Android deletes the app's storage with the app; the manifest's `hasFragileUserData` makes uninstalling ask whether to keep it. **Back up saves** writes to shared storage (`/sdcard/Switch2/save-backups/<title ID>/`, below), which an uninstall never touches.
 
-| App | Save folder |
+Up to 0.1.0 the default was on shared storage, beside the game (the folder holding the game folder or the `.nup`, `/sdcard/Switch2`):
+
+| App | Old default save folder |
 |---|---|
-| play (`dev.nxnative.android.play`) | `/sdcard/Switch2/saves/<title ID>/` |
-| test (`dev.nxnative.android`) | `/sdcard/Switch2/saves-test/<title ID>/` (agents' runs never touch the user's progress) |
+| play and release | `/sdcard/Switch2/saves/<title ID>/` |
+| test | `/sdcard/Switch2/saves-test/<title ID>/` |
 
-At start an empty save folder is filled from the old private save (`Android/data/<app>/files/save/<title ID>`, kept), else from the seed `/sdcard/Switch2/save-seed/<title ID>/`, a save that reaches the first level. The log's `[nxlaunch] save: <path> (migrated|seeded|existing|new)` says which. If the shared folder cannot be created, the private folder is used and the log says so.
+**The one-time copy** (`SaveMigrate`, `GameActivity.defaultSave`): at a game's start, when no save folder is picked, the app's save has no file and the old default has a save, the old save (and its `_device`) is copied into the app's save under both saves' locks: into a staging folder `saves/.<title ID>.migrate/` first, checked file by file (path, size, SHA-256) against the old save, the old save scanned again, then renamed into place (the device save first, the main save last: the main save appearing is the commit). The app records it per title (`save_migrated@<title ID>`), shows a toast, and the log says `[nxlaunch] save: <app save> (existing); copied once from <old folder> (n files, size, checked); that folder is kept as it was`. The old folder is never written, moved or deleted (only its `<folder>.lock` beside it is taken, as before). A copy is never made over an app save that has a file. When the copy fails (or the old save has an unfinished commit), nothing half is played: that start uses the old folder, as 0.1.0 did, with a toast and `save: … not copied into the app's storage (<why>)`; the next start tries again. Until the copy is made, ⋯ › Folders, **Back up** and **Restore** show and use the old folder; afterwards Folders says where the save is and where it came from.
+
+After that, an empty app save is filled from the private save of the first versions (`files/save/<title ID>`, kept), else from the seed `/sdcard/Switch2/save-seed/<title ID>/`, a save that reaches the first level. The log's `[nxlaunch] save: <path> (migrated|seeded|existing|new)` says which. If the folder cannot be created, the private folder is used and the log says so.
 
 Each game has its own save folder, `DM_TEMP` (`files/temp/<title ID>`: pipeline cache, prewarm list), DLC links (`files/aoc/<title ID>`) and logs (`files/logs/<title ID>-<time>.log`, 10 kept per game); `env.txt` applies to every game, `files/env-<title ID>.txt` (written and `chmod 666`ed like `env.txt`) to one.
 
-**Test agents** start from the seed: to get a clean level-1 save, delete `/sdcard/Switch2/saves-test/<title ID>` (with `adb shell rm -r`) before the run; the next start seeds it again. Update the seed with `adb push <save folder> /sdcard/Switch2/save-seed/` (the folder is named by the title ID). Saves are private data: never commit them.
+**Test agents** start from the seed: give the run its own save folder (a copy of the seed: `--es save <folder>` on the launcher's intent, or `DM_SAVE=` in `env-<title ID>.txt`, below) rather than deleting anything; never delete or overwrite the user's save folders (`Switch2/saves*`, `save-backups`, the apps' `files/saves`). To test the one-time copy, copy the seed into `saves-test/<title ID>` beside a game folder or `.nup` of your own (a new folder, say `Switch2/apptest/`; a `.nup` copies on the phone in seconds) and add that game with `--es game`. Update the seed with `adb push <save folder> /sdcard/Switch2/save-seed/` (the folder is named by the title ID). Saves are private data: never commit them.
+
+### Packs in app storage
+
+Prepare writes a new pack into the app's `files/packs/<title ID>/` (the job's working files stay in `<dump>/../<title ID>-work/ondevice`). A game's pack is looked for in the folder picked in Folders, then in `files/packs/<title ID>`, then beside the game (`<title ID>-work/android-pack`, `Pack.find`), then in `<title ID>-work/<any name>` and `android-pack` of the game's folder and up to three folders above it (`PackFind`; the first that fits, else the first an automatic shader update brings current; never one of another game build): packs from earlier versions or a Mac keep working and are updated in place (restamp, shader updates), never copied. Tests: `python3 dm/tools/tests/test_android_packfind.py` (the finder and the folder scan).
+
+A game's ⋯ Manage sheet has **Export pack…** and **Import pack…** (`PackUi`, `PackZip`). Export writes the pack as one stored zip, `banana-pack-<title ID>-<version>.zip`, into a picked folder (`<name>.partial`, read back entry by entry against the pack's files, then renamed; a name taken gets `-2`). Import takes such a zip (pack.tsv at its root or in its one top folder) or a pack folder: its title must have a profile in this APK and be the sheet's game; it is unpacked into `files/packs/<title ID>.partial` (an entry named outside it, `..`, an absolute path or a backslash, refuses the whole zip before anything is written), checked (`Pack.read`, finished code, a shader library of some version, `PackCheck.blocking` against the game folder), and only then swapped in: the pack that was there is kept as `<title ID>.replaced` until the new one has its name (a stop between the renames is put back by `PackZip.recover`). The card then uses it; a picked pack folder is let go (kept on the storage). An older library goes through the usual restamp or shader update. Both refuse while the game runs.
+
+Without the pickers (test app only): `adb shell am start -n dev.nxnative.android/.MainActivity --es pack_title <title ID> [--es pack_game <game folder or .nup>] --es pack_export <folder>` (or `--es pack_import <zip or pack folder>`) runs the same for the listed game of that path (else the first of that title). Tests: `python3 dm/tools/tests/test_android_packzip.py` (round trip, zip slip, wrong titles, damaged packs, the swap).
 
 ### Save backups
 
@@ -126,7 +139,7 @@ A game's ⋯ Manage sheet has **Back up saves**, **Restore saves** and **Import 
 - **Back up**: the save (both parts) is copied into `.partial-<name>/`, each file synced; the copy is compared with the save file by file (path, size, SHA-256) and the save is scanned again (a save that changed during the copy fails); the manifest is written, then the folder gets its name. Older than a day, at the next backup: a `.partial-*` folder that matches the manifest beside it (stopped just before its rename) gets its name; other `.partial-*` folders and manifests without their folder are removed (never a finished backup). The save is only read.
 - **Restore / Import**: refused from the save itself, from inside it, from a folder holding it, and from its working folders (`<save>.restore`, `.new`, `.re`, `.work`, `.old`), compared by canonical paths. The source is checked against its manifest (a backup whose files no longer match is refused as damaged; an imported folder has none, and its `<folder>_device` beside it, if any, is its device save); a current save with anything in it is backed up first as `<time>-before-restore` (checked; when that fails, nothing else happens); each part is copied into `<part>.restore` beside its target and checked; then the set file `<save>.restore-set` names the pairs, each part gets `<part>.pend1` (naming its copy, fsynced), the set file goes, and each part is swapped in under the host's roll-forward journal (`plat_android.c` `plat_rename_swap`: FUSE has no `RENAME_EXCHANGE` and no xattrs): stage 1 deletes what the part has and the copy lacks, `.pend2` replaces `.pend1`, stage 2 renames the copy's files over the part's (each rename atomic), the markers go. A kill before the set file leaves the save as it was; after it, the next backup, restore or game start finishes it (`SaveStore.recover`), so both parts are the old version or the restored one. The final check compares names without case (shared storage is case-insensitive).
 - **The journal's rules** are the same in the launcher (`SaveStore.recover`) and the host (`plat_swap_recover`, at each mount): a legacy `<save>.old` comes back when the save is missing and goes when it is there; an empty marker is dropped and the next one looked at; a marker naming anything but `<save>.new`, `<save>.re` or `<save>.restore` (same folder, by real path) is refused, and so is `.pend1` whose folder is gone (stage 1 would empty the save): the save and the marker are left as they are, the host logs `[RED] save swap journal …`, and the launcher refuses the start with the reason (move the marker away to use the save). Stage 2 runs only once `.pend1` is deleted and the folder synced (also when recovery finds both markers), so a second stop can never leave `.pend1` beside an emptied copy; such a `.pend1` from older builds (its folder holds no files while the save does) is dropped with its empty folder, the save staying as it is.
-- Tests: `python3 dm/tools/tests/test_android_saves.py` runs `SaveStore` and `Profile` on the Mac's JVM (`android/app/src/jvmtest`): backups (main and device), restores with their automatic backup, a damaged backup refused, swaps stopped after the set file, after `.pend1` and inside stage 2, each journal rule, the lock held by another process, refused sources, stale leftovers, canonical paths and the case-insensitive check; and it compiles the host's journal code from `plat_android.c` for the Mac and recovers the same stopped states with both, which must leave the same files.
+- Tests: `python3 dm/tools/tests/test_android_saves.py` runs `SaveStore`, `SaveMigrate` and `Profile` on the Mac's JVM (`android/app/src/jvmtest`): the one-time copy (copied and checked, never over an app save, the old folder unchanged, a failed copy leaving no save to play from and copied whole at the next start, an old save with a journal or in use left alone), backups (main and device), restores with their automatic backup, a damaged backup refused, swaps stopped after the set file, after `.pend1` and inside stage 2, each journal rule, the lock held by another process, refused sources, stale leftovers, canonical paths and the case-insensitive check; and it compiles the host's journal code from `plat_android.c` for the Mac and recovers the same stopped states with both, which must leave the same files.
 - On the phone: back up, play a little and save, restore the backup and check the game loads the older save; `ls /sdcard/Switch2/save-backups/<title ID>/` shows both backups.
 
 ## Pause and background power
@@ -142,7 +155,7 @@ adb shell 'f=/sdcard/Android/data/dev.nxnative.android/files/env.txt; printf "DM
 adb shell rm /sdcard/Android/data/dev.nxnative.android/files/env.txt     # back to a normal run
 ```
 
-**Paths stay the launcher's.** Lines of `env.txt`, `env-<title ID>.txt` or a game's own lines (Game settings) that set `DM_SAVE`, `DM_ROMFS`, `DM_TEMP`, `DM_ROOT`, `DM_AOC_DIR` or `HOME` are not taken: the game shows a message and the log has `[nxlaunch] [RED] env: not taken: …`. One exception, in the **test app only**: `DM_SAVE=<folder>` in `env-<title ID>.txt` (never `env.txt`, which every game reads) runs that game on that folder (a copied seed, for test runs that must not touch `saves-test/`), locked and recovered like any save, never migrated into or seeded; the log says `[nxlaunch] test app: DM_SAVE from env-<title ID>.txt: <folder>`. The play app ignores it with the same `[RED]` line.
+**Paths stay the launcher's.** Lines of `env.txt`, `env-<title ID>.txt` or a game's own lines (Game settings) that set `DM_SAVE`, `DM_ROMFS`, `DM_TEMP`, `DM_ROOT`, `DM_AOC_DIR` or `HOME` are not taken: the game shows a message and the log has `[nxlaunch] [RED] env: not taken: …`. One exception, in the **test app only**: `DM_SAVE=<folder>` in `env-<title ID>.txt` (never `env.txt`, which every game reads) runs that game on that folder (a copied seed, for test runs that must not touch the app's own save), locked and recovered like any save, never migrated into or seeded; the log says `[nxlaunch] test app: DM_SAVE from env-<title ID>.txt: <folder>`. The play app ignores it with the same `[RED]` line.
 
 The `chmod` is needed: a file `adb shell` writes there belongs to the shell user, readable only by its group, which the app is not in; without it the run goes on with no switches and the log says `[nxlaunch] [RED] env.txt: … exists but cannot be read`. The log lists each switch the host got as `[nxlaunch] env KEY=VALUE`.
 
@@ -159,15 +172,15 @@ Hold the phone lock (`android/HANDOFF.md`) for both: the capture runs the game, 
 
 ### Capturing a level frame
 
-The test save (`/sdcard/Switch2/saves-test`, seeded with a save at the first level: [Saves](#saves)) reaches the mining tunnel with A pressed every 2 s; at 100 s the camera is in the tunnel:
+A fresh copy of the seed save (a save at the first level: [Saves](#saves)), given to the run as its own save folder, reaches the mining tunnel with A pressed every 2 s; at 100 s the camera is in the tunnel:
 
 ```sh
 a() { adb "$@"; }
 F=/sdcard/Android/data/dev.nxnative.android/files/env.txt
-a shell rm -r /sdcard/Switch2/saves-test/040074A01BF12000          # a fresh level-1 save
+S=/sdcard/Switch2/saves-run-$(date +%m%d%H%M); a shell cp -r /sdcard/Switch2/save-seed/040074A01BF12000 $S   # a fresh level-1 save of its own
 K=$(python3 -c "print(','.join('%d:A'%t for t in range(15,90,2)))")
 a shell "printf 'DM_WATCH_STALL=25\nDM_KEYS=$K\nDM_NVN_CAPTURE=@100:1:/storage/emulated/0/Switch2/040074A01BF12000-work/captures/tunnel.nvncap\n' > $F"
-a shell am start --user 0 -n dev.nxnative.android/.MainActivity --es game /storage/emulated/0/Switch2/DonkeyKongBananza --ez run true
+a shell am start --user 0 -n dev.nxnative.android/.MainActivity --es game /storage/emulated/0/Switch2/DonkeyKongBananza --es save $S --ez run true
 # about 2 minutes; the game log (files/logs/, newest) ends the capture with
 #   [dm] DM_NVN_CAPTURE: frame 2673: 4 submits, 1052 segments, 2147 regions, … 3170.6 MB in 15969 ms → …/tunnel.nvncap; live digest 0640c5… (2880x1620 VkFormat 37)
 a shell am force-stop --user 0 dev.nxnative.android
@@ -238,7 +251,7 @@ adb shell 'f=/sdcard/Android/data/dev.nxnative.android/files/env.txt; printf "DM
 - `DM_MARK_DRAWS=3000`: once 5 frames in a row have 3,000 draws or more (the title has 63, the loading screen 6-9, the first level 5,500 and more), the log says `[mark] frame <n>: <draws> draws (…), <s> s from process start, wall clock <epoch>`. Wait for that line instead of a fixed time: `adb shell grep -a -m1 '\[mark\]' <newest log>`.
 - `DM_MARK_KEYS_STOP=1`: no presses after the mark, so the level is not played by the script.
 
-Start from the seed save (delete `saves-test/<title ID>`, [Saves](#saves)). Measured on the PNM-N49 (2026-11-02, `am start` to the mark): 49.2 s with `DM_KEYS=15:A*38/2`, 44.7, 49.3 and 50.4 s with `DM_FASTBOOT=1`. The presses take about 3 s off the time from the first present to the level load (23.2 s → 20.2-20.5 s); the run-to-run spread of the rest is as large. What is left is the game's ([the game's note](../dm/games/040074A01BF12000/README.md#boot-android)): the first present 6-9 s after start, the autosave notice before the title (about 15 s, takes no input), the title and the save's menus (about 4 s) and the level load (18-21 s, 0 new pipelines; `DM_FS=1`'s `[fs]` lines put the host's open and read time at about 3 s of it)
+Start from a fresh copy of the seed save ([Saves](#saves)). Measured on the PNM-N49 (2026-11-02, `am start` to the mark): 49.2 s with `DM_KEYS=15:A*38/2`, 44.7, 49.3 and 50.4 s with `DM_FASTBOOT=1`. The presses take about 3 s off the time from the first present to the level load (23.2 s → 20.2-20.5 s); the run-to-run spread of the rest is as large. What is left is the game's ([the game's note](../dm/games/040074A01BF12000/README.md#boot-android)): the first present 6-9 s after start, the autosave notice before the title (about 15 s, takes no input), the title and the save's menus (about 4 s) and the level load (18-21 s, 0 new pipelines; `DM_FS=1`'s `[fs]` lines put the host's open and read time at about 3 s of it)
 
 ## Live control
 

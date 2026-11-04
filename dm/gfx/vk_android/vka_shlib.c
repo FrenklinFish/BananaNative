@@ -21,14 +21,20 @@ static int fail(char *err, size_t n, const char *fmt, ...) {
 void vka_shlib_str(const char field[16], char out[17]) { memcpy(out, field, 16); out[16] = 0; }
 static int str_is(const char field[16], const char *want) { char s[17]; vka_shlib_str(field, s); return !strcmp(s, want); }
 
-int vka_shlib_check(vka_shlib *L, const void *base, size_t size, const char *chain, const char *vk_chain, const char *game, char *err, size_t errn) {
+int vka_shlib_check(vka_shlib *L, const void *base, size_t size, const char *chain, const char *vk_chain, const char *game, const char *abi, char *err, size_t errn) {
     memset(L, 0, sizeof *L);
     if (!base || size < sizeof(dmsh_vk_header)) return fail(err, errn, "%zu bytes: shorter than the header", size);
     const dmsh_vk_header *h = base; char s[17];
     if (h->magic != DMSH_VK_LIB_MAGIC) return fail(err, errn, "magic %#x, not a Vulkan shader library", h->magic);
     if (h->version != DMSH_VK_LIB_VERSION) return fail(err, errn, "library format %u, this host reads %u", h->version, DMSH_VK_LIB_VERSION);
-    if (chain && !str_is(h->chain, chain)) { vka_shlib_str(h->chain, s); return fail(err, errn, "translator chain %s, this host has %s", s, chain); }
-    if (vk_chain && !str_is(h->vk_chain, vk_chain)) { vka_shlib_str(h->vk_chain, s); return fail(err, errn, "Vulkan chain %s, this host has %s", s, vk_chain); }
+    // Another version is taken only by the ABI the header records (12 characters, no NUL; zero in a library made before the field): what this host reads of it is the same
+    int by_abi = 0;
+    if ((chain && !str_is(h->chain, chain)) || (vk_chain && !str_is(h->vk_chain, vk_chain))) {
+        by_abi = abi && strlen(abi) == sizeof h->abi && !memcmp(h->abi, abi, sizeof h->abi);
+        char a[13]; memcpy(a, h->abi, 12); a[12] = 0; for (int i = 0; i < 12; i++) if (a[i] < 32 || a[i] > 126) { a[0] = 0; break; }
+        if (!by_abi && chain && !str_is(h->chain, chain)) { vka_shlib_str(h->chain, s); return fail(err, errn, "translator chain %s, this host has %s (library ABI %s, this host's %s)", s, chain, *a ? a : "none", abi ? abi : "not asked"); }
+        if (!by_abi) { vka_shlib_str(h->vk_chain, s); return fail(err, errn, "Vulkan chain %s, this host has %s (library ABI %s, this host's %s)", s, vk_chain, *a ? a : "none", abi ? abi : "not asked"); }
+    }
     if (game && !str_is(h->game, game)) { vka_shlib_str(h->game, s); return fail(err, errn, "built for game %s, this is %s", s, game); }
     uint64_t sz = size;
     if ((uint64_t)h->entry_off + (uint64_t)h->entry_count * sizeof(dmsh_vk_entry) > sz || (h->entry_off & 7)) return fail(err, errn, "entry table out of the file");
@@ -36,7 +42,7 @@ int vka_shlib_check(vka_shlib *L, const void *base, size_t size, const char *cha
     if ((uint64_t)h->mod_off + (uint64_t)h->mod_count * sizeof(dmsh_vk_module) > sz || (h->mod_off & 7)) return fail(err, errn, "module table out of the file");
     if (h->blob_off > sz || h->blob_size > sz - h->blob_off) return fail(err, errn, "blob out of the file");
     const uint8_t *b = base;
-    L->base = b; L->size = size; L->h = h;
+    L->base = b; L->size = size; L->h = h; L->by_abi = by_abi;
     L->ent = (const dmsh_vk_entry *)(b + h->entry_off); L->bind = (const dmsh_vk_bind *)(b + h->bind_off); L->mod = (const dmsh_vk_module *)(b + h->mod_off); L->blob = b + h->blob_off;
     for (uint32_t i = 0; i < h->entry_count; i++) {
         const dmsh_vk_entry *e = &L->ent[i];
@@ -55,7 +61,7 @@ int vka_shlib_check(vka_shlib *L, const void *base, size_t size, const char *cha
     return 1;
 }
 
-int vka_shlib_open(vka_shlib *L, const char *path, const char *chain, const char *vk_chain, const char *game, char *err, size_t errn) {
+int vka_shlib_open(vka_shlib *L, const char *path, const char *chain, const char *vk_chain, const char *game, const char *abi, char *err, size_t errn) {
     memset(L, 0, sizeof *L);
     int fd = open(path, O_RDONLY | O_CLOEXEC);
     if (fd < 0) return fail(err, errn, "cannot open %s", path);
@@ -64,7 +70,7 @@ int vka_shlib_open(vka_shlib *L, const char *path, const char *chain, const char
     void *p = mmap(NULL, (size_t)st.st_size, PROT_READ, MAP_SHARED, fd, 0);
     close(fd);
     if (p == MAP_FAILED) return fail(err, errn, "%s: mmap failed", path);
-    if (!vka_shlib_check(L, p, (size_t)st.st_size, chain, vk_chain, game, err, errn)) { munmap(p, (size_t)st.st_size); return 0; }
+    if (!vka_shlib_check(L, p, (size_t)st.st_size, chain, vk_chain, game, abi, err, errn)) { munmap(p, (size_t)st.st_size); return 0; }
     L->mapped = 1;
     return 1;
 }

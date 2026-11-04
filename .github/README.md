@@ -26,6 +26,24 @@ the Mac, iPhone and iPad with Metal.
 
 Only these versions run; the app tells you if your dump is a different one.
 
+## Performance
+
+Measured on the tested phone (Snapdragon 8 Elite Gen 5, 16 GB), in the first level, with the performance overlay on and
+frame generation off. Your numbers will differ with the phone, its temperature and its power settings.
+
+| Title ID | Resolution | GPU driver | Phone power mode | Frame rate |
+|---|---|---|---|---|
+| `040074A01BF12000` | 1080p (default) | Qualcomm (system) | Normal | about 30 fps |
+| `040074A01BF12000` | 1080p (default) | Qualcomm (system) | Performance mode | 52-58 fps |
+| `040074A01BF12000` | Original (2880x1620) | Qualcomm (system) | Performance mode | about 30 fps |
+| `040074A01BF12000` | 1080p (default) | Turnip | Normal | 17-32 fps |
+| `0400C3F00006E000` | 1080p (default) | Qualcomm (system) | Performance mode | not measured yet |
+
+- In the phone's performance mode the game reaches its own 60 fps interval in places. A stable 60 is the next goal.
+- Frame generation (Settings) can take 30 fps to a 60 / 90 / 120 fps target, with some added latency.
+- The phone throttles when hot, and the frame rate drops with it. A cooler helps keep it up.
+- The first visit to an area stutters while shaders are built; play a minute before judging the frame rate.
+
 ## What you need
 
 - An Android 13+ phone with a Snapdragon (Adreno) GPU and at least 12 GB of RAM. Tested on a Snapdragon 8 Elite Gen 5 with 16 GB.
@@ -72,7 +90,8 @@ If something doesn't work, start with Settings › **Readiness check**. A game's
   the picture up or down and place the controls where you want them.
 - **Frame generation** with Lossless Scaling (LSFG): 2x, 3x, 4x, or a 60 / 90 / 120 fps target.
 - On-screen controls with a layout editor, gamepad support, frame-rate cap, resolution (1080p or native), performance
-  overlay, Turnip driver downloads, and save backups. Saves live in `Switch2/saves/<title ID>` and survive uninstalling.
+  overlay, Turnip driver downloads, save backups, and pack export / import (one .zip). Saves and packs live in the app's storage (uninstalling asks
+  whether to keep them); backups go to `Switch2/save-backups/<title ID>`. Saves from 0.1.0 are copied in once.
 
 ## Known issues
 
@@ -108,6 +127,28 @@ Something wrong on your phone: open an [issue](https://github.com/moceure/Banana
 (phone, chip and RAM, GPU driver, game version, and the log from Settings › **Share log**). Every report from a phone
 other than the tested one helps. Questions, ideas and "it runs on my phone" reports go to
 [Discussions](https://github.com/moceure/BananaNative/discussions).
+
+## Videos and device reports
+
+Videos are welcome. To make yours useful to viewers:
+
+- Say the app version (for example v0.1.0), the phone, its chip and RAM, and the GPU driver.
+- Turn on the performance overlay so the frame rate is visible, and say whether frame generation is on.
+- Mention the [known issues](#known-issues) you run into, so viewers know which ones are already being fixed.
+- Link this page for downloads: releases are only published here, and copies elsewhere may be modified.
+- Please don't show or link game dumps, keys or firmware.
+
+Post your video or your "it runs on my phone" report in
+[Discussions](https://github.com/moceure/BananaNative/discussions): every phone other than the tested one helps, and
+good videos get linked here.
+
+## History
+
+- **v0.1.0, 4 November 2026**: first public release, with `040074A01BF12000` playable and `0400C3F00006E000` in
+  progress.
+- **v0.1.1, 5 November 2026**: `.nup` files, emulator frontend launch, incremental shader updates (v0.1.0 packs are
+  taken over without a rebuild), phone Prepare and about 1 GiB less RAM for `0400C3F00006E000`, RAM in the in-game stats, fewer stutters and less memory
+  for large memory pools and large `.nup` files, saves and packs in the app's storage with pack export / import.
 
 ## License and credits
 

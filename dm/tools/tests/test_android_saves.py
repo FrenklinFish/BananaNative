@@ -111,7 +111,7 @@ class LauncherJvm(unittest.TestCase):
         (d / 'stub').mkdir()
         (d / 'stub/BuildConfig.java').write_text(STUB)
         cls.classes = d / 'classes'
-        subprocess.run(['javac', '-Xlint:all,-try', '-Werror', '-d', str(cls.classes), str(SRC / 'SaveStore.java'), str(SRC / 'Profile.java'), str(TEST), str(d / 'stub/BuildConfig.java')],
+        subprocess.run(['javac', '-Xlint:all,-try', '-Werror', '-d', str(cls.classes), str(SRC / 'SaveStore.java'), str(SRC / 'SaveMigrate.java'), str(SRC / 'Profile.java'), str(TEST), str(d / 'stub/BuildConfig.java')],
                        check=True, capture_output=True, text=True)
 
     @classmethod

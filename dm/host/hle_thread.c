@@ -16,6 +16,8 @@
 #include <sys/mman.h>
 #include <time.h>
 #include <dlfcn.h>
+#include <fcntl.h>
+#include <unistd.h>
 #include <stdatomic.h>
 
 #define R_TIMEOUT     0xEA01u   // Kernel module 1, description 117
@@ -702,15 +704,25 @@ void svc_thread_dump(void) {
     if (!plat_threads(&ths, &nth)) {
         for (unsigned i = 0; i < nth; i++) {
             int guest = 0; for (thr_t *t = g_all; t; t = t->all) if (t->mport == ths[i]) { guest = 1; break; }
+            char tname[40] = "";
+#if defined(__ANDROID__)
+            if (!guest) { char cp[64], nm[32] = ""; snprintf(cp, sizeof cp, "/proc/self/task/%u/comm", (unsigned)ths[i]); int cfd = open(cp, O_RDONLY);   // its name (vk-replay, vk-enc ...), read before it is suspended
+              if (cfd >= 0) { ssize_t k = read(cfd, nm, sizeof nm - 1); close(cfd); if (k > 0) { nm[k] = 0; nm[strcspn(nm, "\n")] = 0; snprintf(tname, sizeof tname, " '%s'", nm); } } }
+#endif
             if (!guest && ths[i] != plat_thread_self() && !plat_thread_suspend(ths[i])) {
                 plat_regs_t st;
                 if (!plat_thread_get_regs(ths[i], &st)) {
                     char line[1200]; int p = snprintf(line, sizeof line, "[dm] host thread %#x:", (unsigned)ths[i]);
+                    p += snprintf(line + p, sizeof line - p, "%s", tname);
                     uint64_t fp = st.fp, pc = st.pc;
                     for (int k = 0; k < 12 && p < (int)sizeof line - 80; k++) {
                         Dl_info di; module_t *m = module_of((void *)pc);
+#if defined(__ANDROID__)
+                        if (!m && pc >> 39) pc &= (1ull << 39) - 1;   // a return address signed by pointer authentication: its high bits are the code, not the address (39-bit user addresses)
+#endif
                         if (m) p += snprintf(line + p, sizeof line - p, " %s+%#llx", m->name, pc - (uint64_t)m->base);
                         else if (dladdr((void *)pc, &di) && di.dli_sname) p += snprintf(line + p, sizeof line - p, " %s+%#lx", di.dli_sname, (unsigned long)(pc - (uint64_t)di.dli_saddr));
+                        else if (dladdr((void *)pc, &di) && di.dli_fname && di.dli_fbase) { const char *b = strrchr(di.dli_fname, '/'); p += snprintf(line + p, sizeof line - p, " %s+%#lx", b ? b + 1 : di.dli_fname, (unsigned long)(pc - (uint64_t)di.dli_fbase)); }   // a stripped library: its offset, for addr2line on the unstripped one
                         else p += snprintf(line + p, sizeof line - p, " %#llx", pc);
                         uint64_t fr[2];
                         if (!fp || plat_mem_read(fp, fr, 16) || fr[0] <= fp) break;

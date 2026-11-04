@@ -12,12 +12,14 @@
 #   extract/v<version>/RomFS.img   its RomFS as one image (dm/tools/romfs_image.py: the host's DM_ROMFS, the IPA's romfs.img)
 #   aoc/<index>.img   each DLC's RomFS (index = DLC title ID − base title ID − 0x1000), the host's DM_AOC_DIR
 # A dump has no control data, so there is no control.nacp or icon.jpg beside them, as there is after nx_extract.
+# A NUP file (one file holding base, updates and add-ons, android/NUP.md) stands for such a folder: its base, update/<version> and addon/<title ID> packages are
+# read in place (dm/tools/nup.py through romfs.py) as base/, updates/<version>/ and dlc/<title ID>/<n>/ are, and the build folder goes beside it.
 # The title ID is the program ID in main.npdm. A repeat run keeps code modules that are the same and an image whose source tree, packer and image are unchanged (romfs_image.py --reuse).
-# Usage: pack_dump.py <dump folder> [--version N] [--work-dir DIR]   (exit 1 on error)
+# Usage: pack_dump.py <dump folder | .nup file> [--version N] [--work-dir DIR]   (exit 1 on error)
 import argparse, filecmp, shutil, struct, subprocess, sys
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'dm/tools'))
-import romfs_image
+import nup, romfs, romfs_image
 
 
 class Error(Exception): pass
@@ -31,13 +33,20 @@ def program_id(npdm):   # the ACI0 program ID of main.npdm
     return struct.unpack_from('<Q', d, off + 0x10)[0]
 
 
-def clone(src, dst):   # an APFS clone on the same volume, else a copy
-    if subprocess.run(['cp', '-c', src, dst], capture_output=True).returncode != 0: shutil.copy2(src, dst)
+def in_nup(p): return nup.split(p) is not None   # a path inside a NUP file (romfs.Path), read through romfs.py
+
+
+def clone(src, dst):   # an APFS clone on the same volume, else a copy; a file of a NUP package is written out
+    if in_nup(src): dst.write_bytes(src.read_bytes())
+    elif subprocess.run(['cp', '-c', src, dst], capture_output=True).returncode != 0: shutil.copy2(src, dst)
+
+
+def same(f, d): return d.is_file() and (f.read_bytes() == d.read_bytes() if in_nup(f) else filecmp.cmp(f, d, shallow=False))
 
 
 def exefs(src, dst):
     files = sorted(f for f in src.iterdir() if f.is_file() and not f.name.startswith('.'))
-    if dst.is_dir() and {f.name for f in files} == {f.name for f in dst.iterdir()} and all(filecmp.cmp(f, dst / f.name, shallow=False) for f in files): return
+    if dst.is_dir() and {f.name for f in files} == {f.name for f in dst.iterdir()} and all(same(f, dst / f.name) for f in files): return
     tmp = dst.with_name(dst.name + '.partial')
     shutil.rmtree(tmp, ignore_errors=True); tmp.mkdir(parents=True)
     for f in files: clone(f, tmp / f.name)
@@ -61,8 +70,34 @@ def is_dump(folder):   # whether a folder has the layout above: base/exefs/main.
     return (folder / 'base/exefs/main.npdm').is_file() and ((folder / 'base/romfs').is_dir() or any((v / 'romfs').is_dir() for v in updates(folder).values()))
 
 
+def nup_scan(path):
+    """scan() of a NUP file: its packages as romfs.Path folders named as android/NUP.md names them (`<file>.nup:update/<version>`, `<file>.nup:addon/<tid>/romfs`)"""
+    try: n = nup.open_nup(path)
+    except nup.Error as e: raise Error(str(e)) from None
+    pkg = lambda p, sub='': romfs.Path(f'{n.path}:{p.selector}{sub}')
+    base = [p for p in n.packages if p.kind == nup.BASE]
+    if not base or base[0].exefs == nup.NONE or not (pkg(base[0]) / 'exefs/main.npdm').is_file():
+        raise Error(f'{path}: no base package with exefs/main.npdm' + (' (an update-only NUP file: the base is in another one)' if not base else ''))
+    app = program_id(pkg(base[0]) / 'exefs/main.npdm')
+    if app & 0xFFF: raise Error(f'{path}: base program ID {app:016X} is not a base title ID')
+    vers = {p.version: pkg(p) for p in n.packages if p.kind == nup.UPDATE}
+    if base[0].romfs == nup.NONE and not any(p.romfs != nup.NONE for p in n.packages if p.kind == nup.UPDATE): raise Error(f'{path}: no RomFS in the base or an update')
+    dlc = {}
+    for p in n.packages:
+        if p.kind != nup.ADDON: continue
+        if not 0 < p.title_id - app - 0x1000 <= 2000: raise Error(f'{path}: add-on {p.title_id:016X} is not a DLC of {app:016X}')
+        if p.romfs == nup.NONE: raise Error(f'{path}: add-on {p.title_id:016X} has no RomFS')
+        dlc[p.title_id] = pkg(p, '/romfs')
+    return app, vers, dlc
+
+
+def version_dir(dump, vers, ver):   # the folder of a version scan() found: updates/<version>/ (its entry), or the base's
+    return vers[ver] if ver else romfs.Path(f'{nup.open_nup(dump).path}:base') if nup.is_nup(dump) else dump / 'base'
+
+
 def scan(dump):
-    """What a dump folder holds: (title ID, {update version: its folder}, {DLC title ID: its RomFS folder})"""
+    """What a dump folder (or a NUP file) holds: (title ID, {update version: its folder}, {DLC title ID: its RomFS folder})"""
+    if nup.is_nup(dump): return nup_scan(dump)
     if not is_dump(dump): raise Error(f'{dump}: no base/exefs/main.npdm and base/romfs (or an update\'s romfs)')
     app = program_id(dump / 'base/exefs/main.npdm')
     if app & 0xFFF: raise Error(f'{dump}: base program ID {app:016X} is not a base title ID')
@@ -95,7 +130,7 @@ def pack_dlc(app, dlc, aoc, say=print):   # {DLC title ID: its RomFS folder} →
 
 def main():
     ap = argparse.ArgumentParser(description='Pack a dumped game (base/, updates/<version>/, dlc/) into the extraction layout of build_ipa_from_nsp.py')
-    ap.add_argument('dump', type=Path, help='the dump folder (holds base/exefs, and base/romfs or an update\'s romfs)')
+    ap.add_argument('dump', type=Path, help='the dump folder (holds base/exefs, and base/romfs or an update\'s romfs), or a .nup file')
     ap.add_argument('--version', type=int, help='the update version to pack (default: the newest in updates/; 0 = the base game)')
     ap.add_argument('--work-dir', type=Path, help='the build folder (default: <dump>/<title ID>_build)')
     a = ap.parse_args()
@@ -104,8 +139,8 @@ def main():
         app, vers, dlc = scan(dump)
         ver = a.version if a.version is not None else max(vers, default=0)
         if ver and ver not in vers: raise Error(f'no updates/{ver} (have: {", ".join(map(str, sorted(vers))) or "none"})')
-        src = vers[ver] if ver else dump / 'base'
-        work = (a.work_dir or dump / f'{app:016X}_build').resolve()
+        src = version_dir(dump, vers, ver)
+        work = (a.work_dir or (dump.parent if nup.is_nup(dump) else dump) / f'{app:016X}_build').resolve()
         out = work / 'extract' / f'v{ver}'
         print(f'{app:016X} version {ver}: {src}', flush=True)
         say = lambda s: print(s, flush=True)

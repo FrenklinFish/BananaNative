@@ -68,7 +68,7 @@ int nxhost_vk_selftest(ANativeWindow *w, int frames) {
     size_t sz = 64u << 20;
     uint8_t *base = mmap(NULL, sz, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0), *anon = base;
     if (base == MAP_FAILED) { VRED("selftest: no address space"); return 1; }
-    mtl_pool_add(base, sz); mtl_pool_need(base, sz);   // places the pool's pages (anonymous memory until now), as a game's pool once the GPU is given its address
+    mtl_pool_add(base, sz); mtl_pool_need(base, sz, "the selftest");   // places the pool's pages (anonymous memory until now), as a game's pool once the GPU is given its address
     int placed = vka_addr((uintptr_t)base, sz, NULL, NULL, NULL), mapped = 0;
     if (!placed) {   // no placed maps (an emulator): the replay's draws are still checked, on a mapped allocation where the driver put it. The placed check stays failed
         mtl_pool_del(base);
@@ -104,7 +104,7 @@ int nxhost_vk_selftest(ANativeWindow *w, int frames) {
 
     // The library (kept for the process: the shaders made from it point into it) and its program objects
     static uint8_t *limg; static size_t lsz; static vka_shlib L; static int lib_ok = -1; char err[200] = "";
-    if (lib_ok < 0) { limg = lib_make(&lsz); lib_ok = vka_shlib_check(&L, limg, lsz, DMSH_CHAIN, DMSH_VK_CHAIN, NULL, err, sizeof err); }
+    if (lib_ok < 0) { limg = lib_make(&lsz); lib_ok = vka_shlib_check(&L, limg, lsz, DMSH_CHAIN, DMSH_VK_CHAIN, NULL, NULL, err, sizeof err); }
     if (!lib_ok) { VRED("selftest: its own shader library is refused: %s", err); bad++; }
     vka_progsh gps, cps; memset(&gps, 0, sizeof gps); memset(&cps, 0, sizeof cps);
     if (lib_ok) { gps.sh[0] = vka_shader_make(&L, K_VS); gps.sh[1] = vka_shader_make(&L, K_FS); cps.sh[5] = vka_shader_make(&L, K_CS); }
@@ -183,7 +183,7 @@ int nxhost_vk_selftest(ANativeWindow *w, int frames) {
     const char *gl = getenv("DM_VK_SHLIB");
     if (gl && *gl) {
         static vka_shlib G; char e2[256];
-        if (!vka_shlib_open(&G, gl, DMSH_CHAIN, DMSH_VK_CHAIN, NULL, e2, sizeof e2)) { VRED("selftest: shader library %s refused: %s", gl, e2); bad++; }
+        if (!vka_shlib_open(&G, gl, DMSH_CHAIN, DMSH_VK_CHAIN, NULL, NULL, e2, sizeof e2)) { VRED("selftest: shader library %s refused: %s", gl, e2); bad++; }
         else { char game[17]; vka_shlib_str(G.h->game, game); VLOG("selftest: shader library %s (game %s)", gl, game); bad += vka_shlib_check_all(&G) != 0; }
     }
     char pl[200]; mtl_pso_line(pl, sizeof pl);

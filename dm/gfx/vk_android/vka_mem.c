@@ -20,6 +20,7 @@
 #include "vka.h"
 #include "../nvn/nvn_mtl.h"
 #include "../nvn/nvn_dirty.h"
+#include "vka_place.h"
 #include "../../host/dm.h"
 #include <errno.h>
 #include <sched.h>
@@ -74,14 +75,17 @@ static _Atomic unsigned g_nrecent;
 static pthread_mutex_t g_swmu = PTHREAD_MUTEX_INITIALIZER;   // one swap at a time
 static uint64_t mono_ns(void) { struct timespec t; clock_gettime(CLOCK_MONOTONIC, &t); return (uint64_t)t.tv_sec * 1000000000ull + (uint64_t)t.tv_nsec; }
 static int in_swap(uintptr_t a, uintptr_t b) { uintptr_t lo = atomic_load(&g_sw_lo), hi = atomic_load(&g_sw_hi); return lo < hi && a < hi && b > lo; }
+static _Atomic long g_sw_owner;   // the thread that runs the swap (gettid), 0 when none
+// A fault the swap's own thread takes in its range is not a writer to hold back: nothing would end the swap, and the thread (with g_pl, the dirty tracker's hold and the swap's
+// lock) would spin here for ever while every other thread that needs them stops too. It goes to the next hook and, unhandled, is a crash with a backtrace
 static int swap_fault(void *addr, int is_write, void *uc) {
     (void)is_write; (void)uc; uintptr_t a = (uintptr_t)addr;
-    if (in_swap(a, a + 1)) { while (in_swap(a, a + 1)) sched_yield(); return 1; }
+    if (in_swap(a, a + 1)) { if (atomic_load(&g_sw_owner) == (long)gettid()) return 0; while (in_swap(a, a + 1)) sched_yield(); return 1; }
     uint64_t t = mono_ns();
     for (int i = 0; i < NRECENT; i++) { uint64_t e = atomic_load(&g_recent[i].end); if (e && t - e < RECENT_NS && a >= atomic_load(&g_recent[i].lo) && a < atomic_load(&g_recent[i].hi)) return 1; }
     return 0;
 }
-static void swap_prep(void *addr, size_t len) { uintptr_t a = (uintptr_t)addr; while (len && in_swap(a, a + len)) sched_yield(); }
+static void swap_prep(void *addr, size_t len) { uintptr_t a = (uintptr_t)addr; if (atomic_load(&g_sw_owner) == (long)gettid()) return; while (len && in_swap(a, a + len)) sched_yield(); }
 static uint64_t g_sw_reads;   // g_snap_reads at the swap's start (under g_swmu)
 static void swap_nomark_begin(void);
 // The swap's hooks go in before nvn_dirty's (hooks run in the order they were registered): mtl_pool_add registers them, and hle_nvn.c tracks a pool only after mtl_pool_add.
@@ -90,7 +94,7 @@ static void swap_hooks_once(void) { dm_fault_hook_register(swap_fault); dm_guest
 static void swap_hooks(void) { static pthread_once_t o = PTHREAD_ONCE_INIT; pthread_once(&o, swap_hooks_once); }   // (every caller returns after they are in)
 static void swap_begin(uintptr_t lo, uintptr_t hi) {
     swap_hooks();
-    pthread_mutex_lock(&g_swmu); atomic_store(&g_sw_hi, 0); atomic_store(&g_sw_lo, lo); atomic_store(&g_sw_hi, hi);
+    pthread_mutex_lock(&g_swmu); atomic_store(&g_sw_hi, 0); atomic_store(&g_sw_lo, lo); atomic_store(&g_sw_owner, (long)gettid()); atomic_store(&g_sw_hi, hi);
     swap_nomark_begin();
 }
 static void swap_nomark_end(uintptr_t lo, uintptr_t hi, int exact);
@@ -98,7 +102,7 @@ static void swap_end_ok(int exact) { swap_nomark_end(atomic_load(&g_sw_lo), atom
 static void swap_end(void) {
     unsigned k = atomic_fetch_add(&g_nrecent, 1) % NRECENT;
     atomic_store(&g_recent[k].end, 0); atomic_store(&g_recent[k].lo, atomic_load(&g_sw_lo)); atomic_store(&g_recent[k].hi, atomic_load(&g_sw_hi)); atomic_store(&g_recent[k].end, mono_ns());
-    atomic_store(&g_sw_hi, 0); atomic_store(&g_sw_lo, 0);
+    atomic_store(&g_sw_hi, 0); atomic_store(&g_sw_lo, 0); atomic_store(&g_sw_owner, 0);
     pthread_mutex_unlock(&g_swmu);
 }
 
@@ -372,15 +376,21 @@ static void copy_readable(uint8_t *to, uintptr_t lo, const prun *r, int n) {   /
 // Bananza's textures uploaded with blocks of other textures (ASTC 5x4 storage holding 8x8 blocks, which the Adreno decodes to NaN: black cores with white bloom on lamps, rocks
 // and signs; magenta and wrong colours elsewhere). A page already in the page table keeps its page through any split, so none is left to be filled later (measured with
 // DM_VK_NANSCAN's placed memory test, vka_tex.c ptest). The driver's memory is committed when allocated, so this commits nothing more
+// No log line here: it runs inside the swap, with the dirty tracker held (nvn_dirty_hold), and a log line takes stderr's lock, which another thread may hold while it waits
+// for the tracker: the game thread's frame statistics hold it while their arguments are read (the texture counts wait for the replay's texture lock), and the replay thread
+// holds that lock while it waits for the tracker (nvn_dirty_protect). Pokemon Pokopia stopped there, every thread and the log with it. prefault_line logs after the swap
+static uint64_t g_pf_ns, g_pf_bytes; static int g_pf_nlog, g_pf_refused;
+static void prefault_line(void) {
+    static int nr; if (g_pf_refused && !nr++) VLOG("placed memory: MADV_POPULATE_READ refused (errno %d): pages touched one by one", g_pf_refused);
+    if (g_pf_nlog < 4 || !(g_pf_nlog & 255)) VLOG("placed memory: %.1f MiB faulted in so far, %.1f ms", g_pf_bytes / 1048576.0, g_pf_ns / 1e6); }   // (caller holds g_pl)
 static void prefault(uintptr_t lo, uintptr_t hi) {
-    static uint64_t ns_all, bytes_all; static int nlog; uint64_t t0 = mono_ns();
+    uint64_t t0 = mono_ns();
 #ifndef MADV_POPULATE_READ
 #define MADV_POPULATE_READ 22
 #endif
-    if (madvise((void *)lo, hi - lo, MADV_POPULATE_READ)) { static int nr; if (!nr++) VLOG("placed memory: MADV_POPULATE_READ refused (errno %d): pages touched one by one", errno);
+    if (madvise((void *)lo, hi - lo, MADV_POPULATE_READ)) { g_pf_refused = errno ? errno : -1;
         for (uintptr_t a = lo; a < hi; a += 4096) (void)*(volatile const uint8_t *)a; }
-    ns_all += mono_ns() - t0; bytes_all += hi - lo;
-    if (nlog < 4 || !(++nlog & 255)) { if (nlog < 4) nlog++; VLOG("placed memory: %.1f MiB faulted in so far, %.1f ms", bytes_all / 1048576.0, ns_all / 1e6); }
+    g_pf_ns += mono_ns() - t0; g_pf_bytes += hi - lo; g_pf_nlog++;
 }
 
 // Place [lo, hi) (no segment overlaps it; caller holds g_pl, and g_rw for writing only under DM_VK_MEM_LOCK_WHOLE). 1 = placed, 0 = failed with the range as it was; *grow = the size the driver wants when it is larger than the range
@@ -434,6 +444,7 @@ static int place(uintptr_t lo, uintptr_t hi, VkDeviceSize *grow) {
     swap_end_ok(ok && exact);   // (marked if it failed, a call failed, the runs were not all known or a snapshot was read meanwhile)
     swap_end();
     nvn_dirty_unhold();
+    if (ok && pf) prefault_line();
     p5 = mono_ns();
     g_ph[3] += p3 - p2; g_ph[4] += p4 - p3; g_ph[5] += p5 - p4;
     if (!(++g_ph_n & 255)) VLOG("placed memory: %llu placements: allocation %.0f ms, protections read %.0f ms (%.0f lines of /proc/self/maps a read), copy %.0f ms, maps %.0f ms, prefault %.0f ms, protections back %.0f ms",
@@ -442,8 +453,9 @@ static int place(uintptr_t lo, uintptr_t hi, VkDeviceSize *grow) {
     if (V.bda) { VkBufferDeviceAddressInfo bai = {VK_STRUCTURE_TYPE_BUFFER_DEVICE_ADDRESS_INFO, .buffer = s.buf}; s.bda = vk.vkGetBufferDeviceAddress(V.dev, &bai); }
     if (!lock_whole()) pthread_rwlock_wrlock(&g_rw);
     sg_insert(&s);
-    g_placed_bytes += n; if (g_placed_bytes > g_placed_peak) g_placed_peak = g_placed_bytes; t_place_bytes += n; vka_mem_grew(n);
+    g_placed_bytes += n; if (g_placed_bytes > g_placed_peak) g_placed_peak = g_placed_bytes; t_place_bytes += n;
     if (!lock_whole()) pthread_rwlock_unlock(&g_rw);
+    vka_mem_grew(n);   // (its log line outside the table's lock: no log line under a lock another logging thread may wait for)
     return 1;
 }
 
@@ -549,14 +561,19 @@ static void unplace_all(segvec *v) { for (int i = 0; i < v->n; i++) { unplace(&v
 // The segments one pool holds references on (by start)
 typedef struct { uintptr_t *lo; int n, cap; } seglist;
 static void sl_add(seglist *l, uintptr_t lo) { if (l->n == l->cap) { l->cap = l->cap ? l->cap * 2 : 2; l->lo = realloc(l->lo, (size_t)l->cap * sizeof *l->lo); } l->lo[l->n++] = lo; }
+static int sl_has(const seglist *l, uintptr_t lo) { for (int i = 0; i < l->n; i++) if (l->lo[i] == lo) return 1; return 0; }
 static int place_ref(uintptr_t lo, uintptr_t hi, VkDeviceSize *grow, seglist *l) { if (!place(lo, hi, grow)) return 0; sl_add(l, lo); return 1; }
 // Make [lo, hi) GPU-visible: segments over what no segment covers yet, references on the ones that do, all listed in l. 0 = some part is not placed. Caller holds g_pl
-// (so the table changes under no one else here: it is read without g_rw, and written under it), except while pend_wait waits: then the step starts again at a
+// (so the table changes under no one else here: it is read without g_rw, and written under it), except while pend_wait waits: then the step starts again at a.
+// A segment l lists already (a pool placed by parts holds its earlier parts there) takes no second reference
 static int cover(uintptr_t lo, uintptr_t hi, seglist *l) {
     int ok = 1;
     for (uintptr_t a = lo; a < hi;) {
         int k = sg_find(a);
-        if (k >= 0 && a < g_sg[k].hi) { if (!lock_whole()) pthread_rwlock_wrlock(&g_rw); g_sg[k].refs++; if (!lock_whole()) pthread_rwlock_unlock(&g_rw); sl_add(l, g_sg[k].lo); a = g_sg[k].hi; continue; }
+        if (k >= 0 && a < g_sg[k].hi) {
+            if (!sl_has(l, g_sg[k].lo)) { if (!lock_whole()) pthread_rwlock_wrlock(&g_rw); g_sg[k].refs++; if (!lock_whole()) pthread_rwlock_unlock(&g_rw); sl_add(l, g_sg[k].lo); }
+            a = g_sg[k].hi; continue;
+        }
         uintptr_t e = k + 1 < g_nsg && g_sg[k + 1].lo < hi ? g_sg[k + 1].lo : hi;   // the gap up to the next segment
         VkDeviceSize grow = 0;
         if (pend_wait(a, e)) continue;
@@ -689,16 +706,29 @@ int vka_mem_chunks(uint64_t *lo, uint64_t *hi, uint64_t *bda, int max) {
 // the replay reads textures from guest memory on the CPU (uploads into images of their own), and NVN hands the GPU no other address of a pool. Mario Kart World 1.8.0 makes
 // 4,641 MiB of pools before its first frame, of which 765 MiB hold anything that is not zero: a 2.37 GiB texture heap that holds 349 MiB of textures and no buffer,
 // 1,183 MiB of physical pools (GPU_NO_ACCESS) that only back virtual pools, 371 MiB of CPU_NO_ACCESS texture pools; placed at Initialize, all of it was committed
-// (docs/reference/memory.md "Placed pools commit what the game only reserved"). DM_VK_PLACE_LAZY=0 places every pool at Initialize, as before
-typedef struct { uintptr_t mem; uint64_t size; seglist segs; int lazy; uint64_t id; } pool_ent;   // lazy: 1 not placed yet, 2 being placed (mtl_pool_need); id: unique (two pools may share a start)
+// (docs/reference/memory.md "Placed pools commit what the game only reserved"). DM_VK_PLACE_LAZY=0 places every pool at Initialize, as before.
+// Large pools are placed by parts (vka_place.h): a pool of at least DM_VK_PLACE_PART_MB (1024; 0 = whole pools, as before) becomes placed memory granule by granule
+// (DM_VK_PLACE_GRANULE_MB, 16, counted from the pool's start): the granules the GPU is given an address in, not the whole pool. Pokemon Pokopia makes a 3.4 GiB pool
+// before its first frame and gives the GPU a buffer 38 MiB into it: placed whole, its 3.4 GiB of driver memory (committed when allocated) and the rest made the low-memory
+// killer end the game before its first frame. NVN gives the GPU an address only by a buffer, a texture or the pool's own address (which places the rest of the pool),
+// so a granule no buffer or texture lies in is one the GPU is never sent to. A range given to the GPU across a granule placed earlier and one placed now lies in two
+// segments: lookups over the whole range fail there (vka_addr; runs, as for copies and uniform buffers, still work), [RED] once per pool
+typedef struct { uintptr_t mem; uint64_t size; seglist segs; int lazy, part; uint64_t id, pbytes; uint32_t nparts, nspan; uint64_t *gmap; } pool_ent;   // gmap: a pool placed by parts, one bit a granule placed (under g_pmu)   // lazy: 1 not (wholly) placed yet, 2 being placed (mtl_pool_need); part: placed by parts (pbytes placed so far, in nparts placements); id: unique (two pools may share a start)
 static pool_ent *g_pool; static int g_npool, g_poolcap;
 static pthread_mutex_t g_pmu = PTHREAD_MUTEX_INITIALIZER; static pthread_cond_t g_lzcv = PTHREAD_COND_INITIALIZER;   // g_lzcv: a placement by mtl_pool_need ended
-static _Atomic int g_nlazy; static uint64_t g_lazy_bytes, g_pool_id;   // pools not placed yet and their bytes (g_lazy_bytes, g_pool_id under g_pmu)
-static _Atomic uint64_t g_lzgen = 1;   // bumped when a pool not placed yet comes (mtl_pool_add): mtl_pool_need's per-thread record of ranges no such pool overlaps holds while it stands
+static _Atomic int g_nlazy; static uint64_t g_lazy_bytes, g_pool_id;   // pools not (wholly) placed yet and their bytes not placed (g_lazy_bytes, g_pool_id under g_pmu)
+static _Atomic uint64_t g_lzgen = 1;   // bumped when a pool not placed yet comes (mtl_pool_add): mtl_pool_need's per-thread record of ranges with nothing left to place holds while it stands
 static int lazy_on(void) { static int v = -1; if (v < 0) { v = VKA_ENV("DM_VK_PLACE_LAZY", 1) != 0; if (!v) VLOG("DM_VK_PLACE_LAZY=0: every memory pool is placed when it is made"); } return v; }
+static uint64_t part_min(void) { static int64_t v = -1; if (v < 0) { v = (int64_t)VKA_ENV("DM_VK_PLACE_PART_MB", 1024) << 20; if (v < 0) v = 0; if (!v) VLOG("DM_VK_PLACE_PART_MB=0: every memory pool is placed whole"); } return (uint64_t)v; }
+static uint64_t part_gran(void) {
+    static int64_t v = -1;
+    if (v < 0) { int64_t m = VKA_ENV("DM_VK_PLACE_GRANULE_MB", 16); if (m < 1) m = 1; v = m << 20; uintptr_t al = pg_align(); v = (v + (int64_t)al - 1) & ~(int64_t)(al - 1); }
+    return (uint64_t)v;
+}
 static int can_place(uint64_t size) { return size && vka_ok() && placed_on() && V.placed; }
-// Place [mem, mem+size) (page aligned out): its segments into *l. Caller holds g_pl. *lg: the placed total crossed a 256 MiB step since the last line (*tot)
-static int place_pool(uintptr_t mem, uint64_t size, seglist *l, int *lg, uint64_t *tot) {
+// Place [mem, mem+size) (page aligned out): its segments into *l (which may list some already: they take no second reference). Caller holds g_pl. *lg: the placed total
+// crossed a 256 MiB step since the last line (*tot). *mine: the bytes this call placed
+static int place_pool(uintptr_t mem, uint64_t size, seglist *l, int *lg, uint64_t *tot, uint64_t *mine_out) {
     uintptr_t al = pg_align(), lo = mem & ~(al - 1), hi = (mem + size + al - 1) & ~(al - 1);
     if (lock_whole()) pthread_rwlock_wrlock(&g_rw);
     // The placement's own time and bytes: from here (not the wait for another placement), less the time cover waited for give-backs (pend_wait, which lets other
@@ -710,38 +740,60 @@ static int place_pool(uintptr_t mem, uint64_t size, seglist *l, int *lg, uint64_
     if (lock_whole()) pthread_rwlock_unlock(&g_rw);
     if (mine) { atomic_fetch_add(&g_place_bytes, mine); atomic_fetch_add(&g_place_n, 1); }
     atomic_fetch_add(&g_place_ns, mono_ns() - tw - waitns);
+    if (mine_out) *mine_out = mine;
     return placed;
 }
 static void placed_line(uint64_t tot) {
-    pthread_mutex_lock(&g_pmu); int n = g_npool, nl = atomic_load(&g_nlazy); uint64_t lb = g_lazy_bytes; pthread_mutex_unlock(&g_pmu);
-    VLOG("%.2f GiB of memory pools is placed Vulkan memory (%d pools; %d pools, %.2f GiB not placed: no GPU address taken in them yet)", tot / 1073741824.0, n - nl, nl, lb / 1073741824.0);
+    pthread_mutex_lock(&g_pmu); int n = g_npool, nl = atomic_load(&g_nlazy), np = 0; uint64_t lb = g_lazy_bytes;
+    for (int i = 0; i < g_npool; i++) if (g_pool[i].lazy && g_pool[i].pbytes) np++;
+    pthread_mutex_unlock(&g_pmu);
+    VLOG("%.2f GiB of memory pools is placed Vulkan memory (%d pools whole, %d by parts; %d pools, %.2f GiB not placed: no GPU address taken in them yet)", tot / 1073741824.0, n - nl, np, nl, lb / 1073741824.0);
 }
 void mtl_pool_add(const void *mem, uint64_t size) {
     vka_init(); swap_hooks();
-    int placed = 0, lg = 0, lazy = 0; uint64_t t0 = mono_ns(), tot = 0; seglist l = {0};
-    if (can_place(size) && lazy_on()) lazy = 1;
-    else if (can_place(size)) { pthread_mutex_lock(&g_pl); placed = place_pool((uintptr_t)mem, size, &l, &lg, &tot); pthread_mutex_unlock(&g_pl); }
+    int placed = 0, lg = 0, lazy = 0, part = 0; uint64_t t0 = mono_ns(), tot = 0; seglist l = {0};
+    if (can_place(size) && lazy_on()) { lazy = 1; part = vkp_by_parts(size, part_min(), part_gran()); }
+    else if (can_place(size)) { pthread_mutex_lock(&g_pl); placed = place_pool((uintptr_t)mem, size, &l, &lg, &tot, NULL); pthread_mutex_unlock(&g_pl); }
     else placed = vka_addr((uintptr_t)mem, size, NULL, NULL, NULL);   // the selftest's mapped allocation
     pthread_mutex_lock(&g_pmu);
     if (g_npool == g_poolcap) { g_poolcap = g_poolcap ? g_poolcap * 2 : 64; g_pool = realloc(g_pool, (size_t)g_poolcap * sizeof *g_pool); }
-    g_pool[g_npool++] = (pool_ent){(uintptr_t)mem, size, l, lazy, ++g_pool_id};
+    g_pool[g_npool++] = (pool_ent){(uintptr_t)mem, size, l, lazy, part, ++g_pool_id, 0, 0, 0, part ? calloc((size_t)(size / part_gran() / 64 + 1), 8) : NULL};
     if (lazy) { atomic_fetch_add(&g_nlazy, 1); g_lazy_bytes += size; atomic_fetch_add(&g_lzgen, 1); }
     static int nlog; int first = nlog++ < 8;
     pthread_mutex_unlock(&g_pmu);
-    if (lazy) { static _Atomic int once; if (!atomic_exchange(&once, 1)) VLOG("memory pool %p+%#llx: placed when the GPU is first given an address in it (DM_VK_PLACE_LAZY)", mem, (unsigned long long)size); return; }
+    if (lazy) {
+        static _Atomic int once, oncep;
+        if (!atomic_exchange(&once, 1)) VLOG("memory pool %p+%#llx: placed when the GPU is first given an address in it (DM_VK_PLACE_LAZY)", mem, (unsigned long long)size);
+        if (part && !atomic_exchange(&oncep, 1)) VLOG("memory pool %p+%#llx: placed by parts of %llu MiB, those the GPU is given an address in (pools of %llu MiB and more; DM_VK_PLACE_PART_MB, DM_VK_PLACE_GRANULE_MB)",
+                                                      mem, (unsigned long long)size, (unsigned long long)(part_gran() >> 20), (unsigned long long)(part_min() >> 20));
+        return;
+    }
     VkDeviceAddress bda = 0; vka_addr((uintptr_t)mem, 1, NULL, NULL, &bda);
     if (!placed) { static _Atomic int nred; if (size && atomic_fetch_add(&nred, 1) < 8) VRED("memory pool %p+%#llx is not in placed memory: the GPU does not see it", mem, (unsigned long long)size); }
     else if (first) VLOG("memory pool %p+%#llx placed at device address %#llx (%.1f ms)", mem, (unsigned long long)size, (unsigned long long)bda, (mono_ns() - t0) / 1e6);
     if (lg) placed_line(tot);
 }
-// The GPU is given [addr, addr+len): every pool not placed yet that overlaps it is placed now, whole (its other addresses follow from this one). Returns once they are
-// placed, also when another thread is placing one of them
-// Ranges a thread asked for that no pool not placed yet overlaps, while g_lzgen stands (direct-mapped by 64 KiB block): the asks that keep missing placed memory (a buffer
-// past its pool's end, one across two segments, a buffer of a sparse virtual pool) skip the scan of every pool
-enum { NNEG = 64 };
+// The GPU is given [addr, addr+len) (why: by what): every pool not placed yet that overlaps it is placed now, whole (its other addresses follow from this one), or, for a
+// pool placed by parts, the granules [addr, addr+len) touches. Returns once they are placed, also when another thread is placing one of them
+// Ranges a thread asked for with nothing left to place (no pool not placed yet overlaps them, or the parts they touch are placed), while g_lzgen stands (direct-mapped by
+// 64 KiB block): the asks that keep missing one placed segment (a buffer past its pool's end, one across two segments, a buffer of a sparse virtual pool) skip the scan of every pool
+enum { NNEG = 64, NDONE = 8 };
+// [a, e) of pool p (placed by parts) lies in granules all placed already: nothing to place, and no wait for a placement of another part (caller holds g_pmu)
+static int parts_placed(const pool_ent *p, uintptr_t a, uintptr_t e) {
+    if (!p->gmap) return 0;
+    uint64_t g = part_gran(), s = a > p->mem ? a - p->mem : 0, t = (e < p->mem + p->size ? e : p->mem + p->size) - p->mem;
+    if (t <= s) return 1;
+    for (uint64_t k = s / g; k <= (t - 1) / g; k++) if (!(p->gmap[k >> 6] >> (k & 63) & 1)) return 0;
+    return 1;
+}
+static void parts_mark(pool_ent *p, uintptr_t lo, uintptr_t hi) {   // caller holds g_pmu
+    if (!p->gmap || hi <= lo) return;
+    uint64_t g = part_gran();
+    for (uint64_t k = (lo - p->mem) / g; k <= (hi - 1 - p->mem) / g; k++) p->gmap[k >> 6] |= 1ull << (k & 63);
+}
 typedef struct { uint64_t gen; uintptr_t a, e; } negent;
 static __thread negent t_neg[NNEG];
-void mtl_pool_need(const void *addr, uint64_t len) {
+void mtl_pool_need(const void *addr, uint64_t len, const char *why) {
     if (!atomic_load_explicit(&g_nlazy, memory_order_relaxed)) return;
     uintptr_t a = (uintptr_t)addr, e = a + (len ? len : 1);
     if (e < a) e = UINTPTR_MAX;
@@ -749,24 +801,54 @@ void mtl_pool_need(const void *addr, uint64_t len) {
     negent *ng = &t_neg[(a >> 16) & (NNEG - 1)];
     uint64_t gen = atomic_load_explicit(&g_lzgen, memory_order_acquire);
     if (ng->gen == gen && a >= ng->a && e <= ng->e) return;
+    uint64_t done[NDONE]; int ndone = 0;   // pools placed by parts this call has placed its part of (each is still not wholly placed: the scan skips it)
     for (;;) {
         pthread_mutex_lock(&g_pmu);
         int k = -1, busy = 0;
-        for (int i = 0; i < g_npool; i++) if (g_pool[i].lazy && g_pool[i].mem < e && a < g_pool[i].mem + (g_pool[i].size ? g_pool[i].size : 1)) { if (g_pool[i].lazy == 2) busy = 1; else { k = i; break; } }
+        for (int i = 0; i < g_npool; i++) if (g_pool[i].lazy && g_pool[i].mem < e && a < g_pool[i].mem + (g_pool[i].size ? g_pool[i].size : 1)) {
+            int skip = 0; for (int j = 0; j < ndone; j++) if (done[j] == g_pool[i].id) skip = 1;
+            if (skip || parts_placed(&g_pool[i], a, e)) continue;
+            if (g_pool[i].lazy == 2) busy = 1; else { k = i; break; }
+        }
         if (k < 0 && busy) { pthread_cond_wait(&g_lzcv, &g_pmu); pthread_mutex_unlock(&g_pmu); continue; }
         if (k < 0) { *ng = (negent){gen, a, e}; pthread_mutex_unlock(&g_pmu); return; }   // (gen read before the scan: a pool added since bumped it)
+        if (ndone == NDONE) { pthread_mutex_unlock(&g_pmu); static _Atomic int nr; if (!atomic_fetch_add(&nr, 1)) VRED("the GPU is given %#lx+%#lx across more than %d memory pools placed by parts: the rest is not placed", (unsigned long)a, (unsigned long)(e - a), NDONE); return; }
         pool_ent pe = g_pool[k]; g_pool[k].lazy = 2;
         pthread_mutex_unlock(&g_pmu);
-        seglist l = {0}; int lg = 0; uint64_t tot = 0, t0 = mono_ns();
-        pthread_mutex_lock(&g_pl); int placed = place_pool(pe.mem, pe.size, &l, &lg, &tot); pthread_mutex_unlock(&g_pl);
+        uint64_t plo = pe.mem, phi = pe.mem + pe.size;
+        int whole = !(pe.part && vkp_part(pe.mem, pe.size, a, e, part_gran(), &plo, &phi));
+        seglist l = pe.segs; int lg = 0, span = 0; uint64_t tot = 0, t0 = mono_ns(), mine = 0;   // (l: the parts it holds already)
+        pthread_mutex_lock(&g_pl);
+        int placed = place_pool(plo, phi - plo, &l, &lg, &tot, &mine);
+        if (placed && !whole) { uintptr_t sa = a > pe.mem ? a : pe.mem, se = e < pe.mem + pe.size ? e : pe.mem + pe.size; span = !vka_addr(sa, se - sa, NULL, NULL, NULL); }
+        pthread_mutex_unlock(&g_pl);
         pthread_mutex_lock(&g_pmu);   // (mtl_pool_del waits while the pool is being placed: it is still in the table)
-        for (int i = 0; i < g_npool; i++) if (g_pool[i].id == pe.id) { g_pool[i].segs = l; g_pool[i].lazy = 0; break; }
-        atomic_fetch_sub(&g_nlazy, 1); g_lazy_bytes -= pe.size;
+        uint32_t nparts = 0, nspan = 0;
+        for (int i = 0; i < g_npool; i++) if (g_pool[i].id == pe.id) {
+            pool_ent *p = &g_pool[i]; p->segs = l;
+            if (whole && (placed || !pe.part)) { g_lazy_bytes -= pe.size - (pe.pbytes < pe.size ? pe.pbytes : pe.size); p->lazy = 0; atomic_fetch_sub(&g_nlazy, 1); }
+            else {   // a part, or a whole placement of a pool placed by parts that failed: it stays not wholly placed, what was placed counted
+                uint64_t m = mine < pe.size - p->pbytes ? mine : pe.size - p->pbytes; p->pbytes += m; g_lazy_bytes -= m; p->lazy = 1;
+                if (placed && !whole) parts_mark(p, plo, phi);
+            }
+            if (mine) p->nparts++;
+            if (span) p->nspan++;
+            nparts = p->nparts; nspan = span ? p->nspan : 0;
+            break;
+        }
+        if ((!whole || pe.part) && ndone < NDONE) done[ndone++] = pe.id;
         pthread_cond_broadcast(&g_lzcv);
-        static int nlog; int first = nlog++ < 8;
+        static int nlog; int first = nlog++ < 8 || (whole && pe.pbytes);
         pthread_mutex_unlock(&g_pmu);
         if (!placed) { static _Atomic int nred; if (atomic_fetch_add(&nred, 1) < 8) VRED("memory pool %#lx+%#llx is not in placed memory: the GPU does not see it", (unsigned long)pe.mem, (unsigned long long)pe.size); }
-        else if (first) VLOG("memory pool %#lx+%#llx placed when the GPU was given %#lx (%.1f ms)", (unsigned long)pe.mem, (unsigned long long)pe.size, (unsigned long)a, (mono_ns() - t0) / 1e6);
+        else if (whole && pe.pbytes) VLOG("memory pool %#lx+%#llx placed whole after %u parts (%.0f MiB) when the GPU was given %#lx+%#lx (%s; %.1f ms): ranges across the parts' ends lie in two segments",
+                                         (unsigned long)pe.mem, (unsigned long long)pe.size, nparts, pe.pbytes / 1048576.0, (unsigned long)a, (unsigned long)(e - a), why, (mono_ns() - t0) / 1e6);
+        else if (whole && first) VLOG("memory pool %#lx+%#llx placed when the GPU was given %#lx+%#lx (%s; %.1f ms)", (unsigned long)pe.mem, (unsigned long long)pe.size, (unsigned long)a, (unsigned long)(e - a), why, (mono_ns() - t0) / 1e6);
+        else if (!whole && mine && (nparts <= 8 || !(nparts & 63)))
+            VLOG("memory pool %#lx+%#llx: part %u, %#llx+%#llx (%.0f MiB), placed when the GPU was given %#lx+%#lx (%s; %.1f ms; %.0f MiB of the pool placed)", (unsigned long)pe.mem, (unsigned long long)pe.size, nparts,
+                 (unsigned long long)plo, (unsigned long long)(phi - plo), mine / 1048576.0, (unsigned long)a, (unsigned long)(e - a), why, (mono_ns() - t0) / 1e6, (pe.pbytes + mine) / 1048576.0);
+        if (span && nspan == 1) VRED("memory pool %#lx+%#llx (placed by parts): the GPU is given %#lx+%#lx (%s) across two of its parts: lookups over the whole range fail (draws that need it in one piece are skipped)",
+                                     (unsigned long)pe.mem, (unsigned long long)pe.size, (unsigned long)a, (unsigned long)(e - a), why);
         if (lg) placed_line(tot);
     }
 }
@@ -783,10 +865,11 @@ void mtl_pool_del(const void *mem) {
     for (int i = 0; i < g_npool; i++) if (g_pool[i].mem == (uintptr_t)mem) {
         if (g_pool[i].lazy == 2) { pthread_cond_wait(&g_lzcv, &g_pmu); i = -1; continue; }   // being placed (mtl_pool_need): its segments are given back below once it is
         e = g_pool[i]; g_pool[i] = g_pool[--g_npool];
-        if (e.lazy == 1) { atomic_fetch_sub(&g_nlazy, 1); g_lazy_bytes -= e.size; }
+        if (e.lazy == 1) { atomic_fetch_sub(&g_nlazy, 1); g_lazy_bytes -= e.size - (e.pbytes < e.size ? e.pbytes : e.size); }   // (a pool placed by parts: its parts are in segs)
         break;
     }
     pthread_mutex_unlock(&g_pmu);
+    free(e.gmap);
     if (!e.segs.n) { free(e.segs.lo); return; }
     segvec v = {0}; uint64_t t0 = mono_ns();
     pthread_mutex_lock(&g_pl); pthread_rwlock_wrlock(&g_rw); uncover(&e.segs, &v); pthread_rwlock_unlock(&g_rw); pthread_mutex_unlock(&g_pl);

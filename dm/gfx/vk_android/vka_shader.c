@@ -1,7 +1,9 @@
 // Shaders of the Vulkan replay: the game's library (android/SHADERS.md), its entries as VkShaderModules, and NVN programs resolved to one shader per stage.
 // The library is <pack folder>/shaders/v-<DMSH_VK_CHAIN>/dmsh_vk.lib beside its inputs.tsv (the pack folder is the one the modules came from, dm_module_dir), or the file
-// DM_VK_SHLIB names. One whose chain, Vulkan chain or game is not this host's is refused with a [RED] line: the game runs on with no draws. Modules are made at a program's
-// first draw (the submit thread), not at nvnProgramSetShaders
+// DM_VK_SHLIB names. One whose chain, Vulkan chain or game is not this host's is refused with a [RED] line: the game runs on with no draws. While this version's library is
+// not in the pack yet (the app's delta update makes it, android/SHADERS.md#delta-updates), another v-<V>/ of the pack whose header carries this host's DMSH_VK_ABI is played
+// instead (the newest): what the replay reads of it is the same; the new library is taken from the next start. Modules are made at a program's first draw (the submit
+// thread), not at nvnProgramSetShaders
 #if defined(__ANDROID__)
 #include "vka.h"
 #include "../nvn/nvn_mtl.h"
@@ -13,8 +15,12 @@
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
+#include <dirent.h>
+#include <sys/stat.h>
+#include <time.h>
 
 static vka_shlib g_lib; static int g_lib_state;   // 0 not tried, 1 loaded, -1 none
+static char g_lib_path[1024];                       // the library loaded (vka_shader_lib_path)
 static pthread_mutex_t g_mu = PTHREAD_MUTEX_INITIALIZER;
 
 // How each stage runs the subgroup operations of a library built for sg lanes (DMSH_VK_F_SUBGROUP shaders). A module built for 64 lanes splits ballots and shuffles into
@@ -55,15 +61,49 @@ static void sg_plan(unsigned sg) {
 }
 uint32_t vka_shader_sg_pin(int stage) { return stage >= 0 && stage < 8 ? g_sg_pin[stage] : 0; }
 
+const char *vka_shader_lib_path(void) { return g_lib_path; }
+
 static int lib_load(void) {
     if (g_lib_state) return g_lib_state > 0;
     g_lib_state = -1;
-    char path[1024]; const char *e = getenv("DM_VK_SHLIB");
+    char path[1024], err[256]; const char *e = getenv("DM_VK_SHLIB"); const char *dir = dm_module_dir(); dir = dir && *dir ? dir : ".";
     if (e && *e) snprintf(path, sizeof path, "%s", e);
-    else { const char *dir = dm_module_dir(); snprintf(path, sizeof path, "%s/shaders/" DMSH_VK_DIR_PREFIX "%s/" DMSH_VK_LIB_FILE, dir && *dir ? dir : ".", DMSH_VK_CHAIN); }
-    if (access(path, R_OK)) { VRED("no shader library at %s (the pack's shaders/" DMSH_VK_DIR_PREFIX "%s): nothing is drawn", path, DMSH_VK_CHAIN); return 0; }
-    char err[256];
-    if (!vka_shlib_open(&g_lib, path, DMSH_CHAIN, DMSH_VK_CHAIN, DM_GAME_ID, err, sizeof err)) { VRED("shader library %s refused: %s; nothing is drawn", path, err); return 0; }
+    else snprintf(path, sizeof path, "%s/shaders/" DMSH_VK_DIR_PREFIX "%s/" DMSH_VK_LIB_FILE, dir, DMSH_VK_CHAIN);
+    int have = !access(path, R_OK) && vka_shlib_open(&g_lib, path, DMSH_CHAIN, DMSH_VK_CHAIN, DM_GAME_ID, DMSH_VK_ABI, err, sizeof err);
+    if (!have && !(e && *e)) {   // this version's library not in the pack (yet): the newest other v-<V>/ that this host reads the same (its ABI)
+        char why[256]; snprintf(why, sizeof why, "%s", access(path, R_OK) ? "missing" : err);
+        char sd[1024], best[1024] = "", old[1024] = ""; time_t bt = 0, ot = 0; snprintf(sd, sizeof sd, "%s/shaders", dir);
+        DIR *d = opendir(sd); struct dirent *de;
+        while (d && (de = readdir(d))) {
+            if (strncmp(de->d_name, DMSH_VK_DIR_PREFIX, strlen(DMSH_VK_DIR_PREFIX))) continue;
+            char p[1024]; struct stat st; vka_shlib t; char e2[256];
+            if (snprintf(p, sizeof p, "%s/%s/" DMSH_VK_LIB_FILE, sd, de->d_name) >= (int)sizeof p || stat(p, &st) || !strcmp(p, path)) continue;
+            if (vka_shlib_open(&t, p, DMSH_CHAIN, DMSH_VK_CHAIN, DM_GAME_ID, DMSH_VK_ABI, e2, sizeof e2)) {
+                vka_shlib_close(&t);
+                if (!*best || st.st_mtime > bt) { snprintf(best, sizeof best, "%s", p); bt = st.st_mtime; }
+                continue;
+            }
+            // A library made before the abi field (all zero): its ABI is not known, so it is the last resort, played with a warning rather than nothing drawn
+            // (the user's choice: never block Play on it; the app suggests one more shader update, after which updates are deltas of the same ABI)
+            int legacy = vka_shlib_open(&t, p, NULL, NULL, DM_GAME_ID, NULL, e2, sizeof e2);
+            if (legacy) { static const char z[12]; legacy = !memcmp(t.h->abi, z, sizeof z); vka_shlib_close(&t); if (!legacy) snprintf(e2, sizeof e2, "another ABI than this host's %s", DMSH_VK_ABI); }
+            if (!legacy) { VLOG("shader library %s not usable here: %s", p, e2); continue; }
+            if (!*old || st.st_mtime > ot) { snprintf(old, sizeof old, "%s", p); ot = st.st_mtime; }
+        }
+        if (d) closedir(d);
+        if (*best && vka_shlib_open(&g_lib, best, DMSH_CHAIN, DMSH_VK_CHAIN, DM_GAME_ID, DMSH_VK_ABI, err, sizeof err)) {
+            char v[17]; vka_shlib_str(g_lib.h->vk_chain, v);
+            VLOG("shader library %s: this host's version %s is %s (the app's shader update makes it); playing version %s, the same ABI %s", path, DMSH_VK_CHAIN, why, v, DMSH_VK_ABI);
+            snprintf(path, sizeof path, "%s", best); have = 1;
+        } else if (!*best && *old && vka_shlib_open(&g_lib, old, NULL, NULL, DM_GAME_ID, NULL, err, sizeof err)) {
+            char v[17]; vka_shlib_str(g_lib.h->vk_chain, v);
+            VRED("shader library %s: this host's version %s is %s; playing version %s, made before versioned shader updates (no ABI in its header, this host's is %s): "
+                 "it may draw wrong. Update the shaders once in the app; later updates are then partial", path, DMSH_VK_CHAIN, why, v, DMSH_VK_ABI);
+            snprintf(path, sizeof path, "%s", old); have = 1;
+        } else { VRED("no shader library at %s (the pack's shaders/" DMSH_VK_DIR_PREFIX "%s: %s) and none of another version with this host's ABI %s: nothing is drawn", path, DMSH_VK_CHAIN, why, DMSH_VK_ABI); return 0; }
+    }
+    if (!have) { VRED("shader library %s refused: %s; nothing is drawn", path, access(path, R_OK) ? "missing" : err); return 0; }
+    snprintf(g_lib_path, sizeof g_lib_path, "%s", path);
     // The translator's answers in the header against this device: modules built for 64-lane subgroups split ballots and shuffles into 32-lane halves, so they are right on
     // 32 or 64 lanes; storage buffers are bound rounded down to ssbo_align, which the device's alignment must divide (android/SHADERS.md "Translator answers")
     unsigned sg = g_lib.h->subgroup_size ? g_lib.h->subgroup_size : 32, sa = g_lib.h->ssbo_align;

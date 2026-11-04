@@ -14,6 +14,7 @@
 #include <stdio.h>
 #include <stdatomic.h>
 #include "romfs_image.h"
+#include "nup_image.h"
 #include "save_sync.h"
 
 // Every take-over in this file runs on the big host stack (hle_bigstack.c): path buffers are sized by PATH_MAX and one file open takes 6-7 KB of stack, while a game's save thread can have as little as 8 KB (Super Mario 3D World + Bowser's Fury)
@@ -126,8 +127,16 @@ static int dm_fs_test_fail(const char *pt) {
 }
 static int in_txn_dir(const char *hp) { return save_txn_from_path(hp); }
 static int rm_tree(const char *p);
-// Reads and checks a RomFS image's header and index; NULL (and a red line) when it is not a complete image
+// Reads and checks a RomFS image's header and index; NULL (and a red line) when it is not a complete image. A NUP container package
+// ("<file>.nup[:<selector>]", nup_image.h, android/NUP.md) opens as an image too
 static romfs_img *img_open(const char *path) {
+    if (nup_is_spec(path)) {
+        char why[256] = ""; romfs_img *m = nup_image_open(path, why, sizeof why);
+        if (m) LOG("fs NUP %s: %llu entries, %llu compressed files (decompressed when opened, cache %llu MiB)", path, (unsigned long long)m->n,
+                   (unsigned long long)((nup_aux *)m->aux)->nz, (unsigned long long)(((nup_aux *)m->aux)->budget >> 20));
+        else LOG("[RED] fs NUP %s: %s (errno=%d)", path, why, errno);
+        return m;
+    }
     romfs_img *m = romfs_image_open(path);
     if (m) LOG("fs RomFS image %s: %llu entries", path, (unsigned long long)m->n);
     else LOG("[RED] fs RomFS image %s is not a complete image (copied in part? errno=%d)", path, errno);
@@ -225,9 +234,10 @@ static Result mount_ex(const char *name, const char *dir, int ro, int txn) {
     if (ro && !txn) {   // game files: a RomFS folder, or a RomFS image file in its place
         // A path that is neither is a stale or mistyped one (an old run command still naming the RomFS folder a rebuild replaced with RomFS.img): stop here, not at the game's
         // first failed read (Echoes of Wisdom crashed 0.3 s after nnMain, GitHub issue #615). Add-on content and system data check their own paths before they mount
-        if (stat(dir, &ist) || !(S_ISDIR(ist.st_mode) || S_ISREG(ist.st_mode)))
+        if (nup_is_spec(dir)) { if (!(g_mnt[g_nmnt].img = img_open(dir))) die("the game files %s (%s:) cannot be used as a NUP package (the log line above says why)", dir, name); }
+        else if (stat(dir, &ist) || !(S_ISDIR(ist.st_mode) || S_ISREG(ist.st_mode)))
             die("the game files %s (%s:) are missing: neither a folder nor a RomFS image (the rom mount is DM_ROMFS, or $DM_ROOT/romfs when DM_ROMFS is unset)", dir, name);
-        if (S_ISREG(ist.st_mode) && !(g_mnt[g_nmnt].img = img_open(dir))) die("the game files %s are not a complete RomFS image", dir);
+        else if (S_ISREG(ist.st_mode) && !(g_mnt[g_nmnt].img = img_open(dir))) die("the game files %s are not a complete RomFS image", dir);
     }
     g_nmnt++;
     pthread_mutex_unlock(&g_lock);
@@ -470,7 +480,7 @@ static void romfs_tables(const char *dir, size_t *ndir, size_t *dbytes, size_t *
 static size_t romfs_work_size(const char *dir) {
     size_t ndir = 1, dbytes = 0x18, nfile = 0, fbytes = 0;   // the root directory has an entry with an empty name
     struct stat st;
-    if (!stat(dir, &st) && S_ISREG(st.st_mode)) {
+    if (nup_is_spec(dir) || (!stat(dir, &st) && S_ISREG(st.st_mode))) {
         romfs_img *m = img_open(dir);
         if (!m) return 0x1000;
         for (uint64_t k = 1; k < m->n; k++) {
@@ -484,6 +494,9 @@ static size_t romfs_work_size(const char *dir) {
 }
 static int aoc_dir(char *dir, size_t n, int index) {
     const char *base = getenv("DM_AOC_DIR"); struct stat st;
+    // <index>.nup: a NUP container (or a link to one) holding the add-on as an addon package; the mount picks it by index (nup_image.h "aoc/<index>")
+    if (base && *base && snprintf(dir, n, "%s/%d.nup", base, index) < (int)n && !stat(dir, &st) && S_ISREG(st.st_mode))
+        return snprintf(dir, n, "%s/%d.nup:aoc/%d", base, index, index) < (int)n;
     if (base && *base && snprintf(dir, n, "%s/%d.img", base, index) < (int)n && !stat(dir, &st) && S_ISREG(st.st_mode)) return 1;
     return base && *base && snprintf(dir, n, "%s/%d", base, index) < (int)n && !stat(dir, &st) && S_ISDIR(st.st_mode);
 }
@@ -749,6 +762,10 @@ HLE_FORCE("_ZN2nn2fs8OpenFileEPNS0_10FileHandleEPKci", "fsp-srv → open(2)", Re
         img_ent *ent = &g_mnt[mi].img->e[k];   // a damaged file is named once, at its first open
         if ((ent->flags & IMG_ENT_DAMAGED) && !(__atomic_fetch_or(&ent->flags, IMG_ENT_REPORTED, __ATOMIC_RELAXED) & IMG_ENT_REPORTED))
             LOG("[RED] fs %s failed the NCA's hash check when it was extracted (a damaged NSP, --allow-damaged); its bytes may be wrong", path);
+        if (ent->flags & IMG_ENT_ZSTD) {   // a compressed file of a NUP package: decompressed now, held until CloseFile
+            char why[200] = "";
+            if (!nup_z_get(g_mnt[mi].img, ent->a, why, sizeof why)) { LOG("[RED] fs %s: cannot decompress it from %s: %s", path, ((nup_aux *)g_mnt[mi].img->aux)->what, why); return RES_FAIL; }
+        }
         *out = FH_OUT(IMG_HANDLE(mi, k));
         if (g_flag.fs) LOG("fs open [%.2fs] %s mode=%d → image entry %lld", (now_ns() - g_t0_ns) / 1e9, path, mode, (long long)k);
         return RES_OK;
@@ -777,6 +794,16 @@ HLE_FORCE("_ZN2nn2fs8ReadFileEPmNS0_10FileHandleElPvm", "fsp-srv → pread(2)", 
         const img_ent *x = &g_mnt[IMG_M(h)].img->e[IMG_K(h)];
         fd = g_mnt[IMG_M(h)].img->fd; base = (int64_t)x->a;
         sz = off < 0 || (uint64_t)off >= x->b ? 0 : (size_t)(x->b - off) < sz ? (size_t)(x->b - off) : sz;
+        if (x->flags & IMG_ENT_ZSTD) {   // a compressed NUP file: its decompressed bytes, held by the open (one more reference for this read, in case the game reads a closed handle)
+            romfs_img *m = g_mnt[IMG_M(h)].img; char why[200] = ""; uint64_t f0 = now_ns();
+            const uint8_t *src = nup_z_get(m, x->a, why, sizeof why);
+            if (!src) { LOG("[RED] fs ReadFile: cannot decompress a file of %s: %s", ((nup_aux *)m->aux)->what, why); return RES_FAIL; }
+            dm_guest_write_prepare(buf, sz);
+            memcpy(buf, src + off, sz);
+            nup_z_put(m, x->a);
+            *out = sz; fs_stat_note(1, f0, sz);
+            return RES_OK;
+        }
     }
     uint64_t fst0 = now_ns();
     dm_guest_write_prepare(buf, sz);   // The destination may be a texture pool page write-protected by the graphics layer: a kernel write to a read-only page returns EFAULT instead of page-faulting, so unprotect and mark dirty first
@@ -852,7 +879,11 @@ HLE_FORCE("_ZN2nn2fs11SetFileSizeENS0_10FileHandleEl", "fsp-srv → ftruncate(2)
 }
 HLE_FORCE("_ZN2nn2fs9FlushFileENS0_10FileHandleE", "fsp-srv; host writes are already in the page cache, flushing is a no-op", Result, h_fs_FlushFile, uint64_t h) { (void)h; return RES_OK; }
 HLE_FORCE("_ZN2nn2fs9CloseFileENS0_10FileHandleE", "fsp-srv → close(2)", void, h_fs_CloseFile, uint64_t h) { h = FH_IN(h);
-    if (!h || IMG_H(h)) return;   // the null handle after a failed open (see ReadFile): do not touch fd 0; an image entry holds no descriptor
+    if (h && IMG_H(h)) {   // an image entry holds no descriptor; a compressed NUP file gives back the bytes its open held
+        const img_ent *x = &g_mnt[IMG_M(h)].img->e[IMG_K(h)];
+        if (x->flags & IMG_ENT_ZSTD) nup_z_put(g_mnt[IMG_M(h)].img, x->a);
+        return; }
+    if (!h) return;   // the null handle after a failed open (see ReadFile): do not touch fd 0
     g_fmode[(int)h & 0xffff] = 0; atomic_store(&g_ftxn[(int)h & 0xffff], 0);
     close((int)h); }
 HLE_FORCE("_ZN2nn2fs15GetFileOpenModeENS0_10FileHandleE", "fsp-srv; the open mode is recorded by the host", int, h_fs_GetFileOpenMode, uint64_t h) { h = FH_IN(h); return IMG_H(h) ? MODE_READ : g_fmode[(int)h & 0xffff]; }

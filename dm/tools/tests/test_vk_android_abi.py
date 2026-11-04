@@ -37,12 +37,13 @@ class Abi(unittest.TestCase):
 
     def test_pack_formats(self):
         v = vk_values()
-        self.assertEqual(struct.calcsize('<II16s16s16s16sIIIIIIQQHH12x'), v['HEADER_SIZE'])
+        self.assertEqual(struct.calcsize('<II16s16s16s16sIIIIIIQQHH12s'), v['HEADER_SIZE'])
         self.assertEqual(struct.calcsize('<QQBBHIIHH3HBBIIII8x'), v['ENTRY_SIZE'])
         self.assertEqual(struct.calcsize('<BBHBBHhHBBhHHI'), v['BIND_SIZE'])
         self.assertEqual(struct.calcsize('<IIIBBH'), v['MOD_SIZE'])
-        src = (TOOLS / 'vk_android_build.py').read_text()
-        for fmt in ("'<II16s16s16s16sIIIIIIQQHH12x'", "'<QQBBHIIHH3HBBIIII8x'", "'<BBHBBHhHBBhHHI'", "'<IIIBBH'"):
+        # the header, entry and module layouts are vk_android_delta.py's (the build and the delta update read and write them alike), the binding record the build's
+        src = (TOOLS / 'vk_android_build.py').read_text() + (TOOLS / 'vk_android_delta.py').read_text()
+        for fmt in ("'<II16s16s16s16sIIIIIIQQHH12s'", "'<QQBBHIIHH3HBBIIII8x'", "'<BBHBBHhHBBhHHI'", "'<IIIBBH'"):
             self.assertIn(fmt, src, 'the build packs another layout than this test checks')
 
     def test_every_kind_numbered(self):

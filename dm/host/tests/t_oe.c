@@ -153,5 +153,17 @@ int main(void) {
     h_oe_SetFocusMode(3); dm_applet_enter("test");
     CHECK(empty() && h_oe_GetFocus() == 2, "focus mode 3: an applet changes the state without a notification");
     dm_applet_leave(); CHECK(empty() && h_oe_GetFocus() == 1, "focus mode 3: back to 1 without a notification");
+    // Graphics scale: without DM_GRAPHICS_SCALE it follows the operation mode (0 handheld, 1 docked) and the scaling parameters agree (10 / 20); with it, that scale in every mode
+    {
+        unsetenv("DM_GRAPHICS_SCALE"); reset(); g_gfx_scale = -1;
+        g_opmode = 1; int d = h_oe_GfxScale(); unsigned dp = h_oe_GfxScaleParams();
+        g_opmode = 0; int h = h_oe_GfxScale(); unsigned hp = h_oe_GfxScaleParams();
+        CHECK(d == 1 && dp == 20 && h == 0 && hp == 10, "graphics scale follows the operation mode: docked 1 / 20, handheld 0 / 10");
+        fflush(stdout); pid_t p = fork();
+        if (!p) { setenv("DM_GRAPHICS_SCALE", "2", 1); g_gfx_scale = -1; g_opmode = 0; int a = h_oe_GfxScale() == 2 && h_oe_GfxScaleParams() == 30; g_opmode = 1; a = a && h_oe_GfxScale() == 2 && h_oe_GfxScaleParams() == 30; _exit(a ? 0 : 1); }
+        int st = 0; waitpid(p, &st, 0);
+        CHECK(p > 0 && WIFEXITED(st) && WEXITSTATUS(st) == 0, "DM_GRAPHICS_SCALE=2: scale 2 / parameters 30 in both modes");
+        g_opmode = 1;
+    }
     printf("== oe %d checks, %d failed ==\n", checks, fails); return fails != 0;
 }

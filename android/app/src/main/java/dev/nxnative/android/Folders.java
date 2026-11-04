@@ -14,9 +14,11 @@ import java.util.List;
 /**
  * Folders… of one game (its Manage sheet, or Settings › Folders, which asks which game when there are several): the game folder, the pack folder (pack.tsv and
  * shaders/) and the save folder, each picked with the system folder picker and kept per title ID in the app's preferences (Prefs.folder), so an APK update keeps them
- * and the user never has to pick or pack again. Unset = the defaults: the pack beside the game (<game>/../<id>-work/android-pack), the save in
- * <Switch2 root>/saves(-test)/<id>. A picked save folder is given to the host as it is (GameActivity.saveDir); when it is empty and the current one has a save, the
- * user is asked before anything is copied, and nothing is ever deleted or moved.
+ * and the user never has to pick or pack again. Unset = the defaults: the best pack PackFind finds (the app's storage, packs/<id>, AppStorage, first, then
+ * beside the game, then <id>-work/<any name> in the game's folder and up to three folders above it); the save in the app's storage (saves/<id>), into which an older version's save beside the game
+ * (<Switch2 root>/saves(-test)/<id>) is copied at the game's next start (SaveMigrate; until then that folder is the save). A picked save folder is given to the
+ * host as it is (GameActivity.saveDir); when it is empty and the current one has a save, the user is asked before anything is copied, and nothing is ever deleted
+ * or moved.
  */
 final class Folders {
     static final int PICK_PACK = 20, PICK_SAVE = 21;
@@ -41,25 +43,66 @@ final class Folders {
 
     static void pickedPack(Context a, String id, String path) { Prefs.folder(a, "pack_" + id, path); }
 
-    /** The pack folder for a game folder: the picked one when it is a pack of this title, else the usual places (Pack.find) */
+    /**
+     * The pack folder for a game folder: the best pack PackFind finds (the picked folder, the app's packs/&lt;id&gt;, beside and inside the game, then &lt;id&gt;-work/&lt;any&gt;
+     * in the game's folder and its ancestors) that plays now or after the automatic shader update; else, as before, the picked one when it is a pack of this title,
+     * else the app's, else Pack.find's (Prepare then redoes what does not fit there). null when there is no pack of this title at all. Reads pack.tsv files and the
+     * game's module headers: call it off the main thread
+     */
     static File packFor(Context a, File game, String id) {
         String p = pickedPack(a, id);
-        if (p != null) {
-            try {
-                if (Pack.read(new File(p)).titleId.equals(id)) return new File(p);
-            } catch (IOException e) {
-                // the picked folder lost its pack: the usual places
-            }
-        }
-        return Pack.find(game, id);
+        File picked = p != null && isPackOf(new File(p), id) ? new File(p) : null;   // a picked folder that lost its pack is not looked at
+        PackFind.Found f = find(a, picked, game, id);
+        if (f != null) return f.dir;
+        return picked != null ? picked : oldDefault(a, game, id);
     }
 
-    /** The save folder the next start of the game uses (the host's DM_SAVE: GameActivity.saveDir) */
+    /** The default pack folder (the Folders "Default" button): packFor without the picked folder */
+    static File defaultPack(Context a, File game, String id) {
+        PackFind.Found f = find(a, null, game, id);
+        return f != null ? f.dir : oldDefault(a, game, id);
+    }
+
+    /** PackFind over this game's candidates, with PackCheck.blocking as the judge of the code */
+    static PackFind.Found find(Context a, File picked, File game, String id) {
+        List<File> c = PackFind.candidates(picked, AppStorage.pack(a, id), game, id, PackFind.volumeRoot(game));
+        return PackFind.best(c, id, Pack.isDump(game), p -> PackCheck.blocking(a, p, game));
+    }
+
+    /** The app's packs/&lt;id&gt; when it holds this title's pack, else the older places beside the game (Pack.find) */
+    private static File oldDefault(Context a, File game, String id) {
+        File app = AppStorage.pack(a, id);
+        return isPackOf(app, id) ? app : Pack.find(game, id);
+    }
+
+    private static boolean isPackOf(File dir, String id) {
+        try {
+            return Pack.read(dir).titleId.equals(id);
+        } catch (IOException e) {
+            return false;
+        }
+    }
+
+    /**
+     * The save folder the next start of the game uses (the host's DM_SAVE: GameActivity.saveDir): the picked one, else the app's saves/<id>, except while an older
+     * version's save beside the game waits to be copied in (SaveMigrate.needed): then that one, which the next start copies, and which Back up / Restore use until then
+     */
     static File save(Context a, Game g) {
         if (g == null) return null;
         String s = Prefs.folder(a, "save_" + g.titleId);
         if (s != null) return new File(s);
-        return Prefs.saveDefault(new File(g.gameDir), g.titleId);
+        File app = AppStorage.save(a, g.titleId), old = Prefs.oldSaveDefault(new File(g.gameDir), g.titleId);
+        return Prefs.migratedFrom(a, g.titleId) == null && SaveMigrate.needed(old, app) ? old : app;
+    }
+
+    /** The default save folder's state in words: in app storage (and copied there from where), or still beside the game until the next start copies it */
+    static String saveState(Context a, Game g, File save) {
+        File app = AppStorage.save(a, g.titleId);
+        if (!SaveStore.same(save, app)) return " (default: your save from an earlier version, beside the game. The game's next start copies it into the app's storage, "
+                + app + ", and plays it from there; this folder is never changed)";
+        String from = Prefs.migratedFrom(a, g.titleId);
+        return " (default: in the app's storage" + (from != null ? "; copied from " + from + ", which is kept as it was" : "")
+                + "). Back up saves puts copies in " + Prefs.backupsDir(new File(g.gameDir), g.titleId) + ", on shared storage: they stay when the app is uninstalled.";
     }
 
     /** Settings › Folders: the only game's folders, else the user picks the game first */
@@ -84,19 +127,20 @@ final class Folders {
         File save = save(a, g);
         String saveKey = "save_" + g.titleId;
 
-        row(a, box, "Game folder", g.gameDir, "Pick…", v -> { d[0].dismiss(); a.addGame(); }, null, null);
-        row(a, box, "Pack and shader folder (pack.tsv, shaders/)", g.packDir + (pack == null ? " (default: beside the game)" : " (picked)") + packState,
+        row(a, box, Nup.isNup(new File(g.gameDir)) ? "Game (.nup file)" : "Game folder", g.gameDir, "Pick…", v -> { d[0].dismiss(); a.addGame(); }, null, null);
+        boolean inApp = SaveStore.inside(new File(g.packDir), AppStorage.packs(a));
+        row(a, box, "Pack and shader folder (pack.tsv, shaders/)", g.packDir + (pack != null ? " (picked)" : inApp ? " (default: in the app's storage)" : " (default: beside the game)") + packState,
                 "Pick…", v -> { d[0].dismiss(); a.pickFolder(PICK_PACK, "Pick the pack folder (the one with pack.tsv and shaders/)"); },
                 pack == null ? null : "Default", v -> {
                     d[0].dismiss();
                     pickedPack(a, g.titleId, null);
                     if (pack.equals(Prefs.folder(a, "pack"))) Prefs.folder(a, "pack", null);   // the older single-game key, when it was this game's
-                    File f = Pack.find(new File(g.gameDir), g.titleId);
+                    File f = defaultPack(a, new File(g.gameDir), g.titleId);
                     if (f != null) setPack(a, g.titleId, f);
                     dialog(a, g);
                 });
         boolean savePicked = Prefs.folder(a, saveKey) != null;
-        row(a, box, "Save folder", save.getPath() + (savePicked ? " (picked)" : " (default)"),
+        row(a, box, "Save folder", save.getPath() + (savePicked ? " (picked)" : saveState(a, g, save)),
                 "Pick…", v -> { d[0].dismiss(); a.pickFolder(PICK_SAVE, "Pick the folder for " + g.name + "'s save"); },
                 savePicked ? "Default" : null, v -> { d[0].dismiss(); Prefs.folder(a, saveKey, null); dialog(a, g); });
         Ui.add(box, Ui.small(a, "These are kept when the app is updated. Picking a folder never moves, copies or deletes anything without asking."), 16);

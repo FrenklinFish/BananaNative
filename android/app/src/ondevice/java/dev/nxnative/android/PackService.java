@@ -363,7 +363,9 @@ public final class PackService extends Service {
         }
         File od = j.dir(), dump = j.dump(), pack = j.pack();
         String v = String.valueOf(j.version());
-        File up = DumpCheck.versionDir(dump, j.version());
+        // The update's RomFS and main: folders of the dump, or (a .nup) <file>.nup:update/<version>/romfs and …/exefs/main (base/… for version 0), which the
+        // tools take where they take the folders (android/NUP.md "Naming a package"); the dump itself goes to pack_android.py as it is, folder or .nup
+        String upRomfs = DumpCheck.versionPath(dump, j.version(), "romfs"), upMain = DumpCheck.versionPath(dump, j.version(), "exefs/main");
         File split = new File(od, "split"), splitTmp = new File(od, "split.tmp"), splitScan = j.splitScan(this), xlate = new File(od, "xlate"), lib = new File(od, "lib");
         String tool;
         String[] argv;
@@ -382,7 +384,7 @@ public final class PackService extends Service {
                 Job.deleteTree(splitTmp);   // only outputs a stopped run may have half written: the split writes them all at its end; what it kept is in Job.splitScan
                 splitTmp.mkdirs();
                 tool = "dm/gfx/tools/shader_split.py";
-                argv = new String[] {new File(up, "romfs").getPath(), new File(up, "exefs/main").getPath(), new File(splitTmp, "pkg").getPath(),
+                argv = new String[] {upRomfs, upMain, new File(splitTmp, "pkg").getPath(),
                         new File(splitTmp, "shader_map.tsv").getPath(), new File(splitTmp, "shader_facts.tsv").getPath(), new File(splitTmp, "shader_pairs.tsv").getPath(),
                         new File(splitTmp, "pso_pairs.tsv").getPath()};
                 break;
@@ -407,9 +409,15 @@ public final class PackService extends Service {
         File logs = new File(od, "logs");
         logs.mkdirs();
         File log = new File(logs, s + ".log");
-        String head = "== " + new SimpleDateFormat("yyyy-MM-dd HH:mm:ss", Locale.ROOT).format(new Date()) + " " + Prefs.buildTag() + ", engine " + BuildConfig.NX_PACK_ENGINE + ": "
+        String head = "== " + new SimpleDateFormat("yyyy-MM-dd HH:mm:ss", Locale.ROOT).format(new Date()) + " " + Prefs.buildTag(this) + ", engine " + BuildConfig.NX_PACK_ENGINE + ": "
                 + tool + " " + String.join(" ", argv) + "\n";
         Files.write(log.toPath(), head.getBytes(StandardCharsets.UTF_8), java.nio.file.StandardOpenOption.CREATE, java.nio.file.StandardOpenOption.APPEND);
+        if (s.equals("shaders")) {   // a failed shader's kept result would fail every Retry the same way: those shaders are translated again (ShaderResults)
+            List<ShaderResults.Failed> again = ShaderResults.dropFailed(xlate);
+            StringBuilder b = new StringBuilder();
+            for (ShaderResults.Failed f : again) b.append("[retry] translating again, it failed before: ").append(f).append('\n');
+            if (b.length() > 0) Files.write(log.toPath(), b.toString().getBytes(StandardCharsets.UTF_8), java.nio.file.StandardOpenOption.APPEND);
+        }
         int workers = Math.max(1, Runtime.getRuntime().availableProcessors() - 2);
         PackEngine.setenv("DM_GAME", j.titleId());
         PackEngine.setenv("DM_REWRITE_J", "1");
@@ -423,6 +431,8 @@ public final class PackService extends Service {
         // vk_android_build.py: the per-shader results (kept until the job is done: a rerun resumes from them), the translator and SPIRV-Tools from the APK's lib/
         // (bare names: the linker finds them in the APK, as System.loadLibrary does; ctypes loads them in this process)
         PackEngine.setenv("DMSH_VK_RESULTS", xlate.getPath());
+        // the delta update: entries of the pack's older libraries that the profile's manifest has unchanged are kept, only the rest translated (android/SHADERS.md#delta-updates)
+        PackEngine.setenv("DMSH_VK_DELTA_FROM", new File(pack, "shaders").getPath());
         PackEngine.setenv("XLATE", "libdmsh_xlate.so");
         PackEngine.setenv("SPIRV_VAL", "libSPIRV-Tools-shared.so");
         PackEngine.setenv("DMSH_VK_REQUIRE_ALL", "1");   // a library without every shader is a failed step, never a finished one
@@ -474,7 +484,7 @@ public final class PackService extends Service {
         Job.deleteTree(split);   // a Retry splits again, from the start
         Job.deleteTree(j.splitScan(this));
         j.stepState("split", "pending");
-        return "the dump's shaders are not the ones this app knows for " + j.name() + " update " + j.version() + " (" + have.getName()
+        return "the dump's shaders are not the ones this app knows for " + j.name() + " (" + Profile.versionName(j.version()) + ", " + have.getName()
                 + " differs). The dump may be incomplete or modified: dump the game again, then Retry";
     }
 

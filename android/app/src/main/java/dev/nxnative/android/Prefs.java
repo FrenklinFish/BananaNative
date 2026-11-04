@@ -25,8 +25,16 @@ final class Prefs {
     static boolean overlayItem(Context c, String key) { return of(c).getBoolean("overlay_" + key, true); }
     static void overlayItem(Context c, String key, boolean on) { of(c).edit().putBoolean("overlay_" + key, on).commit(); }
 
-    /** The game's window size (Game resolution): DM_WINDOW_SIZE for the host (loader.c window_apply), "1920x1080" (Phone 1080p, the default) or "original" (the game's own, 2880x1620 in Donkey Kong Bananza). DM_WINDOW_SIZE in env.txt overrides it for a run. */
-    static final String[] WINDOWS = {"1920x1080", "original"}, WINDOW_NAMES = {"Phone 1080p (1920x1080)", "Original (the game's own size)"};
+    /** The game's window size (Game resolution): DM_WINDOW_SIZE for the host (loader.c window_apply), "1920x1080" (Phone 1080p, the default), "original" (the game's own, 2880x1620 in Donkey Kong Bananza) or "1280x720" (Phone 720p: less GPU time a frame). DM_WINDOW_SIZE in env.txt overrides it for a run.
+     *  A game whose profile has graphics_scale rows gets the graphics scale and operation mode that give the size instead (Profile.resolutionEnv).
+     *  The stored value is the size itself; new sizes go at the end so the list's first entries keep their places. */
+    static final String[] WINDOWS = {"1920x1080", "original", "1280x720"}, WINDOW_NAMES = {"Phone 1080p (1920x1080)", "Original (the game's own size)", "Phone 720p (1280x720)"},
+            WINDOW_SHORT = {"1080p", "Original", "720p"};
+    /** A window size's name in the lists, its short name for a settings row (short); the value itself when it is none of WINDOWS (an env.txt-style size) */
+    static String windowName(String v, boolean shortName) {
+        int i = java.util.Arrays.asList(WINDOWS).indexOf(v);
+        return i < 0 ? v : (shortName ? WINDOW_SHORT : WINDOW_NAMES)[i];
+    }
     static String window(Context c) { return of(c).getString("window", WINDOWS[0]); }
     static void window(Context c, String v) { of(c).edit().putString("window", v).commit(); }
 
@@ -89,17 +97,25 @@ final class Prefs {
 
     /**
      * Folders the user picked (main screen, Folders…), as /storage paths; null = the default. Kept in the app's preferences, so an APK update keeps them (an
-     * uninstall does not). "pack_<title ID>": the game's pack folder (pack.tsv and shaders/; default <game>/../<id>-work/android-pack, Pack.find; the older
-     * single-game "pack" key is still read when it holds a pack of that title, Folders.packFor); "save_<title ID>": the game's save folder, given to the host as
-     * DM_SAVE (default saveDefault).
+     * uninstall does not). "pack_<title ID>": the game's pack folder (pack.tsv and shaders/; default the app's packs/<id> when it holds one, else
+     * <game>/../<id>-work/android-pack, Pack.find; the older single-game "pack" key is still read when it holds a pack of that title, Folders.packFor);
+     * "save_<title ID>": the game's save folder, given to the host as DM_SAVE (default the app's saves/<id>, AppStorage.save).
      */
     static String folder(Context c, String key) { return of(c).getString("folder_" + key, null); }
     static void folder(Context c, String key, String path) { of(c).edit().putString("folder_" + key, path).commit(); }
 
-    /** The default save folder: <Switch2 root>/saves/<id> for the play app, saves-test/<id> for the others, the root being the game folder's parent */
-    static java.io.File saveDefault(java.io.File game, String id) {
+    /**
+     * The default save folder of versions up to 0.1.0, on shared storage: <Switch2 root>/saves/<id> for the play app, saves-test/<id> for the others, the root
+     * being the folder that holds the game folder or the .nup. The default is now the app's own saves/<id> (AppStorage.save); a save found here is copied in once
+     * (SaveMigrate, GameActivity.saveDir), and this folder is never changed
+     */
+    static java.io.File oldSaveDefault(java.io.File game, String id) {
         return new java.io.File(game.getAbsoluteFile().getParentFile(), (BuildConfig.NX_PLAY ? "saves/" : "saves-test/") + id);
     }
+
+    /** The old default save folder whose save was copied into app storage (SaveMigrate), null when none was. Written by the game's process (GameActivity) */
+    static String migratedFrom(Context c, String titleId) { return of(c).getString(gameKey("save_migrated", titleId), null); }
+    static void migratedFrom(Context c, String titleId, String path) { put(c, gameKey("save_migrated", titleId), path); }
 
     /** Where a game's save backups go (SaveStore): <Switch2 root>/save-backups/<id>, the root being the game folder's parent, for the play and the test app alike
      *  (each backup's manifest says which save folder it came from) */
@@ -110,9 +126,32 @@ final class Prefs {
     /**
      * Which build a log or a screenshot came from. Play app: "Banana Native 0.1 · 6a6448d · 2026-11-02" (the version up to its "-", the commit, the build date);
      * test app: "Banana Native test · int@6a6448d · 11-02 19:51" (the branch without "android-", the commit, the build time). "+dirty" follows the commit when the
-     * tree had changes. The main screen shows it and it is the first line of every game log ("[nxlaunch] build ...").
+     * tree had changes. The play app adds " · official" when the release key signed the APK, else " · unofficial build" (Signer). The main screen shows it and it
+     * is the first line of every game log ("[nxlaunch] build ...").
      */
-    static String buildTag() {
+    static String buildTag(Context ctx) { return Signer.tag(buildTag(), BuildConfig.NX_PLAY, signers(ctx)); }
+
+    private static String[] signers;
+
+    /** The SHA-256 of each certificate that signed this APK (its current signers, not past ones of a rotated key), read once; empty when it cannot be read */
+    static synchronized String[] signers(Context ctx) {
+        if (signers != null) return signers;
+        try {
+            android.content.pm.SigningInfo si = ctx.getPackageManager().getPackageInfo(ctx.getPackageName(), android.content.pm.PackageManager.GET_SIGNING_CERTIFICATES).signingInfo;
+            android.content.pm.Signature[] sig = si == null ? new android.content.pm.Signature[0] : si.getApkContentsSigners();
+            String[] h = new String[sig.length];
+            for (int i = 0; i < sig.length; i++) h[i] = Signer.sha256(sig[i].toByteArray());
+            signers = h;
+        } catch (android.content.pm.PackageManager.NameNotFoundException e) {
+            signers = new String[0];
+        }
+        return signers;
+    }
+
+    /** Which key signed this APK, for logs and reports: the signer's SHA-256, first 16 hex digits */
+    static String signerId(Context ctx) { return Signer.shortId(signers(ctx)); }
+
+    private static String buildTag() {
         String c = BuildConfig.NX_COMMIT, t = BuildConfig.NX_BUILD_TIME;
         if (c.length() > 7 && !c.equals("unknown")) c = c.substring(0, 7);
         c += BuildConfig.NX_DIRTY;

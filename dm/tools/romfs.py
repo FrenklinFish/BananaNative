@@ -1,8 +1,10 @@
-"""Read-only paths inside DMROMFS1 images, without extracting their contents.
+"""Read-only paths inside DMROMFS1 images and NUP files, without extracting their contents.
 
 Readers opt into Path/open/os/mmap here; the real filesystem is untouched. A path
-like /game/RomFS.img/Data/archive is a bounded view of that image entry. Ordinary
-paths retain their normal behavior, including writes to generated outputs.
+like /game/RomFS.img/Data/archive is a bounded view of that image entry, and one like
+/games/game.nup:update/458752/romfs/Data/archive a file of that NUP package (nup.py,
+android/NUP.md). Ordinary paths retain their normal behavior, including writes to
+generated outputs.
 """
 import builtins
 import errno
@@ -16,6 +18,8 @@ import stat as _stat
 import struct
 import sys
 from types import SimpleNamespace
+sys.path.insert(0, _os.path.dirname(_os.path.abspath(__file__)))
+import nup as _nup
 from typing import TYPE_CHECKING
 
 HEAD = struct.Struct('<8sQQQ')
@@ -80,6 +84,21 @@ class Image:
         if t: raise NotADirectoryError(self.path)
         return [(_os.fsdecode(self.name(j)), j) for j in range(a, a + b)]
 
+    def open_raw(self, k): return _File(self, k)
+    def ino(self, k): return k + 1
+
+
+class _NupView:
+    """A node of a NUP file (nup.py) as an Image: find, entry (only the size and the type are used), children, open_raw"""
+    def __init__(self, nup, top): self.nup, self.top, self.path, self.stat = nup, top, nup.path, nup.stat
+    def find(self, relative): return self.nup.find(relative, self.top)
+    def entry(self, k):
+        d = self.nup.is_dir(k)
+        return 0, 0 if d else self.nup.file_size(k), 0, 0, 0 if d else 1, 0
+    def children(self, k): return self.nup.children(k)
+    def open_raw(self, k): return self.nup.open(k, _fd_ranges)
+    def ino(self, k): return k + 1 if isinstance(k, int) else 0
+
 
 @functools.lru_cache(maxsize=8)
 def _image(path, identity): return Image(path) if is_image(path) else None
@@ -93,6 +112,9 @@ def is_image(path):
 
 def _resolve(path):
     p = _os.path.abspath(_os.fsdecode(path))
+    if '.nup:' in p:
+        found = _nup.resolve(p)
+        if found: return _NupView(*found), ''
     parts = p.split('/')
     for i, part in enumerate(parts):
         if not part.endswith('.img'): continue
@@ -145,10 +167,10 @@ else:
     def open(file, mode='r', buffering=-1, encoding=None, errors=None, newline=None, **kwargs):
         resolved = _resolve(file) if not isinstance(file, int) else None
         if not resolved: return builtins.open(file, mode, buffering, encoding, errors, newline, **kwargs)
-        if mode not in ('r', 'rb', 'rt'): raise OSError(errno.EROFS, 'RomFS images are read-only', file)
+        if mode not in ('r', 'rb', 'rt'): raise OSError(errno.EROFS, 'RomFS images and NUP files are read-only', file)
         image, relative = resolved; k = image.find(relative)
         if not image.entry(k)[4]: raise IsADirectoryError(file)
-        raw = _File(image, k)
+        raw = image.open_raw(k)
         if buffering == 0 and 'b' in mode: return raw
         reader = io.BufferedReader(raw, io.DEFAULT_BUFFER_SIZE if buffering < 0 else buffering or io.DEFAULT_BUFFER_SIZE)
         return reader if 'b' in mode else io.TextIOWrapper(reader, encoding=encoding, errors=errors, newline=newline)
@@ -160,7 +182,7 @@ def stat(path, **kwargs):
     image, relative = resolved; k = image.find(relative)
     a, b, _, _, t, _ = image.entry(k); s = image.stat
     return SimpleNamespace(st_mode=(_stat.S_IFREG | 0o444) if t else (_stat.S_IFDIR | 0o555), st_size=b if t else 0,
-                           st_ino=k + 1, st_dev=s.st_dev, st_mtime=s.st_mtime, st_mtime_ns=s.st_mtime_ns,
+                           st_ino=image.ino(k), st_dev=s.st_dev, st_mtime=s.st_mtime, st_mtime_ns=s.st_mtime_ns,
                            st_ctime=s.st_ctime, st_ctime_ns=s.st_ctime_ns, st_atime=s.st_atime, st_atime_ns=s.st_atime_ns)
 
 

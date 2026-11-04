@@ -154,6 +154,15 @@ def header(g):
             w, h = map(int, r[3].split('x'))
             if not (0 < w < 65536 and 0 < h < 65536): sys.exit(f'{g.id}: window_fn size must be 1..65535 each: {r[3]}')
             wfn.append('{' + q(r[0]) + f', {r[1]}, {r[2]}, {w}, {h}' + '}')
+    # Game resolution by the Switch 2 graphics scale (the Android launcher, build.gradle resolutionOf; the host reads DM_GRAPHICS_SCALE and DM_OPMODE, nothing is generated):
+    # <the launcher's choice: WxH or original> <scale 0|1|2> <console|handheld>, for a game that sizes its scenes by the scale rather than its window
+    if g.get('graphics_scale', ''):
+        seen = set()
+        for r in g.values('graphics_scale'):
+            if len(r) != 3 or not re.fullmatch(r'\d{1,5}x\d{1,5}|original', r[0]) or r[1] not in ('0', '1', '2') or r[2] not in ('console', 'handheld') or r[0] in seen:
+                sys.exit(f'{g.id}: graphics_scale takes <WxH | original> <scale 0|1|2> <console | handheld>, one row per choice: {r}')
+            seen.add(r[0])
+        if wfn: sys.exit(f'{g.id}: graphics_scale and window_fn are two levers for one setting: keep one')
     api = g.get('device_api', '55.15')   # the NVN API major.minor version nvnDeviceGetInteger reports (hle_nvn.c)
     if not re.fullmatch(r'\d+\.\d+', api): sys.exit(f'{g.id}: device_api must be major.minor: {api}')
     src = f'dm/games/{g.id}' if g.dir.parent == HERE else str(g.dir)

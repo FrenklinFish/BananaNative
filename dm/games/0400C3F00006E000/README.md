@@ -70,6 +70,27 @@ Before (branch `android-mkw-shaders`): library version `v-ecd8110fe263` (chain `
 - Translated since `v-0b077f88b2c8` (11,568): SURED `0x59f` (compute `ab77eaee44cfef88`) and UP2UR with a mask other than 1 (8 pixel shaders) ([Ampere shader code (Switch 2)](../../../docs/reference/shaders.md#ampere-shader-code-switch-2)). Before that library (`v-e38a586a8a89`, 11,524) `0x2be` (UPOPC's other form) and `0x992` (MEMBAR) failed too, fixed by the translator taken from upstream.
 - switch2mac's white world from a lost fall-through after CAL ([The block after a Maxwell CAL](../../../docs/reference/shaders.md#the-block-after-a-maxwell-cal)) does not happen here: this tree translates the Ampere code itself, and its Ampere decoder keeps that edge.
 
+## Prepare on the phone (1.8.0)
+
+Current (2026-11-05): the app offers Prepare for this game's dump (a folder with `base/exefs` and `base/romfs`, no `updates/`, or a `.nup` with its base package), and the job's steps make the same pack as the Mac. Two gates stopped it before; both were general and are fixed there:
+
+- The app took a dump without `updates/` (or a `.nup` without an update package) for one version's folder and asked for a pack folder: [Prepare is not offered for a game whose supported build is its base game](../../../docs/reference/packing.md#prepare-is-not-offered-for-a-game-whose-supported-build-is-its-base-game). This game's supported build is version 0.
+- With `DMSH_VK_REQUIRE_ALL=1` the shaders step could never finish: compute `078997bf631992c5` does not translate (Ampere instruction `0x481`), on the Mac too, so 11,603 of 11,604 is the whole library: [The phone's shaders step fails on a shader that does not build on the Mac either](../../../docs/reference/packing.md#the-phones-shaders-step-fails-on-a-shader-that-does-not-build-on-the-mac-either). The profile's `vk_delta.tsv` marks it `-`.
+
+Mac simulation of the job's steps with its arguments and environment (on the dump drive, M-series Mac, a 1.8.0 dump, tools from this tree, Python 3.14):
+
+| Step | Mac | Output |
+|---|---|---|
+| rewrite (`pack_android.py --version 0 --code-only -j 1 --in-process`, `DM_REWRITE_J=1`) | 52 s (main 37.4 s, subsdk0 2.1 s, subsdk1 2.2 s, sdk 9.7 s), **peak RSS 3.75 GB** (Donkey Kong Bananza: 2.4 GB on the Mac, 2.7 GB on the phone) | all 28 module files byte-identical to the Mac pack's (`same-44b34b6f8f94`), the four `.android.key` files too |
+| split (`shader_split.py` on `base/romfs` and `base/exefs/main`, `J=6`) | 215 s (391 s user, 800 s system); 206,326 RomFS files, 22 GB (DKB: 80,273 files, 8.7 GB, 160 s) | 11,604 shaders (compute 730, mesh 19, pixel 7,301, task 7, vertex 3,547); all four tables byte-identical to the profile's; package 92 MB, kept scan results 106 MB |
+| shaders (`vk_android_build.py`, `DMSH_VK_REQUIRE_ALL=1`, the translator as a program, `libSPIRV-Tools-shared.dylib` through `ctypes`, `J=6`) | 128 s, peak RSS 1.2 GB | exit 0: "1 shaders did not build, as in the Mac's build of this version"; delta check 11,604 of 11,604; `v-6607c8d19abc` `dmsh_vk.lib` (SHA-256 `53cf5efa…598ef8`, the manifest's `stamp` value), `index.json`, `_vk_build.json`, `inputs.tsv` byte-identical to the Mac build of 2026-11-04 |
+| Retry of the shaders step (the app removes the failed result first, `ShaderResults`) | 3 s | translates the one shader again, the same library |
+| pack (`--shader-cache … --keep-code --in-process`) | 0.1 s | `pack.tsv` equal to the Mac pack's but its `packer` commit |
+
+On the phone (estimates, not run): the rewrite at about 2× its Mac time and with a peak near 4 GB in `:pack`, the split 1.3-1.4× Donkey Kong Bananza's (4-8 min there), the shaders at about half of Donkey Kong Bananza's count. Prepare's dialog says about 16-30 minutes (`ShaderLibs.jobMinutesText` for 11,604 shaders).
+
+Still to check on the phone: a whole job (the library's SHA-256 must be `53cf5efa…598ef8`), the rewrite's peak in `:pack`, the split's time on the phone's storage, and play on the phone-made pack.
+
 ## Boot (Mac; earlier base build)
 
 M5 Pro, 24 GB, headless (`dmhost` on the rewritten modules, `DM_ROMFS` on the dump):
@@ -98,8 +119,35 @@ Phone, 2026-11-03 (Honor PNM-N49, Adreno 840, system driver; test app `dev.nxnat
 - Sparse textures are sparse on the phone now: the 8192x8192 x68 ASTC / RGBA arrays have 25.5-93.5 MiB of pages mapped behind them, and the 1536² / 3072² / 6144² x2 arrays about half.
 - Staging (9d48710d, m13-m14, 2026-11-03): first uploads go through upload batches and sparse textures by mapped bands. Scratch peaks at 256 MiB and was 96-144 MiB when the run ended (1,488 MiB before); the 6144² x2 array takes 191 MiB of staging for its 191 MiB mapped (382 MiB before), the rest as zero texels without staging. Donkey Kong Bananza on the same build (U1): 30 fps, the same 14 `[RED]` lines, the same picture, PSS 5.69 GB (5.75 / 5.80 before).
 - Current (m14, clean phone: both test apps stopped first, 8.4 GB `MemAvailable` at launch): the game gets further (30,128 images, the game sets its present interval 1 → 2) but no frame is presented. It stops 15 s in at `MemAvailable` 147 MB, with 4,556 MiB of placed pools, 4,810 MiB of images, 112 MiB of scratch. The images are the wall: sparse arrays whose level 0 has a mapped page are made with their whole chain. 31607 and 31609 (8192x8192 x68 ASTC 8x8, all 12 levels, 127.8 MiB mapped) are 1.45 GB each, and 31608 asks for one 6,084,722,688-byte image, which fails with `-2`. That is item 2 below (sparse residency). Images that copy pool data (`vka_tex_alias_stats`) come after it.
-- `[RED]` lines: `nvnTexturePoolWriteDescriptorTableData`, `nvnSamplerPoolWriteDescriptorTableData`, `nvnCommandBufferConvertCooperativeVectorMatrix`, `nvnDeviceGetCooperativeVectorMatrixSize`, `nvnDeviceConvertCooperativeVectorMatrix` (on the first boot, NVN address lookups of names the host did not know, twice each: new in SDK 21; the host names all five since a772aae3, so a lookup now finds them and only a call would log); `DM_WINDOW_SIZE` has no `window_fn` row for this build; `mtl_pso_prebuild_tool` not on Android.
+- `[RED]` lines: `nvnTexturePoolWriteDescriptorTableData`, `nvnSamplerPoolWriteDescriptorTableData`, `nvnCommandBufferConvertCooperativeVectorMatrix`, `nvnDeviceGetCooperativeVectorMatrixSize`, `nvnDeviceConvertCooperativeVectorMatrix` (on the first boot, NVN address lookups of names the host did not know, twice each: new in SDK 21; the host names all five since a772aae3, so a lookup now finds them and only a call would log); `DM_WINDOW_SIZE` has no `window_fn` row for this build (none is needed: the game's render size follows the graphics scale, [Render resolution (Android; 1.8.0)](#render-resolution-android-180)); `mtl_pso_prebuild_tool` not on Android.
 - The device's sparse support, printed for the first time: `sparseBinding` 1, residency buffer 1, image 2D 1, image 3D 0, aliased 0, standard 2D block shape 1, non-resident strict 1, `sparseAddressSpaceSize` 4095 MiB, sparse binding on the replay's queue family; `bufferImageGranularity` 1. `maxMemoryAllocationCount` is 4294967295 (no limit), so the earlier build's `-2` image allocation failures were not the allocation count (open: what the driver ran out of; 4.1 GB of placed pools were beside them).
+
+## Render resolution (Android; 1.8.0)
+
+Current, 2026-11-04. The game does not render at its window's size. The swap chain is 3 × 3840x2160 (RGBA8, 95 MiB) in both operation modes. The 3D scenes are drawn at a size that follows the operation mode and the Switch 2 graphics scale. Its display state reads that scale through `oe::GetCurrentGraphicsScale` at `main+0x8728f4`, beside `GetOperationMode` and `GetPerformanceMode`. The game shows that size as the window crop (`[nvn] WindowCrop`), and its final composite stretches the scene to the crop.
+
+| mode, graphics scale | crop after start | how it is set |
+|---|---|---|
+| handheld, 0 | 1920x1080 | `DM_OPMODE=0` (the host's handheld answer) |
+| docked, 1 | 2048x1152 (2560x1440 for the first frames) | the default |
+| docked, 2 | 1706x960 | `DM_GRAPHICS_SCALE=2` |
+| handheld, 2 | 1280x720 | `DM_OPMODE=0 DM_GRAPHICS_SCALE=2` |
+
+So `DM_WINDOW_SIZE` and a `window_fn` row are not this game's lever. No `movz w0,#imm; ret` getters return 3840 or 2160, and a smaller window would only shrink the swap chain. `DM_GRAPHICS_SCALE` is: [The Switch 2's graphics scale sizes Mario Kart World's 3D scenes](../../../docs/reference/services.md#the-switch-2s-graphics-scale-sizes-mario-kart-worlds-3d-scenes). kartnative found the same scale on 1.0.0 on the Mac (scale 2: 1706x960 of a 2560x1440 window).
+
+The Android launcher's Game resolution uses it (current, 2026-11-05): the profile's `graphics_scale` rows map Phone 1080p to handheld scale 0 (1920x1080) and Phone 720p to handheld scale 2 (1280x720); Original sets nothing (console, scale 1, 2048x1152). The 1080p default therefore starts the game in handheld mode, which was measured on the phone only in rH0 / rH2's 3D scene (open: whole sessions in handheld mode, the controller it reports, `hle_hid.c`).
+
+Phone runs, 2026-11-04 (Honor PNM-N49, android-int f3e8756a + the switch, test app, pack `android-pack-1.8.0` with library v-6607c8d19abc, system driver, LSFG on, a new save folder each run, battery 34-35 °C and thermal status 0 at each start). Each run is `memrun.sh`: the title's 3D scene (the desert road with the bus), with replay stats 20 s after the first present.
+
+| run | crop | game fps (presented) | frame | GPU | recording | images | Vulkan total |
+|---|---|---|---|---|---|---|---|
+| rH0: `DM_OPMODE=0` | 1920x1080 | 34.7 (54.5) | 29.4 ms | 11.2 ms | 26.6 ms | 4,039 MB | — |
+| rH2: `DM_OPMODE=0 DM_GRAPHICS_SCALE=2` | 1280x720 | 46.2 (56.8) | 22.2 ms | 8.0 ms | 20.6 ms | 3,996 MB | 5,227 MiB |
+| rD2: `DM_GRAPHICS_SCALE=2` (docked) | 1706x960 | — | — | — | — | — | 4,220 MiB (at the map) |
+
+- Scale 2 handheld gives +33 % game fps and −29 % GPU time. Memory hardly changes (−43 MB of images): the resolution-dependent targets are a small part of the game's memory. The large parts do not depend on the render size: the dense 16384² R8 terrain targets (1,365 MiB), the capped terrain arrays, and the ~1.6 GB of clear-only images ([Boot (Android; 1.8.0)](#boot-android-180), m29).
+- The frame is not GPU-bound even at 1080p: 11.2 ms of GPU in a 29.4 ms frame. The replay's recording (26.6 ms) is the limit, and it also falls with the size (20.6 ms). Open: why recording time follows the render size.
+- rD2 (docked) reached the world-map title and then presented nothing more (fps "--" on the overlay, no `CRASH` line, the log stops after frame 300). The earlier docked run on dd0caa69 crashed at the same map → 3D load (`sig=11` in `memcpy` after `placed memory: 3584 placements`). Docked loads are unrelated to the scale. The crash was a host race, now fixed ([A host read of guest storage that the guest unmaps meanwhile](../../../docs/reference/memory.md#a-host-read-of-guest-storage-that-the-guest-unmaps-meanwhile)). With the fix and the zero-shared images (0465aa1d), three docked runs at the default scale (rC4-rC6, 2026-11-04) and one cut short by another install (rC1) passed the load into the 3D scene with no crash. They ran at 36.0-37.3 game fps in a 2048x1152 crop with 4,352-4,520 MiB of Vulkan memory; the picture was correct (the diner on the desert course). The fix's path ran in each of them: textures whose storage pages are partly unmapped. The crash was intermittent before, so four runs make the fix likely, not proven. The rD2 stall did not come back; its cause is still open.
 
 ## Next on the phone
 
@@ -131,6 +179,10 @@ In the order they block. Line numbers are those of `dm/gfx/vk_android/vka_tex.c`
 
 ## Found on this game
 
+- [Prepare is not offered for a game whose supported build is its base game](../../../docs/reference/packing.md#prepare-is-not-offered-for-a-game-whose-supported-build-is-its-base-game): its 1.8.0 dump has no update; the phone could not prepare it (resolved, Mac simulation).
+- [The phone's shaders step fails on a shader that does not build on the Mac either](../../../docs/reference/packing.md#the-phones-shaders-step-fails-on-a-shader-that-does-not-build-on-the-mac-either): compute `078997bf631992c5`, 11,603 of 11,604 by design (resolved, Mac simulation).
+- [A host read of guest storage that the guest unmaps meanwhile](../../../docs/reference/memory.md#a-host-read-of-guest-storage-that-the-guest-unmaps-meanwhile): docked, SIGSEGV in `memcpy` on `vk-replay` at the world map → 3D load (phone mA).
+- [The Switch 2's graphics scale sizes Mario Kart World's 3D scenes](../../../docs/reference/services.md#the-switch-2s-graphics-scale-sizes-mario-kart-worlds-3d-scenes): its render size follows `oe::GetCurrentGraphicsScale`, not its window; `DM_GRAPHICS_SCALE=2` renders handheld at 1280x720 (+33 % fps on the phone).
 - [Sparse pool textures on the Vulkan replay read through the page table](../../../docs/reference/nvn-objects.md#sparse-pool-textures-on-the-vulkan-replay-read-through-the-page-table): the first Android boot stopped on the Presentation Thread.
 - [Sparse texture arrays made at their full size](../../../docs/reference/nvn-objects.md#sparse-texture-arrays-made-at-their-full-size): its virtual textures (open).
 - [A finalized sparse pool read through a registered texture](../../../docs/reference/nvn-objects.md#a-finalized-sparse-pool-read-through-a-registered-texture): SIGSEGV in `vpool_at` after its first frames on the phone (resolved).
@@ -149,3 +201,4 @@ In the order they block. Line numbers are those of `dm/gfx/vk_android/vka_tex.c`
 - [Float colour outputs into integer targets on the Vulkan replay](../../../docs/reference/shaders.md#float-colour-outputs-into-integer-targets-on-the-vulkan-replay): fragment `dcb0504c844f1ecc` of its task-less mesh programs.
 - [Compute programs over the device's shared memory](../../../docs/reference/shaders.md#compute-programs-over-the-devices-shared-memory): 168 compute programs declare 48 KiB on the Adreno 840's 32 KiB; resolved: the translator keeps their shared memory in a storage buffer, a slice per workgroup (they were skipped before).
 - [Upload staging grows within one Vulkan submission (Android)](../../../docs/reference/memory.md#upload-staging-grows-within-one-vulkan-submission-android): its boot ran out of memory on the phone (resolved; the images are the next wall).
+- [Cleared images the GPU never writes hold memory of their own (Android)](../../../docs/reference/memory.md#cleared-images-the-gpu-never-writes-hold-memory-of-their-own-android): its four 16384² R8 terrain targets, sampled but never written in the roaming scene; 1,024 MiB less image memory on the phone (resolved, zs0 / zs1).

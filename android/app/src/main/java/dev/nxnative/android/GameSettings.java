@@ -24,7 +24,9 @@ final class GameSettings {
         Runnable again = () -> { d[0].dismiss(); dialog(a, g); };
         String id = g.titleId;
         box.addView(Ui.small(a, "For this game only, from its next start. Default follows Settings."));
-        Ui.add(box, new Ui.Setting(a, "🖼️", "Game resolution", v -> resolution(a, g, again)).value(windowLabel(a, id)).chevron(a).view, 8);
+        Profile prof = Profile.of(id);
+        if (prof != null && prof.hasResolution())   // only where it does something: a profile with window_fn or graphics_scale rows
+            Ui.add(box, new Ui.Setting(a, "🖼️", "Game resolution", v -> resolution(a, g, again)).value(windowLabel(a, id)).chevron(a).view, 8);
         if (Prefs.ownRate(a, id)) {   // the host found no limiter it can hold for this game: choices would do nothing
             Ui.Setting fixed = new Ui.Setting(a, "⏱️", "Frame rate cap", null).value("This game picks its own frame rate");
             fixed.view.setClickable(false);
@@ -43,7 +45,7 @@ final class GameSettings {
 
     static String windowLabel(MainActivity a, String id) {
         String w = Prefs.gameWindow(a, id);
-        String l = w.equals(Prefs.WINDOWS[1]) ? Prefs.WINDOW_NAMES[1] : w.equals(Prefs.WINDOWS[0]) ? Prefs.WINDOW_NAMES[0] : w;
+        String l = Prefs.windowName(w, false);
         return Prefs.ownWindow(a, id) ? l : "Default · " + l;
     }
 
@@ -60,7 +62,7 @@ final class GameSettings {
 
     private static void resolution(MainActivity a, Game g, Runnable done) {
         String[] labels = new String[Prefs.WINDOWS.length + 1];
-        labels[0] = "Default (the main screen's: " + (Prefs.window(a).equals(Prefs.WINDOWS[1]) ? Prefs.WINDOW_NAMES[1] : Prefs.WINDOW_NAMES[0]) + ")";
+        labels[0] = "Default (the main screen's: " + Prefs.windowName(Prefs.window(a), false) + ")";
         System.arraycopy(Prefs.WINDOW_NAMES, 0, labels, 1, Prefs.WINDOW_NAMES.length);
         int checked = Prefs.ownWindow(a, g.titleId) ? 1 + Math.max(0, Arrays.asList(Prefs.WINDOWS).indexOf(Prefs.gameWindow(a, g.titleId))) : 0;
         new AlertDialog.Builder(a).setTitle("Game resolution · " + g.name).setSingleChoiceItems(labels, checked, (x, w) -> {

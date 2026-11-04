@@ -15,7 +15,8 @@ import java.util.Set;
 
 /**
  * A game's Back up saves / Restore saves… / Import save… (its Manage sheet), over SaveStore. The save folder is the one the game's next start uses (Folders.save:
- * play saves/&lt;id&gt;, test saves-test/&lt;id&gt;, or the picked one), the backups go to &lt;Switch2&gt;/save-backups/&lt;id&gt;/. Each refuses while a game runs (the
+ * the app's saves/&lt;id&gt;, the old default beside the game until it is copied in, or the picked one), the backups go to &lt;Switch2&gt;/save-backups/&lt;id&gt;/
+ * on shared storage, so they outlive an uninstall. Each refuses while a game runs (the
  * :game process is alive): the host may be writing the save. While one works, Play waits for it (busy). Nothing here deletes a backup.
  */
 final class SaveUi {

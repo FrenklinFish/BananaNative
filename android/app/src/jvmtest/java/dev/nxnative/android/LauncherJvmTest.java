@@ -8,8 +8,9 @@ import java.util.List;
 import java.util.Map;
 
 /**
- * The launcher's pure-Java helpers on the JVM (no Android): SaveStore (save backup, restore, the roll-forward journal, the lock) and Profile (the APK's game table).
- * Run by dm/tools/tests/test_android_saves.py, which compiles this with SaveStore.java, Profile.java and a stub BuildConfig.
+ * The launcher's pure-Java helpers on the JVM (no Android): SaveStore (save backup, restore, the roll-forward journal, the lock), SaveMigrate (the one-time copy of
+ * the old default save into app storage) and Profile (the APK's game table).
+ * Run by dm/tools/tests/test_android_saves.py, which compiles this with SaveStore.java, SaveMigrate.java, Profile.java and a stub BuildConfig.
  * <ul>
  * <li>{@code <scratch folder>}: every case; prints "ok <n>" and exits 0, or the first failure and exits 1</li>
  * <li>{@code recover <save>}: SaveStore.recover on that save, printing "recovered", "nothing" or "refused: …" (the journal cross-check against plat_swap_recover)</li>
@@ -66,6 +67,7 @@ public final class LauncherJvmTest {
         lockSameProcess(new File(t, "lock"));
         edges(new File(t, "edges"));
         review3(new File(t, "review3"));
+        migrate(new File(t, "migrate"));
         System.out.println("ok " + n);
     }
 
@@ -78,6 +80,23 @@ public final class LauncherJvmTest {
         Map<Long, Map<String, String>> b = l.get(0).buildMap();
         check(b.size() == 2 && b.get(458752L).get("sdk").equals("bb") && b.get(0L).get("main").equals("cc"), "the builds, lower case");
         check(l.get(1).buildMap().isEmpty(), "no builds");
+        // The versions a refused dump is told about (DumpCheck): version 0 is the base game itself, whose supported build needs no update (Mario Kart World 1.8.0)
+        check(l.get(0).supported().equals("This app supports Donkey Kong Bananza (040074A01BF12000) as the base game (no update) or update 458752 only: dump the game with that update installed."),
+                "supported, base and an update: " + l.get(0).supported());
+        Profile mkw = Profile.parse("0400C3F00006E000\tMario Kart World\t11604\tabcdef012345\t0 main=d00e4f39").get(0);
+        check(mkw.supported().equals("This app supports Mario Kart World (0400C3F00006E000) as the base game (no update) only: dump the game without an update."),
+                "supported, the base only: " + mkw.supported());
+        // Game resolution (build.gradle resolutionOf, the 10th column): the window size for a window_fn game, the graphics scale and operation mode for a graphics_scale one
+        check(!l.get(0).hasResolution() && l.get(0).resolutionEnv("1920x1080").isEmpty(), "no column: no Game resolution");
+        Profile win = Profile.parse("040074A01BF12000\tD\t0\tx\t\t\t\t\t\twindow").get(0);
+        check(win.hasResolution() && win.resolutionEnv("1280x720").equals(List.of("DM_WINDOW_SIZE=1280x720"))
+                && win.resolutionEnv("original").equals(List.of("DM_WINDOW_SIZE=original")), "window_fn: DM_WINDOW_SIZE as before: " + win.resolutionEnv("original"));
+        Profile sc = Profile.parse("0400C3F00006E000\tM\t0\tx\t\t\t\t\t\tscale:1920x1080=0/handheld,1280x720=2/handheld").get(0);
+        check(sc.hasResolution() && sc.resolutionEnv("1920x1080").equals(List.of("DM_GRAPHICS_SCALE=0", "DM_OPMODE=0"))
+                && sc.resolutionEnv("1280x720").equals(List.of("DM_GRAPHICS_SCALE=2", "DM_OPMODE=0")), "graphics_scale rows: " + sc.resolutionEnv("1280x720"));
+        check(sc.resolutionEnv("original").isEmpty() && sc.resolutionEnv("2560x1440").isEmpty(), "a choice without a row: the game's own");
+        check(Profile.parse("0400C3F00006E000\tM\t0\tx\t\t\t\t\t\tscale:original=1/console").get(0).resolutionEnv("original").equals(List.of("DM_GRAPHICS_SCALE=1", "DM_OPMODE=1")), "console");
+        check(Profile.versionName(0).equals("the base game") && Profile.versionName(458752).equals("update 458752"), "versionName");
         check(Profile.of("040074A01BF12000") != null && Profile.of("0100000000010000") == null, "Profile.of over BuildConfig.NX_PROFILES");
         check(Profile.missing("0100000000010000", "Mario").contains("has no game profile") && Profile.missing("040074A01BF12000", null) == null, "Profile.missing");
     }
@@ -318,5 +337,94 @@ public final class LauncherJvmTest {
         x.entries.put("Slot.bin", "f aa 1");
         y.entries.put("slot.bin", "f aa 1");
         check(x.diff(y) != null && x.diff(y, true) == null, "case-insensitive comparison");
+    }
+
+    /** Everything under a folder (path → hash, size and time, "d" for a folder), lock files left out: the old save's folder before and after */
+    static Map<String, String> snapshot(File root) throws IOException {
+        Map<String, String> m = new java.util.TreeMap<>();
+        if (!root.exists()) return m;
+        try (java.util.stream.Stream<java.nio.file.Path> w = Files.walk(root.toPath())) {
+            for (java.nio.file.Path p : (Iterable<java.nio.file.Path>) w::iterator) {
+                if (p.toString().endsWith(SaveStore.LOCK_SUFFIX)) continue;
+                m.put(root.toPath().relativize(p).toString(), Files.isDirectory(p) ? "d" : SaveStore.sha256(p.toFile()) + " " + Files.size(p) + " " + Files.getLastModifiedTime(p));
+            }
+        }
+        return m;
+    }
+
+    static String text(File f) throws IOException { return new String(Files.readAllBytes(f.toPath()), StandardCharsets.UTF_8); }
+
+    static void migrate(File t) throws Exception {
+        // the old default beside the game (<Switch2>/saves/<id>, with its device save) and the app's save (Android/data/<pkg>/files/saves/<id>)
+        File old = save(new File(t, "Switch2"), "old"), app = new File(t, "appdata/saves/040074A01BF12000");
+        write(new File(SaveStore.device(old), "dev.bin"), "device old");
+        File oldRoot = old.getParentFile();
+        Map<String, String> before = snapshot(oldRoot);
+        check(SaveMigrate.needed(old, app), "needed: the app save is empty, the old one has a save");
+        SaveMigrate.Result r = SaveMigrate.migrate(old, app);
+        check(r.state == SaveMigrate.State.COPIED, "copied: " + r);
+        check(SaveStore.scanParts(SaveStore.parts(app)).diff(SaveStore.scanParts(SaveStore.parts(old))) == null, "the app save (main and device) is the old one, file by file");
+        check(new File(app, "empty").isDirectory() && r.copied.files == 3, "empty folders kept; three files copied");
+        check(snapshot(oldRoot).equals(before), "the old folder is untouched (files, sizes, hashes, times)");
+        check(!SaveMigrate.staging(app).exists(), "no staging folder left");
+        check(!SaveMigrate.needed(old, app), "not needed again");
+        // never over a save: the app's own save stays as it is, however the old one changes
+        write(new File(app, "slot0.bin"), "slot0 played in the app");
+        write(new File(old, "slot0.bin"), "slot0 played by an older version");
+        before = snapshot(oldRoot);
+        Map<String, String> appBefore = snapshot(app.getParentFile());
+        r = SaveMigrate.migrate(old, app);
+        check(r.state == SaveMigrate.State.APP_HAS_SAVE, "a non-empty app save is never copied over: " + r);
+        check(snapshot(app.getParentFile()).equals(appBefore) && snapshot(oldRoot).equals(before), "neither save changed");
+
+        // an app save with only empty folders (the host made them) takes the copy
+        File t2 = new File(t, "emptyapp"), old2 = save(new File(t2, "Switch2"), "two"), app2 = new File(t2, "appdata/saves/040074A01BF12000");
+        new File(app2, "sub/deeper").mkdirs();
+        r = SaveMigrate.migrate(old2, app2);
+        check(r.state == SaveMigrate.State.COPIED && SaveStore.scan(app2).diff(SaveStore.scan(old2)) == null, "empty folders only: copied, " + r);
+        check(!SaveStore.device(app2).exists(), "no device save made when the old one has none");
+        // no old save: nothing
+        File t3 = new File(t, "none"), old3 = new File(t3, "Switch2/saves/040074A01BF12000"), app3 = new File(t3, "appdata/saves/040074A01BF12000");
+        old3.mkdirs();
+        r = SaveMigrate.migrate(old3, app3);
+        check(r.state == SaveMigrate.State.NO_OLD_SAVE && !app3.exists(), "no old save: nothing copied, " + r);
+
+        // an old save with an unfinished commit: not copied (the host finishes it in the old folder this start), the old folder untouched
+        File t4 = new File(t, "pending"), old4 = save(new File(t4, "Switch2"), "four"), app4 = new File(t4, "appdata/saves/040074A01BF12000");
+        write(new File(old4.getPath() + ".new/slot0.bin"), "newer");
+        write(SaveStore.marker(old4, 2), old4.getPath() + ".new");
+        before = snapshot(old4.getParentFile());
+        r = SaveMigrate.migrate(old4, app4);
+        check(r.state == SaveMigrate.State.FAILED && r.message.contains("unfinished"), "an old save with a journal is not copied: " + r);
+        check(!SaveMigrate.hasSave(app4) && snapshot(old4.getParentFile()).equals(before), "nothing in the app, the old folder untouched");
+
+        // a copy that fails part way leaves no save to play from, and the next start copies it whole
+        File t5 = new File(t, "fail"), old5 = save(new File(t5, "Switch2"), "five"), app5 = new File(t5, "appdata/saves/040074A01BF12000");
+        write(new File(SaveStore.device(old5), "dev.bin"), "device five");
+        before = snapshot(old5.getParentFile());
+        new File(app5, "stuck").mkdirs();
+        check(app5.setWritable(false), "set up: a folder that cannot be cleared");   // the move of the main save fails after the device save went in
+        r = SaveMigrate.migrate(old5, app5);
+        app5.setWritable(true);
+        check(r.state == SaveMigrate.State.FAILED, "the failed move is reported: " + r);
+        check(SaveStore.hasFiles(SaveStore.device(app5)), "set up: the failure came after the device save went in");
+        check(!SaveStore.hasFiles(app5) && SaveMigrate.needed(old5, app5), "no main save in the app: the old folder is played, and the copy is needed still");
+        check(!SaveMigrate.staging(app5).exists() && snapshot(old5.getParentFile()).equals(before), "no staging left; the old folder untouched");
+        r = SaveMigrate.migrate(old5, app5);
+        check(r.state == SaveMigrate.State.COPIED && SaveStore.scanParts(SaveStore.parts(app5)).diff(SaveStore.scanParts(SaveStore.parts(old5))) == null,
+                "the next start copies it whole (the device save left in the app was the old one's copy): " + r);
+        // a device save in the app that is not the old one's copy: not played as half a save
+        File t6 = new File(t, "foreigndevice"), old6 = save(new File(t6, "Switch2"), "six"), app6 = new File(t6, "appdata/saves/040074A01BF12000");
+        write(new File(SaveStore.device(old6), "dev.bin"), "device six");
+        write(new File(SaveStore.device(app6), "dev.bin"), "another device save");
+        r = SaveMigrate.migrate(old6, app6);
+        check(r.state == SaveMigrate.State.FAILED && !SaveStore.hasFiles(app6) && text(new File(SaveStore.device(app6), "dev.bin")).equals("another device save"),
+                "a foreign device save: refused, kept, nothing copied: " + r);
+        // the old save in use (a backup of it works in this process): refused, nothing copied
+        File t7 = new File(t, "locked"), old7 = save(new File(t7, "Switch2"), "seven"), app7 = new File(t7, "appdata/saves/040074A01BF12000");
+        try (SaveStore.Lock l = SaveStore.lock(old7)) {
+            r = SaveMigrate.migrate(old7, app7);
+        }
+        check(r.state == SaveMigrate.State.FAILED && !SaveMigrate.hasSave(app7), "the old save in use: not copied, " + r);
     }
 }

@@ -58,6 +58,7 @@ DM_GL_STUBS	diagnostic	`=1` gives every GL function the layer lacks a stub that 
 DM_GPU_CAPTURE	diagnostic	`=<frame>[:<frames>]` or `gpu:<ms>[:<after frame>]` writes a Metal GPU trace of those frames for Xcode's Metal debugger; can be set while running through `DM_CTL`
 DM_GPU_CAPTURE_DIR	path	Folder for `DM_GPU_CAPTURE`'s traces (default `gpu_captures/` in the working directory)
 DM_GPU_CAPTURE_KEEP	diagnostic	Before each GPU capture, prunes the capture folder's `dm_*.gputrace` entries so that the newest `KEEP - 1` stay (default 2)
+DM_GRAPHICS_SCALE	player	The Switch 2 graphics scale the game sees in every operation mode: `0`, `1` or `2` (`oe::GetCurrentGraphicsScale`, scaling parameters 10 / 20 / 30); unset follows the operation mode (0 handheld, 1 console). Mario Kart World renders its 3D scenes smaller at a higher scale (handheld scale 2: 1280x720); read once
 DM_GUEST_BASE	diagnostic	`=<hex>` where the guest address block starts on Android (default `0x4000000000`); when it is taken the host tries the next 64 GiB boundaries, always below `1 << 39`
 DM_GUEST_SPAWN_TEST	diagnostic	`=1` runs a self-test before `nnMain`: a host-started guest thread does SDK malloc / free and locks an `nn::os` mutex, and the result is logged; `=2` also keeps a resident thread
 DM_HID_LOG	diagnostic	`1` logs the HID button usage number of each button pressed on a raw HID gamepad (`pad_hid_mac.h`), to write a `DM_HID_MAP`
@@ -100,6 +101,8 @@ DM_MOVIE_TRACE	diagnostic	When set, the movie decoder logs every call with its t
 DM_MSL_DIR	path	Parent folder of the shader libraries: NVN loads from `b-<chain version>/` beneath it, Vulkan from `vk/`, GL from `gl/`; the app and the Mac launcher set it
 DM_NICK	switch	The account nickname the game sees (default `Player`)
 DM_NRO	switch	`0` turns off loading of the NRO modules the game's NRR files register (on by default): every `nn::ro::LoadModule` then fails
+DM_NUP_CACHE_MB	diagnostic	`=<MB>` sizes the cache of closed, decompressed `.nup` files (nup_image.c; default 128, `0` keeps nothing after close)
+DM_NUP_DISK_MB	diagnostic	`=<MB>` (default 64; `0` none) a compressed `.nup` file of at least this size is decompressed into an unlinked temporary file and mapped, instead of whole into memory (nup_image.h)
 DM_NVN_ALLOCPROF	diagnostic	`=1` charges Metal allocation growth to each replayed op type and function, and logs command allocator sizes and each new texture (serial, size, format, storage)
 DM_NVN_API	switch	`=<major>.<minor>` overrides the NVN API version `nvnDeviceGetInteger` reports (by default decided by the SDK version or the profile's `device_api`: 55.15 for SDK 11 and later, 53.313 before)
 DM_NVN_BARRIER	switch	How draw passes are ordered: `full` (default) waits for all earlier GPU work, `game` only for the previous pass's fragment stage unless the game set a barrier, `ab` alternates with the `DM_AB` phases
@@ -336,7 +339,7 @@ DM_VK_ADPF_SPAN	diagnostic	`=<p>` (Android, live, 0): ADPF reports each frame's 
 DM_VK_AFF_ALL	diagnostic	`=<mask>` (Android, live, 0 = untouched) sets the CPU affinity of every thread of the process to that CPU bit mask when the value changes (`sched_setaffinity`); logs the thread count
 DM_VK_AFF_REPLAY	diagnostic	`=<mask>` (Android, live, 0 = untouched) sets the replay worker thread's CPU affinity to that CPU bit mask when the value changes
 DM_VK_BAR_KEEP	diagnostic	`1` (Android, live, off): a game barrier inside an open draw pass is taken inside the pass when no draw of the pass wrote memory (later draws that write memory, read the texture pool or sample an attachment of the pass end it); `0` ends the pass at every barrier. Off until phone-checked
-DM_VK_BIGIMG_MB	diagnostic	`=<MiB>` (Android, default 64) logs a `large image:` line (texture serial, size, format, flags, pool) for each image whose memory is at least that size, the first 32
+DM_VK_BIGIMG_MB	diagnostic	`=<MiB>` (Android, default 64) logs a `large image:` line (texture serial, size, format, flags, pool) for each image whose memory is at least that size, the first 32; for those images also their first GPU write (frame and site), the other textures found over their storage, and a `ctl: large images the GPU has not written` line with the stats (the largest 8, with the draws that sampled them and what lies over their storage)
 DM_VK_CAPTURE	path	`=<dir>` (Mac) writes every SPIR-V module the game creates to `<dir>/<key>.spv`; the NSP script's Vulkan shader capture stage sets it
 DM_VK_CHUNK	switch	`=<n>` (Android, live: the next submission, default 600; `0` one part) a long submission goes to the queue in parts: after n draws of the part in progress it is ended and submitted at the next pass boundary, so the GPU starts while the rest is recorded
 DM_VK_CHUNK_PASS	switch	`=<n>` (Android, live, default 600; `0` off) a part is also ended and submitted inside an open pass after n draws, when the pass can be split there ([rendering.md](reference/rendering.md#gpu-end-held-back-by-recording-and-a-clocked-down-gpu-on-the-vulkan-replay))
@@ -389,7 +392,9 @@ DM_VK_PASS_KEEP	switch	`0` (Android, live: the next submission, 1) a render targ
 DM_VK_PCACHE	path	`=<file>` (Android, restart) the Vulkan pipeline cache file; `0` no file; default `$DM_TEMP/vk_pipelines.bin` (`vk_pipelines-<driver>.bin` with a custom driver); the replayer does not take it from a capture
 DM_VK_PCACHE_SAVE_S	switch	`=<s>` (Android, live, 20; at least 1) the pipeline cache file is saved at most every s seconds while new pipelines are made (the save at the end of the run and at suspend is forced)
 DM_VK_PLACED	diagnostic	`0` (Android, restart, on) memory pools stay anonymous memory instead of placed Vulkan memory, so the GPU sees none (draws then default off, `DM_VK_DRAW`)
+DM_VK_PLACE_GRANULE_MB	diagnostic	`=<MB>` (Android, read once, 16) the part size of a memory pool placed by parts (`DM_VK_PLACE_PART_MB`): only the parts the GPU is given an address in become placed memory ([memory.md](reference/memory.md))
 DM_VK_PLACE_LAZY	switch	`0` (Android, read once, on) every memory pool is placed when it is made, instead of when the GPU is first given an address in it ([memory.md](reference/memory.md))
+DM_VK_PLACE_PART_MB	diagnostic	`=<MB>` (Android, read once, 1024; `0` whole pools, as before) memory pools of at least this size are placed by parts of `DM_VK_PLACE_GRANULE_MB` instead of whole ([memory.md](reference/memory.md))
 DM_VK_PREFAULT	diagnostic	`0` (Android, restart, on) placed maps are not faulted in after placing; a diagnostic to measure whether the driver needs it
 DM_VK_PRETRANSFORM	switch	`0` (Android, live: makes a new swapchain, 1) no pre-rotation: the compositor rotates the picture instead of it being drawn in the panel's own orientation
 DM_VK_PREWARM	switch	`=<n>` (Android, restart, 2; at most 4) threads that make the prewarm list's pipelines (`vk_pipelines.keys`, the keys of earlier runs) in the background at nice 10 when the first pipeline is made; `0` off. The replay tool sets it to 0
@@ -432,6 +437,8 @@ DM_VK_WORKER	switch	`0` (Android, restart, on) submissions and presents are repl
 DM_VK_WORKER_FRAMES	switch	`=<n>` (Android, restart, default 1) the replay worker may be at most n presents behind the game
 DM_VK_XP_SCISSOR	diagnostic	`=<px>` (Android, live, 0 = off) an experiment with a wrong picture: every draw's scissor is cut to px x px pixels, to split a pass's GPU time into per-pixel and per-draw work
 DM_VK_ZEROLOG	diagnostic	`=<n>` (Android): the first n textures made as zero images whose storage holds data at their first use (virtual pools left out), with their description, pool flags and whether the first use was a sample (`vka_tex.c` `storage_mode`)
+DM_VK_ZSHARE	switch	`0` (Android, live: images made from then on, on) every image has memory of its own, as before; on, a large image whose content is the GPU's and that nothing has written yet (dense, single-sampled, not 3D, uncompressed, not linear or a window texture) aliases one zeroed allocation per identical create info and gets memory of its own right before its first write (`vka_tex.c` "Zero-shared images"; the ctl stats' `image memory:` line counts them)
+DM_VK_ZSHARE_MB	switch	`=<MiB>` (Android, live, 4) the smallest storage of an image `DM_VK_ZSHARE` shares; `0` turns it off
 DM_VSYNC_HZ	switch	`=<Hz>`: rate at which a host thread fires the vi vsync event when the display link does not drive it (default 60)
 DM_WATCH	diagnostic	`=<s>` dumps all threads after that many seconds (SIGALRM) and turns on the stall watchdog; off unless set
 DM_WATCH_SAMPLE	diagnostic	`=<path>` (Mac): when the stall watchdog fires, samples the process for 1 s with `/usr/bin/sample` and writes the thread stacks to that path

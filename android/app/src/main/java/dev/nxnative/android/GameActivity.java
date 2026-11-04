@@ -27,6 +27,7 @@ import android.view.SurfaceView;
 import android.view.View;
 import android.widget.FrameLayout;
 import android.widget.TextView;
+import android.widget.Toast;
 
 import java.io.File;
 import java.io.IOException;
@@ -83,29 +84,23 @@ public final class GameActivity extends Activity implements SurfaceHolder.Callba
         SurfaceView surface = new SurfaceView(this);
         surface.getHolder().addCallback(this);
         root.addView(surface);
-        overlay = new TextView(this);
-        overlay.setTextColor(Color.WHITE);
-        overlay.setShadowLayer(3, 0, 0, Color.BLACK);
-        overlay.setTextSize(11);
-        overlay.setGravity(Gravity.BOTTOM);
-        overlay.setPadding(24, 24, 24, 24);
-        root.addView(overlay);
+        // The log's last lines (tail()): bottom left, one block only as high as its text, so it stays clear of the build tag in the corner above
+        overlay = overlayText(Gravity.BOTTOM | Gravity.START, 1f);
+        root.addView(overlay, new FrameLayout.LayoutParams(FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.WRAP_CONTENT, Gravity.BOTTOM | Gravity.START));
         // The on-screen controls take every touch and pass it to the host, which tells controls from touchscreen fingers
         controls = new TouchControls(this, Native.hasInput());
         root.addView(controls, new FrameLayout.LayoutParams(FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.MATCH_PARENT));
-        // The build tag: always shown, whatever the overlay switches say, so every screenshot and recording names its build; bold white on a dark pill to read over any scene
-        tag = overlayText(Gravity.TOP | Gravity.START, 12, 1f);
-        tag.setText(Prefs.buildTag());
+        // The build tag: always shown, whatever the overlay switches say, so every screenshot and recording names its build; bold, flush in the top-left corner
+        tag = overlayText(Gravity.TOP | Gravity.START, 1f);
+        tag.setText(Prefs.buildTag(this));
         tag.setTypeface(Typeface.DEFAULT_BOLD);
-        tag.setShadowLayer(4, 0, 0, Color.BLACK);
-        android.graphics.drawable.GradientDrawable tagBg = new android.graphics.drawable.GradientDrawable();
-        tagBg.setColor(0xB3000000);
-        tagBg.setCornerRadius(6 * getResources().getDisplayMetrics().density);
-        tag.setBackground(tagBg);
-        FrameLayout.LayoutParams tagLp = new FrameLayout.LayoutParams(FrameLayout.LayoutParams.WRAP_CONTENT, FrameLayout.LayoutParams.WRAP_CONTENT, Gravity.TOP | Gravity.START);
-        tagLp.leftMargin = tagLp.topMargin = Math.round(4 * getResources().getDisplayMetrics().density);
-        root.addView(tag, tagLp);
-        fps = overlayText(Gravity.TOP | Gravity.END, 12, 0.85f);
+        root.addView(tag, new FrameLayout.LayoutParams(FrameLayout.LayoutParams.WRAP_CONTENT, FrameLayout.LayoutParams.WRAP_CONTENT, Gravity.TOP | Gravity.START));
+        // The log block may grow at most up to the tag's bottom edge (its top margin), so a long log never runs under the tag
+        tag.addOnLayoutChangeListener((v, l, t, r, b, ol, ot, or, ob) -> {
+            FrameLayout.LayoutParams lp = (FrameLayout.LayoutParams) overlay.getLayoutParams();
+            if (lp.topMargin != b) { lp.topMargin = b; overlay.post(overlay::requestLayout); }
+        });
+        fps = overlayText(Gravity.TOP | Gravity.END, 0.85f);
         root.addView(fps, new FrameLayout.LayoutParams(FrameLayout.LayoutParams.WRAP_CONTENT, FrameLayout.LayoutParams.WRAP_CONTENT, Gravity.TOP | Gravity.END));
         stats = new Overlay(this);
         panel = new SidePanel(this, box -> controls.controlRows(this, box));
@@ -127,7 +122,14 @@ public final class GameActivity extends Activity implements SurfaceHolder.Callba
         bg.setColor(0x99000000);
         bg.setCornerRadii(new float[] {12 * dp, 12 * dp, 0, 0, 0, 0, 12 * dp, 12 * dp});
         handle.setBackground(bg);
-        handle.setAlpha(0.75f);
+        // Faint while idle (0.4: it sits over the game picture), fully opaque while a finger is on it so the tap is seen
+        handle.setAlpha(0.4f);
+        handle.setOnTouchListener((v, e) -> {
+            int a = e.getActionMasked();
+            if (a == MotionEvent.ACTION_DOWN) v.setAlpha(1f);
+            else if (a == MotionEvent.ACTION_UP || a == MotionEvent.ACTION_CANCEL) v.setAlpha(0.4f);
+            return false;   // the click listener still opens the panel
+        });
         handle.setContentDescription("Open the in-game panel");
         handle.setOnClickListener(v -> panel.open());
         root.addView(handle, root.indexOfChild(panel), new FrameLayout.LayoutParams(Math.round(22 * dp), Math.round(56 * dp), Gravity.END | Gravity.TOP));
@@ -152,15 +154,22 @@ public final class GameActivity extends Activity implements SurfaceHolder.Callba
         else fail("The game was stopped while it was in the background (Android ended its process). Unsaved progress is lost; start it again from the launcher.");
     }
 
-    private TextView overlayText(int gravity, int sp, float alpha) {
+    /** The overlay's text (build tag, stats, log lines): all one small size, 8 sp (at 11-12 sp they covered the touch buttons games put in the corners), white with a
+     *  shadow on a faint dark pill with tight padding, so it reads over any scene; touches pass through to the controls */
+    static final int OVERLAY_SP = 8;
+    private TextView overlayText(int gravity, float alpha) {
         TextView t = new TextView(this);
+        float dp = getResources().getDisplayMetrics().density;
         t.setTextColor(Color.WHITE);
-        t.setShadowLayer(3, 0, 0, Color.BLACK);
-        t.setTextSize(sp);
+        t.setShadowLayer(2, 0, 0, Color.BLACK);
+        t.setTextSize(OVERLAY_SP);
         t.setGravity(gravity);
         t.setAlpha(alpha);
-        int p = Math.round(6 * getResources().getDisplayMetrics().density);
-        t.setPadding(p, p / 2, p, p / 2);
+        t.setPadding(Math.round(3 * dp), Math.round(1 * dp), Math.round(3 * dp), Math.round(1 * dp));
+        android.graphics.drawable.GradientDrawable bg = new android.graphics.drawable.GradientDrawable();
+        bg.setColor(0x80000000);
+        bg.setCornerRadius(3 * dp);
+        t.setBackground(bg);
         t.setClickable(false);
         t.setFocusable(false);
         return t;
@@ -181,14 +190,15 @@ public final class GameActivity extends Activity implements SurfaceHolder.Callba
     private String saveHow = "new", saveNote;
 
     /**
-     * The game's save folder, on shared storage so that clearing or uninstalling the app keeps it:
-     * <Switch2 root>/saves/<id> (play app and release, BuildConfig.NX_PLAY) or saves-test/<id> (test app), the Switch2 root being the game folder's parent.
-     * An empty folder is filled from the old private save (migrated), else from <Switch2 root>/save-seed/<id> (seeded). Falls back to the private folder.
+     * The game's save folder: the one picked in Folders, else the app's own saves/&lt;id&gt; (AppStorage.save; the device save beside it). An older version's save in
+     * the old default folder beside the game (&lt;Switch2 root&gt;/saves/&lt;id&gt; for the play app, saves-test/&lt;id&gt; for the test app: Prefs.oldSaveDefault) is
+     * copied in once, when the app's save is empty (defaultSave, SaveMigrate). An empty folder is then filled from the private save of the first versions
+     * (&lt;app files&gt;/save/&lt;id&gt;, "migrated"), else from &lt;Switch2 root&gt;/save-seed/&lt;id&gt; (seeded). Falls back to that private folder.
      */
     private File saveDir(File files, File game, String id) throws IOException {
         File priv = new File(files, "save/" + id);
         String chosen = Prefs.folder(this, "save_" + id);   // the user's pick (Folders…): used as it is, never migrated into or seeded (the launcher asked about copying)
-        File dir = testSave != null ? new File(testSave) : chosen != null ? new File(chosen) : Prefs.saveDefault(game, id);
+        File dir = testSave != null ? new File(testSave) : chosen != null ? new File(chosen) : defaultSave(game, id);
         // The save's lock first (kept while the game runs), then a restore (Restore saves…) or swap stopped part way is finished (SaveStore's journal, the host's
         // rules); one that cannot be finished stops the start: never a half save
         holdLock(dir);
@@ -214,9 +224,33 @@ public final class GameActivity extends Activity implements SurfaceHolder.Callba
             if (!isEmpty(seed)) { copyTree(seed, dir); saveHow = "seeded"; return dir; }
             return dir;
         } catch (IOException | RuntimeException e) {
-            saveNote = "shared save folder unusable (" + e.getMessage() + "), using the app's private folder";
+            saveNote = "save folder " + dir + " unusable (" + e.getMessage() + "), using the app's private folder";
             saveHow = isEmpty(priv) ? "new" : "existing";
             return mkdirs(priv);
+        }
+    }
+
+    /**
+     * The default save: the app's saves/&lt;id&gt;, after the one-time copy of the old default's save into it (SaveMigrate: checked file by file, under both saves'
+     * locks, never over a save the app has, the old folder only read). When the copy fails, this start plays the old folder, as before, and says so; the next start
+     * tries again. Once copied (Prefs.migratedFrom), the app's save is the game's for good
+     */
+    private File defaultSave(File game, String id) {
+        File app = AppStorage.save(this, id), old = Prefs.oldSaveDefault(game, id);
+        if (Prefs.migratedFrom(this, id) != null) return app;
+        SaveMigrate.Result r = SaveMigrate.migrate(old, app);
+        switch (r.state) {
+            case COPIED:
+                Prefs.migratedFrom(this, id, old.getPath());
+                saveNote = "copied once from " + old + " (" + r.copied.files + " files, " + SaveStore.size(r.copied.bytes) + ", checked); that folder is kept as it was";
+                Toast.makeText(this, "Your save was copied into the app's storage (" + app + "). The old folder " + old + " is kept as it was.", Toast.LENGTH_LONG).show();
+                return app;
+            case FAILED:
+                saveNote = "not copied into the app's storage (" + r.message + "): this start plays the save in " + old + "; the next start tries again";
+                Toast.makeText(this, "Your save could not be copied into the app's storage (" + r.message + "). This start plays it where it is, " + old + ".", Toast.LENGTH_LONG).show();
+                return old;
+            default:   // the app has a save already, or there is none to copy
+                return app;
         }
     }
 
@@ -286,8 +320,15 @@ public final class GameActivity extends Activity implements SurfaceHolder.Callba
             StringBuilder m = new StringBuilder("Missing: ");
             for (Readiness.Check c : fails) m.append(c.title).append(", ");
             m.setLength(m.length() - 2);
-            m.append(".\n\nThe game may stop or draw wrongly. A custom GPU driver (Settings › GPU driver) may help.");
-            readinessDialog("Not ready for this game", m.toString(), details(fails, warns, gpu), report, "Try anyway", true);
+            // Without placed memory maps the GPU sees none of the game's memory: draws are off (vka_draw.c), so the result is certain, not "may"
+            boolean placed = false;
+            for (Readiness.Check c : fails) placed |= "ext.VK_KHR_map_memory2".equals(c.fact) || "ext.VK_EXT_map_memory_placed".equals(c.fact) || "feature.memoryMapPlaced".equals(c.fact);
+            GpuDriver.Info drv = GpuDriver.selected(this, id);
+            if (placed) m.append(".\n\nWith this GPU driver (").append(drv == null ? "System" : drv.label()).append(") nothing is drawn: the screen stays black while the game runs. ")
+                    .append(drv == null ? "Pick a custom driver that has placed memory maps" : "Pick System (the phone's own driver)")
+                    .append(" in Settings › GPU driver, or in this game's Game settings.");
+            else m.append(".\n\nThe game may stop or draw wrongly. A custom GPU driver (Settings › GPU driver) may help.");
+            readinessDialog("Not ready for this game", m.toString(), details(fails, warns, gpu), report, placed ? "Start anyway (black screen)" : "Try anyway", true);
         } else if (!warns.isEmpty() && !Prefs.of(this).getString(Prefs.gameKey("readiness_seen", id), "").equals(warnKey(f, warns))) {
             StringBuilder m = new StringBuilder("Runs with less: ");
             for (Readiness.Check c : warns) m.append(c.title).append(", ");
@@ -368,8 +409,8 @@ public final class GameActivity extends Activity implements SurfaceHolder.Callba
         File files = getExternalFilesDir(null);
         try {
             Pack pack = Pack.read(packDir);
-            File romfs = pack.romfs(game);
-            if (romfs == null) throw new IOException("no RomFS in " + game);
+            String romfs = pack.romfsPath(game);   // a folder's RomFS folder, or <file>.nup:<selector>/romfs (NUP.md)
+            if (romfs == null) throw new IOException(Nup.isNup(game) ? game.getName() + " has no " + pack.romfsSelector() + " with a RomFS" : "no RomFS in " + game);
             if (readinessHold(id)) return;   // after the pack's own checks (a missing pack says so first), before the save is locked or anything is written
             // The user's lines, read first: the paths the launcher sets cannot be changed by them (guard), but the test app's env-<id>.txt may name a test save folder (one game's file only: a global DM_SAVE would point every game at one save)
             List<String> user = new ArrayList<>(guard(userEnv(new File(files, "env.txt")), "env.txt", false));   // diagnostic switches (every game: never DM_SAVE) (DM_SVC=1, DM_FS=1, ...), as the iPhone's Documents/env.txt
@@ -383,8 +424,11 @@ public final class GameActivity extends Activity implements SurfaceHolder.Callba
                     "DM_ROMFS=" + romfs, "DM_SAVE=" + save, "DM_TEMP=" + temp, "DM_ROOT=" + root, "DM_AOC_DIR=" + aoc,
                     "HOME=" + files, "TMPDIR=" + getCacheDir(), "DM_BUILD_COMMIT=" + BuildConfig.NX_COMMIT,
                     "DM_CTL=" + new File(files, "ctl.txt")));   // live control lines (android/TESTING.md "Live control", android/tools/nxctl.sh); DM_CTL= in env.txt turns it off
-            env.add(0, "NX_BUILD_TAG=" + Prefs.buildTag());   // nxlaunch.c writes it as the log's first line
-            env.add("DM_WINDOW_SIZE=" + Prefs.gameWindow(this, id));   // Game resolution: the game's own setting, else the main screen's: the window size the host gives the game
+            env.add(0, "NX_BUILD_TAG=" + Prefs.buildTag(this) + " \u00b7 signer " + Prefs.signerId(this));   // nxlaunch.c writes it as the log's first line; the signer says which key signed the APK (Signer)
+            // Game resolution: the game's own setting, else the main screen's: the window size the host gives the game (window_fn), or the graphics scale and operation
+            // mode that give that size (graphics_scale rows), as its profile says (Profile.resolutionEnv); nothing for a game with neither
+            Profile prof = Profile.of(id);
+            if (prof != null) env.addAll(prof.resolutionEnv(Prefs.gameWindow(this, id)));
             Lsfg.env(this, env);   // frame generation: the user's Lossless.dll and the settings
             int cap = Prefs.fpsCap(this, id);   // the game's own frame rate cap (its in-game panel, its Game settings), else the main screen's (unset: the profile's fps_target)
             if (cap >= 0) env.add("DM_FPS_TARGET=" + cap);
@@ -399,6 +443,7 @@ public final class GameActivity extends Activity implements SurfaceHolder.Callba
             ui.postDelayed(this::noteOwnRate, 30000);
             hostRunning = true;
             if (readinessLine != null) Native.note(readinessLine + (triedAnyway ? "; the player chose Try anyway" : ""));   // the readiness check (readinessHold)
+            Native.note("[nxlaunch] game: " + game + (Nup.isNup(game) ? " (.nup)" : " (folder)") + ", DM_ROMFS " + romfs + ", pack " + packDir);
             Native.note("[nxlaunch] save: " + save + " (" + saveHow + ")" + (saveNote != null ? "; " + saveNote : ""));
             Native.note("nxnative " + BuildConfig.VERSION_NAME + " (" + BuildConfig.NX_COMMIT + "), host libnxhost_" + id + ".so; " + name + " " + id + " version " + pack.version);
             Native.note("device " + Build.MANUFACTURER + " " + Build.MODEL + ", Android " + Build.VERSION.RELEASE + " (SDK " + Build.VERSION.SDK_INT + "), " + Build.SUPPORTED_ABIS[0]
@@ -460,10 +505,14 @@ public final class GameActivity extends Activity implements SurfaceHolder.Callba
     }
 
     private void end() {
+        backToFrontend();
         finish();
         // On its own handler: onDestroy clears ui's callbacks
         new Handler(Looper.getMainLooper()).postDelayed(() -> android.os.Process.killProcess(android.os.Process.myPid()), 300);
     }
+
+    /** A game a frontend started (FrontendLaunch): the app's task goes behind the frontend, so its stop shows the frontend, not Home */
+    void backToFrontend() { if (getIntent().getBooleanExtra("frontend", false)) moveTaskToBack(true); }
 
     /**
      * The screen goes (Stop, or Android recreating the activity while the game runs, which then attaches a new one): what hostSetup registered is let go, and the
@@ -528,14 +577,12 @@ public final class GameActivity extends Activity implements SurfaceHolder.Callba
         return d;
     }
 
-    /** DM_AOC_DIR/<index> → each DLC's RomFS folder in the game folder (hle_fs.c aoc_dir), as symbolic links in app storage */
+    /** DM_AOC_DIR/<index> → each DLC's RomFS folder in the game folder, or DM_AOC_DIR/<index>.nup → the .nup (hle_fs.c aoc_dir; Pack.aocLinks), as symbolic links in app storage */
     private static File aocLinks(File dir, File game, Pack pack) {
         File[] old = dir.listFiles();
         if (old != null) for (File f : old) f.delete();
-        for (Map.Entry<Integer, String> e : pack.aoc.entrySet()) {
-            File target = new File(game, e.getValue());
-            if (!target.isDirectory()) continue;
-            try { Os.symlink(target.getPath(), new File(dir, String.valueOf(e.getKey())).getPath()); } catch (ErrnoException ignored) { /* the game then runs without that DLC */ }
+        for (Map.Entry<String, String> e : pack.aocLinks(game).entrySet()) {
+            try { Os.symlink(e.getValue(), new File(dir, e.getKey()).getPath()); } catch (ErrnoException ignored) { /* the game then runs without that DLC */ }
         }
         return dir;
     }

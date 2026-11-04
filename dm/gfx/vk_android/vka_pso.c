@@ -346,6 +346,26 @@ static int pstate_fill(pstate *P, vka_shader *const sh[VKA_NSTAGE], const vka_la
 }
 static const char *stage_name(VkShaderStageFlagBits b) { return b == VK_SHADER_STAGE_VERTEX_BIT ? "vertex" : b == VK_SHADER_STAGE_FRAGMENT_BIT ? "fragment" : b == VK_SHADER_STAGE_GEOMETRY_BIT ? "geometry"
                                                               : b == VK_SHADER_STAGE_TASK_BIT_EXT ? "task" : b == VK_SHADER_STAGE_MESH_BIT_EXT ? "mesh" : "tessellation"; }
+// Pipelines being made now (whole pipelines, any thread): the watchdog's dump names them (vka_pso_wait_dump), so a stop inside the driver's compiler says which shaders
+// (a frame-pointer backtrace ends in the stripped driver). Slots are claimed with a compare-and-swap; a build that finds none full is simply not listed
+enum { NBUILD = 16 };
+static struct { _Atomic pid_t tid; _Atomic uint64_t t0, vs, fs; const char *_Atomic what; } g_build[NBUILD];
+static void vka_pso_wait_dump(void) {
+    uint64_t t = now_ns(); int n = 0;
+    for (int i = 0; i < NBUILD; i++) { pid_t id = atomic_load(&g_build[i].tid); if (!id) continue; n++;
+        fprintf(stderr, "[dm] [vk] %s being made by thread %d for %.1f s: shaders %016llx %016llx\n", atomic_load(&g_build[i].what), (int)id, (t - atomic_load(&g_build[i].t0)) / 1e9,
+                (unsigned long long)atomic_load(&g_build[i].vs), (unsigned long long)atomic_load(&g_build[i].fs)); }
+    if (!n) fprintf(stderr, "[dm] [vk] no pipeline being made\n");
+}
+void crash_set_wait_dump(void (*fn)(void));
+static void build_reg(void) { crash_set_wait_dump(vka_pso_wait_dump); }
+static int build_begin(const char *what, uint64_t vs, uint64_t fs) {
+    static pthread_once_t o = PTHREAD_ONCE_INIT; pthread_once(&o, build_reg);
+    for (int i = 0; i < NBUILD; i++) { pid_t z = 0; if (atomic_compare_exchange_strong(&g_build[i].tid, &z, -1)) {
+        atomic_store(&g_build[i].what, what); atomic_store(&g_build[i].vs, vs); atomic_store(&g_build[i].fs, fs); atomic_store(&g_build[i].t0, now_ns()); atomic_store(&g_build[i].tid, gettid()); return i; } }
+    return -1;
+}
+static void build_end(int i) { if (i >= 0) atomic_store(&g_build[i].tid, 0); }
 // The whole pipeline (optimized), with creation feedback (core in 1.3) for the line of a slow one: whether the pipeline cache had it and each stage's share. how: NULL = on the
 // frame path (counted as the frame's), else where it was made (" in the background", " (prewarm)")
 static VkPipeline full_pipeline(pstate *P, vka_shader *const sh[VKA_NSTAGE], const char *how) {
@@ -355,7 +375,10 @@ static VkPipeline full_pipeline(pstate *P, vka_shader *const sh[VKA_NSTAGE], con
     P->ci.pNext = &fbi;
     uint64_t t0 = now_ns();
     VkPipeline p = VK_NULL_HANDLE;
+    const vka_shader *pre0 = P->mesh ? sh[7] : sh[0];
+    int bslot = build_begin("whole graphics pipeline", pre0 ? pre0->key : 0, sh[1] ? sh[1]->key : 0);
     VkResult r = vk.vkCreateGraphicsPipelines(V.dev, g_pc, 1, &P->ci, NULL, &p);
+    build_end(bslot);
     P->ci.pNext = fbi.pNext;
     uint64_t dns = now_ns() - t0; double ms_ = dns / 1e6;
     pthread_mutex_lock(&g_mu);
@@ -413,7 +436,9 @@ static VkPipeline lib_make(int kind, const void *key, size_t klen, VkGraphicsPip
     VkGraphicsPipelineLibraryCreateInfoEXT li = {VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_LIBRARY_CREATE_INFO_EXT, .pNext = shp && (g_pre_adapt & A_NORI) ? NULL : ci->pNext, .flags = part};
     ci->pNext = &li; ci->flags |= VK_PIPELINE_CREATE_LIBRARY_BIT_KHR | (g_pre_adapt & A_RETAIN ? VK_PIPELINE_CREATE_RETAIN_LINK_TIME_OPTIMIZATION_INFO_BIT_EXT : 0);
     uint64_t t0 = now_ns();
+    int bs = build_begin(g_lib_name[kind], 0, 0);
     VkPipeline p = VK_NULL_HANDLE; VkResult r = vk.vkCreateGraphicsPipelines(V.dev, shp && (g_pre_adapt & A_NOCACHE) ? VK_NULL_HANDLE : g_pc, 1, ci, NULL, &p);
+    build_end(bs);
     ci->pNext = li.pNext;
     double ms_ = (now_ns() - t0) / 1e6;
     pthread_mutex_lock(&g_mu);
@@ -445,7 +470,9 @@ static void dyn_of(const pstate *P, int part, VkDynamicState *out, VkPipelineDyn
 static VkResult try_lib(VkGraphicsPipelineCreateInfo ci, VkGraphicsPipelineLibraryFlagsEXT part, VkPipelineCache pc, VkPipelineCreateFlags extra) {
     VkGraphicsPipelineLibraryCreateInfoEXT li = {VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_LIBRARY_CREATE_INFO_EXT, .pNext = ci.pNext, .flags = part};
     ci.pNext = &li; ci.flags |= VK_PIPELINE_CREATE_LIBRARY_BIT_KHR | extra;
+    int bs = build_begin("linked graphics pipeline", 0, 0);
     VkPipeline p = VK_NULL_HANDLE; VkResult r = vk.vkCreateGraphicsPipelines(V.dev, pc, 1, &ci, NULL, &p);
+    build_end(bs);
     if (!r && p) vk.vkDestroyPipeline(V.dev, p, NULL);
     return r;
 }
@@ -556,7 +583,9 @@ static VkPipeline gpl_link(pstate *P, const vka_gkey *k) {
     VkPipelineLibraryCreateInfoKHR libs = {VK_STRUCTURE_TYPE_PIPELINE_LIBRARY_CREATE_INFO_KHR, .libraryCount = nparts, .pLibraries = part};
     VkGraphicsPipelineCreateInfo ci = {VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO, .pNext = &libs, .layout = P->ci.layout};   // no LINK_TIME_OPTIMIZATION: the fast link
     uint64_t t0 = now_ns();
+    int bs = build_begin("graphics pipeline (no cache)", 0, 0);
     VkPipeline p = VK_NULL_HANDLE; VkResult r = vk.vkCreateGraphicsPipelines(V.dev, VK_NULL_HANDLE, 1, &ci, NULL, &p);
+    build_end(bs);
     pthread_mutex_lock(&g_mu); g_link_ms += (now_ns() - t0) / 1e6; if (!r) { g_nlinked++; __atomic_store_n(&g_nlinked_pub, g_nlinked, __ATOMIC_RELAXED); } pthread_mutex_unlock(&g_mu);
     if (r) { static _Atomic int n; if (atomic_fetch_add(&n, 1) < 8) VRED("graphics pipeline link: %d; the whole pipeline is made instead", r); return VK_NULL_HANDLE; }
     return p;
@@ -845,7 +874,9 @@ static gval *gfx_obtain(const gkey_full *fk, uint64_t h, size_t len, vka_shader 
             // The pipeline cache may already hold the optimized one (made in an earlier run): then it is made at once (a fraction of a millisecond), else linked from parts
             P->ci.flags |= VK_PIPELINE_CREATE_FAIL_ON_PIPELINE_COMPILE_REQUIRED_BIT;
             uint64_t t0 = now_ns();
+            int bs = build_begin("graphics pipeline (cache probe)", 0, 0);
             VkResult r = vk.vkCreateGraphicsPipelines(V.dev, g_pc, 1, &P->ci, NULL, &p);
+            build_end(bs);
             P->ci.flags &= ~VK_PIPELINE_CREATE_FAIL_ON_PIPELINE_COMPILE_REQUIRED_BIT;
             uint64_t dns = now_ns() - t0;
             if (r == VK_SUCCESS && p) { pthread_mutex_lock(&g_mu); g_ngfx++; g_made++; g_frame_made++; g_probe_hit++; g_create_ms += dns / 1e6; g_create_ns += dns; pthread_mutex_unlock(&g_mu); }
@@ -924,13 +955,14 @@ static VkPipeline cs_obtain(vka_shader *cs, const vka_layout *lay, int prewarm, 
     if (smax && cs->e->shared > smax && !VKA_ENV("DM_VK_CS_SHARED_OVER", 0)) {
         r = VK_ERROR_FEATURE_NOT_PRESENT; over = 1;
         static _Atomic int n; if (atomic_fetch_add(&n, 1) < 16) VRED("compute program %016llx takes %u bytes of shared memory, the device at most %u: not made, its dispatches are skipped (the first 16 are logged; the count is in the pipeline line)", (unsigned long long)cs->key, cs->e->shared, smax);
-    } else r = vk.vkCreateComputePipelines(V.dev, g_pc, 1, &ci, NULL, &p);
+    } else { int bs = build_begin("compute pipeline", cs->key, 0); r = vk.vkCreateComputePipelines(V.dev, g_pc, 1, &ci, NULL, &p); build_end(bs); }
     pthread_mutex_lock(&g_mu);
     if (over) { p = VK_NULL_HANDLE; g_ncs_over++; } else if (r) { p = VK_NULL_HANDLE; g_nfail++; } else { g_ncs++; g_made++; if (!prewarm) g_frame_made++; }
     { uint64_t dns = now_ns() - t0; g_create_ms += dns / 1e6; if (!prewarm) g_create_ns += dns; }
     g->p = p; g->busy = 0; pthread_cond_broadcast(&g_busy_cv);
     pthread_mutex_unlock(&g_mu);
     if (r && !over) { static _Atomic int n; if (atomic_fetch_add(&n, 1) < 16) VRED("compute pipeline %016llx: %d; its dispatches are skipped", (unsigned long long)cs->key, r); }
+    { double ms_ = (now_ns() - t0) / 1e6; static _Atomic int n; if (!r && ms_ > 50 && atomic_fetch_add(&n, 1) < 200) VLOG("compute pipeline %016llx took %.0f ms%s", (unsigned long long)cs->key, ms_, prewarm ? " (prewarm)" : ""); }
     if (!prewarm && !over) { vka_shader *s5[5] = {cs, NULL, NULL, NULL, NULL}; pw_note(1, s5, "", 0); }   // (one not made stays out of the prewarm list)
     *made = 1;
     return p;

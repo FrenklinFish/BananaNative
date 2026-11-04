@@ -63,7 +63,7 @@ Donkey Kong Bananza only for now: preparing Mario Kart World on the phone runs o
 
 Settings (the gear) › **Readiness check** tells you what your phone is missing, with a button to fix most items.
 
-Saves are in `Switch2/saves/<title ID>/`, next to your game folder, so uninstalling the app keeps them. A game's ⋯ menu backs them up and restores them.
+Saves and prepared packs are in the app's own storage (`Android/data/<app>/files/saves` and `packs`). When you uninstall, Android asks whether to keep that data. A game's ⋯ menu backs saves up to `Switch2/save-backups/<title ID>/` (kept when the app is uninstalled) and restores them, and exports or imports the pack as one .zip. A save from version 0.1.0 or older, in `Switch2/saves/<title ID>/`, is copied into the app at the game's next start; that folder is left as it was.
 
 ## Features
 

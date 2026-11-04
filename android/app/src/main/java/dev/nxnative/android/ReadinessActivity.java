@@ -166,9 +166,19 @@ public final class ReadinessActivity extends Activity {
             if (st != null) l.add(st);
             l.addAll(Readiness.evaluate(f, Readiness.parseReqs(p.reqs)));
             String own = GpuDriver.choice(c, p.titleId);
-            if (own != null) l.add(new Readiness.Check("Its own GPU driver", Readiness.Status.INFO, "Checked on that driver when the game starts.", null));
+            if (own != null) {
+                // This screen probes the main screen's driver only (the driver opens once a process, vka_driver_open): a game with another driver of its own is
+                // checked on that one when it starts, and that check can differ from this screen's
+                GpuDriver.Info g = GpuDriver.selected(c, p.titleId);
+                String gl = g == null ? "System" : g.label(), ml = d == null ? "System" : d.label();
+                boolean same = g == null ? d == null : d != null && g.dir.equals(d.dir);
+                l.add(same ? new Readiness.Check("Its own GPU driver", Readiness.Status.INFO, gl + ", the one this screen checked.", "driver")
+                        : new Readiness.Check("Its own GPU driver", Readiness.Status.WARNING, "This game uses its own GPU driver, " + gl + "; this screen checked " + ml
+                                + ". The check before the game starts uses the game's driver, and its result can differ from this one.", "driver"));
+            }
             String name = p.titleId;   // a game is named as the user's dump names it (its card), else by its title ID
             for (Game g : added) if (g.titleId.equals(p.titleId)) { name = g.name; break; }
+            for (Game g : added) if (g.titleId.equals(p.titleId)) l.add(gameFiles(g));
             r.sections.add(new Section(name, l));
             boolean fail = Readiness.any(l, Readiness.Status.FAIL), warn = Readiness.any(l, Readiness.Status.WARNING);
             if (fail) fails++; else if (warn) warns++;
@@ -297,9 +307,30 @@ public final class ReadinessActivity extends Activity {
         return m.totalMem / (double) (1L << 30);
     }
 
+    /**
+     * Whether the dump of an added game can be read: a folder (readable, with base/exefs/main.npdm or exefs/main.npdm), or a .nup (Nup.open: its header and the
+     * SHA-256 of its table of contents; its packages listed)
+     */
+    static Readiness.Check gameFiles(Game g) {
+        File f = new File(g.gameDir);
+        if (Nup.isNup(f)) {
+            try {
+                Nup n = Nup.open(f);
+                StringBuilder s = new StringBuilder();
+                for (Nup.Pkg p : n.packages) s.append(s.length() == 0 ? "" : ", ").append(p.selector() != null ? p.selector() : "kind " + p.kind);
+                return new Readiness.Check("Game files", Readiness.Status.PASS, f + ": a .nup that reads and checks (" + s + ").", null);
+            } catch (IOException e) {
+                return new Readiness.Check("Game files", Readiness.Status.FAIL, f + " cannot be used: " + e.getMessage(), f.canRead() ? null : "access");
+            }
+        }
+        if (!f.isDirectory() || !f.canRead()) return new Readiness.Check("Game files", Readiness.Status.FAIL, f + " is not a folder this app can read.", "access");
+        if (Pack.npdmOf(f) == null) return new Readiness.Check("Game files", Readiness.Status.FAIL, f + " has neither base/exefs/main.npdm nor exefs/main.npdm.", null);
+        return new Readiness.Check("Game files", Readiness.Status.PASS, f + ": a folder that reads.", null);
+    }
+
     /** The report's first lines: the build, the phone, Android, and the game when there is one */
     static String header(Context c, String game) {
-        return "nxnative readiness report: " + Prefs.buildTag() + "\nPhone: " + Build.MANUFACTURER + " " + Build.MODEL + " (" + Build.SOC_MANUFACTURER + " " + Build.SOC_MODEL + "), Android "
+        return "nxnative readiness report: " + Prefs.buildTag(c) + "\nSigner: " + Prefs.signerId(c) + " (SHA-256 of the signing certificate, first 16 hex digits)\nPhone: " + Build.MANUFACTURER + " " + Build.MODEL + " (" + Build.SOC_MANUFACTURER + " " + Build.SOC_MODEL + "), Android "
                 + Build.VERSION.RELEASE + " (SDK " + Build.VERSION.SDK_INT + "), " + Build.SUPPORTED_ABIS[0] + (game == null ? "" : "\nGame: " + game);
     }
 

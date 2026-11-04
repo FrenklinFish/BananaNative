@@ -151,8 +151,23 @@ HLE_FORCE("_ZN2nn2oe22SetCpuOverclockEnabledEb", "CPU overclock switch (through 
 // Switch 2 SDKs: the graphics scale, which the SDK takes from am's IGraphicsScalingParametersFunctions (a session the host never opened: null read in
 // oe::GetGraphicsScalingParameters). The SDK maps the parameter's first word 10 / 20 / 30 to scale 0 / 1 / 2. Donkey Kong Bananza keeps it as a quality tier: a byte of its graphics
 // settings (+0x1c7, main+0x549348, next to the handheld flag it takes from the operation mode at +0x1c4), and an index into {3, 12, 16} (main+0x1d1a604) whose value less 3 (0, 9, 13)
-// goes to a renderer parameter (main+0x549614). Which tier the console reports in which mode is not measured: the host answers 0 handheld and 1 console, following the operation mode
-HLE_FORCE("_ZN2nn2oe23GetCurrentGraphicsScaleEv", "graphics scale (Switch 2, through am): 0 handheld, 1 console", int, h_oe_GfxScale, void) { return opmode() == 1; }
+// goes to a renderer parameter (main+0x549614). Which tier the console reports in which mode is not measured: the host answers 0 handheld and 1 console, following the operation mode.
+// Mario Kart World sizes its 3D scenes by it (its display state takes it at main+0x8728f4 in 1.8.0): handheld scale 0 draws 1920x1080, console scale 1 2048x1152 of its 3840x2160
+// window, scale 2 smaller still, and its final composite stretches the scene to the window. DM_GRAPHICS_SCALE=0, 1 or 2 answers that scale in every mode (the launcher's lower
+// resolution on a phone GPU); GetGraphicsScalingParameters answers the matching 10 / 20 / 30, so the SDK's two queries agree
+static int g_gfx_scale = -1;   // -1 not read yet, 0-2 DM_GRAPHICS_SCALE, 3 following the operation mode
+static int gfx_scale(void) {
+    int v = g_gfx_scale;
+    if (v < 0) {
+        const char *e = getenv("DM_GRAPHICS_SCALE");
+        if (e && *e >= '0' && *e <= '2' && !e[1]) { v = *e - '0'; LOG("oe: graphics scale %d in every operation mode (DM_GRAPHICS_SCALE)", v); }
+        else { if (e && *e) LOG("[RED] DM_GRAPHICS_SCALE=%s: must be 0, 1 or 2; the scale follows the operation mode", e); v = 3; }
+        g_gfx_scale = v;
+    }
+    return v < 3 ? v : opmode() == 1;
+}
+HLE_FORCE("_ZN2nn2oe23GetCurrentGraphicsScaleEv", "graphics scale (Switch 2, through am): 0 handheld, 1 console (DM_GRAPHICS_SCALE: 0-2 in every mode)", int, h_oe_GfxScale, void) { return gfx_scale(); }
+HLE_FORCE("_ZN2nn2oe28GetGraphicsScalingParametersEv", "graphics scaling parameters (Switch 2, through am): 10 / 20 / 30 for graphics scale 0 / 1 / 2", unsigned, h_oe_GfxScaleParams, void) { return 10u * (gfx_scale() + 1); }
 HLE_FORCE("_ZN2nn2oe42SetGraphicsScaleChangedNotificationEnabledEb", "graphics scale change notification (Switch 2, through am); the scale changes only with the operation mode",
           void, h_oe_GfxScaleNotify, unsigned on) { (void)on; }
 // The frame length the game aims at (Switch 2 SDKs): oe::SetGraphicsTargetFrameRate maps up to 59 fps to mode 1, up to 119 to mode 2 and above to mode 3, SetGraphicsTargetFrameRateAuto

@@ -52,6 +52,118 @@ static Result write_save(const char *path, const char *s) {           // open ->
 }
 static int read_fs(const char *path, char *out, size_t n) { uint64_t h; size_t got = 0; if (h_fs_OpenFile(&h, path, MODE_READ)) return 0; Result r = h_fs_ReadFile(&got, h, 0, out, n - 1); h_fs_CloseFile(h); out[got] = 0; return !r; }
 
+// ---------- NUP container (nup_image.h, android/NUP.md) ----------
+// A .nup written here from SPEC.md's layout, independently of dm/tools/nup_pack.py: four packages (base, two updates, an add-on), raw, empty and
+// zstd files, and one extent shared by two files (dedup)
+#include "nup_fixture_zst.h"
+static void nup_fixture_text(char *out) { for (int i = 0; i < 3000; i++) out += sprintf(out, "line %05d of the compressed file\n", i); }
+enum { NUP_ND = 10, NUP_NF = 8 };
+static size_t nup_fixture(uint8_t *o) {   // returns the file's size; o has room for 8 KiB
+    static const struct { const char *name; int kids[3], nk; } D[NUP_ND] = {
+        {"", {1}, 1}, {"romfs", {2, 10 + 0}, 2}, {"data", {10 + 1, 10 + 2, 10 + 3}, 3},          // base: romfs/{data/{a,e,z}, top.txt}
+        {"", {4}, 1}, {"romfs", {5}, 1}, {"data", {10 + 4, 10 + 5}, 2},                          // update 65536: romfs/data/{a,z}
+        {"", {7}, 1}, {"romfs", {10 + 6}, 1},                                                     // update 131072: romfs/v2.txt
+        {"", {9}, 1}, {"romfs", {10 + 7}, 1}};                                                    // add-on 040074a01bf13001: romfs/d.txt
+    static const struct { const char *name, *data; int zstd, share; } F[NUP_NF] = {
+        {"top.txt", "base-top"}, {"a", "hello"}, {"e", ""}, {"z", NULL, 1}, {"a", "HELLO"}, {"z", NULL, 1, 3}, {"v2.txt", "two"}, {"d.txt", "dlc"}};
+    static const struct { uint64_t tid; uint32_t root, romfs, ver; uint8_t kind; } P[4] = {
+        {0x040074A01BF12000ull, 0, 1, 0, 0}, {0x040074A01BF12000ull, 3, 4, 65536, 1}, {0x040074A01BF12000ull, 6, 7, 131072, 1}, {0x040074a01bf13001ull, 8, 9, 0, 2}};
+    uint8_t toc[4096] = {0}; char pool[256]; size_t pl = 0, no[NUP_ND + NUP_NF];
+    for (int i = 0; i < NUP_ND + NUP_NF; i++) { const char *n = i < NUP_ND ? D[i].name : F[i - NUP_ND].name; no[i] = pl; memcpy(pool + pl, n, strlen(n)); pl += strlen(n); }
+    size_t o_pk = 0x30, o_dir = o_pk + 4 * 0x40, o_file = o_dir + NUP_ND * 0x18, o_kids = o_file + NUP_NF * 0x50, nkids = 0;
+    for (int i = 0; i < NUP_ND; i++) nkids += D[i].nk;
+    size_t o_pool = o_kids + 4 * nkids, toc_size = o_pool + pl, blob = (0x80 + toc_size + 15) & ~(size_t)15, at = blob;
+    #define W32(b, off, v) do { uint32_t _v = (uint32_t)(v); memcpy((b) + (off), &_v, 4); } while (0)
+    #define W64(b, off, v) do { uint64_t _v = (uint64_t)(v); memcpy((b) + (off), &_v, 8); } while (0)
+    memcpy(toc, "TOC\x01", 4); W32(toc, 4, 4); W64(toc, 8, NUP_ND); W64(toc, 0x10, NUP_NF); W64(toc, 0x18, o_pool); W64(toc, 0x20, pl);
+    for (int i = 0; i < 4; i++) { uint8_t *p = toc + o_pk + 0x40 * i; W64(p, 0, P[i].tid); W32(p, 8, P[i].root); W32(p, 0xC, NUP_NONE); W32(p, 0x10, P[i].romfs); W32(p, 0x14, P[i].ver); p[0x18] = P[i].kind; }
+    size_t slot = 0;
+    for (int i = 0; i < NUP_ND; i++) { uint8_t *d = toc + o_dir + 0x18 * i; W32(d, 0, no[i]); W32(d, 4, strlen(D[i].name)); W32(d, 8, slot); W32(d, 12, D[i].nk);
+        for (int j = 0; j < D[i].nk; j++) W32(toc, o_kids + 4 * slot++, D[i].kids[j]); }
+    uint64_t xo[NUP_NF] = {0};
+    for (int i = 0; i < NUP_NF; i++) {
+        uint8_t *r = toc + o_file + 0x50 * i; size_t size = F[i].zstd ? 102000 : strlen(F[i].data), stored = F[i].zstd ? nup_zst_len : size;
+        if (F[i].share) xo[i] = xo[F[i].share];
+        else if (stored) { xo[i] = at; memcpy(o + at, F[i].zstd ? (const char *)nup_zst : F[i].data, stored); at = (at + stored + 15) & ~(size_t)15; }
+        W32(r, 0, no[NUP_ND + i]); W32(r, 4, strlen(F[i].name)); W64(r, 8, size); W64(r, 0x10, stored ? xo[i] : 0); W64(r, 0x18, stored); r[0x40] = (uint8_t)F[i].zstd;
+    }
+    memcpy(toc + o_pool, pool, pl);
+    size_t fsize = at;   // the last extent's padding is part of the file here (SPEC: gaps are zero padding)
+    uint8_t *s = o; memset(s, 0, 0x80); memcpy(s, "NUP\x01", 4); s[4] = 0x80; s[6] = 1; W64(s, 8, 0x80); W64(s, 0x10, toc_size);
+    plat_sha256(toc, toc_size, s + 0x18); W64(s, 0x38, blob); W64(s, 0x40, fsize); W32(s, 0x48, 4);
+    memcpy(o + 0x80, toc, toc_size);
+    #undef W32
+    #undef W64
+    return fsize;
+}
+static void nup_write(const char *p, const uint8_t *b, size_t n) { FILE *f = fopen(p, "wb"); fwrite(b, 1, n, f); fclose(f); }
+static void nup_tests(const char *root) {
+    printf("NUP container\n");
+    static uint8_t b[8192]; static char want[102001], got[102001];
+    size_t n = nup_fixture(b); nup_fixture_text(want);
+    char np[1100], spec[1200]; snprintf(np, sizeof np, "%s/game.nup", root); nup_write(np, b, n);
+    unsetenv("DM_ROMFS_OVERLAY"); unsetenv("DM_NUP_CACHE_MB"); g_nmnt = 0;
+    setenv("DM_ROMFS", np, 1);
+    CHECK(h_fs_MountRom("rom", NULL, 0) == RES_OK && g_mnt[0].img, "a .nup with no selector mounts");
+    CHECK(read_fs("rom:/v2.txt", got, sizeof got) && !strcmp(got, "two"), "with no selector the RomFS is the newest update's (131072)");
+    { uint64_t h; CHECK(h_fs_OpenFile(&h, "rom:/data/a", MODE_READ) == RES_PATH_NOT_FOUND, "the older update's files are not in it"); }
+    g_nmnt = 0;
+    snprintf(spec, sizeof spec, "%s:update/65536/romfs", np); setenv("DM_ROMFS", spec, 1);
+    CHECK(h_fs_MountRom("rom", NULL, 0) == RES_OK && read_fs("rom:/data/a", got, sizeof got) && !strcmp(got, "HELLO"), "update/65536/romfs selects that update");
+    {   uint64_t h; int64_t sz = 0; size_t r1 = 0, r2 = 0, r3 = 0;
+        CHECK(h_fs_OpenFile(&h, "rom:/data/z", MODE_READ) == RES_OK && h_fs_GetFileSize(&sz, h) == RES_OK && sz == 102000, "a zstd file opens with its uncompressed size (%lld)", (long long)sz);
+        CHECK(h_fs_ReadFile(&r1, h, 0, got, 40000) == RES_OK && h_fs_ReadFile(&r2, h, 40000, got + 40000, 70000) == RES_OK && r1 == 40000 && r2 == 62000 && !memcmp(got, want, 102000),
+              "a zstd file reads in pieces, the last one cut at its end (%zu + %zu)", r1, r2);
+        CHECK(h_fs_ReadFile(&r3, h, 102000, got, 10) == RES_OK && r3 == 0, "a read at the end gives 0 bytes");
+        nup_aux *a = g_mnt[0].img->aux;
+        CHECK(a->nz == 1 && a->z[0].refs == 1 && a->held == 102000, "the open holds the decompressed bytes (refs %u, held %llu)", a->z[0].refs, (unsigned long long)a->held);
+        h_fs_CloseFile(h);
+        CHECK(a->z[0].refs == 0 && a->z[0].buf, "closed, the bytes stay cached within the budget");
+    }
+    g_nmnt = 0; setenv("DM_NUP_CACHE_MB", "0", 1);
+    snprintf(spec, sizeof spec, "%s:base", np); setenv("DM_ROMFS", spec, 1);
+    CHECK(h_fs_MountRom("rom", NULL, 0) == RES_OK && read_fs("rom:/top.txt", got, sizeof got) && !strcmp(got, "base-top"), ":base selects the base");
+    CHECK(read_fs("rom:/data/e", got, sizeof got) && !got[0], "an empty file reads as empty");
+    CHECK(read_fs("rom:/data/z", got, sizeof got) && !memcmp(got, want, 102000), "the file sharing the zstd extent reads the same bytes");
+    { nup_aux *a = g_mnt[0].img->aux; CHECK(!a->z[0].buf && !a->held, "with DM_NUP_CACHE_MB=0 nothing stays cached after close"); }
+    { int t = -1; CHECK(h_fs_GetEntryType(&t, "rom:/data") == RES_OK && t == ENT_DIR, "a directory is a directory"); }
+    unsetenv("DM_NUP_CACHE_MB");
+    // a large compressed file (here: DM_NUP_DISK_MB of 0.05 MiB, the 102,000-byte file is "large") is decompressed into a temporary file and mapped: the same bytes,
+    // not in the cache's budget, kept after close
+    g_nmnt = 0; setenv("DM_NUP_DISK_MB", "0.05", 1); setenv("TMPDIR", root, 1);
+    snprintf(spec, sizeof spec, "%s:update/65536/romfs", np); setenv("DM_ROMFS", spec, 1);
+    {   uint64_t h; size_t r1 = 0, r2 = 0; memset(got, 0, sizeof got);
+        CHECK(h_fs_MountRom("rom", NULL, 0) == RES_OK && h_fs_OpenFile(&h, "rom:/data/z", MODE_READ) == RES_OK, "a large zstd file opens");
+        CHECK(h_fs_ReadFile(&r1, h, 0, got, 50000) == RES_OK && h_fs_ReadFile(&r2, h, 50000, got + 50000, 60000) == RES_OK && r1 == 50000 && r2 == 52000 && !memcmp(got, want, 102000),
+              "a large zstd file reads its bytes from the temporary file (%zu + %zu)", r1, r2);
+        nup_aux *a = g_mnt[0].img->aux;
+        CHECK(a->z[0].mapped && a->held == 0, "it is mapped from a temporary file, outside the cache's budget (mapped %d, held %llu)", a->z[0].mapped, (unsigned long long)a->held);
+        h_fs_CloseFile(h);
+        CHECK(a->z[0].buf && a->ndec == 1, "closed, the map stays: no second decompression at the next open");
+        char tl[1200]; snprintf(tl, sizeof tl, "%s/nup-", root); DIR *d = opendir(root); int left = 0; struct dirent *de;
+        while (d && (de = readdir(d))) if (!strncmp(de->d_name, "nup-", 4)) left++;
+        if (d) closedir(d);
+        CHECK(!left, "the temporary file is unlinked (%d left in %s)", left, root); (void)tl;
+    }
+    g_nmnt = 0; unsetenv("DM_NUP_DISK_MB"); unsetenv("TMPDIR");
+    {   char aocd[1100], ln[1200]; size_t cache = 0; snprintf(aocd, sizeof aocd, "%s/aocnup", root); mkdir(aocd, 0755);
+        snprintf(ln, sizeof ln, "%s/1.nup", aocd); unlink(ln); CHECK(!symlink(np, ln), "link 1.nup to the .nup"); setenv("DM_AOC_DIR", aocd, 1);
+        CHECK(h_fs_QueryAocCache(&cache, 1) == RES_OK && cache > 0x30, "the add-on reports a table size (%zu)", cache);
+        CHECK(h_fs_MountAoc("aocn", 1, NULL, 0) == RES_OK && read_fs("aocn:/d.txt", got, sizeof got) && !strcmp(got, "dlc"), "add-on 1 mounts from the addon package whose title ID ends in 001");
+        CHECK(h_fs_MountAoc("aocm", 2, NULL, 0) == RES_TARGET_NOT_FOUND, "an index with no link is not found");
+        unsetenv("DM_AOC_DIR");
+    }
+    snprintf(spec, sizeof spec, "%s:addon/040074a01bf13001", np); { romfs_img *m = img_open(spec); CHECK(m && m->n == 2, "addon/<title ID> selects the add-on"); romfs_image_close(m); }
+    snprintf(spec, sizeof spec, "%s:update/1", np); CHECK(!img_open(spec), "an update that is not there is refused");
+    snprintf(spec, sizeof spec, "%s:patch", np); CHECK(!img_open(spec), "an unknown selector is refused");
+    {   char bp[1100]; snprintf(bp, sizeof bp, "%s/bad.nup", root);
+        uint8_t c[8192]; memcpy(c, b, n); c[0x80 + 0x40] ^= 1; nup_write(bp, c, n); CHECK(!img_open(bp), "a changed TOC byte fails its SHA-256");
+        nup_write(bp, b, n - 16); CHECK(!img_open(bp), "a cut-off .nup is refused (file size)");
+        memcpy(c, b, n); c[0x4C] = 1; nup_write(bp, c, n); CHECK(!img_open(bp), "unknown superblock flags are refused");
+    }
+    g_nmnt = 0; unsetenv("DM_ROMFS");
+}
+
 int main(void) {
     char root[1024], save[1100], work[1200], p[1200];
     const char *sp = getenv("TMPDIR"); snprintf(root, sizeof root, "%s/t_fs.XXXXXX", sp ? sp : "/private/tmp");
@@ -140,6 +252,7 @@ int main(void) {
         f = fopen(ip, "wb"); fwrite(img, 1, 39 + 50, f); fclose(f);   // cut off inside the index, as a copy stopped partway
         CHECK(!img_open(ip), "a cut-off image is refused");
     }
+    nup_tests(root);
     snprintf(save, sizeof save, "%s/save", root); snprintf(work, sizeof work, "%s.work", save);
     mkdir(save, 0755); snprintf(p, sizeof p, "%s/a", save); put(p, "old");
     setenv("DM_SAVE", save, 1); setenv("DM_TEST_FS_FAIL", "write:5:28", 1);   // the 5th save write fails, errno 28 = ENOSPC

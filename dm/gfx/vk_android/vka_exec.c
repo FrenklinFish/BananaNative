@@ -475,6 +475,7 @@ static void clear_color(const p_clear_color *c) {
     if (!im || !vka_fmt_of(hv && v->set_format ? v->format : t->d.format, &f)) return;
     if (f.kind) { VRED_ONCE("color clear of a depth texture (format %#x)", t->d.format); return; }
     if ((c->mask & 0xf) != 0xf) { VRED_ONCE("color clear with channel mask %#x is not on Vulkan yet (needs a pipeline): skipped", c->mask); return; }
+    vka_tex_own(im, g_cb);   // (zero-shared: memory of its own before the clear, which may also become the next pass's loadOp)
     uint32_t lv, l0, nl; rt_range(im, v, hv, &lv, &l0, &nl);
     if (lv >= im->levels || !nl) return;
     VkRect2D rc; int part = scissored(im, lv, &rc);
@@ -544,6 +545,7 @@ static void clear_ds(const p_clear_ds *c) {
     if (S.rc_skip || !S.has_rt || !S.rt.depth) return;
     vka_img *im = vka_tex_get(S.rt.depth, g_cb);
     if (!im || im->f.kind < 3) return;
+    vka_tex_own(im, g_cb);
     VkImageAspectFlags asp = 0; unsigned sm = (unsigned)c->stencil_mask & 0xff;
     if (c->depth_mask && (im->aspect & VK_IMAGE_ASPECT_DEPTH_BIT)) asp |= VK_IMAGE_ASPECT_DEPTH_BIT;
     int masked = sm && sm != 0xff && (im->aspect & VK_IMAGE_ASPECT_STENCIL_BIT);   // drawn (stencil_masked)
@@ -567,6 +569,7 @@ static void clear_tex(const p_clear_tex *c) {
     if (!im || !vka_fmt_of(c->has_view && c->view.set_format ? c->view.format : c->tex->d.format, &f)) return;
     if (f.kind >= 3) { VRED_ONCE("ClearTexture of a depth / stencil texture (format %#x)", c->tex->d.format); return; }
     if ((c->mask & 0xf) != 0xf) { if (c->mask & 0xf) VRED_ONCE("ClearTexture with channel mask %#x is not on Vulkan yet: skipped", c->mask); return; }
+    vka_tex_own(im, g_cb);
     uint32_t lv = c->has_view && c->view.set_levels ? c->view.base_level : 0, l0 = (c->has_view && c->view.set_layers ? c->view.min_layer : 0) + (uint32_t)c->r.zoffset, nl = c->r.depth > 0 ? (uint32_t)c->r.depth : 1;
     if (!vka_img_lv(im, &lv)) return;
     uint32_t all = vka_img_slices(im, lv); int is3d = im->d.target == NVN_TEXTURE_TARGET_3D;
@@ -594,6 +597,7 @@ static void copy_bt(const p_copy_b2t *c, int to_tex) {
     if (!c->tex) return;
     vka_img *im = vka_tex_get(c->tex, g_cb);
     if (!im) return;
+    if (to_tex) vka_tex_own(im, g_cb);
     VkImageAspectFlags asp = copy_aspect(im, to_tex ? "buffer → texture copy" : "texture → buffer copy"); if (!asp) return;
     if (im->samples > 1) { VRED_ONCE("buffer copy of a multisampled texture"); return; }
     const vka_fmt *f = &im->f;
@@ -636,6 +640,7 @@ static void copy_t2t(const p_copy_t2t *c) {
     if (!c->src || !c->dst) return;
     vka_img *s = vka_tex_get(c->src, g_cb), *d = vka_tex_get(c->dst, g_cb);
     if (!s || !d) return;
+    vka_tex_own(d, g_cb);
     unsigned sl = c->has_sv && c->sv.set_levels ? c->sv.base_level : 0, dl = c->has_dv && c->dv.set_levels ? c->dv.base_level : 0;
     unsigned sz0 = c->has_sv && c->sv.set_layers ? c->sv.min_layer : 0, dz0 = c->has_dv && c->dv.set_layers ? c->dv.min_layer : 0;
     if (!vka_img_lv(s, &sl) || !vka_img_lv(d, &dl)) return;

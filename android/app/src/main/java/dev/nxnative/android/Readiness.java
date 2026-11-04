@@ -35,10 +35,14 @@ final class Readiness {
     }
 
     static final class Check {
-        final String title, message, fix;
+        final String title, message, fix, fact;
         final Status status;
 
-        Check(String title, Status status, String message, String fix) {
+        Check(String title, Status status, String message, String fix) { this(title, status, message, fix, null); }
+
+        /** fact: the requirement's fact key (Req.fact) when the check is one, so a caller can tell what failed without matching titles */
+        Check(String title, Status status, String message, String fix, String fact) {
+            this.fact = fact;
             this.title = title;
             this.status = status;
             this.message = message;
@@ -147,7 +151,7 @@ final class Readiness {
                 String msg = (r.required ? "This device lacks it; this game needs it. " : "Missing: this game runs without it, with less. ")
                         + (r.why.isEmpty() ? "" : r.why.substring(0, 1).toUpperCase(Locale.ROOT) + r.why.substring(1) + ". ")
                         + "(" + label(r.fact) + " " + shown + ", needs " + r.min + ")";
-                out.add(new Check(r.title, r.required ? Status.FAIL : Status.WARNING, msg, r.fact.equals("ram_gib") ? "memory" : "driver"));
+                out.add(new Check(r.title, r.required ? Status.FAIL : Status.WARNING, msg, r.fact.equals("ram_gib") ? "memory" : "driver", r.fact));
             }
         }
         return out;

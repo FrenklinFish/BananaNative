@@ -24,7 +24,7 @@ romfs_marker	motor_asset_re/KIDS_PLATFORM_OUNCE/root.rdb
 zip_store	.fdata:.file:.rdb:.webm:.metallib
 
 # ---- Memory ----
-# The Switch 2 leaves games 9 GB of its 12 GB (Donkey Kong Bananza's figure, not measured here). The NPDM declares no system resource (META +0x14 = 0): no virtual address memory.
+# The Switch 2 leaves games 9 GB of its 12 GB (Donkey Kong Bananza's figure). The game takes all of it with SetHeapSize (8.92 GB) and makes 4,988 MiB of memory pools in it; the opening touches 4.6 GB (phone, README.md Memory). The NPDM declares no system resource (META +0x14 = 0): no virtual address memory.
 # 256 MB in front + 256 MB alias region + 256 MB stack region + 9 GB heap region
 mem_reserve	0x270000000
 mem_alias	0x10000000

@@ -12,10 +12,21 @@
 #           binary search per path component; directories are numbered breadth-first.
 # The index comes last, so a copy cut off partway has no valid index (the header points past the end of the file) and the host refuses it.
 # Names are the guest names: a host name chosen on a case collision (.dm-case-N) is replaced by the one in its xattr, as hle_fs.c's guest_name does.
+# The folder may be a NUP package's RomFS (`game.nup:update/458752/romfs`, android/NUP.md), read through romfs.py.
 # Usage: romfs_image.py [--reuse] <RomFS folder> <out image>   (written to <out>.part, renamed at the end)
 # --reuse checks the source tree's names and file metadata, the packer's version and the image's identity before keeping a previous image.
-import argparse, hashlib, json, os, struct, subprocess
+import argparse, hashlib, json, os, struct, subprocess, sys
 from pathlib import Path
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import romfs
+
+
+def _nup(path): return '.nup:' in os.fspath(path)   # a NUP package's file (romfs.py); every other path through os, as before
+
+
+def _scandir(path): return romfs.scandir(path) if _nup(path) else os.scandir(path)
+def _open(path): return romfs.open(path, 'rb') if _nup(path) else open(path, 'rb')
+
 
 MAGIC = b'DMROMFS1'
 HEAD = struct.Struct('<8sQQQ')
@@ -31,7 +42,7 @@ def guest(parent, name):
 
 def children(path):
     out = []
-    with os.scandir(path) as it:
+    with _scandir(path) as it:
         for e in it:
             out.append((guest(path, e.name).encode(), e.path, e.is_dir(follow_symlinks=True)))
     out.sort()
@@ -52,7 +63,7 @@ def entries(src):
 
 
 def file_identity(path):
-    s = os.stat(path)
+    s = romfs.stat(path) if _nup(path) else os.stat(path)
     return [s.st_dev, s.st_ino, s.st_size, s.st_mtime_ns, s.st_ctime_ns]
 
 
@@ -81,7 +92,7 @@ def pack(src, dst, reuse=False):
         off = HEAD.size
         for e in ents:
             if e[2]: continue
-            with open(e[1], 'rb') as f:
+            with _open(e[1]) as f:
                 n = 0
                 while True:
                     b = f.read(8 << 20)

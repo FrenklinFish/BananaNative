@@ -53,8 +53,33 @@ final class Ondevice {
     /** Prepare the dump (MainActivity's Add game, a game card's Prepare again): checked off the main thread, then asked before anything is written */
     static void prepare(MainActivity a, File dump, boolean again) { if (panel != null && panel.a == a) panel.picked(dump, false, null, again); }
 
-    /** Whether a folder is a dump Prepare can start from (base/exefs/main.npdm and updates/): one version's folder (exefs/, romfs/) needs a pack made elsewhere */
-    static boolean isDump(File dir) { return new File(dir, "base/exefs/main.npdm").isFile() && new File(dir, "updates").isDirectory(); }
+    /** Shaders a delta update of this pack translates (the profile's manifest rows for the pack's older libraries, ShaderLibs.toTranslate), -1 when the manifest has none of them */
+    static int deltaShaders(File packDir, String titleId) { return Pack.deltaShaders(packDir, titleId); }
+
+    /** What making a pack's shaders does and takes, for Prepare's dialogs: an update of the changed ones when the manifest knows the pack's older library, else all of them */
+    static String shadersText(File packDir, String titleId) {
+        int n = deltaShaders(packDir, titleId);
+        Profile p = Profile.of(titleId);
+        if (n >= 0 && p != null) return String.format(Locale.getDefault(), "Updates the shaders from your dump: %,d of the %,d changed in this app version (%s, in the background).",
+                n, p.shaderTotal, ShaderLibs.minutesText(n));
+        return "Makes the shaders from your dump (" + (p != null ? ShaderLibs.minutesText(p.shaderTotal) : "about 20-35 minutes") + ", in the background).";
+    }
+
+    private static final java.util.Set<String> autoTried = new java.util.HashSet<>();
+
+    /**
+     * A shader update the user need not ask for: a dump whose pack has an older library the profile's delta manifest knows (deltaShaders) is updated in the background
+     * with no question, once per app process (a failed or paused job is resumed once). The game card then shows it, and Play stays on when that library is playable
+     * (Pack.playableLibrary); otherwise Play waits for it as before. Only the card's own pack is updated (card = true): never the pack Folders.packFor would pick
+     * (a game added with another pack, e.g. the play app's beside the dump), never a whole job, never a job for another pack folder
+     */
+    static void autoUpdate(MainActivity a, File dump, File packDir, String titleId) {
+        if (panel == null || panel.a != a || panel.alive() || deltaShaders(packDir, titleId) < 0 || !autoTried.add(dump.getPath())) return;
+        panel.picked(dump, true, packDir, false, true);
+    }
+
+    /** Whether a folder or .nup is a dump Prepare can start from: an update, or a base game with its code and RomFS (Pack.isDump; DumpCheck checks it fully) */
+    static boolean isDump(File dir) { return Pack.isDump(dir); }
     static void resume(MainActivity a) { if (panel != null && panel.a == a) panel.resume(); }
 
     static void pause(MainActivity a) { if (panel != null && panel.a == a) panel.pause(); }
@@ -72,8 +97,8 @@ final class Ondevice {
     }
 
     /** adb: am start -n dev.nxnative.android/.MainActivity (play app: dev.nxnative.android.play/dev.nxnative.android.MainActivity) --es ondevice_dump <dump folder> [--ez ondevice_start true] [--ez ondevice_pause true]
-     *  [--es ondevice_pack <pack folder>] [--ez show_when_locked true] (TESTING.md). ondevice_pack: the job writes its pack there instead of the dump's work folder's
-     *  android-pack, and a pack already beside the dump is not adopted (agents' test runs: <work>/ondevice/test-pack, so the user's pack is never written) */
+     *  [--es ondevice_pack <pack folder>] [--ez show_when_locked true] (TESTING.md). ondevice_pack: the job writes its pack there instead of the app's
+     *  packs/<id> (AppStorage.pack), and a pack already there or beside the dump is not adopted (agents' test runs: <work>/ondevice/test-pack, so the user's pack is never written) */
     static void fromIntent(MainActivity a, Intent i) {
         if (panel != null && panel.a != a) return;   // a panel of an activity gone (the launcher was recreated on its Settings page)
         // Tests over adb on a locked phone: the launcher shows over the lock screen (it stays locked; only this screen shows), so its screen can be checked and captured
@@ -296,21 +321,24 @@ final class Ondevice {
          */
         void picked(File dump, boolean start, File packOverride) { picked(dump, start, packOverride, false); }
 
-        void picked(File dump, boolean start, File packOverride, boolean again) {
+        void picked(File dump, boolean start, File packOverride, boolean again) { picked(dump, start, packOverride, again, false); }
+
+        /** card: an automatic update of a game card's pack (autoUpdate): packOverride is that pack, checked as the pack to keep; nothing else is started or asked */
+        void picked(File dump, boolean start, File packOverride, boolean again, boolean card) {
             if (a.needAccess()) return;
             android.widget.Toast.makeText(a, "Checking " + dump + "…", android.widget.Toast.LENGTH_SHORT).show();
             new Thread(() -> {
                 Found f = new Found();
                 try {
-                    String id = Pack.programId(new File(dump, "base/exefs/main.npdm"));
+                    String id = Nup.isNup(dump) ? Pack.titleIdOf(dump) : Pack.programId(new File(dump, "base/exefs/main.npdm"));
                     File jf = Job.fileOf(DumpCheck.workOf(dump, id));
                     if (jf.isFile()) f.existing = jf;
                 } catch (IOException e) {
                     // DumpCheck says what is wrong
                 }
                 f.r = DumpCheck.check(dump, f.existing == null);
-                if (f.r.ok() && packOverride == null) {
-                    f.packDir = Folders.packFor(a, f.r.dump, f.r.titleId);
+                if (f.r.ok() && (packOverride == null || card)) {
+                    f.packDir = card ? packOverride : Folders.packFor(a, f.r.dump, f.r.titleId);
                     try {
                         Pack p = f.packDir == null ? null : Pack.read(f.packDir);
                         if (p != null && !p.simulated && p.titleId.equals(f.r.titleId)) {
@@ -322,13 +350,13 @@ final class Ondevice {
                         // no usable pack: the whole job
                     }
                 }
-                h.post(() -> checked(f, start, packOverride, again));
+                h.post(() -> checked(f, start, packOverride, again, card));
             }, "nxpack-check").start();
         }
 
-        void checked(Found f, boolean start, File packOverride, boolean again) {
+        void checked(Found f, boolean start, File packOverride, boolean again, boolean card) {
             DumpCheck.Result r = f.r;
-            if (!r.ok()) { a.error(r.error); show(); return; }
+            if (!r.ok()) { if (!card) { a.error(r.error); show(); } return; }
             // A job in progress for this dump is resumed
             if (f.existing != null) {
                 try {
@@ -344,6 +372,7 @@ final class Ondevice {
                         return;
                     }
                     if (!s.equals("done") && !s.isEmpty()) {   // unfinished, for another pack folder: never written over (its job.json is this dump's)
+                        if (card) return;   // an automatic update leaves it to the user
                         a.error("An unfinished job for this dump writes to " + j.pack() + ": " + j.statusText(false) + "\n\nResume it from the card, or delete its working files "
                                 + "(⋯ › Delete working files) before preparing into another folder.");
                         Job.remember(a, f.existing);
@@ -360,6 +389,7 @@ final class Ondevice {
                 a.error(job.name() + " is being prepared now (" + job.statusText(true) + "). Pause it first, then try again.");
                 return;
             }
+            if (card && (f.pack == null || f.build != null)) return;   // an automatic update only updates the shaders of the card's own pack, when its code fits
             // A pack already there (the picked pack folder, else beside the dump): what fits is kept
             if (f.pack != null) {
                 File pd = f.packDir;
@@ -368,9 +398,11 @@ final class Ondevice {
                 if (!code && !shaders) { adopt(r, pd, false, false); return; }
                 Runnable redo = () -> adopt(r, pd, code, shaders);
                 if (start) { redo.run(); return; }
-                String what = code && shaders ? "Makes the game code and the shaders again from your dump (about 30-45 minutes, in the background)."
+                int delta = shaders ? deltaShaders(pd, r.titleId) : -1;
+                String what = code && shaders ? (delta >= 0 ? "Rewrites the game code (a few minutes). " + shadersText(pd, r.titleId)
+                                : "Makes the game code and the shaders again from your dump (" + ShaderLibs.jobMinutesText(Profile.of(r.titleId).shaderTotal) + ", in the background).")
                         : code ? "Rewrites the game code from your dump (a few minutes, in the background). The shaders are kept."
-                        : "Makes the shaders from your dump (about 20-35 minutes, in the background).";
+                        : shadersText(pd, r.titleId);
                 String why = (f.build != null ? f.build + "\n\n" : again && code ? "The pack's game code was made by other tools than this app's.\n\n" : "") + (lp != null ? lp + "\n\n" : "");
                 new AlertDialog.Builder(a).setTitle(code ? "Update the pack?" : "Prepare shaders?").setMessage(what + "\n\n" + why + "Pack: " + pd)
                         .setPositiveButton(code ? "Prepare again" : "Prepare", (d, w) -> redo.run())
@@ -379,12 +411,12 @@ final class Ondevice {
                 return;
             }
             Profile prof = Profile.of(r.titleId);   // DumpCheck refused a dump without one
-            String text = String.format(Locale.getDefault(), "Update %d, %d DLC.\n\nThe app builds the game's pack and %,d shaders from your dump, once: about 30-45 minutes "
-                    + "in the background, best on the charger. You can pause any time.\n\nNeeds about 1.5 GB (%.1f GB free), in %s.",
-                    r.version, r.dlc, prof.shaderTotal, r.free / 1073741824.0, r.work);
+            String text = String.format(Locale.getDefault(), "%s, %d DLC.\n\nThe app builds the game's pack and %,d shaders from your dump, once: %s "
+                    + "in the background, best on the charger. You can pause any time.\n\nNeeds about 1.5 GB (%.1f GB free): working files in %s, the pack in the app's storage (%s).",
+                    r.version == 0 ? "Base game" : "Update " + r.version, r.dlc, prof.shaderTotal, ShaderLibs.jobMinutesText(prof.shaderTotal), r.free / 1073741824.0, r.work, AppStorage.pack(a, r.titleId));
             Runnable go = () -> {
                 try {
-                    Job j = Job.create(r);
+                    Job j = Job.create(r, AppStorage.pack(a, r.titleId));
                     if (packOverride != null) j.pack(packOverride);
                     j.save();
                     Job.remember(a, j.file);
@@ -396,7 +428,23 @@ final class Ondevice {
                 }
             };
             if (start) go.run();
-            else confirm("Prepare " + prof.name + "?", text, "Prepare", go);
+            else askPrepare(r, prof, text, go);
+        }
+
+        /**
+         * Prepare's question for a dump with no pack that fits: Prepare or Cancel, and the two ways to a pack made elsewhere: "Use an existing pack…" (the folder
+         * picker; the picked folder becomes the game's, MainActivity.pickPackFor) and "Import pack…" (a .zip from Export pack… or a pack folder into the app's
+         * storage, PackUi; the game gets its card first, so the import has a game to go to)
+         */
+        void askPrepare(DumpCheck.Result r, Profile prof, String text, Runnable go) {
+            LinearLayout box = new LinearLayout(a);
+            box.setOrientation(LinearLayout.VERTICAL);
+            Ui.add(box, Ui.body(a, text), 0);
+            Ui.add(box, Ui.small(a, "Have a pack made elsewhere (on a computer, or exported from another phone)?"), 16);
+            AlertDialog[] d = new AlertDialog[1];
+            Ui.add(box, Ui.button(a, "Use an existing pack…", Ui.Kind.SOFT, v -> { d[0].dismiss(); a.pickPackFor(r.dump, r.titleId); }), 8);
+            Ui.add(box, Ui.button(a, "Import pack…", Ui.Kind.SOFT, v -> { d[0].dismiss(); PackUi.importPick(a, a.cardFor(r.dump, r.titleId)); }), 8);
+            d[0] = Ui.sheet(a, "Prepare " + prof.name + "?", box).setPositiveButton("Prepare", (x, w) -> go.run()).setNegativeButton("Cancel", null).show();
         }
 
         /** A pack that is already there (PackCheck): ready (a done job pointing at it, the game added to the list), or a job that redoes its code, its shaders or both */
@@ -507,11 +555,12 @@ final class Ondevice {
             });
         }
 
-        /** The pack folder this job made itself (<work>/android-pack, or the simulated engine's ondevice/fake-pack), else null: an adopted pack is the user's */
+        /** The pack folder this job made itself (the app's packs/<id>, an older job's <work>/android-pack, or the simulated engine's ondevice/fake-pack), else null: an adopted pack is the user's */
         File ownPack(Job j) {
             if (!j.ownsPack()) return null;   // a folder that was there before the job (a Mac pack, an adopted one) is the user's
             File p = j.pack(), w = j.work();
-            return p.getParentFile() != null && (p.getParentFile().equals(w) || p.getParentFile().equals(j.dir())) && new File(p, "pack.tsv").isFile() ? p : null;
+            boolean ours = p.equals(AppStorage.pack(a, j.titleId())) || p.getParentFile() != null && (p.getParentFile().equals(w) || p.getParentFile().equals(j.dir()));
+            return ours && new File(p, "pack.tsv").isFile() ? p : null;
         }
 
         static boolean inside(File f, File dir) {

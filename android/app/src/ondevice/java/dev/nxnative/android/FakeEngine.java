@@ -18,7 +18,7 @@ import java.util.List;
  * where it was, as the real per-shader results will. NX_FAKE_RATE (shaders a second, default 250) and NX_FAKE_FAIL (a step's tool name: fails halfway) for tests.
  */
 final class FakeEngine implements PackEngine {
-    static final int SHADERS = 22852;   // DKB's shader count (ONDEVICE.md)
+    static final int DKB_SHADERS = 22852;   // DKB's shader count (ONDEVICE.md), for a game without a count in its profile
     private volatile boolean stop;
 
     @Override public boolean simulated() { return true; }
@@ -103,6 +103,7 @@ final class FakeEngine implements PackEngine {
 
     private int translate(PrintStream log, File cache, boolean fail) throws InterruptedException, IOException {
         cache.mkdirs();
+        final int SHADERS = Profile.of(game()) != null && Profile.of(game()).shaderTotal > 0 ? Profile.of(game()).shaderTotal : DKB_SHADERS;   // the game's shader map, as the real step
         File count = new File(cache, "fake.done");
         int done = 0;
         try {
@@ -174,7 +175,7 @@ final class FakeEngine implements PackEngine {
             if (!f.isFile()) write(f, "");
         }
         write(new File(out, "pack.tsv"), "format\t1\ntarget\tandroid\ntitle_id\t" + game() + "\nname\t" + (Profile.of(game()) != null ? Profile.of(game()).name : game()) + " (simulated)\nversion\t"
-                + System.getenv("NX_PACK_VERSION") + "\nmodules\tmain sdk\nromfs\tupdates/" + System.getenv("NX_PACK_VERSION") + "/romfs\nshaders\t" + rel + "\nsimulated\t1\n");
+                + System.getenv("NX_PACK_VERSION") + "\nmodules\tmain sdk\nromfs\t" + ("0".equals(System.getenv("NX_PACK_VERSION")) ? "base" : "updates/" + System.getenv("NX_PACK_VERSION")) + "/romfs\nshaders\t" + rel + "\nsimulated\t1\n");
         log.println("progress 1 1 pack");
         return 0;
     }

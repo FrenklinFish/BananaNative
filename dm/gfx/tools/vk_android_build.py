@@ -20,7 +20,8 @@
 #   translator's libdmsh_xlate (dmsh_xlate_android, export dmsh_xlate_main), SPIRV_VAL SPIRV-Tools' libSPIRV-Tools-shared (spvValidateWithOptions, Vulkan 1.3 environment)
 #   DMSH_VK_RESULTS the result folder (default <output>/v-<V>/results), DMSH_VK_BATCH shaders per translator call (default 64), DMSH_VK_PROGRESS a file the progress is also
 #   written to (JSON, replaced by rename), DMSH_VK_KEEP=0 deletes the result folder once the library is written, DMSH_VK_XLATE_J translator calls at once (default 1
-#   for the library form, J for the program), DMSH_VK_REQUIRE_ALL=1 writes no library unless every shader built (exit 1)
+#   for the library form, J for the program), DMSH_VK_REQUIRE_ALL=1 writes no library unless every shader built (exit 1) but
+#   those the profile's manifest of this version (vk_delta.tsv, a full Mac build) has as "-": every shader the Mac's build holds
 # Resumable: each shader's result (its modules, compressed, and its reflection) is one file <results>/<key>.r, written to a temporary name and renamed, stamped with
 #   the tools digest, the profile inputs digest, the validator's version and the key; a rerun skips every key with a valid result (a killed build resumes; a later build of the same version is a cache hit)
 #   and the library is written from the result files. Pixel shaders go first; the vertex shaders' padding reads their inputs from the pixel shaders' results.
@@ -34,28 +35,16 @@
 import ast, collections, concurrent.futures as cf, ctypes, hashlib, json, mmap, os, re, shutil, struct, subprocess, sys, tempfile, threading
 HERE = os.path.dirname(os.path.abspath(__file__)); GFX = os.path.dirname(HERE)
 sys.path.insert(0, HERE)
-import dmsh_chain, dmsh_abi as abi, dmsh_ampere, tool_lock, vk_android_spv as spv
+import dmsh_chain, dmsh_abi as abi, dmsh_ampere, tool_lock, vk_android_spv as spv, vk_android_delta as delta
 
 try: from compression import zstd   # Python 3.14; before it, pip install backports.zstd (shader_split.py needs it too)
 except ImportError:
     try: from backports import zstd   # pyright: ignore[reportMissingImports]
     except ImportError: zstd = None
 ABI_VK = os.path.join(GFX, 'nvn', 'dmsh_abi_vk.h'); HEADER_VK = os.path.join(GFX, 'nvn', 'dmsh_chain_vk.h')
-VK_FILES = ['tools/vk_android_build.py', 'tools/vk_android_spv.py', 'nvn/dmsh_abi_vk.h']
+VK_FILES = ['tools/vk_android_build.py', 'tools/vk_android_spv.py', 'tools/vk_android_delta.py', 'nvn/dmsh_abi_vk.h']
 SAME_TSV = os.path.join(HERE, 'vk_android_same.tsv')
-_DEFINE = re.compile(r'#define DMSH_VK_([A-Z][A-Z0-9_]*)[ \t]+(0x[0-9A-Fa-f]+|[1-9][0-9]*|0|"[^"\\]*")(?:[ \t]+//.*)?')
-
-
-def vk_values():
-    """{name without DMSH_VK_: int or str} of dmsh_abi_vk.h's #define lines (its structs are for C)"""
-    out = {}
-    for line in open(ABI_VK):
-        s = line.strip()
-        if not s.startswith('#define DMSH_VK_'): continue
-        m = _DEFINE.fullmatch(s)
-        if not m: raise ValueError(f'{ABI_VK}: not a definition this tool can read: {s}')
-        out[m.group(1)] = m.group(2)[1:-1] if m.group(2).startswith('"') else int(m.group(2), 0)
-    return out
+vk_values = delta.vk_values
 
 
 VK = vk_values()
@@ -85,14 +74,16 @@ def vk_version():
     return same_rows().get(d, d)
 
 
-def header_text(v):
+def header_text(v, a):
     return ('// Generated file (dm/gfx/tools/vk_android_build.py --header): the Android Vulkan shader library version this source tree expects. It covers DMSH_CHAIN\n'
-            '// (the translator front half), vk_android_build.py, vk_android_spv.py and dmsh_abi_vk.h; the replay loads only <library dir>/v-<V>/dmsh_vk.lib\n'
-            f'#define DMSH_VK_CHAIN "{v}"\n')
+            '// (the translator front half), vk_android_build.py, vk_android_spv.py, vk_android_delta.py and dmsh_abi_vk.h; the replay loads <library dir>/v-<V>/dmsh_vk.lib.\n'
+            '// DMSH_VK_ABI: what the replay reads of a library (vk_android_delta.py abi_digest); a library of another version with this ABI is played while its update runs\n'
+            f'#define DMSH_VK_CHAIN "{v}"\n'
+            f'#define DMSH_VK_ABI "{a}"\n')
 
 
-def committed_version():
-    m = re.search(r'#define DMSH_VK_CHAIN "([0-9a-f]+)"', open(HEADER_VK).read()) if os.path.exists(HEADER_VK) else None
+def committed_version(name='DMSH_VK_CHAIN'):
+    m = re.search(r'#define ' + name + r' "([0-9a-f]+)"', open(HEADER_VK).read()) if os.path.exists(HEADER_VK) else None
     return m.group(1) if m else None
 
 
@@ -297,13 +288,51 @@ if len(argv) == 2 and argv[0] == '--check':
     sys.exit(1 if _bad else 0)
 if argv == ['--version']: print(vk_version()); sys.exit(0)
 if argv == ['--digest']: print(tools_digest()); sys.exit(0)
-if argv == ['--header']: open(HEADER_VK, 'w').write(header_text(vk_version())); print(vk_version()); sys.exit(0)
+if argv == ['--header']: open(HEADER_VK, 'w').write(header_text(vk_version(), delta.abi_digest())); print(vk_version()); sys.exit(0)
+if argv == ['--abi']: print(delta.abi_digest()); sys.exit(0)
+if argv[:1] == ['--publish-delta'] and len(argv) >= 2:
+    # The manifest a full build wrote beside its library (<v-V folder>/vk_delta.tsv) into the profile (dm/games/<id>/vk_delta.tsv, which the APK carries): checked to be of
+    # this tree's version, the profile's game, inputs and keys, and to hold nothing but keys and hashes (vk_android_delta.py manifest_problems: a home path once leaked through
+    # translator binaries). "from" rows: how many shaders a phone with an older library translates, for the profile's previous manifest and each older library named;
+    # "stamp" rows: an older library named that differs from this build's library only in the header's version and abi (vk_android_delta.py stamp_only), with both SHA-256s
+    _d, _olds = argv[1], argv[2:]
+    _g = dmsh_chain.load_game()
+    try: _m = delta.parse_manifest(open(os.path.join(_d, delta.MANIFEST)).read())
+    except (OSError, ValueError) as _e: sys.exit(f'[RED] {_d}: no manifest a full build wrote: {_e}')
+    _keys = {c[3] for c in (l.rstrip('\n').split('\t') for l in open(_g.table('shader_map.tsv'))) if len(c) > 4 and c[0].endswith('.bin')}
+    _why = [w for w, bad in ((f'version {_m["version"]}, this tree makes {vk_version()}', _m['version'] != vk_version()), (f'game {_m["game"]}', _m['game'] != _g.id),
+                             (f'inputs {_m["inputs"]}, the profile\'s are {dmsh_chain.inputs(_g)}', _m['inputs'] != dmsh_chain.inputs(_g)),
+                             ('not the keys of the profile\'s shader_map.tsv', set(_m['hashes']) != _keys)) if bad]
+    if _why: sys.exit(f'[RED] {_d}/{delta.MANIFEST} is not this profile\'s full build of this tree: ' + '; '.join(_why))
+    _froms, _stamps = {}, {}
+    _new = os.path.join(_d, VK['LIB_FILE'])
+    _prof = str(_g.table(delta.MANIFEST))
+    try: _prev = delta.parse_manifest(open(_prof).read())
+    except FileNotFoundError: _prev = None
+    except ValueError as _e: sys.exit(f'[RED] {_prof}: {_e}')
+    if _prev and _prev['game'] == _g.id and _prev['version'] != _m['version']: _froms[_prev['version']] = len(delta.to_translate(_prev['hashes'], _m['hashes']))
+    if _prev and _prev['version'] == _m['version']: _froms.update(_prev['from']); _stamps.update(_prev['stamp'])   # published again: keep what was measured
+    for _o in _olds:
+        _L, _hs = delta.library_hashes(_o if _o.endswith('.lib') else os.path.join(_o, VK['LIB_FILE']), zstd, int(os.environ.get('J', '8'))); _L.close()
+        if _L.game != _g.id: sys.exit(f'[RED] {_o}: a library of game {_L.game}')
+        if _L.version != _m['version']: _froms[_L.version] = len(delta.to_translate(_hs, _m['hashes']))
+        _of = _o if _o.endswith('.lib') else os.path.join(_o, VK['LIB_FILE'])
+        if _L.version != _m['version'] and os.path.isfile(_new) and delta.stamp_only(_of, _new):   # byte-identity is the rule (a shader that builds nowhere counts in from)
+            _stamps[_L.version] = (delta.sha256_file(_of), delta.sha256_file(_new))
+    _text = delta.format_manifest(_m['version'], _g.id, _m['inputs'], _m['hashes'], _froms.items(), [(v, *h) for v, h in _stamps.items()])
+    open(_prof + '.tmp', 'w').write(_text); os.replace(_prof + '.tmp', _prof)
+    print(f'{_prof}: version {_m["version"]}, {len(_m["hashes"])} shaders ({sum(1 for h in _m["hashes"].values() if h == "-")} not built), {len(_text)} bytes; '
+          + (', '.join(f'from v-{v}: {n} to translate' for v, n in sorted(_froms.items())) or 'no older version measured')
+          + ''.join(f'; v-{v} restamps to this version' for v in sorted(_stamps)))
+    sys.exit(0)
 if len(argv) < 4 or argv[0] != '--target' or argv[1] not in ('vulkan', 'android'): sys.exit(__doc__ or 'usage: vk_android_build.py --target vulkan <package dir> <output cache dir> [key...] | --header | --version')
 dm_dir, cache_root, want = argv[2], argv[3], set(argv[4:])
 
 CHAIN = dmsh_chain.version(); VKV = vk_version(); TOOLS = tools_digest()
 if f'"{CHAIN}"' not in open(dmsh_chain.HEADER).read(): sys.exit(f'[RED] {dmsh_chain.HEADER} does not hold the current chain version {CHAIN}: run dmsh_chain.py --header first')
-if committed_version() != VKV: sys.exit(f'[RED] {HEADER_VK} does not hold the current Vulkan library version {VKV}: run vk_android_build.py --header and commit it')
+if committed_version() != VKV or committed_version('DMSH_VK_ABI') != delta.abi_digest():
+    sys.exit(f'[RED] {HEADER_VK} does not hold the current Vulkan library version {VKV} and ABI {delta.abi_digest()}: run vk_android_build.py --header and commit it')
+ABI = delta.abi_digest()
 SPIRV_VAL = os.environ.get('SPIRV_VAL') or shutil.which('spirv-val')
 if not SPIRV_VAL: sys.exit('[RED] no spirv-val (SPIRV-Tools: brew install spirv-tools, or micromamba install -c conda-forge spirv-tools)')
 VALIDATE = spirv_validator(SPIRV_VAL); VAL_ID = VALIDATE.version   # in each result's stamp: another validator builds the results again
@@ -616,6 +645,25 @@ def pack_module(data):
     return (c, VK['CODEC_ZSTD']) if len(c) < len(data) else (data, VK['CODEC_RAW'])
 
 
+def entry_parts(key, refl, nmods):
+    """One shader's part of the library as the library stores it: (its 64-byte entry with its positions in the file zero, its binding records, its c1 bytes). A result
+    reused from an older library (delta) carries them as they were there"""
+    if refl.get('reused'): return bytes.fromhex(refl['lib']['entry']), bytes.fromhex(refl['lib']['binds']), bytes.fromhex(refl['lib']['c1'])
+    binds = bytearray()
+    for e in refl['bindings']:
+        s = e.get('soff'); s = 0xFFFF if s is None else s
+        binds += struct.pack('<BBHBBHhHBBhHHI', KIND_NUM[e['kind']], e['desc'], e['binding'], e['set'], e['flags'], 0 if e['set'] == VK['SET_POOL'] else min(e['count'], 0xFFFF),
+                             -1 if e.get('reg') is None else e['reg'], e.get('off') or 0, KIND_NUM[e['skind']] if e.get('skind') else 0, dim_byte(e.get('dim')),
+                             -1 if e.get('sreg') is None else e['sreg'], s, 0, e.get('bytes') or 0)
+    c1 = bytes.fromhex(refl['c1'])
+    vin_mask = sum(1 << int(l) for l in refl['vin']); vin_types = sum(t << (2 * int(l)) for l, t in refl['vin'].items())
+    fout_mask = sum(1 << int(l) for l in refl['fout'] if int(l) < 8); fout_types = sum(t << (2 * int(l)) for l, t in refl['fout'].items() if int(l) < 8)
+    lx, ly, lz = (list(refl['local']) + [1, 1, 1])[:3]
+    entry = delta.ENTRY.pack(key_int(key), vin_types, STAGE[refl['stage']], nmods, refl['flags'], 0, 0, len(refl['bindings']), fout_types,
+                             lx, ly, lz, fout_mask, refl.get('uint_mask', 0), refl['shared'], 0, len(c1), vin_mask)
+    return entry, bytes(binds), c1
+
+
 def write_library(results):
     """dmsh_vk.lib: header, entries sorted by key, binding records, module records, blob (dmsh_abi_vk.h)"""
     ok = sorted(((k, r) for k, st, _, r in results if st == 'ok'), key=lambda x: key_int(x[0]))
@@ -625,24 +673,19 @@ def write_library(results):
         nonlocal blob
         blob += b'\0' * (-len(blob) % 16); off = len(blob); blob += b; return off
     for key, (refl, modules) in ok:
-        c1 = bytes.fromhex(refl['c1']); c1_off = put(c1) if c1 else 0
+        entry, bb, c1 = entry_parts(key, refl, len(modules))
+        c1_off = put(c1) if c1 else 0
         b0, m0 = nb, nm
         for variant, size, stored, codec, _ in modules:
             mods += struct.pack('<IIIBBH', put(stored), size, len(stored), variant, codec, 0); nm += 1
-        for e in refl['bindings']:
-            s = e.get('soff'); s = 0xFFFF if s is None else s
-            binds += struct.pack('<BBHBBHhHBBhHHI', KIND_NUM[e['kind']], e['desc'], e['binding'], e['set'], e['flags'], 0 if e['set'] == VK['SET_POOL'] else min(e['count'], 0xFFFF),
-                                 -1 if e.get('reg') is None else e['reg'], e.get('off') or 0, KIND_NUM[e['skind']] if e.get('skind') else 0, dim_byte(e.get('dim')),
-                                 -1 if e.get('sreg') is None else e['sreg'], s, 0, e.get('bytes') or 0); nb += 1
-        vin_mask = sum(1 << int(l) for l in refl['vin']); vin_types = sum(t << (2 * int(l)) for l, t in refl['vin'].items())
-        fout_mask = sum(1 << int(l) for l in refl['fout'] if int(l) < 8); fout_types = sum(t << (2 * int(l)) for l, t in refl['fout'].items() if int(l) < 8)
-        lx, ly, lz = (list(refl['local']) + [1, 1, 1])[:3]
-        entries += struct.pack('<QQBBHIIHH3HBBIIII8x', key_int(key), vin_types, STAGE[refl['stage']], len(modules), refl['flags'], m0, b0, len(refl['bindings']), fout_types,
-                               lx, ly, lz, fout_mask, refl.get('uint_mask', 0), refl['shared'], c1_off, len(c1), vin_mask)
+        binds += bb; nb += len(bb) // VK['BIND_SIZE']
+        e = bytearray(entry)
+        for o, v in zip(delta.POS, (m0, b0, c1_off)): struct.pack_into('<I', e, o, v)
+        entries += e
     hs = VK['HEADER_SIZE']; eo = hs; bo = eo + len(entries); mo = bo + len(binds); blob_off = (mo + len(mods) + 15) // 16 * 16
     pad = lambda s: s.encode()[:16].ljust(16, b'\0')   # NUL padded; a 16-character value (a title ID) has no terminator
-    head = struct.pack('<II16s16s16s16sIIIIIIQQHH12x', VK['LIB_MAGIC'], VK['LIB_VERSION'], pad(CHAIN), pad(VKV), pad(GAME.id), pad(INPUTS),
-                       len(ok), eo, nb, bo, nm, mo, blob_off, len(blob), ANSWERS['subgroup_size'], ANSWERS['ssbo_align'])
+    head = delta.HEAD.pack(VK['LIB_MAGIC'], VK['LIB_VERSION'], pad(CHAIN), pad(VKV), pad(GAME.id), pad(INPUTS),
+                           len(ok), eo, nb, bo, nm, mo, blob_off, len(blob), ANSWERS['subgroup_size'], ANSWERS['ssbo_align'], ABI.encode())
     assert len(head) == hs and len(entries) == len(ok) * VK['ENTRY_SIZE'] and len(binds) == nb * VK['BIND_SIZE'] and len(mods) == nm * VK['MOD_SIZE']
     data = head + entries + binds + mods; data += b'\0' * (blob_off - len(data)) + blob
     path = os.path.join(out, VK['LIB_FILE']); tmp = path + '.tmp'
@@ -679,10 +722,12 @@ def result_head(path):
 
 
 def write_result(key, st, err, r, ps_in):
-    """One shader's result, as fin() gives it, to <RES>/<key>.r: written to a temporary name, then renamed (a killed build leaves a whole file or none)"""
+    """One shader's result, as fin() gives it, to <RES>/<key>.r: written to a temporary name, then renamed (a killed build leaves a whole file or none). A result reused
+    from an older library (delta) has 'reused': that library's version in its head and its reflection"""
     refl, modules = r if r else (None, [])
     h = {'vk': TOOLS, 'inputs': INPUTS, 'raw': RAW, 'val': VAL_ID, 'key': key, 'stage': STAGE_OF[key], 'st': st, 'err': err, 'ps_inputs': sorted(ps_in) if ps_in is not None else None,
          'refl': refl, 'modules': [[variant, size, len(stored), codec] for variant, size, stored, codec, _ in modules]}
+    if refl and refl.get('reused'): h['reused'] = refl['reused']
     j = json.dumps(h, separators=(',', ':')).encode()
     tmp = result_path(key) + '.tmp'
     with open(tmp, 'wb') as f:
@@ -706,25 +751,94 @@ def read_result(key):
 
 
 _plock = threading.Lock()
-PROGRESS = os.environ.get('DMSH_VK_PROGRESS'); DONE = [0]
+PROGRESS = os.environ.get('DMSH_VK_PROGRESS'); DONE = [0]; TOTAL = [len(keys)]   # TOTAL: the shaders this version translates (all, less those a delta reuses)
 
 
 def progress(stage, add=0):
     with _plock:
         DONE[0] += add
-        print(f'progress {DONE[0]} {len(keys)} {stage}', flush=True)
+        print(f'progress {DONE[0]} {TOTAL[0]} {stage}', flush=True)
         if PROGRESS:
             tmp = PROGRESS + '.tmp'
-            with open(tmp, 'w') as f: json.dump({'done': DONE[0], 'total': len(keys), 'stage': stage}, f)
+            with open(tmp, 'w') as f: json.dump({'done': DONE[0], 'total': TOTAL[0], 'stage': stage, 'reused': len(keys) - TOTAL[0]}, f)
             os.replace(tmp, PROGRESS)
+
+
+# ---- delta update (android/SHADERS.md#delta-updates): the profile's manifest of this version gives every shader's entry hash; an entry of an older library of this game
+# with that hash is reused as it is (a result file that names its library), and only the other shaders are translated. Every entry of the new library is checked against
+# the manifest at the end. No manifest of this version (a Mac build after a tools change, before the manifest is made), no older library, a key list or DMSH_VK_RAW: a full build
+MANIFEST_PATH = str(GAME.table(delta.MANIFEST))
+
+
+def load_manifest():
+    """(the profile's manifest when it is of this version, game and inputs, else None; why not)"""
+    try: m = delta.parse_manifest(open(MANIFEST_PATH).read())
+    except FileNotFoundError: return None, f'no {MANIFEST_PATH}'
+    except (OSError, ValueError) as e: return None, f'{MANIFEST_PATH}: {e}'
+    if (m['version'], m['game'], m['inputs']) != (VKV, GAME.id, INPUTS):
+        return None, f'{MANIFEST_PATH} is of version {m["version"]}, game {m["game"]}, inputs {m["inputs"]}; this build is {VKV}, {GAME.id}, {INPUTS}'
+    return m, ''
+
+
+def older_libraries():
+    """The libraries a delta may take entries from: DMSH_VK_DELTA_FROM (paths separated by os.pathsep, each a dmsh_vk.lib, a v-<V> folder or a folder of them; the app passes
+    the pack's shaders/), else the other v-<V> folders of the output's cache folder; only libraries of this game in a format this tool reads, newest first"""
+    roots = [p for p in os.environ.get('DMSH_VK_DELTA_FROM', '').split(os.pathsep) if p] or [cache_root]
+    files = []
+    for r in roots:
+        if os.path.isfile(r): files.append(r); continue
+        if os.path.isfile(os.path.join(r, VK['LIB_FILE'])): files.append(os.path.join(r, VK['LIB_FILE'])); continue
+        try: subs = os.listdir(r)
+        except OSError: continue
+        files += [os.path.join(r, n, VK['LIB_FILE']) for n in subs if n.startswith(VK['DIR_PREFIX']) and os.path.isfile(os.path.join(r, n, VK['LIB_FILE']))]
+    libs = []
+    for f in sorted(set(os.path.realpath(f) for f in files)):
+        if os.path.dirname(f) == os.path.realpath(out): continue   # this version's own library (an earlier run's): its entries are results already
+        try: L = delta.Library(f)
+        except (OSError, ValueError, struct.error) as e: print(f'delta: {f} skipped: {e}', flush=True); continue
+        if L.game != GAME.id: L.close(); continue
+        libs.append(L)
+    return sorted(libs, key=lambda L: -os.stat(L.path).st_mtime)
 
 
 for _n in os.listdir(RES):   # what a killed build left: unfinished result files
     if _n.endswith('.tmp'): os.unlink(os.path.join(RES, _n))
 heads = {k: h for k in keys if (h := result_head(result_path(k)))}
+MANIFEST, _why = (None, 'a key list') if want else (None, 'DMSH_VK_RAW') if RAW else load_manifest()
+REUSED = {k for k, h in heads.items() if h.get('reused')}
+if MANIFEST:
+    _cand = [k for k in keys if k not in heads and MANIFEST['hashes'].get(k, '-') != '-']
+    _libs = older_libraries() if _cand else []
+    _have = collections.defaultdict(list)   # key → [(library, entry number)], newest library first
+    for L in _libs:
+        for k in _cand:
+            if k in L.index: _have[k].append((L, L.index[k]))
+    def _reuse(k):
+        errs = []
+        for L, i in _have[k]:
+            try: _, hh, (_, e, b, c1, mods) = L.hash_of(i, zstd)
+            except Exception as ex: errs.append(f'{L.version}: {type(ex).__name__}: {ex}'); continue   # any entry that cannot be read is translated instead
+            if hh != MANIFEST['hashes'][k]: continue
+            refl = {'stage': STAGE_OF[k], 'reused': L.version, 'lib': {'entry': delta.zeroed(e).hex(), 'binds': b.hex(), 'c1': c1.hex()}}
+            write_result(k, 'ok', '', (refl, [(v, size, bytes(st), codec, None) for v, size, st, codec in mods]), None)
+            return k, L.version, None
+        return k, None, '; '.join(errs) or None
+    _from = collections.Counter()
+    with cf.ThreadPoolExecutor(NJ) as ex:
+        for k, v, err in ex.map(_reuse, [k for k in _cand if k in _have]):
+            if err: print(f'[RED] delta: {k}: the older library\'s entry cannot be read ({err}): translated', flush=True)
+            if v:
+                _from[v] += 1; REUSED.add(k)
+                heads[k] = {'reused': v, 'ps_inputs': None}
+    for L in _libs: L.close()
+    if not _libs and not REUSED: print('delta: no older library of this game: a full build', flush=True)
+    else: print(f'delta: {len(REUSED)} of {len(keys)} shaders kept (' + (', '.join(f'from v-{v}: {n}' for v, n in _from.most_common()) or 'by an earlier run of this build')
+                + f'); {len(keys) - len(REUSED)} to translate, {sum(1 for k in keys if k not in heads)} of them left', flush=True)
+else: print(f'delta: none ({_why}): a full build', flush=True)
 todo = [k for k in ORDER if k not in heads]
-DONE[0] = len(keys) - len(todo)
-print(f'translating {len(todo)} shaders of {len(keys)} ({len(keys) - len(todo)} already in {RES}; {NJ} at a time, {BATCH} a translator call)', flush=True)
+TOTAL[0] = len(keys) - len(REUSED); DONE[0] = TOTAL[0] - len(todo)
+print(f'translating {len(todo)} shaders of {len(keys)} ({len(keys) - len(todo)} already in {RES}' + (f', {len(REUSED)} of them kept from an older library' if REUSED else '')
+      + f'; {NJ} at a time, {BATCH} a translator call)', flush=True)
 progress('translate')
 _wk = os.environ.get('WORK')
 if _wk: w = tempfile.mkdtemp(prefix='dmshvk_', dir=_wk)
@@ -782,10 +896,15 @@ def run_batch(batch):
 try:   # the package descriptors are closed however the translation ends (the phone runs this in a long-lived interpreter)
     for _phase in ([k for k in todo if STAGE_OF[k] != 'vs'], [k for k in todo if STAGE_OF[k] == 'vs']):
         if _phase and STAGE_OF[_phase[0]] == 'vs':   # the pixel shaders' inputs, from their results (this run's and earlier runs')
+            _need = set().union(*[PAIRS.get(k, ()) for k in _phase])
             for k in keys:
                 if STAGE_OF[k] != 'vs' and k not in PS_INPUTS:
                     h = result_head(result_path(k))
                     if h and h['ps_inputs'] is not None: PS_INPUTS[k] = set(h['ps_inputs'])
+                    elif h and h.get('reused') and k in _need:   # kept from an older library: the inputs its base module reads, as finish() takes them
+                        _r = read_result(k)[3]
+                        _b = next(m for m in _r[1] if m[0] == VK['MOD_BASE'])
+                        PS_INPUTS[k] = set(spv.Module(delta.spirv(_b[2], _b[3], zstd)).io(spv.SC_INPUT))
         batches = [_phase[i:i + BATCH] for i in range(0, len(_phase), BATCH)]
         with cf.ThreadPoolExecutor(NJ) as ex:
             for _ in ex.map(run_batch, batches): pass
@@ -798,9 +917,12 @@ _missing = [k for k in ORDER if not os.path.exists(result_path(k))]
 if _missing: sys.exit(f'[RED] {len(_missing)} shaders have no result (the translator wrote neither a module nor a reason for them, from {_missing[0]}): run again')
 results = [read_result(k) for k in ORDER]
 _bad = [r for r in results if r[1] != 'ok']
-if _bad and not want and os.environ.get('DMSH_VK_REQUIRE_ALL') == '1':   # the phone's job: a library without every shader must not pass as finished
+if _bad and not want and os.environ.get('DMSH_VK_REQUIRE_ALL') == '1':   # the phone's job: a library without every shader the Mac's build of this version holds must not pass as finished
+    _there = delta.not_built_there(MANIFEST, [r[0] for r in _bad])   # "-" in the profile's manifest of this version: they did not build in the Mac's full build either
+    if _there: print(f'{len(_there)} shaders did not build, as in the Mac\'s build of this version (the profile\'s {delta.MANIFEST} has them as "-"): ' + ', '.join(sorted(_there)[:5]), flush=True)
+    _bad = [r for r in _bad if r[0] not in _there]
     for lvl, n in collections.Counter(r[1] for r in _bad).items(): print(f'[RED] {lvl}: {n} shaders, e.g. {next(r for r in _bad if r[1] == lvl)[0]}: ' + next(r for r in _bad if r[1] == lvl)[2])
-    sys.exit(f'[RED] {len(_bad)} of {len(results)} shaders did not build: no library written (DMSH_VK_REQUIRE_ALL)')
+    if _bad: sys.exit(f'[RED] {len(_bad)} of {len(results)} shaders did not build: no library written (DMSH_VK_REQUIRE_ALL)')
 if not want:
     for n in os.listdir(out):
         if n == 'spv': shutil.rmtree(os.path.join(out, n))
@@ -810,11 +932,30 @@ if os.environ.get('DMSH_VK_LOOSE') == '1':
     for key, st, _, r in results:
         if st == 'ok':
             for variant, _, _, _, data in r[1]: open(os.path.join(out, 'spv', key + (f'_{variant}' if variant else '') + '.spv'), 'wb').write(data)
-index = {k: r[0] for k, st, _, r in results if st == 'ok'}
+index = {k: r[0] for k, st, _, r in results if st == 'ok'}   # a shader kept from an older library has its stage and that library's version here, not its whole reflection
 for v in index.values():
-    for b in v['bindings']: b['kind_num'] = KIND_NUM[b['kind']]
+    for b in v.get('bindings', ()): b['kind_num'] = KIND_NUM[b['kind']]
 json.dump({'chain': CHAIN, 'vk_chain': VKV, 'game': GAME.id, 'inputs': INPUTS, 'shaders': index}, open(os.path.join(out, 'index.json'), 'w'), separators=(',', ':'))
 json.dump([{'key': k, 'st': st, 'err': e} for k, st, e, _ in results], open(os.path.join(out, '_vk_build.json'), 'w'))
+# The new library read back and every entry hashed: vk_delta.tsv beside it (what a Mac build gives the profile: vk_android_build.py --publish-delta), and with a manifest of this
+# version, each entry checked against it: a mismatch or a shader the manifest has and the library lacks is a [RED] line naming the key (the library is kept: it is what this
+# machine's tools made). A full build with a manifest checks the same, so a phone's full build is compared with the Mac's too
+progress('check')
+_lib, _hashes = delta.library_hashes(lib, zstd, NJ); _lib.close()
+_status = {k: st for k, st, _, _ in results}
+open(os.path.join(out, delta.MANIFEST + '.tmp'), 'w').write(delta.format_manifest(VKV, GAME.id, INPUTS, {k: _hashes.get(k, '-') for k in keys}))
+os.replace(os.path.join(out, delta.MANIFEST + '.tmp'), os.path.join(out, delta.MANIFEST))
+if MANIFEST:
+    _bad = 0
+    for k in keys:
+        want_h, got_h = MANIFEST['hashes'].get(k), _hashes.get(k)
+        if delta.entry_as_manifest(want_h, got_h): continue   # a "-" shader this build did not build either is as the manifest has it
+        _bad += 1
+        how = 'kept from an older library' if k in REUSED else 'translated here'
+        if got_h is None: print(f'[RED] delta check: {k}: not in the library ({_status.get(k)}: {next((r[2] for r in results if r[0] == k), "")[:100]}), the manifest has {want_h}', flush=True)
+        elif want_h in (None, '-'): print(f'[RED] delta check: {k}: in the library ({how}), the manifest has it as ' + ('not built' if want_h else 'not a shader of this version'), flush=True)
+        else: print(f'[RED] delta check: {k}: library entry {got_h} ({how}), the manifest has {want_h}', flush=True)
+    print(f'delta check: {len(keys) - _bad} of {len(keys)} shaders as the manifest has them ({len(REUSED)} kept, {len(keys) - len(REUSED)} translated)' + (f', {_bad} differ' if _bad else ''), flush=True)
 if not want:
     dmsh_chain.write_stamp(out, GAME.id, INPUTS)
 if os.environ.get('DMSH_VK_KEEP') == '0': shutil.rmtree(RES, ignore_errors=True)
@@ -822,7 +963,8 @@ progress('done')
 
 # ---- summary
 st = collections.Counter(r[1] for r in results)
-okr = [r[3][0] for r in results if r[1] == 'ok']
+okr = [r[3][0] for r in results if r[1] == 'ok' and not r[3][0].get('reused')]   # reflections made here (a kept entry's is in the older library)
+if REUSED: print(f'kept from older libraries: {len(REUSED)} shaders (the counts below are of the {len(okr)} translated here)')
 print(f'shaders {len(results)}: ok {st["ok"]}, ' + ', '.join(f'{k} {v}' for k, v in st.items() if k != 'ok'))
 print('  by stage: ' + ', '.join(f'{s} {n}/{m}' for s, m in sorted(collections.Counter(STAGE_OF[r[0]] for r in results).items())
                                   for n in [sum(1 for r in results if r[1] == 'ok' and STAGE_OF[r[0]] == s)]))

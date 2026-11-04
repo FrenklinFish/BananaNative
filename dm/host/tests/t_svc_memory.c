@@ -504,6 +504,24 @@ static void guest_helper(void) {
     dm_guest_thread_join(tt); assert(helper_freed && !g_nmap && !g_heap_cur);
 }
 static void *init_worker(void *arg) { *(uint64_t *)arg = info(I_AliasAddr); return NULL; }
+// Host reads of guest storage (dm_guest_read_mapped, the Vulkan replay's uploads): a page whose bitmap bit still says mapped but that is already inaccessible (the guest unmapping
+// it during the copy: Mario Kart World 1.8.0 docked, SEGV_ACCERR on vk-replay) reads as zeros without a fault, and after Unmap the pages read as zeros from the bitmap
+static void read_mapped_race(void) {
+    uintptr_t a = alias + 40 * P; int64_t before = g_alias_mapped; static uint8_t buf[8 * P];
+    assert(!pages(1, a, 8 * P));
+    memset((void *)a, 0x5a, 8 * P);
+    memset(buf, 1, sizeof buf); assert(dm_guest_read_mapped(buf, a, 8 * P) == 0);
+    for (size_t i = 0; i < 8 * P; ++i) assert(buf[i] == 0x5a);
+    // the second half inaccessible while its bits are still set (real mprotect: the test's wrapper counts protections)
+    assert(!mprotect((void *)(a + 4 * P), 4 * P, PROT_NONE));
+    memset(buf, 1, sizeof buf); assert(dm_guest_read_mapped(buf, a + 0x800, 8 * P - 0x800) == 4);
+    for (size_t i = 0; i < 4 * P - 0x800; ++i) assert(buf[i] == 0x5a);
+    for (size_t i = 4 * P - 0x800; i < 8 * P - 0x800; ++i) assert(buf[i] == 0);
+    assert(!mprotect((void *)(a + 4 * P), 4 * P, PROT_READ | PROT_WRITE));
+    assert(!pages(0, a, 8 * P) && g_alias_mapped == before);
+    memset(buf, 1, sizeof buf); assert(dm_guest_read_mapped(buf, a, 8 * P) == 8);
+    for (size_t i = 0; i < 8 * P; ++i) assert(buf[i] == 0);
+}
 int main(int argc, char **argv) {
     if (argc == 2 && !strcmp(argv[1], "--heap-probe")) {
         mem_init();
@@ -517,7 +535,7 @@ int main(int argc, char **argv) {
     for (unsigned i = 0; i < 8; ++i) { assert(!pthread_join(threads[i], NULL)); assert(addresses[i] == addresses[0]); }
     alias = addresses[0]; stack = info(I_StackAddr); heap = info(I_HeapAddr);
     lazy_commit(); alias_lifecycle(); ownership(); module_sources(); module_back_patch(); failures(); release_fallback(); concurrency(); fragmented_queries();
-    guest_helper();
+    guest_helper(); read_mapped_race();
     if (!DM_GAME_MEM_MAP_LIMIT) metadata_limit();
 #ifdef TEST_REAL_DIRTY
     dirty_integration();

@@ -6,7 +6,7 @@ import android.provider.DocumentsContract;
 
 import java.io.File;
 
-/** A Storage Access Framework tree URI → the /storage path the host can open (All files access lets it read there). */
+/** A Storage Access Framework tree (or document) URI → the /storage path the host can open (All files access lets it read there). */
 final class PathUtil {
     private PathUtil() {}
 
@@ -18,6 +18,21 @@ final class PathUtil {
         } catch (IllegalArgumentException e) {
             return null;
         }
+        return idToPath(id);
+    }
+
+    /** A picked document (ACTION_OPEN_DOCUMENT: a .nup) → its path; null when it is not on a local volume or its provider gives no path (Recent, a MediaStore number) */
+    static String documentToPath(Uri doc) {
+        String id;
+        try {
+            id = DocumentsContract.getDocumentId(doc);
+        } catch (IllegalArgumentException e) {
+            return null;
+        }
+        return idToPath(id);
+    }
+
+    private static String idToPath(String id) {
         if (id == null) return null;
         if (id.startsWith("raw:")) return id.substring(4);   // the Downloads provider's direct paths
         if (id.startsWith("msf:")) {   // MediaStore ids: some devices put a path after the prefix

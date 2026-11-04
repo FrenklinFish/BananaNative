@@ -16,8 +16,8 @@ void bf_want_note(const char *key);
 void mtl_pool_add(const void *mem, uint64_t size);
 void mtl_pool_del(const void *mem);
 // The GPU is given an address in [addr, addr+len) (a buffer, a pool's or a texture's address, a linear texture): the Vulkan replay places the pools there that it has not placed
-// yet (vka_mem.c); Metal wraps every pool at mtl_pool_add, so this is a no-op there
-void mtl_pool_need(const void *addr, uint64_t len);
+// yet, or the parts of a large pool that [addr, addr+len) touches (vka_mem.c; why names the ask in its log lines); Metal wraps every pool at mtl_pool_add, so this is a no-op there
+void mtl_pool_need(const void *addr, uint64_t len, const char *why);
 // memory pool Finalize: evict the textures built on this pool (pool object address) from the storage-sharing table
 void mtl_alias_drop_pool(const void *pool);
 int mtl_addr(uint64_t addr, uint64_t len, void **buf, uint64_t *off);   // 1 on success; buf is a (__bridge) id<MTLBuffer>

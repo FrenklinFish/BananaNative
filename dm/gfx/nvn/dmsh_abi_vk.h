@@ -8,7 +8,12 @@
 #include <stdint.h>
 
 // The library: <cache dir>/v-<DMSH_VK_CHAIN>/DMSH_VK_LIB_FILE, one file per game (index, binding records, module table, then the blob of SPIR-V words and c1 bytes).
-// All integers little-endian. The replay maps the file and takes it only when its header names the DMSH_CHAIN and DMSH_VK_CHAIN it was compiled with
+// All integers little-endian. The replay maps the file and takes it when its header names the DMSH_CHAIN and DMSH_VK_CHAIN it was compiled with, or, while that
+// version's library is being made, when its header's abi is the host's DMSH_VK_ABI (dmsh_chain_vk.h): the digest of this file and dmsh_abi.h without comments
+// (vk_android_delta.py abi_digest), so an older library of the same ABI plays while its delta update runs (android/SHADERS.md#delta-updates)
+// DMSH_VK_ABI_REV: raise it with any change of what the replay expects of a library or its modules that neither header shows (a convention in vk_android_spv.py or
+// vka_*.c), so such a change moves DMSH_VK_ABI and an older library is no longer played
+#define DMSH_VK_ABI_REV 1
 #define DMSH_VK_LIB_FILE "dmsh_vk.lib"
 #define DMSH_VK_LIB_MAGIC 0x4B56534D     // "MSVK"
 #define DMSH_VK_LIB_VERSION 1
@@ -148,7 +153,7 @@ typedef struct {
     uint64_t blob_off, blob_size;      // module words and c1 bytes, offsets in the entries and modules relative to blob_off, 16-byte aligned
     uint16_t subgroup_size;  // DMSH_VK_SUBGROUP_SIZE the modules were built for; 0 in an older library: 32
     uint16_t ssbo_align;     // DMSH_VK_SSBO_ALIGN the modules were built for; 0 in an older library: bind storage buffers at their exact address
-    uint8_t reserved[12];
+    char abi[12];            // DMSH_VK_ABI of the tools that made it (12 hex digits, no NUL); zero in a library made before it, which plays only with its own version
 } dmsh_vk_header;
 
 typedef struct {

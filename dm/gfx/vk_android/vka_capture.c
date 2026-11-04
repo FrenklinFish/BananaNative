@@ -104,6 +104,7 @@ void vcap_img_copy(VkCommandBuffer cb, vka_img *im, const cap_tsub *subs, uint32
         c[i] = (VkBufferImageCopy){off, 0, 0, {a, subs[i].level, subs[i].slice, 1}, {0, 0, 0}, {subs[i].w, subs[i].h, subs[i].d}};
         off += (subs[i].bytes + 15) & ~15ull;
     }
+    if (to_image) vka_tex_own(im, cb);   // (a zero-shared image gets memory of its own first)
     vka_barrier(cb);
     if (to_image) vk.vkCmdCopyBufferToImage(cb, b, im->img, VK_IMAGE_LAYOUT_GENERAL, nsub, c);
     else vk.vkCmdCopyImageToBuffer(cb, im->img, VK_IMAGE_LAYOUT_GENERAL, b, nsub, c);
@@ -200,8 +201,9 @@ void vcap_iface(const prog_t *p, uint64_t out[6]) {
     }
 }
 void vcap_shlib_path(char *out, size_t n) {
-    const char *e = getenv("DM_VK_SHLIB");
-    if (e && *e) snprintf(out, n, "%s", e);
+    const char *e = getenv("DM_VK_SHLIB"), *l = vka_shader_lib_path();
+    if (l && *l) snprintf(out, n, "%s", l);   // the one loaded: an older library of the same ABI while the update runs
+    else if (e && *e) snprintf(out, n, "%s", e);
     else { const char *dir = dm_module_dir(); snprintf(out, n, "%s/shaders/" DMSH_VK_DIR_PREFIX "%s/" DMSH_VK_LIB_FILE, dir && *dir ? dir : ".", DMSH_VK_CHAIN); }
 }
 

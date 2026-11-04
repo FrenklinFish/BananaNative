@@ -10,13 +10,15 @@ typedef struct {
     const dmsh_vk_header *h;
     const dmsh_vk_entry *ent; const dmsh_vk_bind *bind; const dmsh_vk_module *mod; const uint8_t *blob;
     int mapped;
+    int by_abi;   // taken by its abi only: its chain or vk_chain is not the host's (an older library played while its update runs)
 } vka_shlib;
 
 // Checks a library image against what the host was built with: magic, version, chain, vk_chain and game (NULL = not checked), then every table and range inside the file and the
-// entries' key order. 1 = usable; else 0 and err says why (one line)
-int vka_shlib_check(vka_shlib *L, const void *base, size_t size, const char *chain, const char *vk_chain, const char *game, char *err, size_t errn);
+// entries' key order. abi (the host's DMSH_VK_ABI; NULL = versions only): a library whose chain or vk_chain differs is still taken when its header's abi is this one (by_abi),
+// the rule for an older library while its delta update runs (android/SHADERS.md#delta-updates). 1 = usable; else 0 and err says why (one line)
+int vka_shlib_check(vka_shlib *L, const void *base, size_t size, const char *chain, const char *vk_chain, const char *game, const char *abi, char *err, size_t errn);
 // Maps path read-only and checks it as above
-int vka_shlib_open(vka_shlib *L, const char *path, const char *chain, const char *vk_chain, const char *game, char *err, size_t errn);
+int vka_shlib_open(vka_shlib *L, const char *path, const char *chain, const char *vk_chain, const char *game, const char *abi, char *err, size_t errn);
 void vka_shlib_close(vka_shlib *L);
 
 uint64_t vka_shlib_key(const uint8_t md[8]);   // the host's 8-byte program key (prog_key) as the library's sort key: its 16 hex digits read as one big-endian number

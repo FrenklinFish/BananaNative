@@ -8,10 +8,12 @@
 // Memory overhead: block space no image uses is committed memory too (the "free in blocks" of the stats line), which matters to a game near the low-memory killer (Donkey Kong
 // Bananza: 8.07 GB RSS, killed at about 9.2 GB); an earlier version rounded every image up to a power of two (a third more for mipped textures, up to half for 8-16 MiB ones).
 // Lifetime: as before, an image's memory is given back in img_destroy, which runs once the GPU is done with the image (vka_after), after vkDestroyImage. A block with no image
-// left is freed, except one empty block a memory type keeps for the next images. The 64 MiB vkAllocateMemory runs outside the lock (other threads' allocations and frees go on)
+// left is freed, except one empty block a memory type keeps for the next images. The 64 MiB vkAllocateMemory runs outside the lock (other threads' allocations and frees go on).
+// Large never-written GPU-content images instead alias one zeroed allocation per create info (vka_imem_bind_zero; vka_tex.c "Zero-shared images")
 #if defined(__ANDROID__)
 #include "vka.h"
 #include "vka_extents.h"
+#include "vka_zshare.h"
 #include <stdlib.h>
 
 #define UNIT 256ull
@@ -80,9 +82,52 @@ VkResult vka_imem_bind(VkImage img, uint32_t type, const VkMemoryRequirements *m
     return VK_SUCCESS;
 }
 
+// Zero-shared memory (vka_zshare.h; vka_tex.c "Zero-shared images"): the image is bound at offset 0 of the allocation its key names, made (size mr->size, type) at the key's
+// first image. *fresh: 1 when this call made it (the caller counts its bytes once). VK_SUCCESS, or the Vulkan error with nothing bound (the caller binds the image as before).
+// An image the driver requires a dedicated allocation for is refused (VK_ERROR_FEATURE_NOT_PRESENT): a dedicated allocation names one image
+static vkz_tab Z;
+VkResult vka_imem_bind_zero(VkImage img, uint32_t type, const VkMemoryRequirements *mr, const void *key, uint32_t klen, vka_imem *m, int *fresh) {
+    memset(m, 0, sizeof *m); *fresh = 0;
+    if (klen > VKZ_KEY) return VK_ERROR_FEATURE_NOT_PRESENT;
+    if (vk.vkGetImageMemoryRequirements2) {
+        VkMemoryDedicatedRequirements dr = {VK_STRUCTURE_TYPE_MEMORY_DEDICATED_REQUIREMENTS};
+        VkMemoryRequirements2 r2 = {VK_STRUCTURE_TYPE_MEMORY_REQUIREMENTS_2, &dr};
+        VkImageMemoryRequirementsInfo2 ri = {VK_STRUCTURE_TYPE_IMAGE_MEMORY_REQUIREMENTS_INFO_2, NULL, img};
+        vk.vkGetImageMemoryRequirements2(V.dev, &ri, &r2);
+        if (dr.requiresDedicatedAllocation) return VK_ERROR_FEATURE_NOT_PRESENT;
+    }
+    pthread_mutex_lock(&g_imu);
+    int i = vkz_ref(&Z, key, klen);
+    VkDeviceMemory dm = i >= 0 ? (VkDeviceMemory)(uintptr_t)Z.e[i].h : VK_NULL_HANDLE;
+    pthread_mutex_unlock(&g_imu);
+    VkResult r;
+    if (i < 0) {   // the key's first image: its allocation (callers hold vka_tex.c's table lock, so no other image of the key comes meanwhile)
+        VkMemoryAllocateInfo ai = {VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO, .allocationSize = mr->size, .memoryTypeIndex = type};
+        if ((r = vk.vkAllocateMemory(V.dev, &ai, NULL, &dm))) return r;
+        if ((r = vk.vkBindImageMemory(V.dev, img, dm, 0))) { vk.vkFreeMemory(V.dev, dm, NULL); return r; }
+        pthread_mutex_lock(&g_imu); int k = vkz_add(&Z, key, klen, (uint64_t)(uintptr_t)dm, mr->size); pthread_mutex_unlock(&g_imu);
+        if (k < 0) { m->dm = dm; return VK_SUCCESS; }   // no room in the table: the allocation is this image's own (size 0: freed outside the stats)
+        *fresh = 1;
+    } else if ((r = vk.vkBindImageMemory(V.dev, img, dm, 0))) {
+        pthread_mutex_lock(&g_imu); vkz_unref(&Z, (uint64_t)(uintptr_t)dm); pthread_mutex_unlock(&g_imu);   // (not the last: the entry's other images hold it)
+        return r;
+    }
+    m->dm = dm; m->size = mr->size; m->z = 1;
+    return VK_SUCCESS;
+}
+uint64_t vka_imem_zbytes(void) { uint64_t b; pthread_mutex_lock(&g_imu); vkz_stats(&Z, NULL, NULL, &b, NULL); pthread_mutex_unlock(&g_imu); return b; }
+uint64_t vka_imem_zbytes_nolock(void) { uint64_t b = 0; for (int i = 0; i < Z.n; i++) b += Z.e[i].size; return b; }   // (a log line's value, read without the lock)
+void vka_imem_zowned(void) { pthread_mutex_lock(&g_imu); vkz_note_own(&Z); pthread_mutex_unlock(&g_imu); }
+
 // The memory back (after vkDestroyImage of the image bound to it, once the GPU is done with it)
 void vka_imem_free(vka_imem *m) {
     if (!m->dm) return;
+    if (m->z) {   // a zero-shared allocation: freed with its last image
+        pthread_mutex_lock(&g_imu); int last = vkz_unref(&Z, (uint64_t)(uintptr_t)m->dm); pthread_mutex_unlock(&g_imu);
+        if (last < 0) VRED_ONCE("zero-shared image memory given back twice or never taken (left as it is)");
+        if (last == 1) vk.vkFreeMemory(V.dev, m->dm, NULL);
+        memset(m, 0, sizeof *m); return;
+    }
     if (!m->blk) {
         vk.vkFreeMemory(V.dev, m->dm, NULL);
         if (m->size) { pthread_mutex_lock(&g_imu); S.ded--; S.ded_bytes -= m->size; pthread_mutex_unlock(&g_imu); }   // (size 0: an allocation made elsewhere, vka_framegen.c)
@@ -113,7 +158,9 @@ void vka_imem_stats(char *o, size_t n) {
              (unsigned long long)S.blocks, S.blocks * (double)BLOCK / 1048576.0, (unsigned long long)S.freed, S.req_bytes / 1048576.0, (unsigned long long)S.runs,
              (S.run_bytes - S.req_bytes) / 1048576.0, (S.blocks * (double)BLOCK - S.run_bytes) / 1048576.0, (unsigned long long)S.ded, S.ded_bytes / 1048576.0);
     if (S.fail) { size_t l = strlen(o); snprintf(o + l, n - l, "; %llu block allocations failed (those images dedicated)", (unsigned long long)S.fail); }
+    if (Z.made) { uint64_t zi, za, zb, zs; vkz_stats(&Z, &zi, &za, &zb, &zs); size_t l = strlen(o);
+        snprintf(o + l, n - l, "; zero-shared: %llu images in %llu allocations (%.0f MiB, %.0f MiB saved), %llu made their own", (unsigned long long)zi, (unsigned long long)za, zb / 1048576.0, zs / 1048576.0, (unsigned long long)Z.owned); }
     pthread_mutex_unlock(&g_imu);
 }
-uint64_t vka_imem_allocations(void) { pthread_mutex_lock(&g_imu); uint64_t c = S.blocks + S.ded; pthread_mutex_unlock(&g_imu); return c; }
+uint64_t vka_imem_allocations(void) { pthread_mutex_lock(&g_imu); uint64_t c = S.blocks + S.ded + (uint64_t)Z.n; pthread_mutex_unlock(&g_imu); return c; }
 #endif

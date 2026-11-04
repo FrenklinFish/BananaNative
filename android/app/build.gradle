@@ -64,7 +64,17 @@ def readinessRows = { String game -> def t = new File(repo, "dm/games/$game/read
 def reqText = { String s -> s.replaceAll(/[\t\n\\"]/, ' ').replaceAll(/[;|]/, ',').trim() }
 def reqsOf = { String game -> readinessRows(game).findAll { it.size() >= 4 && it[0] in ['required', 'degraded'] }.collect { c -> (c.take(3) + [c.drop(3).join(' ')]).collect { reqText(it) }.join('|') }.join(';') }
 def statusOf = { String game -> readinessRows(game).find { it.size() >= 2 && it[0] == 'status' }?.getAt(1)?.trim() ?: '' }
-def nxProfiles = nxGames.collect { g -> [g, nameOf(g).replaceAll(/[\t\n\\"]/, ' '), shaderTotalOf(g), shaderInputsOf(g), buildsOf(g), reqsOf(g), statusOf(g)].join('\\t') }.join('\\n')
+// and last the shader delta rows (the profile's vk_delta.tsv "from" rows when its version is this tree's: "version=shaders to translate", ',' between them; Prepare's
+// estimate for an update, ShaderLibs.toTranslate)
+def deltaOf = { String game -> def f = new File(repo, "dm/games/$game/vk_delta.tsv"); if (!f.isFile()) return ''; def ls = f.readLines()
+    ls.contains("version\t${defineOf('dm/gfx/nvn/dmsh_chain_vk.h', 'DMSH_VK_CHAIN')}".toString()) ? ls.findAll { it ==~ /from\t[0-9a-f]{12}\t\d+/ }.collect { def c = it.split('\t'); "${c[1]}=${c[2]}" }.join(',') : '' }
+// and its "stamp" rows (an older library that becomes this version's by its header alone, ShaderLibs.restamp): "version:old SHA-256:new SHA-256", ';' between them
+def stampOf = { String game -> def f = new File(repo, "dm/games/$game/vk_delta.tsv"); if (!f.isFile()) return ''; def ls = f.readLines()
+    ls.contains("version\t${defineOf('dm/gfx/nvn/dmsh_chain_vk.h', 'DMSH_VK_CHAIN')}".toString()) ? ls.findAll { it ==~ /stamp\t[0-9a-f]{12}\t[0-9a-f]{64}\t[0-9a-f]{64}/ }.collect { it.split('\t').drop(1).join(':') }.join(';') : '' }
+// and last what Game resolution sets for it (Profile.resolutionEnv): "window" with window_fn rows (DM_WINDOW_SIZE), "scale:<choice>=<scale>/<console|handheld>,…" with
+// graphics_scale rows (DM_GRAPHICS_SCALE and DM_OPMODE), empty when it has neither (the launcher then offers no Game resolution for it)
+def resolutionOf = { String game -> !tsvRows(game, 'window_fn').isEmpty() ? 'window' : tsvRows(game, 'graphics_scale').with { rs -> rs.isEmpty() ? '' : 'scale:' + rs.collect { c -> "${c[1].trim()}=${c[2].trim()}/${c[3].trim()}" }.join(',') } }
+def nxProfiles = nxGames.collect { g -> [g, nameOf(g).replaceAll(/[\t\n\\"]/, ' '), shaderTotalOf(g), shaderInputsOf(g), buildsOf(g), reqsOf(g), statusOf(g), deltaOf(g), stampOf(g), resolutionOf(g)].join('\\t') }.join('\\n')
 def lockOf = { String key -> def f = new File(repo, 'dm/gfx/tools/dmsh_chain.lock'); f.isFile() ? (f.readLines().find { it.startsWith(key + '\t') }?.split('\t')?.getAt(1) ?: 'unknown') : 'unknown' }
 
 android {
@@ -92,6 +102,8 @@ android {
         // The shader library the host loads: <pack>/shaders/v-<DMSH_VK_CHAIN>/dmsh_vk.lib (vka_shader.c); the launcher checks a pack has it before starting the game
         buildConfigField 'String', 'NX_DMSH_CHAIN', "\"${defineOf('dm/gfx/nvn/dmsh_chain.h', 'DMSH_CHAIN')}\""
         buildConfigField 'String', 'NX_DMSH_VK_CHAIN', "\"${defineOf('dm/gfx/nvn/dmsh_chain_vk.h', 'DMSH_VK_CHAIN')}\""
+        // Its ABI: a library of another version with it plays while the shader update makes this version's (ShaderLibs.playable, as vka_shader.c lib_load)
+        buildConfigField 'String', 'NX_DMSH_VK_ABI', "\"${defineOf('dm/gfx/nvn/dmsh_chain_vk.h', 'DMSH_VK_ABI')}\""
         buildConfigField 'String', 'NX_PACK_ENGINE', "\"$nxPackEngine\""
         buildConfigField 'String', 'NX_XLATE_SOURCE', "\"${lockOf('xlate_source')}\""
         // The rewriter's files in pack_android.py's rewrite key (its REWRITER tuple): the launcher computes the key a pack's code must have (PackCheck)

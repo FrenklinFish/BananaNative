@@ -45,3 +45,8 @@ shader_note	Mario Kart World shaders
 # ---- Graphics ----
 # agl's render buffer binding: Donkey Kong Bananza's clears are wrapped in render conditions; the same engine, not yet checked on this game
 render_cond	on
+# The 3D scenes' size follows the operation mode and the Switch 2 graphics scale, not the window (README, Render resolution): the Android launcher's Game resolution
+# sets these instead of DM_WINDOW_SIZE. <choice> <DM_GRAPHICS_SCALE> <operation mode>: handheld scale 0 crops 1920x1080, handheld scale 2 1280x720 (phone rH0 / rH2);
+# Original has no row: the game's own (console, scale 1: 2048x1152)
+graphics_scale	1920x1080	0	handheld
+graphics_scale	1280x720	2	handheld

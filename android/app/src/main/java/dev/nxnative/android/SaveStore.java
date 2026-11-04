@@ -26,7 +26,8 @@ import java.util.TreeMap;
  * A game's save backups and restores (the game card's Manage sheet: Back up saves, Restore saves…, Import save…). No Android classes: the JVM test
  * (android/app/src/jvmtest, run by dm/tools/tests/test_android_saves.py) runs it on the Mac, and checks its journal against the host's (plat_android.c).
  * <p>
- * <b>The save</b> is the folder the app gives the host as DM_SAVE (play saves/&lt;id&gt;, test saves-test/&lt;id&gt;, or the folder picked in Folders) and, for a game
+ * <b>The save</b> is the folder the app gives the host as DM_SAVE (the app's saves/&lt;id&gt;, AppStorage; the old default beside the game until it is copied in,
+ * SaveMigrate; or the folder picked in Folders) and, for a game
  * whose main imports both MountSaveData and MountDeviceSaveData, its device save &lt;DM_SAVE&gt;_device beside it (hle_fs.c h_fs_MountDeviceSave). Both are one save
  * here: a backup holds both (main/ and device/), a restore swaps both.
  * <ul>
