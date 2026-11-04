@@ -2913,10 +2913,12 @@ def pooled(ex, jobs, total, start=0, chunk=1, cache=None):
                 if done == start + len(jobs) or time.monotonic() - shown >= 0.5: print(f'progress: {done}/{total}', flush=True); shown = time.monotonic()
         else:
             futures = {ex.submit(scan_batch, b): first for first, b in todo}
-            for f in cf.as_completed(futures):   # each result into the cache as it comes (as_completed waits on all the futures once, not once a result)
-                kept[futures[f]] = r = f.result(); cache.add(futures[f], r); done += len(r)
-                if time.monotonic() - shown >= 0.5: print(f'progress: {done}/{total}', flush=True); shown = time.monotonic()
-            if futures: print(f'progress: {done}/{total}', flush=True)
+            pending = set(futures)
+            while pending:   # a timed wait, not as_completed: the count is shown every half second even while one slow range is all that is left
+                finished, pending = cf.wait(pending, timeout=0.5, return_when=cf.FIRST_COMPLETED)
+                for f in finished:   # each result into the cache as it comes
+                    kept[futures[f]] = r = f.result(); cache.add(futures[f], r); done += len(r)
+                if not pending or time.monotonic() - shown >= 0.5: print(f'progress: {done}/{total}', flush=True); shown = time.monotonic()
     finally:
         cache.flush()   # also on an interrupt (KeyboardInterrupt): what finished is kept
     return [r for first, _ in batches for r in kept[first]]

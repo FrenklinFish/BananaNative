@@ -18,14 +18,18 @@ import dmsh_abi as abi   # noqa: E402
 # Literals of the ABI still written in each file (outside comments), counted as the ratchet below does: the value, or the kind string (repr). These stay for other reasons:
 # a json key spelled like a kind ('c1', 'geometry', 'tex', 'img' in the facts and reflection json), an NVN stage name ("geometry"), a "?" placeholder in a log line, and 0x100
 # where it is not the push constant block's size (DMSH_PUSH_SIZE): a viewport swizzle value in nvn_mtl.m, the start of compute code in a package record in dmsh_build.py,
-# a single texture bind record's flag bit in nvn_obj.h (BIND_TEX1_NOBASE).
+# a single texture bind record's flag bit in nvn_obj.h (BIND_TEX1_NOBASE) and its p_draw.prim of an NVN2 mesh-task draw (NVN_PRIM_MESH).
 # 0x1000 where it is not the pool table's entry count (DMSH_GMEM_MAP_ENTRIES): the 4 KB page step of nvn_mtl.m's sparse residency map.
 # A count may only go down; when it does, lower it here.
+# Binding kinds only the Android build writes: the Apple build never answers the translator's shared_max (dmsh_abi.h), so its
+# shaders never have them. Checked against vk_android_build.py and vka_bind.c instead of dmsh_build.py and nvn_refl.m.
+ANDROID_ONLY_KINDS = ('KIND_SHARED_SPILL',)
+
 BASELINE = {
     'dm/gfx/nvn/nvn_mtl.m': {"'?'": 2, "'geometry'": 3, '0x100': 2, '0x1000': 2},
     'dm/gfx/nvn/nvn_refl.m': {"'c1'": 1},
     'dm/gfx/nvn/nvn_refl.h': {},
-    'dm/gfx/nvn/nvn_obj.h': {'0x100': 1},
+    'dm/gfx/nvn/nvn_obj.h': {'0x100': 2},
     'dm/gfx/tools/dmsh_build.py': {"'c1'": 4, "'geometry'": 3, "'img'": 1, "'tex'": 1, '0x100': 2},
     'dm/gfx/tools/dmsh_fetch.py': {},
     'dm/gfx/tools/cb_extent.py': {},
@@ -101,8 +105,12 @@ class Build(unittest.TestCase):
     def test_every_kind_is_written_by_the_build(self):
         src = (REPO / 'dm/gfx/tools/dmsh_build.py').read_text()
         self.assertRegex(src, r'(?m)^import .*\bdmsh_abi as abi\b')
-        unused = [k for k in abi.VALUES if k.startswith('KIND_') and f'abi.{k}' not in src]
+        unused = [k for k in abi.VALUES if k.startswith('KIND_') and k not in ANDROID_ONLY_KINDS and f'abi.{k}' not in src]
         self.assertEqual(unused, [], 'binding kinds in dmsh_abi.h that dmsh_build.py never writes')
+
+    def test_android_only_kinds_are_written_by_the_android_build(self):
+        src = (REPO / 'dm/gfx/tools/vk_android_build.py').read_text()
+        self.assertEqual([k for k in ANDROID_ONLY_KINDS if f'abi.{k}' not in src], [], 'Android-only kinds that vk_android_build.py never writes')
 
     def test_chain_covers_the_abi(self):   # the header and its reader decide the build output: they are part of the chain version
         sys.path.insert(0, str(REPO / 'dm/gfx/tools'))
@@ -119,8 +127,12 @@ class Host(unittest.TestCase):
 
     def test_host_reads_every_kind(self):   # a kind the build may write that the host does not know fails the shader at load time
         src = (REPO / 'dm/gfx/nvn/nvn_refl.m').read_text()
-        missing = [k for k in abi.VALUES if k.startswith('KIND_') and k != 'KIND_UNKNOWN' and f'@DMSH_{k}]' not in src]
+        missing = [k for k in abi.VALUES if k.startswith('KIND_') and k not in ('KIND_UNKNOWN', *ANDROID_ONLY_KINDS) and f'@DMSH_{k}]' not in src]
         self.assertEqual(missing, [], 'binding kinds nvn_refl.m does not convert')
+
+    def test_android_reads_android_only_kinds(self):   # the Vulkan replay binds them (vka_bind.c), under their dmsh_abi_vk.h numbers
+        src = (REPO / 'dm/gfx/vk_android/vka_bind.c').read_text()
+        self.assertEqual([k for k in ANDROID_ONLY_KINDS if f'DMSH_VK_{k}' not in src], [], 'Android-only kinds vka_bind.c does not bind')
 
     def test_translator_agrees(self):   # Program.cs keeps its own copy of the c2 layout (a C# file cannot include the header)
         m = re.search(r'const int TexBase = (\w+), ImgBase = (\w+), ImgSlots = (\w+), SepTexBase = (\w+), SepTexSlot0 = (\w+), SampBase = (\w+);',

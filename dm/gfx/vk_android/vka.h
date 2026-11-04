@@ -51,7 +51,7 @@ typedef struct { PFN_vkGetInstanceProcAddr vkGetInstanceProcAddr; VKA_GLOBAL_FNS
 extern vka_fns vk;   // a missing optional entry point is NULL
 
 // ---------- Switches read again while the game runs (vka_ctl.c) ----------
-// VKA_ENV("DM_VK_X", def) is a DM_VK_* switch's value as a number (strtod; unset or empty = def), cached per call site: one relaxed load and a compare while nothing changed.
+// VKA_ENV("DM_VK_<NAME>", def) is a DM_VK_* switch's value as a number (strtod; unset or empty = def), cached per call site: one relaxed load and a compare while nothing changed.
 // A live "env KEY=VALUE" control line (android/TESTING.md "Live control") bumps vka_env_gen at a frame boundary and every call site reads its switch again on its next call.
 // Read switches through it, not getenv: a switch that cannot change while running (it sizes a device object, a cache) goes into vka_ctl.c's restart-only table
 // A call site can run on two threads at once (the game's and the replay worker's): v is atomic (no torn read), and only one thread at a time refreshes a cache, and only to a
