@@ -13,8 +13,10 @@
 #include "vk_android.h"
 #include "../nvn/nvn_mtl.h"
 #include "vka_present_rot.h"
+#include "vka_present_fsr.h"
 #include <android/native_window.h>
 #include <dlfcn.h>
+#include <math.h>
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
@@ -55,7 +57,7 @@ static uint64_t g_refresh_ns, g_last_desired, g_drawable_ns;
 static int g_recreate;
 static struct { uint64_t n; double t; } g_pres[PRING];
 static VkSurfaceTransformFlagBitsKHR g_pre = VK_SURFACE_TRANSFORM_IDENTITY_BIT_KHR;   // the swapchain's preTransform
-static VkImageView g_sview[MAXIMG];   // the swapchain images as colour attachments (pre-rotation only)
+static VkImageView g_sview[MAXIMG];   // the swapchain images as colour attachments (pre-rotation and FSR only)
 static int g_fps_set; static unsigned g_refresh_n;
 static _Atomic int g_place_x = 5000, g_place_y = 5000;   // nxhost_picture_place, in 1/10000 of the free space
 void nxhost_picture_place(float x, float y) {
@@ -71,14 +73,21 @@ static struct { int state; VkFormat fmt; VkPipeline pipe; VkPipelineLayout lay; 
 static int rot_rotates(VkSurfaceTransformFlagBitsKHR t) { return t == VK_SURFACE_TRANSFORM_ROTATE_90_BIT_KHR || t == VK_SURFACE_TRANSFORM_ROTATE_180_BIT_KHR || t == VK_SURFACE_TRANSFORM_ROTATE_270_BIT_KHR; }
 static int rot_quarter(VkSurfaceTransformFlagBitsKHR t) { return t == VK_SURFACE_TRANSFORM_ROTATE_90_BIT_KHR || t == VK_SURFACE_TRANSFORM_ROTATE_270_BIT_KHR; }
 static int rot_wanted(void) { return VKA_ENV("DM_VK_PRETRANSFORM", 1) != 0; }   // live: a change makes a new swapchain (present_one)
+// rk's functions, loaded once for the rotated copy and the FSR passes: 1 = loaded
+static int rk_load(void) {
+    static int ok = -1;
+    if (ok >= 0) return ok;
+#define ROT_LOAD(f) rk.f = (PFN_##f)vk.vkGetDeviceProcAddr(V.dev, #f); if (!rk.f) { VRED("present: no %s", #f); return ok = 0; }
+    ROT_FNS(ROT_LOAD)
+#undef ROT_LOAD
+    return ok = 1;
+}
 // The pipeline for one swapchain format: 1 = ready. A failure is logged once and leaves the rotation to the compositor
 static int rot_ready(VkFormat fmt) {
     if (g_rot.state > 0 && g_rot.fmt == fmt) return 1;
     if (g_rot.state < 0) return 0;
     if (!g_rot.state) {
-#define ROT_LOAD(f) rk.f = (PFN_##f)vk.vkGetDeviceProcAddr(V.dev, #f); if (!rk.f) { VRED("pre-rotation: no %s", #f); g_rot.state = -1; return 0; }
-        ROT_FNS(ROT_LOAD)
-#undef ROT_LOAD
+        if (!rk_load()) { g_rot.state = -1; return 0; }
         VkDescriptorSetLayoutBinding b = {0, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1, VK_SHADER_STAGE_FRAGMENT_BIT, NULL};
         VkDescriptorSetLayoutCreateInfo dl = {VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO, .bindingCount = 1, .pBindings = &b};
         VkPushConstantRange pc = {VK_SHADER_STAGE_VERTEX_BIT, 0, 6 * sizeof(float)};
@@ -165,6 +174,144 @@ static void rot_copy(VkCommandBuffer cb, unsigned k, uint32_t idx, vka_img *im, 
     vka_img_barrier(cb, g_simg[idx], VK_IMAGE_ASPECT_COLOR_BIT, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, VK_IMAGE_LAYOUT_PRESENT_SRC_KHR);
 }
 
+// ---------- FSR 1 upscale: EASU into an intermediate image, then RCAS into the swapchain image (vka_present_fsr.h) ----------
+// DM_VK_FSR=1 replaces the bilinear blit, or the rotated copy, when the picture is scaled up; DM_VK_FSR_SHARP is RCAS's sharpness in stops (0 = the most,
+// each stop halves it; AMD's default 0.25). Both are live. The intermediate image has the picture's size on the window, one per frame in flight
+static struct { int state; VkFormat fmt; VkPipeline easu, rcas; VkPipelineLayout lay; VkDescriptorSetLayout dsl; VkDescriptorPool pool; VkDescriptorSet set[NFRAME][2]; VkSampler samp;
+                VkImage mid[NFRAME]; VkDeviceMemory mem[NFRAME]; VkImageView view[NFRAME]; uint32_t mw[NFRAME], mh[NFRAME]; } g_fsr;
+static int fsr_wanted(void) { return VKA_ENV("DM_VK_FSR", 0) != 0; }
+static VkPipeline fsr_pipe(const uint32_t *frag, size_t fsize, VkFormat fmt) {
+    VkShaderModule sm[2] = {0}; VkPipeline p = VK_NULL_HANDLE;
+    VkShaderModuleCreateInfo mv = {VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO, .codeSize = sizeof vka_fsr_vert, .pCode = vka_fsr_vert}, mf = mv;
+    mf.codeSize = fsize; mf.pCode = frag;
+    VkResult r = rk.vkCreateShaderModule(V.dev, &mv, NULL, &sm[0]);
+    if (!r) r = rk.vkCreateShaderModule(V.dev, &mf, NULL, &sm[1]);
+    VkPipelineShaderStageCreateInfo st[2] = {{VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, .stage = VK_SHADER_STAGE_VERTEX_BIT, .module = sm[0], .pName = "main"},
+                                             {VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, .stage = VK_SHADER_STAGE_FRAGMENT_BIT, .module = sm[1], .pName = "main"}};
+    VkPipelineVertexInputStateCreateInfo vi = {VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO};
+    VkPipelineInputAssemblyStateCreateInfo ia = {VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO, .topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST};
+    VkPipelineViewportStateCreateInfo vp = {VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO, .viewportCount = 1, .scissorCount = 1};
+    VkPipelineRasterizationStateCreateInfo rs = {VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO, .polygonMode = VK_POLYGON_MODE_FILL, .cullMode = VK_CULL_MODE_NONE, .lineWidth = 1};
+    VkPipelineMultisampleStateCreateInfo ms = {VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO, .rasterizationSamples = VK_SAMPLE_COUNT_1_BIT};
+    VkPipelineColorBlendAttachmentState cba = {.colorWriteMask = 0xf};
+    VkPipelineColorBlendStateCreateInfo cb = {VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO, .attachmentCount = 1, .pAttachments = &cba};
+    VkDynamicState dyn[2] = {VK_DYNAMIC_STATE_VIEWPORT, VK_DYNAMIC_STATE_SCISSOR};
+    VkPipelineDynamicStateCreateInfo ds = {VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO, .dynamicStateCount = 2, .pDynamicStates = dyn};
+    VkPipelineRenderingCreateInfo rci = {VK_STRUCTURE_TYPE_PIPELINE_RENDERING_CREATE_INFO, .colorAttachmentCount = 1, .pColorAttachmentFormats = &fmt};
+    VkGraphicsPipelineCreateInfo gi = {VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO, .pNext = &rci, .stageCount = 2, .pStages = st, .pVertexInputState = &vi, .pInputAssemblyState = &ia,
+        .pViewportState = &vp, .pRasterizationState = &rs, .pMultisampleState = &ms, .pColorBlendState = &cb, .pDynamicState = &ds, .layout = g_fsr.lay};
+    if (!r) r = rk.vkCreateGraphicsPipelines(V.dev, VK_NULL_HANDLE, 1, &gi, NULL, &p);
+    for (int i = 0; i < 2; i++) if (sm[i]) rk.vkDestroyShaderModule(V.dev, sm[i], NULL);
+    if (r) VRED("FSR: pipeline for format %d: %d", fmt, r);
+    return r ? VK_NULL_HANDLE : p;
+}
+// The layout, sets, sampler and the EASU pipeline once, the RCAS pipeline per swapchain format: 1 = ready. A failure is logged once and leaves the bilinear blit
+static int fsr_ready(VkFormat fmt) {
+    if (g_fsr.state > 0 && g_fsr.fmt == fmt) return 1;
+    if (g_fsr.state < 0) return 0;
+    if (!g_fsr.state) {
+        if (!rk_load()) { g_fsr.state = -1; return 0; }
+        VkDescriptorSetLayoutBinding b = {0, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1, VK_SHADER_STAGE_FRAGMENT_BIT, NULL};
+        VkDescriptorSetLayoutCreateInfo dl = {VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO, .bindingCount = 1, .pBindings = &b};
+        VkPushConstantRange pc = {VK_SHADER_STAGE_FRAGMENT_BIT, 0, 16 * sizeof(uint32_t)};   // the shaders' P: EASU's four uvec4 constants; RCAS's con0 and its turn
+        VkDescriptorPoolSize ps = {VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 2 * NFRAME};
+        VkDescriptorPoolCreateInfo pi = {VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO, .maxSets = 2 * NFRAME, .poolSizeCount = 1, .pPoolSizes = &ps};
+        VkSamplerCreateInfo si = {VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO, .magFilter = VK_FILTER_LINEAR, .minFilter = VK_FILTER_LINEAR, .addressModeU = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE,
+                                  .addressModeV = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE, .addressModeW = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE, .maxLod = 0.25f};
+        VkResult r = vk.vkCreateDescriptorSetLayout(V.dev, &dl, NULL, &g_fsr.dsl);
+        VkPipelineLayoutCreateInfo li = {VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO, .setLayoutCount = 1, .pSetLayouts = &g_fsr.dsl, .pushConstantRangeCount = 1, .pPushConstantRanges = &pc};
+        if (!r) r = rk.vkCreatePipelineLayout(V.dev, &li, NULL, &g_fsr.lay);
+        if (!r) r = vk.vkCreateDescriptorPool(V.dev, &pi, NULL, &g_fsr.pool);
+        VkDescriptorSetLayout dsls[2 * NFRAME]; for (int i = 0; i < 2 * NFRAME; i++) dsls[i] = g_fsr.dsl;
+        VkDescriptorSetAllocateInfo ai = {VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO, .descriptorPool = g_fsr.pool, .descriptorSetCount = 2 * NFRAME, .pSetLayouts = dsls};
+        if (!r) r = vk.vkAllocateDescriptorSets(V.dev, &ai, &g_fsr.set[0][0]);
+        if (!r) r = vk.vkCreateSampler(V.dev, &si, NULL, &g_fsr.samp);
+        if (r) { VRED("FSR: descriptor set, layout or sampler: %d; the picture is blitted", r); g_fsr.state = -1; return 0; }
+        if (!(g_fsr.easu = fsr_pipe(vka_fsr_easu_frag, sizeof vka_fsr_easu_frag, VK_FORMAT_R8G8B8A8_UNORM))) { g_fsr.state = -1; return 0; }
+    }
+    if (g_fsr.rcas) { vka_queue_idle(); rk.vkDestroyPipeline(V.dev, g_fsr.rcas, NULL); g_fsr.rcas = VK_NULL_HANDLE; }   // a new swapchain format: no pass in flight
+    if (!(g_fsr.rcas = fsr_pipe(vka_fsr_rcas_frag, sizeof vka_fsr_rcas_frag, fmt))) { g_fsr.state = -1; return 0; }
+    g_fsr.state = 1; g_fsr.fmt = fmt;
+    VLOG("FSR 1 upscale on (RCAS sharpness %.2f stops)", VKA_ENVF("DM_VK_FSR_SHARP", 0.25));
+    return 1;
+}
+// Frame k's intermediate image at w x h: made again when the size changes (frame k's fence is waited for, so nothing reads the old one). 1 = ready
+static int fsr_mid(unsigned k, uint32_t w, uint32_t h) {
+    if (g_fsr.mid[k] && g_fsr.mw[k] == w && g_fsr.mh[k] == h) return 1;
+    if (g_fsr.view[k]) vk.vkDestroyImageView(V.dev, g_fsr.view[k], NULL);
+    if (g_fsr.mid[k]) vk.vkDestroyImage(V.dev, g_fsr.mid[k], NULL);
+    if (g_fsr.mem[k]) vk.vkFreeMemory(V.dev, g_fsr.mem[k], NULL);
+    g_fsr.view[k] = VK_NULL_HANDLE; g_fsr.mid[k] = VK_NULL_HANDLE; g_fsr.mem[k] = VK_NULL_HANDLE; g_fsr.mw[k] = g_fsr.mh[k] = 0;
+    VkImageCreateInfo ci = {VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO, .imageType = VK_IMAGE_TYPE_2D, .format = VK_FORMAT_R8G8B8A8_UNORM, .extent = {w, h, 1}, .mipLevels = 1, .arrayLayers = 1,
+        .samples = VK_SAMPLE_COUNT_1_BIT, .tiling = VK_IMAGE_TILING_OPTIMAL, .usage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT};
+    VkResult r = vk.vkCreateImage(V.dev, &ci, NULL, &g_fsr.mid[k]);
+    VkMemoryRequirements mr = {0}; if (!r) vk.vkGetImageMemoryRequirements(V.dev, g_fsr.mid[k], &mr);
+    VkMemoryAllocateInfo ai = {VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO, .allocationSize = mr.size, .memoryTypeIndex = vka_mem_type(mr.memoryTypeBits, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, 0)};
+    if (!r && ai.memoryTypeIndex == UINT32_MAX) r = VK_ERROR_OUT_OF_DEVICE_MEMORY;
+    if (!r) r = vk.vkAllocateMemory(V.dev, &ai, NULL, &g_fsr.mem[k]);
+    if (!r) r = vk.vkBindImageMemory(V.dev, g_fsr.mid[k], g_fsr.mem[k], 0);
+    VkImageViewCreateInfo vi = {VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO, .image = g_fsr.mid[k], .viewType = VK_IMAGE_VIEW_TYPE_2D, .format = VK_FORMAT_R8G8B8A8_UNORM, .subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1}};
+    if (!r) r = vk.vkCreateImageView(V.dev, &vi, NULL, &g_fsr.view[k]);
+    if (r) { VRED_ONCE("FSR: intermediate image %ux%u: %d; the picture is blitted", w, h, r); return 0; }
+    g_fsr.mw[k] = w; g_fsr.mh[k] = h;
+    return 1;
+}
+static uint32_t fsr_bits(float f) { uint32_t u; memcpy(&u, &f, 4); return u; }
+// The texture's crop [cx, cx + cw) x [cy, cy + ch) scaled to [dx, dx + dw) x [dy, dy + dh) of swapchain image idx, the rest black. The constants are AMD's FsrEasuConOffset and
+// FsrRcasCon (ffx_fsr1.h) in C; for a lower-left origin (the texture stored bottom-up) EASU's rows are read from the bottom: con0's y scale negated and its offset from the crop's top
+static void fsr_copy(VkCommandBuffer cb, unsigned k, uint32_t idx, vka_img *im, int cx, int cy, int cw, int ch, int dx, int dy, int dw, int dh) {
+    VkImageView src = vka_view(im, im->f.vk, VK_IMAGE_VIEW_TYPE_2D, VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1, NULL);
+    VkDescriptorImageInfo ii[2] = {{g_fsr.samp, src, VK_IMAGE_LAYOUT_GENERAL}, {g_fsr.samp, g_fsr.view[k], VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL}};
+    VkWriteDescriptorSet w[2] = {{VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, .dstSet = g_fsr.set[k][0], .descriptorCount = 1, .descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, .pImageInfo = &ii[0]},
+                                 {VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, .dstSet = g_fsr.set[k][1], .descriptorCount = 1, .descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, .pImageInfo = &ii[1]}};
+    vk.vkUpdateDescriptorSets(V.dev, 2, w, 0, NULL);
+    float sx = (float)cw / dw, sy = (float)ch / dh, rw = 1.0f / im->w, rh = 1.0f / im->h;
+    float easu[16] = {sx, sy, 0.5f * sx - 0.5f + cx, 0.5f * sy - 0.5f + cy, rw, rh, rw, -rh, -rw, 2 * rh, rw, 2 * rh, 0, 4 * rh, 0, 0};
+    if (vka_origin_ll()) { easu[1] = -sy; easu[3] = cy + ch - 0.5f * sy - 0.5f; }
+    uint32_t pc[16];
+    for (int i = 0; i < 16; i++) pc[i] = fsr_bits(easu[i]);
+    VkViewport v = {0, 0, (float)dw, (float)dh, 0, 1}; VkRect2D sc = {{0, 0}, {(uint32_t)dw, (uint32_t)dh}};
+    vka_img_barrier(cb, g_fsr.mid[k], VK_IMAGE_ASPECT_COLOR_BIT, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL);
+    VkRenderingAttachmentInfo ca = {VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO, .imageView = g_fsr.view[k], .imageLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+        .loadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE, .storeOp = VK_ATTACHMENT_STORE_OP_STORE};
+    VkRenderingInfo ri = {VK_STRUCTURE_TYPE_RENDERING_INFO, .renderArea = sc, .layerCount = 1, .colorAttachmentCount = 1, .pColorAttachments = &ca};
+    vk.vkCmdBeginRendering(cb, &ri);
+    rk.vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, g_fsr.easu);
+    rk.vkCmdBindDescriptorSets(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, g_fsr.lay, 0, 1, &g_fsr.set[k][0], 0, NULL);
+    rk.vkCmdPushConstants(cb, g_fsr.lay, VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof pc, pc);
+    rk.vkCmdSetViewport(cb, 0, 1, &v);
+    rk.vkCmdSetScissor(cb, 0, 1, &sc);
+    rk.vkCmdDraw(cb, 3, 1, 0, 0);
+    vk.vkCmdEndRendering(cb);
+    vka_img_barrier(cb, g_fsr.mid[k], VK_IMAGE_ASPECT_COLOR_BIT, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+    // RCAS: con0 = FsrRcasCon's (its packed half at word 1 is for the 16-bit path, unused here); words 4-9 turn the swapchain pixel q back to the picture's,
+    // q.x * (4, 5) + q.y * (6, 7) + (8, 9): rot_copy's turns in whole pixels (ROTATE_90: the picture's (x, y) = (q.y - dx, W - 1 - dy - q.x)), the viewport as rot_copy's
+    int W = (int)g_ext.width, H = (int)g_ext.height, m[6];
+    switch (g_pre) {
+    case VK_SURFACE_TRANSFORM_ROTATE_90_BIT_KHR:  v = (VkViewport){(float)(W - dy - dh), (float)dx, (float)dh, (float)dw, 0, 1}; memcpy(m, (int[6]){0, -1, 1, 0, -dx, W - 1 - dy}, sizeof m); break;
+    case VK_SURFACE_TRANSFORM_ROTATE_270_BIT_KHR: v = (VkViewport){(float)dy, (float)(H - dx - dw), (float)dh, (float)dw, 0, 1}; memcpy(m, (int[6]){0, 1, -1, 0, H - 1 - dx, -dy}, sizeof m); break;
+    case VK_SURFACE_TRANSFORM_ROTATE_180_BIT_KHR: v = (VkViewport){(float)(W - dx - dw), (float)(H - dy - dh), (float)dw, (float)dh, 0, 1}; memcpy(m, (int[6]){-1, 0, 0, -1, W - 1 - dx, H - 1 - dy}, sizeof m); break;
+    default:                                      v = (VkViewport){(float)dx, (float)dy, (float)dw, (float)dh, 0, 1}; memcpy(m, (int[6]){1, 0, 0, 1, -dx, -dy}, sizeof m); break;
+    }
+    memset(pc, 0, sizeof pc);
+    pc[0] = fsr_bits(exp2f(-(float)VKA_ENVF("DM_VK_FSR_SHARP", 0.25)));
+    memcpy(&pc[4], m, sizeof m);
+    sc = (VkRect2D){{0, 0}, g_ext};
+    vka_img_barrier(cb, g_simg[idx], VK_IMAGE_ASPECT_COLOR_BIT, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL);
+    ca = (VkRenderingAttachmentInfo){VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO, .imageView = g_sview[idx], .imageLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+        .loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR, .storeOp = VK_ATTACHMENT_STORE_OP_STORE, .clearValue = {.color = {{0, 0, 0, 1}}}};   // the bars
+    ri.renderArea = sc;
+    vk.vkCmdBeginRendering(cb, &ri);
+    rk.vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, g_fsr.rcas);
+    rk.vkCmdBindDescriptorSets(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, g_fsr.lay, 0, 1, &g_fsr.set[k][1], 0, NULL);
+    rk.vkCmdPushConstants(cb, g_fsr.lay, VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof pc, pc);
+    rk.vkCmdSetViewport(cb, 0, 1, &v);
+    rk.vkCmdSetScissor(cb, 0, 1, &sc);
+    rk.vkCmdDraw(cb, 3, 1, 0, 0);
+    vk.vkCmdEndRendering(cb);
+    vka_img_barrier(cb, g_simg[idx], VK_IMAGE_ASPECT_COLOR_BIT, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, VK_IMAGE_LAYOUT_PRESENT_SRC_KHR);
+}
+
 static void swap_destroy(int surface_too) {
     if (!V.dev) return;
     vka_queue_idle();
@@ -219,7 +366,7 @@ static int swap_create(void) {
     VkSemaphoreCreateInfo sci = {VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO};
     for (uint32_t i = 0; i < g_nimg; i++) {
         vk.vkCreateSemaphore(V.dev, &sci, NULL, &g_sdone[i]);
-        if (rot_rotates(pre)) {
+        if (rot_rotates(pre) || fsr_wanted()) {   // the rotated copy and the FSR passes draw into the swapchain image
             VkImageViewCreateInfo vi = {VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO, .image = g_simg[i], .viewType = VK_IMAGE_VIEW_TYPE_2D, .format = pick.format, .subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1}};
             if ((r = vk.vkCreateImageView(V.dev, &vi, NULL, &g_sview[i]))) { VRED("swapchain image view %u: %d", i, r); g_sview[i] = VK_NULL_HANDLE; }
         }
@@ -348,7 +495,15 @@ static int present_one(const pq_item *it) {
     int dw = (int)(cw * s + 0.5), dh = (int)(ch * s + 0.5), dx = (int)((long)(ew - dw) * g_place_x / 10000), dy = (int)((long)(eh - dh) * g_place_y / 10000);   // nxhost_picture_place
     VkFormatProperties fp = {0}; if (im) vk.vkGetPhysicalDeviceFormatProperties(V.pd, im->f.vk, &fp);
     int blit = im && im->inited && im->aspect == VK_IMAGE_ASPECT_COLOR_BIT && im->f.kind == 0 && im->samples == 1 && (fp.optimalTilingFeatures & VK_FORMAT_FEATURE_BLIT_SRC_BIT);
-    if (rot_rotates(g_pre)) {
+    // FSR in place of the blit or the rotated copy for a picture scaled up; switched on live, the swapchain has no attachment views yet: blitted once, and the next swapchain has them
+    int fsr = blit > 0 && fsr_wanted() && (dw > cw || dh > ch) && (im->usage & VK_IMAGE_USAGE_SAMPLED_BIT)
+              && (fp.optimalTilingFeatures & VK_FORMAT_FEATURE_SAMPLED_IMAGE_FILTER_LINEAR_BIT);
+    if (fsr && !g_sview[idx]) { g_recreate = 1; fsr = 0; }
+    if (fsr && fsr_ready(g_swap_fmt) && fsr_mid(k, (uint32_t)dw, (uint32_t)dh)) {
+        vka_barrier(cb);   // the replay's writes to the window texture (earlier submissions, in submission order)
+        fsr_copy(cb, k, idx, im, cx, cy, cw, ch, dx, dy, dw, dh);
+        blit = -1;
+    } else if (rot_rotates(g_pre)) {
         int ok = im && im->inited && im->aspect == VK_IMAGE_ASPECT_COLOR_BIT && im->f.kind == 0 && im->samples == 1 && (im->usage & VK_IMAGE_USAGE_SAMPLED_BIT) && g_sview[idx];
         if (ok) vka_barrier(cb);   // the replay's writes to the window texture (earlier submissions, in submission order)
         else if (im) VRED_ONCE("window texture serial %llu (format %#x) cannot be sampled for the rotated copy: presented black", (unsigned long long)im->serial, im->d.format);
