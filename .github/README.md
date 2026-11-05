@@ -143,7 +143,8 @@ Videos are welcome. To make yours useful to viewers:
 - Turn on the performance overlay so the frame rate is visible, and say whether frame generation is on.
 - Mention the [known issues](#known-issues) you run into, so viewers know which ones are already being fixed.
 - Link this page for downloads: releases are only published here, and copies elsewhere may be modified.
-- Please don't show or link game dumps, keys or firmware.
+- Please don't show or link game dumps, keys or firmware. The same goes for Issues and Discussions: posts that share, offer
+  or ask for game files, keys or links are edited or removed ([rules](https://github.com/moceure/BananaNative/discussions/23)).
 
 Post your video or your "it runs on my phone" report in
 [Discussions](https://github.com/moceure/BananaNative/discussions): every phone other than the tested one helps, and

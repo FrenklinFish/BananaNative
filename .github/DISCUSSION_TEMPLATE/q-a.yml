@@ -1,0 +1,20 @@
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Ask away. Bugs go to [Issues](https://github.com/moceure/BananaNative/issues) with the form; a log helps.
+        **No game files, keys, firmware or links to them**: don't share them, offer them or ask where to get them. Banana Native works with your own dump of a game you own. Posts that break this are edited or removed ([rules](https://github.com/moceure/BananaNative/discussions/23)).
+  - type: textarea
+    id: body
+    attributes:
+      label: Your question
+      description: Your phone, the app version and the game help with an answer.
+    validations:
+      required: true
+  - type: checkboxes
+    id: rules
+    attributes:
+      label: Rules
+      options:
+        - label: My post has no game files, keys, firmware or links to them, and doesn't ask for any.
+          required: true

@@ -89,3 +89,13 @@ body:
     attributes:
       label: Anything else
       description: Settings you changed (resolution, frame rate cap, frame generation), a phone cooler, screenshots.
+  - type: checkboxes
+    id: rules
+    attributes:
+      label: Rules
+      description: Posts that share, offer or ask for game files, keys or links are edited or removed.
+      options:
+        - label: I play a dump of a game I own, made with my own console.
+          required: true
+        - label: I am not attaching, offering or linking game files, keys or firmware.
+          required: true
