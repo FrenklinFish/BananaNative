@@ -34,6 +34,13 @@ sys_resource	0x0
 # nninitStartup asks for pool - used memory and does not check the answer; the rewritten modules take 82 MB, more than the default 64 MB SetHeapSize checks the request against
 mem_used	0x5600000
 
+# ---- Render size ----
+# KTGL's dynamic resolution: a table of 34 sizes at main+0x2849658 (u32 widths, then heights: level 0 = 960x540 up by 32x18 to level 30 = 1920x1080, then 1440p, 4K, 8K) and
+# nine level lists the controller (main+0x22cd20) walks down when the GPU runs late, picked at main+0x22d338 by oe::GetOperationMode, oe::GetCurrentGraphicsScale and a flag:
+# docked at scale 1 it starts at level 24 (1728x972), docked at scale 0 at 30, handheld at 20 (1600x900). The host lowers the lists that start above DM_WINDOW_SIZE
+# (the Android launcher's Game resolution; loader.c levels_apply), the table stays: the game's own maximum must stay, or the terrain breaks (the game note, Render size)
+res_levels	76a489f3bd3642fa5e18bd83d32c98ba	0x2849658	34	0x2804ff0:8	0x2805160:8	0x2805198:8	0x2805458:8	0x28055c0:8	0x2808b60:9	0x2808b69:10	0x2808b73:9	0x2808b7c:9
+
 # ---- Shader split (shader_split.py) ----
 shader_groups	/motor_asset_re/=rdb
 shader_note	Pokemon Pokopia shaders

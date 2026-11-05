@@ -168,6 +168,21 @@ def header(g):
                 sys.exit(f'{g.id}: graphics_scale takes <WxH | original> <scale 0|1|2> <console | handheld>, one row per choice: {r}')
             seen.add(r[0])
         if wfn: sys.exit(f'{g.id}: graphics_scale and window_fn are two levers for one setting: keep one')
+    # Dynamic resolution level lists, one row per main build: <main build ID> <size table offset> <levels> <list offset>:<length>... (loader.c levels_apply): for a game
+    # with no window getter, DM_WINDOW_SIZE=WxH caps the render size by lowering the lists (Game resolution as with window_fn: build.gradle resolutionOf)
+    rlv = []
+    if g.get('res_levels', ''):
+        for r in g.values('res_levels'):
+            if len(r) < 4 or len(r) > 3 + 12 or not re.fullmatch(r'[0-9a-f]{32}', r[0]) or not re.fullmatch(r'0x[0-9a-fA-F]+', r[1]) or not re.fullmatch(r'\d{1,3}', r[2]) \
+                    or not all(re.fullmatch(r'0x[0-9a-fA-F]+:\d{1,2}', x) for x in r[3:]):
+                sys.exit(f"{g.id}: res_levels takes <main build ID (32 hex)> <size table offset> <levels> <list offset>:<length> (1 to 12 lists): {r}")
+            n = int(r[2])
+            if not 2 <= n <= 255: sys.exit(f'{g.id}: res_levels: the size table must have 2..255 levels: {r[2]}')
+            ls = [(x.split(':')[0], int(x.split(':')[1])) for x in r[3:]]
+            if not all(1 <= ln <= 32 for _, ln in ls): sys.exit(f'{g.id}: res_levels: each list is 1..32 bytes: {r}')
+            ls += [('0', 0)] * (12 - len(ls))
+            rlv.append('{' + q(r[0]) + f', {r[1]}, {n}, {len(r) - 3}, ' + '{' + ', '.join(f'{{{o}, {ln}}}' for o, ln in ls) + '}}')
+        if g.get('graphics_scale', ''): sys.exit(f'{g.id}: graphics_scale and res_levels are two levers for one setting: keep one')
     api = g.get('device_api', '55.15')   # the NVN API major.minor version nvnDeviceGetInteger reports (hle_nvn.c)
     if not re.fullmatch(r'\d+\.\d+', api): sys.exit(f'{g.id}: device_api must be major.minor: {api}')
     src = f'dm/games/{g.id}' if g.dir.parent == HERE else str(g.dir)
@@ -213,6 +228,7 @@ def header(g):
          f'#define DM_GAME_GPU_TS_SEGMENT {int(gts == "segment")}',
          f'#define DM_GAME_VCONV_RANGE {int(vcr == "on")}',
          f'#define DM_GAME_WINDOW_FN {{{", ".join(wfn) or "{\"\", 0, 0, 0, 0}"}}}', f'#define DM_GAME_NWINDOW_FN {len(wfn)}',
+         '#define DM_GAME_RES_LEVELS {' + (', '.join(rlv) or '{"", 0, 0, 0, {{0, 0}}}') + '}', f'#define DM_GAME_NRES_LEVELS {len(rlv)}',
          *([f'#define DM_GAME_NVN_API_MAJOR {api.split(".")[0]}', f'#define DM_GAME_NVN_API_MINOR {api.split(".")[1]}'] if g.get('device_api', '') else []),   # without the key: by the SDK version (hle_nvn.c nvn_api)
          '']
     return '\n'.join(L)

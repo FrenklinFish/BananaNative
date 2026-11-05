@@ -628,13 +628,55 @@ static void map_image(module_t *m, const char *dir) {
 // DM_WINDOW_SIZE=<w>x<h> writes that size into them (the Android launcher's Game resolution); unset, empty or "original" writes the game's own size from the profile, so a pack
 // rewritten with the older cut of the constants gives the game's size too. Only for the main build the row names, while the text is still writable (map_image, before the
 // seal), and after checking each function's shape: fixed addresses never run on another build. Not on iOS: the text is embedded there as signed code (map_image above)
+// A game with dynamic resolution and no window getter (Pokemon Pokopia) takes the size as a cap on its render size instead (profile key res_levels): the game keeps a table of
+// sizes (u32 widths, then u32 heights, <levels> each) and picks its level from short byte lists of levels, one list per operation mode and graphics scale, stepping down the
+// list when the GPU runs late. Each list whose first level is larger than the cap is rewritten to start at the largest level that fits and step down from there. The table and
+// so the game's maximum stay as they are: render targets keep their size and the game draws into part of them, as its own dynamic resolution does (lowering the table's
+// maximum instead broke the terrain: something else assumes the game's own maximum). Rows are checked: the table must grow, every list byte must be a level; read-only data
+// is still writable here (map_image seals the text and the patch area only)
+static int levels_apply(module_t *m, unsigned cw, unsigned ch) {
+    static const struct { const char *build; uint64_t table; unsigned n, nl; struct { uint64_t off; unsigned len; } l[12]; } rows[] = DM_GAME_RES_LEVELS;
+    int r = -1;
+    for (int i = 0; i < DM_GAME_NRES_LEVELS; i++) if (!strcmp(rows[i].build, m->build_id)) r = i;
+    if (r < 0) return 0;
+    unsigned n = rows[r].n;
+    if (rows[r].table + 8ull * n > m->size) { LOG("[RED] res_levels: main+%#llx is outside main; the resolution stays the game's", (unsigned long long)rows[r].table); return 1; }
+    const uint32_t *tw = (const uint32_t *)(m->base + rows[r].table), *th = tw + n;
+    for (unsigned i = 0; i < n; i++) if (!tw[i] || !th[i] || (i && (tw[i] < tw[i - 1] || th[i] < th[i - 1]))) {
+        LOG("[RED] res_levels: the size table at main+%#llx does not grow at level %u (%ux%u); the resolution stays the game's", (unsigned long long)rows[r].table, i, tw[i], th[i]); return 1;
+    }
+    for (unsigned k = 0; k < rows[r].nl; k++) {
+        const uint8_t *p = m->base + rows[r].l[k].off;
+        if (rows[r].l[k].off + rows[r].l[k].len > m->size) { LOG("[RED] res_levels: list main+%#llx is outside main; the resolution stays the game's", (unsigned long long)rows[r].l[k].off); return 1; }
+        for (unsigned i = 0; i < rows[r].l[k].len; i++) if (p[i] >= n) { LOG("[RED] res_levels: list main+%#llx holds %u, not a level; the resolution stays the game's", (unsigned long long)rows[r].l[k].off, p[i]); return 1; }
+    }
+    int top = -1;
+    for (unsigned i = 0; i < n; i++) if (tw[i] <= cw && th[i] <= ch) top = (int)i;
+    if (top < 0) top = 0;
+    int changed = 0;
+    for (unsigned k = 0; k < rows[r].nl; k++) {
+        uint8_t *p = m->base + rows[r].l[k].off;
+        if (p[0] <= top) continue;
+        for (unsigned i = 0; i < rows[r].l[k].len; i++) p[i] = (uint8_t)(top > (int)i ? top - (int)i : 0);
+        changed++;
+    }
+    LOG("resolution: at most %ux%u (level %d of the game's %u, DM_WINDOW_SIZE=%ux%u): %d of %u level lists lowered", tw[top], th[top], top, n, cw, ch, changed, rows[r].nl);
+    return 1;
+}
+
 static void window_apply(module_t *m) {
     if (strcmp(m->name, "main") || m->nro) return;
     const char *e = getenv("DM_WINDOW_SIZE");
     static const struct { const char *build; uint64_t wfn, hfn; unsigned w, h; } rows[] = DM_GAME_WINDOW_FN;
     int r = -1, own = !e || !*e || !strcmp(e, "original");
     for (int i = 0; i < DM_GAME_NWINDOW_FN; i++) if (!strcmp(rows[i].build, m->build_id)) r = i;
-    if (r < 0) { if (!own) LOG("[RED] DM_WINDOW_SIZE=%s: the profile has no window_fn row for main build %s; the window stays the game's", e, m->build_id); return; }
+    if (r < 0) {
+        unsigned a, b; char x;
+        if (own) return;
+        if (sscanf(e, "%ux%u%c", &a, &b, &x) != 2 || !a || !b) { LOG("[RED] DM_WINDOW_SIZE=%s: must be <width>x<height> or original; the size stays the game's", e); return; }
+        if (!levels_apply(m, a, b)) LOG("[RED] DM_WINDOW_SIZE=%s: the profile has no window_fn or res_levels row for main build %s; the window stays the game's", e, m->build_id);
+        return;
+    }
     unsigned w = rows[r].w, h = rows[r].h;
     if (!own) {
         unsigned a, b; char x;
