@@ -147,11 +147,19 @@ The probe allows memfd RW + RX views at a fixed address, anonymous RWX memory an
 Each stub logs once and then fails, or reports "nothing to do":
 
 - **Graphics.** The replay (`dm/gfx/vk_android`) draws and dispatches; it logs once each for what it does not do yet: the shader variants, transform feedback, texel buffers, DrawTexture and the rest listed in [SHADERS.md](SHADERS.md#what-the-replay-does), colour clears with a partial channel mask (stencil clears with a write mask are drawn), buffer copies of packed depth-stencil formats, depth upload from guest memory, texture buffers, sampler reduction modes, pools outside placed guest RAM. `dm/gfx/nvn/android_stub.c` keeps 31 functions: statistics (`mtl_*_stats`, `mtl_gpu_ms`, `mtl_bw` …), `mtl_read_texels` (CPU texel reads), `mtl_ub_present`, `mtl_pso_prebuild_tool`, and `dm_gfx_*` (screenshots and dumps); frame capture is `vka_capture.c` ([TESTING.md](TESTING.md#frame-capture-and-replay-on-the-phone)). Vulkan games (`hle_vk.m`) and OpenGL games (`hle_gl.m`) are not built at all: their imports resolve to the host's named unimplemented stubs.
-- **Front end.** `front_android.c`: `front_run` runs the guest on the calling thread; the window goes from the launcher straight to the replay (`nxhost_set_window`). There is no text input (the keyboard applet takes its no-window path) and no progress screen.
+- **Front end.** `front_android.c`: `front_run` runs the guest on the calling thread; the window goes from the launcher straight to the replay (`nxhost_set_window`). There is no progress screen. Text input: see [The software keyboard](#the-software-keyboard).
 - **Audio and movies.** Implemented ([Audio, video and input on Android](#audio-video-and-input-on-android)); the microphone and AV1 are absent, as on every platform.
 - **Memory aliases.** `plat_mem_alias` has no writable alias of guest pages, so cheats write data only and the probe write watch unprotects the page instead. NVN virtual pools are kept in the page table only.
 - **Diagnostics.** The power line, the frame-step CPU-share reading and the present thread's time-constraint policy are off.
 - **Input, motion and haptics.** Implemented in the host. The launcher forwards gamepads, touch, motion and the lifecycle, and draws the on-screen controls (`TouchControls.java`: its own layout in dp through `nxhost_touch_controls_set`, the host's hit tests and state; shown without a gamepad, a top-centre button to hide them, held for opacity / size / vibration). It installs no rumble callback.
+
+## The software keyboard
+
+The keyboard applet (`hle_swkbd.c`: `ShowKeyboard`, and the inline keyboard's `Appear`) asks the front end's `front_text_input`. On Android that is `android_text_input` (`dm/host/android/input_android.c`), which calls the launcher's callback (`nxhost_text_input_callback`, `input_android.h`) and blocks the guest thread that opened the keyboard until it returns, as on the Mac and iOS. Without a callback it returns the no-window answer (cancel).
+
+- **Host.** While the box is up, every pad and touch the game saw held is let go (the box takes the window's focus, so the game screen never gets the key-up or touch-up of what opened it) and `nxhost_input_key` / `_axes` / `nxhost_input_touch` are dropped, so nothing typed or pressed in the box reaches the game. The guest clock is not frozen for `ShowKeyboard` (the game's other threads run on, as on the Switch; `hle_swkbd.c` says why); the inline keyboard freezes it around its own call. The minimum length (`ShowKeyboardArg` +0x3b0, `g_swkbd_min_chars`) goes to the callback; the host cuts the text to the maximum in UTF-16 units.
+- **Shim.** `nxlaunch.c` installs the callback at `Native.start`. The guest thread does not enter the VM: a thread of the shim, attached for the call and detached after it, calls `TextInput.ask(byte[] title, byte[] sub, byte[] guide, byte[] initial, int max, int min)` while the guest thread waits in `pthread_join`. Strings cross as UTF-8 byte arrays (`NewStringUTF` takes modified UTF-8). `null` back is a cancel.
+- **Launcher.** `TextInput` shows an `AlertDialog` on the UI thread over the game's screen: the header as its title ("Enter text" when empty), the sub and guide texts as its message (and the guide as the field's hint), the initial text in a single-line field limited to the maximum length, the soft keyboard up (no full-screen extract editor). OK, Done on the soft keyboard or Enter on a physical keyboard confirm it, once the text has the minimum length (OK stays disabled until then, as the applet's). Cancel, Back or B on a controller cancel it, as the console's keyboard always allows: the game decides what a cancel means (an optional box closes its menu, a box the game needs is shown again). A tap outside does nothing, so a stray touch never cancels. Before the box, the host answered every request with an instant cancel, so a game that needs the text asked again forever (a soft-lock). A gamepad moves between the field and the buttons (A presses the focused one). A screen recreated while the box is up (`GameActivity.onDestroy` without finishing, then `onCreate`) shows it again with the text typed so far; a screen closed for good (the game stopped) answers cancel with a `[RED] keyboard: …` line, so the host never waits for a box nobody can see. The host logs each answer (`swkbd: title … → OK '…'`).
 
 ## Tests
 
@@ -334,7 +342,7 @@ What the Activity calls:
 
 ### Still stubs after this
 
-- the graphics' draws and dispatches (the replay does clears, copies and presents), the text input box and the progress screen;
+- the graphics' draws and dispatches (the replay does clears, copies and presents) and the progress screen;
 - the microphone (none on any platform);
 - AV1 (none on any platform; `video/av01` through the same `mavc`-style wrapper is the way if a game needs it);
 - memory aliases and the diagnostics listed above.

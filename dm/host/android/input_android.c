@@ -24,6 +24,7 @@ static nxin_pad g_pad[DM_PLAYERS];
 static float g_dz = -1;
 static nxin_touch g_touch; static int g_touch_init;
 static uint64_t g_shake_btn;
+static int g_held;   // the text input box is up: pad and touch events are dropped (android_text_input)
 
 static void touch_once(void) { if (!g_touch_init) { nxin_touch_init(&g_touch); g_touch_init = 1; } }
 static const void *owner(int device) { return (const void *)(intptr_t)((int64_t)device + 0x100000000ll); }   // never NULL, even for device 0
@@ -75,6 +76,7 @@ int nxhost_input_device_player(int device) { pthread_mutex_lock(&g_mu); int p = 
 bool nxhost_input_key(int device, int keycode, bool down) {
     if (!nxin_key_button(keycode, 0)) return false;
     pthread_mutex_lock(&g_mu);
+    if (g_held) { pthread_mutex_unlock(&g_mu); return true; }
     int p = take(device, NULL, 0);
     if (p >= 0 && nxin_pad_key(&g_pad[p], keycode, down, g_labelled[p])) publish_pad(p);
     pthread_mutex_unlock(&g_mu);
@@ -84,6 +86,7 @@ bool nxhost_input_axes(int device, const int *axes, const float *values, int n) 
     nxin_pad probe = {0};
     if (!nxin_pad_axes(&probe, axes, values, n)) return false;
     pthread_mutex_lock(&g_mu);
+    if (g_held) { pthread_mutex_unlock(&g_mu); return true; }
     int p = take(device, NULL, 0);
     if (p >= 0) { nxin_pad_axes(&g_pad[p], axes, values, n); publish_pad(p); }
     pthread_mutex_unlock(&g_mu);
@@ -94,6 +97,7 @@ void nxhost_input_deadzone(float dz) { pthread_mutex_lock(&g_mu); g_dz = dz < 0 
 
 void nxhost_input_touch(int action, int id, float x, float y) {
     pthread_mutex_lock(&g_mu); touch_once();
+    if (g_held) { pthread_mutex_unlock(&g_mu); return; }
     int r = nxin_touch_event(&g_touch, action, id, x, y);
     if (r & 1) publish_touch_pad();
     if (r & 2) publish_fingers();
@@ -135,6 +139,32 @@ void nxhost_touch_controls_state(uint64_t *pressed, int max, float stick[4]) {
     for (int i = 0; pressed && i < max && i < g_touch.n; i++) pressed[i] = g_touch.pressed[i];
     if (stick) { stick[0] = g_touch.sx[0]; stick[1] = g_touch.sy[0]; stick[2] = g_touch.sx[1]; stick[3] = g_touch.sy[1]; }
     pthread_mutex_unlock(&g_mu);
+}
+
+// ---- Text input: the launcher's input box for the keyboard applet (front_text_input) ----
+// The box takes the window's focus, so the game screen never gets the key-up of the pad button or the touch-up of the tap that opened it: everything the game saw held
+// is let go when the box comes up, and pad and touch events are dropped until it goes (on the Mac the input box clears the keys the same way, front_mac.m), so nothing
+// stays pressed and nothing typed or pressed in the box reaches the game. The guest clock keeps running, as on the Switch (hle_swkbd.c)
+static nxhost_text_input_fn _Atomic g_ti_fn; static void *_Atomic g_ti_ctx;
+void nxhost_text_input_callback(nxhost_text_input_fn fn, void *ctx) {
+    atomic_store(&g_ti_ctx, ctx); atomic_store(&g_ti_fn, fn);
+    LOG("input: the keyboard applet goes to the launcher's input box%s", fn ? "" : " (none: cancel)");
+}
+static void input_hold(int on) {
+    pthread_mutex_lock(&g_mu);
+    g_held = on;
+    for (int p = 0; p < DM_PLAYERS; p++) if (pad_slot_mask(&g_slots) >> p & 1) { memset(&g_pad[p], 0, sizeof g_pad[p]); publish_pad(p); }
+    touch_release_all();
+    pthread_mutex_unlock(&g_mu);
+}
+int android_text_input(const char *title, const char *sub, const char *guide, const char *initial, int max_chars, int min_chars, char *out, int out_cap) {
+    nxhost_text_input_fn fn = atomic_load(&g_ti_fn);
+    if (!fn) return -1;
+    input_hold(1);
+    int r = fn(atomic_load(&g_ti_ctx), title ? title : "", sub ? sub : "", guide ? guide : "", initial ? initial : "", max_chars, min_chars, out, out_cap);
+    input_hold(0);
+    if (r > 0 && out_cap > 0) out[out_cap - 1] = 0;
+    return r > 0 ? 1 : 0;
 }
 
 // ---- Motion: ASensorManager on a looper thread of its own ----

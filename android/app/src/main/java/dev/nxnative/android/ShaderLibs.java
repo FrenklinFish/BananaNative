@@ -10,8 +10,12 @@ import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
+import java.util.ArrayList;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Locale;
+import java.util.Set;
+import java.util.TreeSet;
 
 /**
  * The shader libraries of a pack folder (shaders/v-&lt;V&gt;/dmsh_vk.lib) and their delta update (android/SHADERS.md#delta-updates), as the launcher decides them:
@@ -22,6 +26,7 @@ import java.util.Locale;
  * and {@link #minutes} the time that takes on the phone.</li>
  * <li>{@link #restamp}: an older library that is this version's byte for byte but for the header's version and abi (the manifest's "stamp" rows, Profile.stamp) becomes
  * this version's library by rewriting those fields: no update job at all (android/SHADERS.md#restamp).</li>
+ * <li>{@link #selection}: the shaders Prepare builds for a profile with a selected set (shader_seen.tsv), not every shader of its map.</li>
  * </ul>
  * No Android classes: the JVM test (android/app/src/jvmtest ShaderLibsJvmTest, dm/tools/tests/test_android_shader_delta.py) runs it on the Mac.
  */
@@ -240,5 +245,32 @@ final class ShaderLibs {
     static String jobMinutesText(int n) {
         int[] m = minutes(n);
         return String.format(Locale.ROOT, "about %d-%d minutes", m[0] + 2, m[1] + 5);
+    }
+
+    /** The profile's selected shader set: its file in dm/games/&lt;title ID&gt;/ (rows "key&lt;TAB&gt;stage"; android/SHADERS.md "Selected shaders") */
+    static final String SELECTED = "shader_seen.tsv";
+
+    /**
+     * The shader keys the shaders step passes to vk_android_build.py for a profile with a selected set ({@link #SELECTED}): its keys that the profile's shader_map.tsv
+     * has (column 4), sorted, each once; the tool adds the pixel shaders paired with them (dmsh_build.py build_keys). null when the profile has no selected set: the
+     * step then builds every shader of the map. The same keys the Mac's selected build takes (docs/development.md, Building selected Mac shaders), so the phone's
+     * library is the Mac's.
+     */
+    static List<String> selection(File profile) throws IOException {
+        File seen = new File(profile, SELECTED);
+        if (!seen.isFile()) return null;
+        Set<String> map = new HashSet<>();
+        for (String l : Files.readAllLines(new File(profile, "shader_map.tsv").toPath(), StandardCharsets.UTF_8)) {
+            if (l.isEmpty() || l.startsWith("#") || l.startsWith("package\t")) continue;
+            String[] c = l.split("\t", 5);
+            if (c.length > 3) map.add(c[3]);
+        }
+        TreeSet<String> keys = new TreeSet<>();
+        for (String l : Files.readAllLines(seen.toPath(), StandardCharsets.UTF_8)) {
+            if (l.length() < 16 || !l.substring(0, 16).matches("[0-9a-f]{16}")) continue;
+            String k = l.substring(0, 16);
+            if (map.contains(k)) keys.add(k);
+        }
+        return new ArrayList<>(keys);
     }
 }

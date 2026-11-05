@@ -15,6 +15,7 @@ import java.util.List;
  * translate &lt;delta rows&gt; &lt;versions, comma-separated&gt;   → "translate &lt;n&gt;"
  * minutes &lt;n&gt;                                           → "minutes &lt;lo&gt; &lt;hi&gt; &lt;text&gt;"; job &lt;n&gt; → "job &lt;a whole Prepare's text&gt;"
  * restamp &lt;pack&gt; &lt;title ID&gt; &lt;current&gt; &lt;abi&gt; &lt;stamps&gt;  → "restamp &lt;the older version taken over&gt;" or "restamp none"
+ * selection &lt;profile dir&gt;                               → "selection &lt;keys, comma-separated&gt;" or "selection none" (no shader_seen.tsv)
  * </pre>
  */
 public final class ShaderLibsJvmTest {
@@ -55,6 +56,16 @@ public final class ShaderLibsJvmTest {
             case "restamp": {
                 String v = ShaderLibs.restamp(new File(a[1]), a[2], a[3], a[4], a[5]);
                 System.out.println("restamp " + (v == null ? "none" : v));
+                break;
+            }
+            case "selection": {
+                List<String> k;
+                try {
+                    k = ShaderLibs.selection(new File(a[1]));
+                } catch (java.io.IOException e) {
+                    throw new RuntimeException(e);
+                }
+                System.out.println("selection " + (k == null ? "none" : String.join(",", k)));
                 break;
             }
             default:

@@ -23,6 +23,7 @@ the Mac, iPhone and iPad with Metal.
 |---|---|---|
 | `040074A01BF12000` | update 458752 | Works |
 | `0400C3F00006E000` | 1.8.0 (base game) | Work in progress: in game and driving, with graphics problems |
+| `0400A3A01EE4C000` | update 655360 (Ver. 2.0.1) | Works, about 60 fps, on the system driver and Turnip |
 
 Only these versions run; the app tells you if your dump is a different one.
 
@@ -99,6 +100,7 @@ If something doesn't work, start with Settings › **Readiness check**. A game's
   alone is not affected. Being fixed.
 - `040074A01BF12000`: some texture glitches during fights in some caves.
 - `040074A01BF12000` runs at 30 fps on both drivers: the CPU's work per frame holds it there. 60 fps is a later task.
+- `0400A3A01EE4C000`: the sky is black.
 - `0400C3F00006E000` has more problems: trees flicker, ground textures are sometimes missing, and memory is tight on
   16 GB. It heats the phone a lot.
 - The first visit to an area stutters while its shaders and pipelines are built; later visits are smoother.
@@ -164,6 +166,9 @@ good videos get linked here.
 - **v0.1.4, 5 November 2026**: in-app updates (a popup at start when a new release is out; Settings › Check for
   updates), Prepare's code step in a fifth of the memory (fixes `0400C3F00006E000` stopping at rewriting the game code,
   #20), no false "Pack from other tools" chip.
+- **v0.1.5, 5 November 2026**: `0400A3A01EE4C000` playable at about 60 fps on the system driver and Turnip, with
+  Game resolution working for it (thanks to [Raphix91](https://github.com/Raphix91), #28 #29 #30); a text box for games
+  that ask you to type; shaders already on the phone carry over without an update.
 
 ## License and credits
 

@@ -47,6 +47,16 @@ typedef void (*nxhost_rumble_fn)(void *ctx, int player, float intensity, float s
 NXHOST_API void nxhost_rumble_callback(nxhost_rumble_fn fn, void *ctx);
 NXHOST_API void nxhost_rumble_route(int player, bool available);
 
+// ---- Text input (the keyboard applet) ----
+// Optional. The host calls fn from the guest thread that opened the keyboard (not attached to the VM) and that thread waits until fn returns: the launcher shows its input box
+// over the game and returns 1 with the confirmed text in out (UTF-8, at most out_cap bytes with the terminating 0), or 0 for cancel. title / sub / guide / initial are UTF-8
+// (any of them may be empty); max_chars 0 = no limit (the host cuts the text to the limit in UTF-16 units either way), min_chars 0 = an empty text is accepted.
+// Without a callback the applet takes its no-window path (cancel). While fn runs the pads and touches the game saw are let go and no input reaches it
+typedef int (*nxhost_text_input_fn)(void *ctx, const char *title, const char *sub, const char *guide, const char *initial, int max_chars, int min_chars, char *out, int out_cap);
+NXHOST_API void nxhost_text_input_callback(nxhost_text_input_fn fn, void *ctx);
+// Host-internal (front_android.c): asks the callback (-1 without one), with the input held around it
+int android_text_input(const char *title, const char *sub, const char *guide, const char *initial, int max_chars, int min_chars, char *out, int out_cap);
+
 // ---- Lifecycle ----
 // event: 0 onPause, 1 onStop, 2 onStart (after onStop), 3 onResume, 4 pause, 5 continue. The app is suspended while it is stopped (1 until 2) or paused (4 until 5):
 // audio suspended, the guest clock frozen, the graphics drained and gated, the guest threads stopped at their next SVC (dm_guest_suspend), the game told Background; it

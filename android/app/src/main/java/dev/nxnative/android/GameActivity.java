@@ -146,6 +146,7 @@ public final class GameActivity extends Activity implements SurfaceHolder.Callba
         pausedView.setOnClickListener(v -> unpause());
         root.addView(pausedView, root.indexOfChild(handle), new FrameLayout.LayoutParams(FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.MATCH_PARENT));
         setContentView(root);
+        TextInput.screen(this);   // the keyboard applet's input box shows on this screen (again, when the game was waiting on it as the screen was recreated)
         // The host starts once per process. A screen created again while it runs (Android recreated the activity: "Don't keep activities", a font or language
         // change while in the background) takes its window over; a screen restored into a new process (Android ended the old one while it was in the background)
         // has no game to show: the game was stopped, and the user starts it again
@@ -523,6 +524,7 @@ public final class GameActivity extends Activity implements SurfaceHolder.Callba
      * The game itself is left as it is: onStop has suspended it
      */
     @Override protected void onDestroy() {
+        TextInput.gone(this);
         ui.removeCallbacksAndMessages(null);
         if (inputManager != null) inputManager.unregisterInputDeviceListener(this);
         if (audio != null) {

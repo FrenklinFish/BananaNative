@@ -152,3 +152,4 @@ The launcher's JNI shim (`android/app/src/main/cpp/nxlaunch.c`) includes the hos
 | `nxhost_fps(out, n)` | twice a second by `GameActivity` for the overlay: game fps, presented fps, frame time, frame generation state, images per game frame, GPU ms a frame |
 | `nxhost_framegen_set(on, multiplier, target, flow)`, `nxhost_framegen_status(buf, n)` | from the in-game panel; the status and its reason, shown in it |
 | `nxhost_fps_cap_set(fps)`, `nxhost_fps_cap_status(buf, n)` | from the in-game panel: the frame rate cap, and "`<cap> <rates> <game fps>`" twice a second while the panel is open (which caps this game can hold, what it runs at) |
+| `nxhost_text_input_callback(fn, ctx)` | by the shim at `Native.start`: the keyboard applet's input box, a dialog `TextInput` shows over the game while the guest thread that opened the keyboard waits ([PORTING.md](PORTING.md#the-software-keyboard)) |

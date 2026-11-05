@@ -267,6 +267,23 @@ class Launcher(unittest.TestCase):
         self.assertEqual(self.java('restamp', pack, GAME, cur, abi, f'66d1dd2cd5ff:{o}:{n}'), 'none', 'once only: this version has its library')
         self.assertEqual(self.java('restamp', pack, GAME, cur, abi, ''), 'none')
 
+    def test_selection(self):
+        """A profile's shader_seen.tsv: its keys that the map has, sorted, each once (the Mac's selected build: grep the keys, comm with the map's column 4)"""
+        d = self.tmp / 'sel'; d.mkdir(exist_ok=True)
+        (d / 'shader_map.tsv').write_text('# kind: evidence\npackage\tindex\tstage\tdm_ctl_sha16\tsource\n'
+                                          'vs_0.bin\t0\tvs\t00000000000000bb\tx\nps_0.bin\t0\tps\t00000000000000aa\tx\ncs_0.bin\t0\tcs\t00000000000000cc\tx\n')
+        self.assertEqual(self.java('selection', d), 'none', 'no shader_seen.tsv: the whole map')
+        (d / 'shader_seen.tsv').write_text('# a comment 00000000000000cc\nkey\tstage\n00000000000000bb\tvertex\n00000000000000aa\tpixel\n00000000000000dd\tpixel\n00000000000000bb\tvertex\n')
+        self.assertEqual(self.java('selection', d), '00000000000000aa,00000000000000bb', 'only keys of the map, sorted, once')
+
+    def test_selection_of_profiles(self):
+        """Every profile with a selected set: the Java selection is what the Mac's selected build passes (shader_seen.tsv keys in shader_map.tsv)"""
+        for seen in sorted((REPO / 'dm/games').glob('*/shader_seen.tsv')):
+            mp = seen.parent / 'shader_map.tsv'
+            keys = {c[3] for c in (l.rstrip('\n').split('\t') for l in mp.read_text().splitlines()) if len(c) > 3 and not c[0].startswith('#') and c[0] != 'package'}
+            want = sorted({l[:16] for l in seen.read_text().splitlines() if re.match(r'[0-9a-f]{16}', l)} & keys)
+            self.assertEqual(self.java('selection', seen.parent), ','.join(want), seen.parent.name)
+
     def test_translate_and_minutes(self):
         self.assertEqual(self.java('translate', '66d1dd2cd5ff=2322,b430e271aa8a=5000', 'b430e271aa8a,66d1dd2cd5ff'), '2322')
         self.assertEqual(self.java('translate', '66d1dd2cd5ff=2322', 'b430e271aa8a'), '-1')

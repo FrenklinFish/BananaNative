@@ -372,6 +372,7 @@ public final class PackService extends Service {
         File split = new File(od, "split"), splitTmp = new File(od, "split.tmp"), splitScan = j.splitScan(this), xlate = new File(od, "xlate"), lib = new File(od, "lib");
         String tool;
         String[] argv;
+        List<String> selected = null;
         // The tools' arguments: the in-process forms (pack_android.py --in-process: the rewriter in the same Python; shader_split.py with J=1 below: no process pool;
         // vk_android_build.py with the translator and the validator as libraries, XLATE / SPIRV_VAL below; the app's process must not fork, ONDEVICE.md "No subprocesses").
         // The split is resumable by RomFS file: its scan results are kept in the app's own storage (Job.splitScan, DM_SPLIT_RESUME, shader_split.py ScanCache) and a rerun scans only the files
@@ -403,6 +404,14 @@ public final class PackService extends Service {
                 if (bad != null) return bad;
                 tool = "dm/gfx/tools/vk_android_build.py";
                 argv = new String[] {"--target", "vulkan", new File(split, "pkg").getPath(), lib.getPath()};
+                // a profile with a selected set (shader_seen.tsv): only its keys, with their paired pixel shaders, as the Mac's selected build (android/SHADERS.md "Selected shaders")
+                selected = selection(j);
+                if (selected != null && selected.isEmpty()) return "the profile's " + ShaderLibs.SELECTED + " names none of the shaders of its shader_map.tsv";
+                if (selected != null) {
+                    String[] a = java.util.Arrays.copyOf(argv, argv.length + selected.size());
+                    for (int k = 0; k < selected.size(); k++) a[argv.length + k] = selected.get(k);
+                    argv = a;
+                }
                 break;
             }
             case "pack":
@@ -416,7 +425,8 @@ public final class PackService extends Service {
         logs.mkdirs();
         File log = new File(logs, s + ".log");
         String head = "== " + new SimpleDateFormat("yyyy-MM-dd HH:mm:ss", Locale.ROOT).format(new Date()) + " " + Prefs.buildTag(this) + ", engine " + BuildConfig.NX_PACK_ENGINE + ": "
-                + tool + " " + String.join(" ", argv) + "\n";
+                + tool + " " + (selected == null ? String.join(" ", argv)
+                        : String.join(" ", java.util.Arrays.copyOf(argv, argv.length - selected.size())) + " <" + selected.size() + " keys of " + ShaderLibs.SELECTED + ">") + "\n";
         Files.write(log.toPath(), head.getBytes(StandardCharsets.UTF_8), java.nio.file.StandardOpenOption.CREATE, java.nio.file.StandardOpenOption.APPEND);
         if (s.equals("shaders")) {   // a failed shader's kept result would fail every Retry the same way: those shaders are translated again (ShaderResults)
             List<ShaderResults.Failed> again = ShaderResults.dropFailed(xlate);
@@ -470,6 +480,12 @@ public final class PackService extends Service {
         long t = j.stepTotal(i);
         j.stepProgress(s, t > 0 ? t : 1, t > 0 ? t : 1, "");
         return null;
+    }
+
+    /** The profile's selected shader keys (ShaderLibs.selection), null when it has no selected set (or the engine is simulated: no repository) */
+    private List<String> selection(Job j) throws IOException {
+        if (engine.simulated()) return null;
+        return ShaderLibs.selection(new File(PackNative.repo(), "dm/games/" + j.titleId()));
     }
 
     /**

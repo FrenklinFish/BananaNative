@@ -69,6 +69,10 @@ First use, 2026-11-04 (tools digest `44b34b6f8f94` kept at version `6607c8d19abc
 
 The Vulkan tools are not among `DMSH_CHAIN`'s files, so adding or changing them does not move the Apple libraries: they stay byte-identical, in the same `b-<V>/`. The translator is the vendored `dmsh_xlate_bin` checked against `dmsh_chain.lock` (only its half of the lock: the Metal compilers are not needed). The build reads control sections and makes the translator's jobs with `dmsh_build.py`'s own functions (`job_for`, `vertex_ab`, `tf_layout`, `decode_tex` and the other handle decoders), taken from that file's source by name, so they stay one copy.
 
+### Selected shaders
+
+A profile may list the shaders its game needs in `dm/games/<id>/shader_seen.tsv` (rows `key<TAB>stage`; column 4 of `shader_map.tsv`), when its map is far larger than what play reaches (0400A3A01EE4C000: 8,157 of 131,426). The phone's shaders step then builds only those: `PackService` passes the set's keys that the map has (`ShaderLibs.selection`, sorted, each once) after the two folders, and `vk_android_build.py` adds the pixel shaders paired with them (`build_keys`), as the Mac's partial build takes them ([Building selected Mac shaders](../docs/development.md#building-selected-mac-shaders)), so the phone's library is the Mac's. The step's log names the keys by count. The launcher's count (`Profile.shaderTotal`, gradle's `shaderTotalOf`) is the same set with its pairs from the profile's `shader_pairs.tsv` and `pso_pairs.tsv`, so Prepare's time and the progress bar are the selection's. Any profile with the file gets this; one without builds its whole map. A key-list build has no delta manifest (`delta: none (a key list)`, and `--publish-delta` takes only full builds) and no stamp: the pack step stamps it from the library's header (`pack_android.py lib_stamp`), and a new `DMSH_VK_CHAIN` translates the selection again. `DMSH_VK_REQUIRE_ALL` does not apply to a key list, so a shader that fails leaves the library without it (the `[RED]` lines in `shaders.log` name it) instead of failing the step.
+
 ## The Apple chain on Vulkan
 
 | Step (Apple) | Vulkan | Why |

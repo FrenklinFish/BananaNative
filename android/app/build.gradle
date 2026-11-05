@@ -50,11 +50,21 @@ def tsvRows = { String game, String key -> def t = new File(repo, "dm/games/$gam
 def buildsOf = { String game -> tsvRows(game, 'build').collect { c -> def m = (c[1] =~ /\d+/); (m.find() ? m.group() : c[1]) + (c.size() > 2 && c[2] ==~ /\d+(\.\d+)+/ ? ' @' + c[2] : '') + ' ' + c.drop(3).join(' ') }.join(';') }   // "<version> [@<display version>] <module>=<build ID> ..."
 def nameOf = { String game -> tsvRows(game, 'name').collect { it[1] }.find() ?: game }
 def defineOf = { String path, String name -> def f = new File(repo, path); def m = f.isFile() ? (f.text =~ /#define\s+${name}\s+"([^"]*)"/) : null; (m != null && m.find()) ? m.group(1) : 'unknown' }
-def shaderTotalOf = { String game -> def f = new File(repo, "dm/games/$game/shader_map.tsv"); f.isFile() ? f.readLines().count { it && !it.startsWith('#') && !it.startsWith('package\t') } : 0 }
+// The shaders Prepare builds: every key of the profile's shader_map.tsv, or for a profile with a selected set (shader_seen.tsv; ShaderLibs.selection, android/SHADERS.md
+// "Selected shaders") the set's keys that the map has, with the pixel shaders paired with them (shader_pairs.tsv, pso_pairs.tsv: dmsh_build.py build_keys, the tool's total)
+def shaderTotalOf = { String game ->
+    def f = new File(repo, "dm/games/$game/shader_map.tsv"); if (!f.isFile()) return 0
+    def map = f.readLines().findAll { it && !it.startsWith('#') && !it.startsWith('package\t') }.collect { it.split('\t') }.findAll { it.size() > 3 }.collect { it[3] } as Set
+    def seen = new File(repo, "dm/games/$game/shader_seen.tsv"); if (!seen.isFile()) return map.size()
+    def sel = seen.readLines().findAll { it ==~ /(?s)[0-9a-f]{16}.*/ }.collect { it.substring(0, 16) }.findAll { it in map } as Set
+    def keys = new HashSet(sel)
+    ['shader_pairs.tsv', 'pso_pairs.tsv'].each { t -> def pf = new File(repo, "dm/games/$game/$t"); if (pf.isFile()) pf.eachLine { l -> if (l.trim() && !l.startsWith('#')) { def c = l.trim().split(/\s+/); if (c.size() == 2 && c[0] in sel && c[1] in map) keys << c[1] } } }
+    keys.size()
+}
 def nxRewriter = { def m = (new File(repo, 'scripts/pack_android.py').text =~ /(?m)^REWRITER = \(([^)]*)\)/); if (!m.find()) throw new GradleException('scripts/pack_android.py has no REWRITER tuple'); (m.group(1) =~ /'([^']+)'/).collect { it[1] }.join(' ') }()
 def shaderInputsOf = { String game -> try { def r = providers.exec { commandLine('python3', new File(repo, 'dm/gfx/tools/dmsh_chain.py').path, '--inputs'); environment('DM_GAME', game); ignoreExitValue = true }.standardOutput.asText.get().trim(); r ==~ /[0-9a-f]{12}/ ? r : 'unknown' } catch (Exception e) { 'unknown' } }
-// The games' profiles as the launcher reads them (Profile.java): one line per game, tab-separated: title ID, name, the shader count Prepare translates (the profile's
-// shader_map.tsv rows: vk_android_build.py's total), the shader inputs digest (dmsh_chain.py --inputs: a pack's library is current only when its stamp
+// The games' profiles as the launcher reads them (Profile.java): one line per game, tab-separated: title ID, name, the shader count Prepare translates (shaderTotalOf:
+// vk_android_build.py's total), the shader inputs digest (dmsh_chain.py --inputs: a pack's library is current only when its stamp
 // shaders/v-<V>/inputs.tsv names it, as pack_android.py's library_current asks; "unknown" without a Python 3 at build time: the launcher then checks the library's path
 // only), and the profile's builds (game.tsv build rows: version, then module=NSO build ID, ';' between builds), which the on-device job checks a dump against
 // then the readiness check's rows (the profile's readiness.tsv: required / degraded rows as level|fact|min|what, ';' between them; Readiness.java) and the game's status

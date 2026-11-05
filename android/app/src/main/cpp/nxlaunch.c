@@ -48,6 +48,7 @@ int nxhost_main(int argc, char **argv);
 #pragma weak nxhost_picture_place
 #pragma weak nxhost_fps_cap_set
 #pragma weak nxhost_fps_cap_status
+#pragma weak nxhost_text_input_callback
 
 // ---- Log: the host's stdout and stderr go straight into the log file (nothing is lost when the process dies), and a thread copies new lines to logcat ----
 // At the end of the file the thread sleeps until the file is written (inotify IN_MODIFY), not on a 20 ms timer: the timer woke it 50 times a second for the whole game,
@@ -106,6 +107,48 @@ static void *host_thread(void *p) {
 }
 static char *jstr(JNIEnv *env, jstring s) { const char *c = (*env)->GetStringUTFChars(env, s, NULL); char *r = strdup(c ? c : ""); if (c) (*env)->ReleaseStringUTFChars(env, s, c); return r; }
 
+// ---- The keyboard applet's input box (nxhost_text_input_callback): TextInput.ask shows the dialog on the UI thread and blocks until it is confirmed. The guest thread that
+// opened the keyboard does not enter the VM itself: a thread of this shim, attached for the call, makes it while the guest thread waits in pthread_join (guest threads
+// carry the guest's state in their registers and slots, and one that ended while attached would abort the process). Strings cross as UTF-8 byte arrays: NewStringUTF
+// takes modified UTF-8, which a character outside the BMP in the game's text would break ----
+static JavaVM *g_vm;
+static jclass g_ti_class; static jmethodID g_ti_ask;
+typedef struct { const char *title, *sub, *guide, *initial; int max_chars, min_chars; char *out; int out_cap, ok; } text_req;
+static jbyteArray jbytes(JNIEnv *env, const char *s) {
+    jsize n = (jsize)strlen(s); jbyteArray a = (*env)->NewByteArray(env, n);
+    if (a && n) (*env)->SetByteArrayRegion(env, a, 0, n, (const jbyte *)s);
+    return a;
+}
+static void *text_input_thread(void *p) {
+    text_req *q = p; JNIEnv *env = NULL;
+    JavaVMAttachArgs a = {JNI_VERSION_1_6, "nxkeyboard", NULL};
+    if ((*g_vm)->AttachCurrentThread(g_vm, &env, &a) != JNI_OK) { fprintf(stderr, "[RED] [nxlaunch] keyboard: cannot attach to the VM: cancel\n"); return NULL; }
+    jbyteArray t = jbytes(env, q->title), s = jbytes(env, q->sub), g = jbytes(env, q->guide), i = jbytes(env, q->initial);
+    jbyteArray r = (*env)->CallStaticObjectMethod(env, g_ti_class, g_ti_ask, t, s, g, i, (jint)q->max_chars, (jint)q->min_chars);
+    if ((*env)->ExceptionCheck(env)) { (*env)->ExceptionDescribe(env); (*env)->ExceptionClear(env); fprintf(stderr, "[RED] [nxlaunch] keyboard: TextInput.ask threw: cancel\n"); r = NULL; }
+    if (r && q->out_cap > 0) {
+        jsize n = (*env)->GetArrayLength(env, r); if (n > q->out_cap - 1) n = q->out_cap - 1;
+        (*env)->GetByteArrayRegion(env, r, 0, n, (jbyte *)q->out); q->out[n] = 0; q->ok = 1;
+    }
+    (*g_vm)->DetachCurrentThread(g_vm);   // (frees the local references)
+    return NULL;
+}
+static int text_input(void *ctx, const char *title, const char *sub, const char *guide, const char *initial, int max_chars, int min_chars, char *out, int out_cap) {
+    (void)ctx; text_req q = {title, sub, guide, initial, max_chars, min_chars, out, out_cap, 0};
+    pthread_t t; int e = pthread_create(&t, NULL, text_input_thread, &q);
+    if (e) { fprintf(stderr, "[RED] [nxlaunch] keyboard: cannot start its thread: %s: cancel\n", strerror(e)); return 0; }
+    pthread_join(t, NULL);
+    return q.ok;
+}
+static void text_input_setup(JNIEnv *env) {
+    if (!nxhost_text_input_callback) { fprintf(stderr, "[nxlaunch] keyboard: not in this host (the applet cancels)\n"); return; }
+    jclass k = (*env)->FindClass(env, "dev/nxnative/android/TextInput");
+    jmethodID m = k ? (*env)->GetStaticMethodID(env, k, "ask", "([B[B[B[BII)[B") : NULL;
+    if (!m || (*env)->GetJavaVM(env, &g_vm) != JNI_OK) { (*env)->ExceptionClear(env); fprintf(stderr, "[RED] [nxlaunch] keyboard: no TextInput.ask: the applet cancels\n"); return; }
+    g_ti_class = (*env)->NewGlobalRef(env, k); g_ti_ask = m;
+    nxhost_text_input_callback(text_input, NULL);
+}
+
 // start(args, env, log path, cwd): args[0] is the program name (main.c reads args[1] as the pack folder), env is KEY=VALUE strings. 0 = started; the host runs on
 JNIEXPORT jint JNICALL Java_dev_nxnative_android_Native_start(JNIEnv *env, jclass cls, jobjectArray args, jobjectArray envs, jstring log, jstring cwd) {
     (void)cls;
@@ -128,6 +171,7 @@ JNIEXPORT jint JNICALL Java_dev_nxnative_android_Native_start(JNIEnv *env, jclas
     for (int i = 0; i < g_run.argc; i++) { g_run.argv[i] = jstr(env, (jstring)(*env)->GetObjectArrayElement(env, args, i)); fprintf(stderr, "[nxlaunch] arg %d: %s\n", i, g_run.argv[i]); }
     fprintf(stderr, "[nxlaunch] hooks: window %s, input %s, lifecycle %s\n", nxhost_set_window ? "yes" : "not in this build", nxhost_input_key ? "yes" : "not in this build",
             nxhost_lifecycle ? "yes" : "not in this build");
+    text_input_setup(env);
     pthread_attr_t a; pthread_attr_init(&a); pthread_attr_setstacksize(&a, HOST_STACK);
     pthread_t t; int r = pthread_create(&t, &a, host_thread, NULL); pthread_attr_destroy(&a);
     if (r) { fprintf(stderr, "[nxlaunch] cannot start the host thread: %s\n", strerror(r)); return -3; }
