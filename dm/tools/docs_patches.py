@@ -130,6 +130,8 @@ SWITCH_BINDING = [
     ('perf_mode', '', {'what': 'Boost whatever the operation mode', 'now': 'game', 'goal': 'game', 'purpose': 'runtime', 'why': 'a combination a Switch 1 never reports: a choice per game'}),
     ('window_fn', '', {'what': "the window size's two getter functions, set at load (DM_WINDOW_SIZE, the Android launcher's Game resolution)", 'now': 'build', 'goal': 'game', 'purpose': 'rendering',
      'why': "the game's own constant window size, at fixed offsets per main build; a function fingerprint (two leaf functions returning the size, found from their callers) could carry it over the game's updates"}),
+    ('res_levels', '', {'what': "the dynamic resolution's level lists, lowered at load to fit DM_WINDOW_SIZE (the Android launcher's Game resolution)", 'now': 'build', 'goal': 'engine', 'purpose': 'rendering',
+     'why': "KTGL's size table and level lists, at fixed offsets per main build; a fingerprint of the controller that picks the list (oe::GetOperationMode, oe::GetCurrentGraphicsScale, the 34-level table) could find them in other KTGL games"}),
     ('graphics_scale', '', {'what': "the Switch 2 graphics scale and operation mode for each Game resolution choice (DM_GRAPHICS_SCALE, DM_OPMODE; the Android launcher)", 'now': 'game', 'goal': 'game', 'purpose': 'rendering',
      'why': "the game sizes its 3D scenes by the graphics scale, not by its window; which crop each scale gives was measured on the game"}),
     ('op_mode', '', {'what': 'the operation mode at start', 'now': 'game', 'goal': 'game', 'purpose': 'runtime', 'why': "the game's controls (handheld: the touch screen instead of a gyro pointer)"}),

@@ -70,9 +70,10 @@ def deltaOf = { String game -> def f = new File(repo, "dm/games/$game/vk_delta.t
 // and its "stamp" rows (an older library that becomes this version's by its header alone, ShaderLibs.restamp): "version:old SHA-256:new SHA-256", ';' between them
 def stampOf = { String game -> def f = new File(repo, "dm/games/$game/vk_delta.tsv"); if (!f.isFile()) return ''; def ls = f.readLines()
     ls.contains("version\t${defineOf('dm/gfx/nvn/dmsh_chain_vk.h', 'DMSH_VK_CHAIN')}".toString()) ? ls.findAll { it ==~ /stamp\t[0-9a-f]{12}\t[0-9a-f]{64}\t[0-9a-f]{64}/ }.collect { it.split('\t').drop(1).join(':') }.join(';') : '' }
-// and last what Game resolution sets for it (Profile.resolutionEnv): "window" with window_fn rows (DM_WINDOW_SIZE), "scale:<choice>=<scale>/<console|handheld>,…" with
-// graphics_scale rows (DM_GRAPHICS_SCALE and DM_OPMODE), empty when it has neither (the launcher then offers no Game resolution for it)
-def resolutionOf = { String game -> !tsvRows(game, 'window_fn').isEmpty() ? 'window' : tsvRows(game, 'graphics_scale').with { rs -> rs.isEmpty() ? '' : 'scale:' + rs.collect { c -> "${c[1].trim()}=${c[2].trim()}/${c[3].trim()}" }.join(',') } }
+// and last what Game resolution sets for it (Profile.resolutionEnv): "window" with window_fn or res_levels rows (DM_WINDOW_SIZE: the window, or a cap on a dynamic
+// resolution), "scale:<choice>=<scale>/<console|handheld>,…" with graphics_scale rows (DM_GRAPHICS_SCALE and DM_OPMODE), empty when it has none (the launcher then offers no
+// Game resolution for it)
+def resolutionOf = { String game -> !tsvRows(game, 'window_fn').isEmpty() || !tsvRows(game, 'res_levels').isEmpty() ? 'window' : tsvRows(game, 'graphics_scale').with { rs -> rs.isEmpty() ? '' : 'scale:' + rs.collect { c -> "${c[1].trim()}=${c[2].trim()}/${c[3].trim()}" }.join(',') } }
 // The RomFS checks (game.tsv romfs_check rows, as "<path>|<line>|<expected or main>", ';' between them: Profile.romfsChecks, RomfsCheck.java)
 def romfsChecksOf = { String game -> tsvRows(game, 'romfs_check').findAll { it.size() >= 4 }.collect { c -> [c[1].trim(), c[2].trim(), c[3].trim().replaceAll(/[\\"]/, ' ')].join('|') }.join(';') }
 // The profile's GPU timestamp mode (game.tsv gpu_timestamps: segment or submission, the host's default when it has no row): Game settings › GPU timing names it as "Game default"
