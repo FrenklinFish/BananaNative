@@ -88,6 +88,17 @@ static void test_made(void) {
     e[0].stage = DMSH_VK_STAGE_MS; CHECK(vka_shlib_check(&L, I.p, I.n, NULL, NULL, NULL, NULL, err, sizeof err), "mesh entry refused: %s", err);
     e[0].stage = DMSH_VK_STAGE_MS + 1; CHECK(!vka_shlib_check(&L, I.p, I.n, NULL, NULL, NULL, NULL, err, sizeof err) && strstr(err, "stage"), "stage 8 accepted: %s", err);
     e[0].stage = DMSH_VK_STAGE_VS;
+    // Offsets past 4 GiB (Pokemon Pokopia's 9.8 GB blob) take their high bits from c1_off_hi / off_hi; in this small file they point past the blob and are refused
+    dmsh_vk_module *mm = (dmsh_vk_module *)(I.p + 128 + 2 * 64 + 3 * 24);
+    mm[1].off_hi = 1;
+    CHECK(!vka_shlib_check(&L, I.p, I.n, NULL, NULL, NULL, NULL, err, sizeof err) && strstr(err, "past the blob"), "module high offset bits ignored: %s", err);
+    CHECK(vka_shlib_mod_off(&mm[1]) == (1ull << 32 | mm[1].off), "module offset %llx", (unsigned long long)vka_shlib_mod_off(&mm[1]));
+    mm[1].off_hi = 0;
+    e[1].c1_off_hi = 2;
+    CHECK(!vka_shlib_check(&L, I.p, I.n, NULL, NULL, NULL, NULL, err, sizeof err) && strstr(err, "c1 bytes past the blob"), "c1 high offset bits ignored: %s", err);
+    CHECK(vka_shlib_c1_off(&e[1]) == (2ull << 32 | e[1].c1_off), "c1 offset %llx", (unsigned long long)vka_shlib_c1_off(&e[1]));
+    e[1].c1_off_hi = 0;
+    CHECK(vka_shlib_check(&L, I.p, I.n, NULL, NULL, NULL, NULL, err, sizeof err), "library refused after the high bits were cleared: %s", err);
     free(I.p);
 }
 
