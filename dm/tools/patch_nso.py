@@ -1507,6 +1507,9 @@ def spin_region(T, bes):
     """the spin wait region with head T (bes: the backward branches to T found by the scan) → dict, or None. A store whose value or address a pass changes is no part of a region:
     the paths through it are dropped and the region is found again without them (a poll that takes its item once the wait is over stores the new cursor there). When the paths
     through stores bring in a register that a pass changes, the region is looked for once more with every store ending its path, as before stores could be part of one"""
+    # The decode cache serves one head's searches (up to ten over the same code). Kept for every head it held a detailed capstone instruction
+    # for every word any search reached, gigabytes on a large main (Mario Kart World), and on a phone capstone ran out of memory (CS_ERR_MEM)
+    spin_dec.clear()
     ban = set()
     for _ in range(8):
         g = spin_region1(T, bes, ban, True)

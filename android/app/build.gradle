@@ -103,6 +103,8 @@ android {
         buildConfigField 'boolean', 'NX_LSFG', "$nxLsfg"
         // The play app and the release behave alike (saves/<id>, the user's build tag, no test switches); every other app is a test app
         buildConfigField 'boolean', 'NX_PLAY', "${nxPlay || nxLive}"
+        // The public release (dev.bananative.android) alone checks GitHub for a newer release at start (Updater; a test app only through its update.txt)
+        buildConfigField 'boolean', 'NX_LIVE', "$nxLive"
         // The shader library the host loads: <pack>/shaders/v-<DMSH_VK_CHAIN>/dmsh_vk.lib (vka_shader.c); the launcher checks a pack has it before starting the game
         buildConfigField 'String', 'NX_DMSH_CHAIN', "\"${defineOf('dm/gfx/nvn/dmsh_chain.h', 'DMSH_CHAIN')}\""
         buildConfigField 'String', 'NX_DMSH_VK_CHAIN', "\"${defineOf('dm/gfx/nvn/dmsh_chain_vk.h', 'DMSH_VK_CHAIN')}\""
@@ -192,6 +194,7 @@ if (nxPackEngine == 'native') {
     def toolsZip = tasks.register('nxPackTools', Zip) {
         from(repo) {
             include 'scripts/*.py', 'dm/tools/*.py', 'dm/games/*.py', 'dm/gfx/nvn/*.h'
+            include 'dm/tools/rewriter_equiv/*'   // earlier rewriter files of identical output: their pack keys still count (pack_android.py EQUIV, RewriteKey)
             nxGames.each { include "dm/games/$it/**" }   // the profile of each game the APK runs
             include 'dm/games/*/patches.py'   // every profile's rewriter patches: patch_nso.py lists them all in build_src.sha256, as on the Mac
             include 'dm/gfx/tools/*.py', 'dm/gfx/tools/*.lock', 'dm/gfx/tools/*.metal', 'dm/gfx/tools/*.tsv', 'dm/gfx/tools/dmsh_xlate/Program.cs', 'dm/gfx/tools/dmsh_xlate/*.csproj'

@@ -48,7 +48,7 @@ public final class MainActivity extends Activity {
     private LinearLayout gameBox;   // the game cards (refresh)
     private View accessCard;
     private BananaBackgroundView bananas;   // the drifting bananas behind the screen
-    private Ui.Setting overlayRow, resRow, capRow, lsfgRow, gpuRow;
+    private Ui.Setting overlayRow, resRow, capRow, lsfgRow, gpuRow, updateRow;
     private boolean resumed, settingsPage;
     private boolean merged;   // the list's duplicates were merged (Game.collapse) since this activity started
     private File pendingGame;   // a game folder (or .nup) waiting for its pack folder
@@ -64,6 +64,7 @@ public final class MainActivity extends Activity {
         setContentView(frame);
         build();
         if (saved == null) fromIntent(getIntent());
+        Updater.onStart(this);   // the release app: a newer release on GitHub opens the update popup (once per process start: not on a resume or a rotation)
     }
 
     @Override protected void onSaveInstanceState(Bundle out) {
@@ -140,7 +141,13 @@ public final class MainActivity extends Activity {
         gameBox = null;
         content.addView(Ui.header(this, Ui.back(this, v -> page(false)), "Settings", null));
 
-        Ui.add(content, Ui.section(this, "Game defaults"), 16);
+        // Updates first, so the version and the check are easy to find (Updater: the release app also checks at every fresh start)
+        Ui.add(content, Ui.section(this, "Updates"), 16);
+        LinearLayout upd = settingsCard(content);
+        updateRow = new Ui.Setting(this, "🔄", "Check for updates", v -> Updater.checkNow(this)).chevron(this);
+        upd.addView(updateRow.view);
+
+        Ui.add(content, Ui.section(this, "Game defaults"), Ui.SECTION_GAP);
         LinearLayout play = settingsCard(content);
         overlayRow = new Ui.Setting(this, "👀", "Overlay", v -> overlayItems())
                 .toggle(this, Prefs.overlay(this), (b, on) -> { Prefs.overlay(this, on); refreshSettings(); });
@@ -188,6 +195,7 @@ public final class MainActivity extends Activity {
     /** The settings rows' current values (after a dialog, on resume) */
     private void refreshSettings() {
         if (overlayRow == null) return;
+        updateRow.value("Banana Native " + Updater.version(this) + (Updater.available(this) ? "" : " · release app only"));
         boolean ov = Prefs.overlay(this);
         if (overlayRow.toggle.isChecked() != ov) overlayRow.toggle.setChecked(ov);
         int n = 0;
@@ -250,6 +258,7 @@ public final class MainActivity extends Activity {
         if (gameBox != null && Game.load(this).size() != games.size()) refresh();   // a card FrontendLaunch added while Home was in the background
         onResumeViews();
         Ondevice.resume(this);
+        Updater.resume(this);   // back from "Install unknown apps" with an update download waiting
     }
 
     private void onResumeViews() {

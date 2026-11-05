@@ -89,6 +89,8 @@ If something doesn't work, start with Settings › **Readiness check**. A game's
 - On-screen controls with a layout editor, gamepad support, frame-rate cap, resolution (1080p or native), performance
   overlay, Turnip driver downloads, save backups, and pack export / import (one .zip). Saves and packs live in the app's storage (uninstalling asks
   whether to keep them); backups go to `Switch2/save-backups/<title ID>`. Saves from 0.1.0 are copied in once.
+- **Updates in the app** (from v0.1.4): when a newer release is out, the app offers it at start (Update or Later), downloads it from this page's release and installs it after you confirm. Settings › **Updates** › **Check for updates**
+  checks at any time.
 
 ## Known issues
 
@@ -158,6 +160,9 @@ good videos get linked here.
   `040074A01BF12000` at Phone 720p by default on Turnip as a stopgap.
 - **v0.1.3, 5 November 2026**: `040074A01BF12000` at 30 fps on Turnip at Phone 1080p (was about 20): faster upscaler
   shader on Adreno and a GPU clock floor for Turnip; Phone 1080p and dynamic resolution are the defaults again.
+- **v0.1.4, 5 November 2026**: in-app updates (a popup at start when a new release is out; Settings › Check for
+  updates), Prepare's code step in a fifth of the memory (fixes `0400C3F00006E000` stopping at rewriting the game code,
+  #20), no false "Pack from other tools" chip.
 
 ## License and credits
 

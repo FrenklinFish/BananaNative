@@ -40,15 +40,86 @@ FORMAT = 1   # pack.tsv format; the launcher refuses another
 class Error(Exception): pass
 
 
-def sha(paths):
-    h = hashlib.sha256()
-    for p in paths: h.update(p.name.encode() + b'\0' + p.read_bytes())
-    return h.hexdigest()
+# The rewrite key, <module>.android.key: SHA-256 over name\0bytes of the REWRITER files, the module, the profile's patches.py (when there is one) and the part of the
+# profile's game.tsv the rewriter reads: its build rows (patch_nso.py reads them for a module whose build has no CUTS), normalized by build_rows and hashed under the
+# name ROWS. The rest of game.tsv is the host's (GPU timing, window size, ...): a change there must not make every pack's code stale.
+# Packs made before (the v1 key) hash the whole game.tsv; one counts as current with this APK's game.tsv, or with the copy the pack keeps (<pack>/game.tsv,
+# written after the rewrite) when the copy's build rows are the profile's: the key proves the copy is the file it was made with, the rows that the rewrite read
+# the same. upgrade_keys rewrites such a key as the current one, before the pack's copy of game.tsv is replaced.
+ROWS = 'game.tsv build rows'
+
+
+def build_rows(b):
+    """game.tsv's build rows as patch_nso.py reads them (rows split at tabs, each cell stripped, first cell `build`), one a line; bytes in, bytes out.
+    A narrower strip and split than the rewriter's own: two tables that differ for it never come out the same here"""
+    rows = []
+    for row in b.split(b'\n'):
+        c = [x.strip(b' \r\x0b\x0c') for x in row.split(b'\t')]
+        if c[0] == b'build': rows.append(b'\t'.join(c) + b'\n')
+    return b''.join(rows)
+
+
+def part(h, name, b): h.update(name.encode() + b'\0' + b)
 
 
 def rewrite_key(src, g):
-    files = [REPO / 'dm/tools' / f for f in REWRITER] + [src] + [p for p in (g.dir / 'patches.py',) if p.is_file()] + [g.dir / 'game.tsv']
-    return sha(files) + ' target=android'
+    """The key a module rewritten now carries (the current formula, the current rewriter files)"""
+    return rewrite_keys(src, g)[0]
+
+
+# Earlier bytes of a REWRITER file whose rewrite output is the same as the current file's: dm/tools/rewriter_equiv/<file>.<commit> (that commit's version of the
+# file). A file goes there ONLY when the rewrite output with it was verified byte-identical to the current one (each game's modules); a pack whose key was made
+# with it then counts as up to date (rewrite_keys, the launcher's PackCheck.rewriteKeys), so a change that only saves memory or time does not redo every pack.
+EQUIV = REPO / 'dm/tools/rewriter_equiv'
+
+
+def equiv_files():
+    """{REWRITER file: [earlier bytes, ...]} from EQUIV"""
+    out = {}
+    for p in sorted(EQUIV.glob('*.*')) if EQUIV.is_dir() else []:
+        name = p.name.rsplit('.', 1)[0]
+        if name in REWRITER: out.setdefault(name, []).append(p.read_bytes())
+    return out
+
+
+def rewrite_keys(src, g, pack=None):
+    """Every key that counts as the current rewriter's, rewrite_key's first: for the current REWRITER files and each with earlier equivalent bytes (EQUIV) in
+    their place, the current key (ROWS), then the v1 key with the profile's game.tsv, then the v1 key with pack/game.tsv when pack names a pack folder that has
+    one whose build rows are the profile's (the same rule as the launcher's RewriteKey.keys)"""
+    eq = equiv_files()
+    variants = [[]]
+    for f in REWRITER:
+        cur = (REPO / 'dm/tools' / f).read_bytes()
+        variants = [v + [(f, b)] for v in variants for b in [cur] + eq.get(f, [])]
+    hs = []
+    for v in variants:
+        h = hashlib.sha256()
+        for name, b in v: part(h, name, b)
+        hs.append(h)
+    for p in [src] + [p for p in (g.dir / 'patches.py',) if p.is_file()]:
+        b = p.read_bytes()
+        for h in hs: part(h, p.name, b)
+    gt = (g.dir / 'game.tsv').read_bytes()
+    tails = [(ROWS, build_rows(gt)), ('game.tsv', gt)]
+    pg = pack / 'game.tsv' if pack is not None else None
+    if pg is not None and pg.is_file() and (pb := pg.read_bytes()) != gt and build_rows(pb) == build_rows(gt): tails.append(('game.tsv', pb))
+    out = []
+    for name, b in tails:
+        for h in hs:
+            t = h.copy(); part(t, name, b); out.append(t.hexdigest() + ' target=android')
+    return out
+
+
+def upgrade_keys(srcs, out, g):
+    """Each module's key that counts as current (rewrite_keys with the pack's game.tsv) but is not rewrite_key's is written as rewrite_key's (by rename), so the
+    pack stays current when its copy of game.tsv is replaced. Other keys are left as they are"""
+    for m, src in srcs.items():
+        kf = out / f'{m}.android.key'
+        if not kf.is_file(): continue
+        have, keys = kf.read_text().strip(), rewrite_keys(src, g, out)
+        if have in keys and have != keys[0]:
+            tmp = out / f'{m}.android.key.tmp'; tmp.write_text(keys[0] + '\n'); os.replace(tmp, kf)
+            print(f'  {m}: key brought to the current formula (same rewrite)')
 
 
 def nso_build_id(path):   # the module's build ID (NSO header +0x40), as the profile's build rows name it
@@ -113,8 +184,10 @@ def rewrite(py, srcs, out, jobs, g, in_process=False):
     env = dict(os.environ, DM_GAME=g.id, DM_REWRITE_J=str(max(1, (os.cpu_count() or 4) // max(1, len(srcs)))))
     todo = {}
     for m, src in srcs.items():
-        key = rewrite_key(src, g); kf = out / f'{m}.android.key'
-        if (out / f'{m}.patched.bin').is_file() and kf.is_file() and kf.read_text().strip() == key: print(f'  {m}: unchanged, kept'); continue
+        keys = rewrite_keys(src, g, out); key = keys[0]; kf = out / f'{m}.android.key'
+        if (out / f'{m}.patched.bin').is_file() and kf.is_file() and (have := kf.read_text().strip()) in keys:   # the current rewriter's key, an equivalent one's (EQUIV), an earlier formula's
+            if have != key: tmp = out / f'{m}.android.key.tmp'; tmp.write_text(key + '\n'); os.replace(tmp, kf)   # the same rewrite: its key as rewrite_key's (upgrade_keys)
+            print(f'  {m}: unchanged, kept'); continue
         todo[m] = (src, key)
     for m in todo: (out / f'{m}.android.key').unlink(missing_ok=True)   # every module to rewrite is unfinished from here on: no mix of old and new modules passes
     if in_process:
@@ -311,6 +384,7 @@ def main():
             try: rewrite(sys.executable, srcs, out, max(1, a.j), g, a.in_process)
             finally: shutil.rmtree(out / '.nup-src', ignore_errors=True)   # the module copies a NUP game's rewrite read (rewriter_src)
         if a.code_only: print(f'done: the modules in {out} (--code-only: pack.tsv and the shaders unchanged)'); return
+        if a.keep_code: upgrade_keys(srcs, out, g)   # before the copy below replaces the game.tsv an earlier key was made with (a rewrite run did it in rewrite)
         shutil.copyfile(g.dir / 'game.tsv', out / 'game.tsv')
         shaders = None if a.no_shaders else pack_shaders(a, g, folder.parent / f'{app:016X}-work', out, vdir, (romfs, exe))
         top = folder.parent if pack_dump.nup.is_nup(folder) else folder   # a NUP file's paths are `<name>.nup:<package>/...`, relative to its folder

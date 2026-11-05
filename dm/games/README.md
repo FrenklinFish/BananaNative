@@ -227,7 +227,7 @@ One row per profile; the notes are each profile's `README.md`.
 
 ### Readiness rows
 
-`readiness.tsv` (optional, Android): what the game needs of a phone, for the launcher's [readiness check](../../android/README.md#readiness-check). A table of its own rather than `game.tsv` keys, because `game.tsv` is part of a pack's rewrite key (`pack_android.py` `rewrite_key`): a new row must not make every player's pack stale. Tab-separated, `#` comments; `build.gradle` hands the rows to the launcher (`BuildConfig.NX_PROFILES`, `Profile.reqs` / `status`).
+`readiness.tsv` (optional, Android): what the game needs of a phone, for the launcher's [readiness check](../../android/README.md#readiness-check). A table of its own rather than `game.tsv` keys: the launcher's own rows stay apart from the host's. (A pack's rewrite key, `pack_android.py` `rewrite_key`, hashes only `game.tsv`'s `build` rows, so other rows no longer make packs stale.) Tab-separated, `#` comments; `build.gradle` hands the rows to the launcher (`BuildConfig.NX_PROFILES`, `Profile.reqs` / `status`).
 
 | Row | Meaning |
 |---|---|

@@ -7,10 +7,7 @@ import java.io.IOException;
 import java.io.InputStream;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
-import java.security.MessageDigest;
-import java.security.NoSuchAlgorithmException;
 import java.util.HashMap;
-import java.util.Locale;
 import java.util.Map;
 import java.util.zip.ZipEntry;
 import java.util.zip.ZipInputStream;
@@ -23,8 +20,9 @@ import java.util.zip.ZipInputStream;
  *     A mismatch means the rewritten code is of another game version: the game would crash, so the launcher does not start it and offers Prepare again.</li>
  * <li>{@link #shaders}: the pack has this APK's shader library (Pack.libraryProblem).</li>
  * <li>{@link #code} (slower: hashes the modules, so it runs off the main thread): the pack's code was rewritten by this APK's rewriter. The key
- *     scripts/pack_android.py writes as &lt;module&gt;.android.key (rewrite_key: the rewriter's files, the module, the profile's patches.py and game.tsv) is
- *     computed here from the tools in the APK (assets/pack/tools.zip) and the folder's module. Another key is not an error: a pack made by an earlier commit
+ *     scripts/pack_android.py writes as &lt;module&gt;.android.key (rewrite_key: the rewriter's files, the module, the profile's patches.py and game.tsv's build rows) is
+ *     computed here (RewriteKey, which also accepts a key made with an earlier rewriter file of identical output, dm/tools/rewriter_equiv, and one of the earlier
+ *     formula over the whole game.tsv, the APK's or the pack's copy when its build rows are the APK's) from the tools in the APK (assets/pack/tools.zip) and the folder's module. Another key is not an error: a pack made by an earlier commit
  *     usually runs; the card says so and Prepare again brings the code up to date (the shaders are kept).</li>
  * </ul>
  */
@@ -84,6 +82,8 @@ final class PackCheck {
             File k = new File(p.dir, m + ".android.key");
             id.append('|').append(k.length()).append(':').append(k.lastModified()).append(':').append(mod(game, gv, m).stamp());
         }
+        File gt = new File(p.dir, "game.tsv");   // the pack's copy: an earlier key may have been made with it (RewriteKey)
+        id.append('|').append(gt.length()).append(':').append(gt.lastModified());
         synchronized (codeCache) {
             if (codeCache.containsKey(id.toString())) return codeCache.get(id.toString());
         }
@@ -97,13 +97,16 @@ final class PackCheck {
         if (t == null) return null;
         String gd = "dm/games/" + p.titleId + "/";
         if (!t.containsKey(gd + "game.tsv")) return null;   // the APK carries the profiles of its own games only: another game's pack is not this APK's to judge
+        byte[] packGt = null;   // the game.tsv the pack was made with (pack_android.py copies it after the rewrite): an earlier formula's key counts with it (RewriteKey)
+        File gf = new File(p.dir, "game.tsv");
+        try { if (gf.isFile()) packGt = Files.readAllBytes(gf.toPath()); } catch (IOException e) { packGt = null; }
         for (String m : p.modules) {
             File kf = new File(p.dir, m + ".android.key");
             BuildCheck.Mod nso = mod(game, p.gameVersion(game), m);
             if (!kf.isFile() || !nso.exists()) return null;
             try {
                 String have = new String(Files.readAllBytes(kf.toPath()), StandardCharsets.UTF_8).trim();
-                if (!have.equals(rewriteKey(t, gd, m, nso))) return false;
+                if (!RewriteKey.keys(t, BuildConfig.NX_REWRITER.split(" "), gd, m, nso::hash, packGt).contains(have)) return false;   // this rewriter's key, an equivalent one's, an earlier formula's (RewriteKey)
             } catch (IOException e) {
                 return null;
             }
@@ -111,35 +114,7 @@ final class PackCheck {
         return true;
     }
 
-    /** scripts/pack_android.py rewrite_key: SHA-256 over name\0bytes of the REWRITER files, the module, the profile's patches.py (when there is one) and game.tsv */
-    static String rewriteKey(Map<String, byte[]> t, String gameDir, String module, BuildCheck.Mod nso) throws IOException {
-        MessageDigest h;
-        try {
-            h = MessageDigest.getInstance("SHA-256");
-        } catch (NoSuchAlgorithmException e) {
-            throw new IOException(e);
-        }
-        for (String f : BuildConfig.NX_REWRITER.split(" ")) {
-            byte[] b = t.get("dm/tools/" + f);
-            if (b == null) throw new IOException("the APK's tools have no dm/tools/" + f);
-            part(h, f, b);
-        }
-        h.update((module + "\0").getBytes(StandardCharsets.UTF_8));
-        nso.hash(h);
-        byte[] pp = t.get(gameDir + "patches.py");
-        if (pp != null) part(h, "patches.py", pp);
-        part(h, "game.tsv", t.get(gameDir + "game.tsv"));
-        StringBuilder s = new StringBuilder();
-        for (byte b : h.digest()) s.append(String.format(Locale.ROOT, "%02x", b & 0xff));
-        return s + " target=android";
-    }
-
-    private static void part(MessageDigest h, String name, byte[] b) {
-        h.update((name + "\0").getBytes(StandardCharsets.UTF_8));
-        h.update(b);
-    }
-
-    /** dm/tools/*.py and dm/games/&lt;id&gt;/{patches.py,game.tsv} from assets/pack/tools.zip; null without it (-PnxPackEngine=fake) */
+    /** dm/tools/*.py, dm/tools/rewriter_equiv/* and dm/games/&lt;id&gt;/{patches.py,game.tsv} from assets/pack/tools.zip; null without it (-PnxPackEngine=fake) */
     private static synchronized Map<String, byte[]> tools(Context c) {
         if (tools != null) return tools;
         Map<String, byte[]> out = new HashMap<>();
@@ -147,7 +122,8 @@ final class PackCheck {
             ZipEntry e;
             while ((e = z.getNextEntry()) != null) {
                 String n = e.getName();
-                boolean want = n.startsWith("dm/tools/") && n.indexOf('/', 9) < 0 || n.startsWith("dm/games/") && (n.endsWith("/patches.py") || n.endsWith("/game.tsv"));
+                boolean want = n.startsWith("dm/tools/") && n.indexOf('/', 9) < 0 || n.startsWith(RewriteKey.EQUIV) && n.indexOf('/', RewriteKey.EQUIV.length()) < 0
+                        || n.startsWith("dm/games/") && (n.endsWith("/patches.py") || n.endsWith("/game.tsv"));
                 if (want && !e.isDirectory()) out.put(n, z.readAllBytes());
             }
         } catch (IOException e) {

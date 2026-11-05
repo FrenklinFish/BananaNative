@@ -1,6 +1,6 @@
 # What this game needs of an Android phone, for the launcher's readiness check (android/README.md "Readiness check"; the format in dm/games/README.md "Readiness rows").
 # <required|degraded> <TAB> <fact> <TAB> <at least> <TAB> <title>: <why>. Facts: what vka_readiness.c reports, ram_gib (ActivityManager totalMem in GiB) and android.sdk.
-# A table of its own, not game.tsv rows: game.tsv is part of a pack's rewrite key (pack_android.py rewrite_key), and a change here must not make packs stale.
+# A table of its own, not game.tsv rows: the launcher's rows apart from the host's (a pack's rewrite key hashes only game.tsv's build rows, pack_android.py rewrite_key).
 
 # In bring-up on Android: it reaches its first frames and does not play yet on the tested phone (the note)
 status	bring-up
