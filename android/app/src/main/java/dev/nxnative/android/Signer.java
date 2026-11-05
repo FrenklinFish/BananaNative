@@ -46,20 +46,20 @@ final class Signer {
     }
 
     /**
-     * Which build this is, without the app's name: play app "0.1 · 6a6448d · 2026-11-02" (the version up to its "-", the commit, the build date); test app
-     * "int@6a6448d · 11-02 19:51" (the branch without "android-", the commit, the build time). "+dirty" follows the commit when the tree had changes. Home shows
-     * it under the title; {@link #buildTag} is it with the app's name, so the two never disagree
+     * Which build this is, without the app's name: play app "0.1 · 6a6448d" (the version up to its "-", the commit); test app "int@6a6448d" (the branch without
+     * "android-", the commit). "+dirty" follows the commit when the tree had changes. No build time: the commit and the signer's fingerprint identify a build. Home
+     * shows it under the title; {@link #buildTag} is it with the app's name, so the two never disagree
      */
-    static String buildId(boolean play, String versionName, String commit, String dirty, String branch, String time) {
+    static String buildId(boolean play, String versionName, String commit, String dirty, String branch) {
         String c = commit;
         if (c.length() > 7 && !c.equals("unknown")) c = c.substring(0, 7);
         c += dirty;
         if (play) {
             int d = versionName.indexOf('-');
-            return (d > 0 ? versionName.substring(0, d) : versionName) + " · " + c + " · " + (time.length() >= 10 ? time.substring(0, 10) : time);
+            return (d > 0 ? versionName.substring(0, d) : versionName) + " · " + c;
         }
         String b = branch.startsWith("android-") ? branch.substring(8) : branch;
-        return b + "@" + c + " · " + (time.length() == 16 ? time.substring(5) : time);
+        return b + "@" + c;
     }
 
     /** The build tag without its mark: "Banana Native &lt;buildId&gt;" (play app), "Banana Native test · &lt;buildId&gt;" (test app) */

@@ -57,7 +57,7 @@ double vka_env_slow(vka_envc *c, const char *key, double def) {
 }
 
 // Switches read once (at start, or when a device object is made): a live change is logged as taking effect at the next start
-static const char *const g_restart[] = {"DM_VK_VALIDATE", "DM_VK_DRIVER", "DM_VK_HOOKDIR", "DM_VK_PLACED", "DM_VK_PREFAULT", "DM_VK_PCACHE", "DM_VK_SHLIB", "DM_VK_SHLIB_CHECK", "DM_VK_GS_CLAIM", "DM_VK_SUBGROUP_PIN", "DM_VK_GPL", "DM_VK_MESH", "DM_VK_SUBGROUP_GS", "DM_VK_ADPF", "DM_VK_ADPF_PIPELINE", "DM_VK_NANSCAN",
+static const char *const g_restart[] = {"DM_VK_VALIDATE", "DM_VK_DRIVER", "DM_VK_HOOKDIR", "DM_VK_PLACED", "DM_VK_PREFAULT", "DM_VK_PCACHE", "DM_VK_SHLIB", "DM_VK_SHLIB_CHECK", "DM_VK_GS_CLAIM", "DM_VK_SUBGROUP_PIN", "DM_VK_GPL", "DM_VK_MESH", "DM_VK_SUBGROUP_GS", "DM_VK_SHUFFLE_LDS", "DM_VK_ADPF", "DM_VK_ADPF_PIPELINE", "DM_VK_NANSCAN",
                                         "DM_VK_NANSCAN_STEP", "DM_VK_NANSCAN_DRAWS", "DM_VK_NANSCAN_SERIAL", "DM_VK_NANSCAN_FS", "DM_VK_WORKER",
                                         "DM_VK_WORKER_FRAMES", "DM_VK_TEST_HANG", "DM_LSFG_DLL", "DM_FPS", "NXHOST_VK_SELFTEST", "DM_CTL", "DM_VK_PREWARM", "DM_VK_PREWARM_MAX", "DM_VK_PREWARM_FILE", "DM_VK_LC_GLOBAL",
                                         "DM_VK_PSO_ASYNC", NULL};

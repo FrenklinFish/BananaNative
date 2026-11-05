@@ -29,12 +29,11 @@ def signStore = System.getenv('NX_SIGN_STORE'), signAlias = System.getenv('NX_SI
 if (nxLive && !(signStore && signAlias && signPass && new File(signStore).isFile()))
     throw new GradleException('nxLive needs the release key: NX_SIGN_STORE (an existing keystore), NX_SIGN_ALIAS and NX_SIGN_PASS')
 def nxLabel = providers.gradleProperty('nxLabel').getOrElse(nxApp ? "Banana Native $nxApp" : '')
-// The build tag the launcher shows over the game and in its main screen, and writes as the first line of each game log: branch@commit[+dirty] and the build time
+// The build tag the launcher shows over the game and in its main screen, and writes as the first line of each game log: branch@commit[+dirty] (no build time: the commit and the signer identify a build)
 def gitOut = { List<String> a -> try { providers.exec { commandLine(['git'] + a); ignoreExitValue = true }.standardOutput.asText.get().trim() } catch (Exception e) { '' } }
 def commit = gitOut(['rev-parse', '--short=12', 'HEAD'])
 def branch = gitOut(['rev-parse', '--abbrev-ref', 'HEAD'])
 def dirty = gitOut(['status', '--porcelain', '--untracked-files=no']) ? '+dirty' : ''
-def buildTime = new Date().format('yyyy-MM-dd HH:mm')
 // Lossless Scaling frame generation (GPL-3.0-or-later, dm/gfx/vk_android/lsfg): in by default, which makes the APK GPL-3.0-or-later; -PnxLsfg=false builds without it (the packer's libdmsh_xlate.so is GPL-3.0-or-later too: android/NOTICE.md)
 def nxLsfg = providers.gradleProperty('nxLsfg').getOrElse('true') != 'false'
 // Preparing the game on the phone (android/ONDEVICE.md): "+ Add game" on a dump without a usable pack offers Prepare, which runs PackService (a foreground service
@@ -101,7 +100,6 @@ android {
         buildConfigField 'String', 'NX_COMMIT', "\"${commit ?: 'unknown'}\""
         buildConfigField 'String', 'NX_BRANCH', "\"${branch ?: 'unknown'}\""
         buildConfigField 'String', 'NX_DIRTY', "\"${commit ? dirty : ''}\""
-        buildConfigField 'String', 'NX_BUILD_TIME', "\"$buildTime\""
         buildConfigField 'boolean', 'NX_LSFG', "$nxLsfg"
         // The play app and the release behave alike (saves/<id>, the user's build tag, no test switches); every other app is a test app
         buildConfigField 'boolean', 'NX_PLAY', "${nxPlay || nxLive}"

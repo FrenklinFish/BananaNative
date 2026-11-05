@@ -42,15 +42,11 @@ shader_note	Donkey Kong Bananza shaders
 # agl's render buffer binding wraps its clears in render conditions (SetRenderEnableConditional(RENDER_IF_NOT_EQUAL) at main+0x12798c before the ClearColor at main+0x1279d4):
 # without the key, a clear-only rebinding of the composite target right after the composite draw wiped it before the upscaler read it, and every gameplay frame came out black
 render_cond	on
-# Dynamic resolution (MaintainGpuPercentage: the NDSR rate between NdsrUpscaleMinRate and NdsrUpscaleMaxRate) reads the GPU time between the frame's timestamp reports.
-# `gpu_timestamps segment` lets it scale the scene, but on Android it held both drivers near 20 fps (the NDSR upscaler's cost, game note "Segment timing on Android"),
-# so the default stays per submission (open); Game settings › GPU timing (DM_NVN_GPU_TS=segment) turns it on per game
+# Dynamic resolution (MaintainGpuPercentage: the NDSR rate between NdsrUpscaleMinRate and NdsrUpscaleMaxRate) reads the GPU time between the frame's timestamp reports: each report takes its segment's GPU start / end
+gpu_timestamps	segment
 # The window size (the nvnWindow textures the upscaler's output is copied to; the render targets scale with it) is the constant pair two leaf functions of main return (mov w0,#2880 / #1620; ret):
 # the host writes DM_WINDOW_SIZE's size into them at load (loader.c window_apply; the Android launcher's Game resolution: Phone 1080p = 1920x1080), the game's own 2880x1620 without it (the game note, Window size)
 window_fn	e25c90c1c136638885659fd55bf8a03b	0x5bf770	0x5bf780	2880x1620
-# Workaround (open, v0.1.2): the Android launcher's default Game resolution for this game is Phone 720p, because its NDSR upscaler compute shader is too slow on Adreno with
-# Turnip at Phone 1080p (about 20 fps; 720p about 30 fps on the Adreno 840; game note "Segment timing on Android"). A player's own choice wins. Remove with the upscaler fix
-android_window	1280x720
 
 # ---- Test runs ----
 # DM_FASTBOOT=1: A every 12 presented frames (0.1 s held) from the first present through the boot screen, the title, Continue and the file, a [mark] once 5 frames in a row

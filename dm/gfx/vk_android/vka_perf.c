@@ -106,7 +106,7 @@ void vka_perf_thread(int nice) {
 // period as target the session would lower the clocks until the frame took 50 ms and keep it there). Each frame is reported once. Not phone-checked (STUTTER-TEST.md)
 // Since 2026-11-05 the period is the game's shortest (vka_dev.c vka_floor_period_ns: 16.7 ms unless the game asked for less, or DM_VK_GPU_FLOOR_PERIOD), not the current
 // one capped at 33.3 ms: at 30 fps a frame the controller could only take back to 60 fps once it fits in a vsync. Unset (-1), DM_VK_ADPF_SPAN is 100 when the session is
-// the GPU clock floor (vka_floor_adpf: no VK_QCOM_queue_perf_hint, as on Turnip) and 0 otherwise
+// the GPU clock floor (vka_floor_adpf: neither VK_QCOM_queue_perf_hint nor the KGSL constraint) and 0 otherwise
 static int span_pct(void) { int vka_floor_adpf(void); int p = VKA_ENV("DM_VK_ADPF_SPAN", -1); if (p < 0) p = vka_floor_adpf() ? 100 : 0; return p <= 0 ? 0 : p > 100 ? 100 : p; }
 static int64_t span_target(double period_s, int pct) { (void)period_s; int64_t vka_floor_period_ns(void); return vka_floor_period_ns() * pct / 100; }
 uint64_t vka_floor_span_of(uint64_t f); uint64_t vka_frame_start_ns(uint64_t f); uint64_t now_ns(void);

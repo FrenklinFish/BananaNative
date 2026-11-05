@@ -137,6 +137,7 @@ static int init_once(void) {
     float prio = 1.f;
     VkDeviceQueueCreateInfo qci = {VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO, .queueFamilyIndex = V.qf, .queueCount = 1, .pQueuePriorities = &prio};
     VkDeviceCreateInfo dci = {VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO, .pNext = &f2, .queueCreateInfoCount = 1, .pQueueCreateInfos = &qci, .enabledExtensionCount = ndext, .ppEnabledExtensionNames = dext};
+    void vka_kgsl_before(int has_ext), vka_kgsl_after(int has_hint); vka_kgsl_before(x_ph);   // the kernel contexts the device's queue gets (the KGSL floor below)
     if ((r = vk.vkCreateDevice(V.pd, &dci, NULL, &V.dev))) { VRED("vkCreateDevice %d", r); return 0; }
 #define D(f) vk.f = (PFN_##f)vk.vkGetDeviceProcAddr(V.dev, #f);
     VKA_DEVICE_FNS(D)
@@ -147,8 +148,9 @@ static int init_once(void) {
     vk.vkGetDeviceQueue(V.dev, V.qf, 0, &V.q);
     if (x_ph && fph.queuePerfHint) V.perf_hint = (void *)vk.vkGetDeviceProcAddr(V.dev, "vkQueueSetPerfHintQCOM");
     VLOG("GPU clock floor (VK_QCOM_queue_perf_hint): %s", V.perf_hint ? "available (DM_VK_GPU_FLOOR)" : x_ph ? "extension without the feature" : "not on this device");
+    vka_kgsl_after(V.perf_hint != NULL);
 #if defined(__ANDROID__)
-    { int vka_floor_adpf(void); if (!V.perf_hint) VLOG("GPU clock floor through ADPF: %s", vka_floor_adpf() ? "each frame's span and GPU time reported against the game's shortest period (DM_VK_GPU_FLOOR_ADPF)" : "off (DM_VK_GPU_FLOOR=0 or DM_VK_GPU_FLOOR_ADPF=0)"); }
+    { int vka_floor_adpf(void), vka_floor_kgsl(void); if (!V.perf_hint && !vka_floor_kgsl()) VLOG("GPU clock floor through ADPF: %s", vka_floor_adpf() ? "each frame's span and GPU time reported against the game's shortest period (DM_VK_GPU_FLOOR_ADPF)" : "off (DM_VK_GPU_FLOOR=0 or DM_VK_GPU_FLOOR_ADPF=0)"); }
 #endif
 
     VkPhysicalDeviceMapMemoryPlacedPropertiesEXT pmp = {VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MAP_MEMORY_PLACED_PROPERTIES_EXT};
@@ -626,45 +628,126 @@ void vka_floor_stats(char *b, size_t n) {   // the replay statistics: frames at 
     g_p90_sum = 0; g_p90_n = 0;
     memset(g_floor_frames, 0, sizeof g_floor_frames);
 }
+// The floor through the kernel driver (KGSL) for a Vulkan driver without VK_QCOM_queue_perf_hint on an Adreno (Turnip): the power constraint of the queue's own kernel context.
+// Qualcomm's hint maps onto the same kernel call: IOCTL_KGSL_SETPROPERTY KGSL_PROP_PWR_CONSTRAINT {KGSL_CONSTRAINT_PWRLEVEL, context, level} (graphics-kernel adreno.c
+// adreno_set_constraint), level 1 = the highest clock or 2-100 = a floor at that % of it, the hint's two kinds. On GPUs whose clock the GMU decides (gen8, the Adreno 840:
+// not host_based_dcvs) the kernel hands it to the GMU at once as the context's rule (adreno_gen8_hwsched.c gen8_hwsched_set_pwrconstraint, H2F_MSG_CONTEXT_RULE), which holds
+// the clock while that context's work runs; on host-DCVS GPUs (older) it applies at dispatch of submissions flagged KGSL_CONTEXT_PWR_CONSTRAINT and there only "highest" (1)
+// is taken. The rule only reaches the GMU while the context is registered with it (after its first submission; again after the GPU slept), and Turnip does not create its
+// context with that flag, so the level is sent again every 30 frames. Which contexts: the kernel lets a file descriptor set the constraint only on contexts it owns
+// (kgsl_context_get_owner), so the contexts the driver made for the device's queue are the ids this process's /dev/kgsl-3d0 descriptors own after vkCreateDevice and did
+// not own before (Turnip: one per VkQueue, tu_knl_kgsl.cc kgsl_submitqueue_new). The ownership test is the same ioctl with KGSL_CONSTRAINT_NONE, which changes nothing on a
+// context without a constraint. Before 2026-11-05 Turnip's floor was the ADPF session (vka_perf.c), which did not raise the GPU clock: 282-646 MHz (mean 380) in DKB's
+// level where the system driver ran 1,100-1,200 MHz. DM_VK_GPU_FLOOR_KGSL=0 (restart) leaves it off (the ADPF floor then); DM_VK_GPU_FLOOR and DM_VK_GPU_FLOOR_AUTO work as
+// with the queue hint
+#include <fcntl.h>
+#include <sys/ioctl.h>
+#include <dirent.h>
+#include <unistd.h>
+#include <errno.h>
+struct kgsl_dc { unsigned int type, context_id; void *data; size_t size; };
+struct kgsl_gp { unsigned int type; void *value; size_t sizebytes; };
+#define KGSL_IOCTL_SETPROPERTY _IOW(0x09, 0x32, struct kgsl_gp)
+enum { KG_FDS = 4, KG_IDS = 1024, KG_CTX = 8 };
+static int g_kg_fd[KG_FDS], g_kg_nfd; static uint8_t g_kg_own[KG_FDS][KG_IDS / 8];
+static struct { int fd; unsigned id; } g_kg[KG_CTX]; static int g_kg_n, g_kg_host;   // the queue's contexts; host DCVS: only "highest"
+static int kg_set(int fd, unsigned id, int type, unsigned level) {
+    unsigned lv = level; struct kgsl_dc c = {(unsigned)type, id, &lv, sizeof lv}; struct kgsl_gp g = {0x12, &c, sizeof c};   // KGSL_PROP_PWR_CONSTRAINT
+    int r; do r = ioctl(fd, KGSL_IOCTL_SETPROPERTY, &g); while (r < 0 && (errno == EINTR || errno == EAGAIN));
+    return r < 0 ? -errno : 0;
+}
+static void kg_scan(int keep_fds) {   // this process's descriptors on /dev/kgsl-3d0 and the context ids each owns
+    if (!keep_fds) {
+        g_kg_nfd = 0; DIR *d = opendir("/proc/self/fd"); if (!d) return;
+        struct dirent *de; char path[64], to[64];
+        while ((de = readdir(d)) && g_kg_nfd < KG_FDS) {
+            int fd = atoi(de->d_name); if (fd <= 2) continue;
+            snprintf(path, sizeof path, "/proc/self/fd/%d", fd); ssize_t n = readlink(path, to, sizeof to - 1); if (n <= 0) continue; to[n] = 0;
+            if (!strncmp(to, "/dev/kgsl-3d", 12)) g_kg_fd[g_kg_nfd++] = fd;
+        }
+        closedir(d);
+    }
+    for (int i = 0; i < g_kg_nfd; i++) { memset(g_kg_own[i], 0, sizeof g_kg_own[i]); for (unsigned id = 1; id < KG_IDS; id++) if (!kg_set(g_kg_fd[i], id, 0, 0)) g_kg_own[i][id / 8] |= (uint8_t)(1u << (id % 8)); }
+}
+static uint8_t g_kg_was[KG_FDS][KG_IDS / 8]; static int g_kg_wasfd[KG_FDS], g_kg_wasn, g_kg_tried;
+void vka_kgsl_before(int has_ext) {   // (not with the queue hint's extension: its driver's contexts are left alone)
+    g_kg_tried = !has_ext && VKA_ENV("DM_VK_GPU_FLOOR_KGSL", 1) != 0;
+    if (!g_kg_tried) return;
+    kg_scan(0); g_kg_wasn = g_kg_nfd; memcpy(g_kg_wasfd, g_kg_fd, sizeof g_kg_fd); memcpy(g_kg_was, g_kg_own, sizeof g_kg_own);
+}
+void vka_kgsl_after(int has_hint) {
+    if (has_hint) return;   // the queue hint does it
+    if (!g_kg_tried) { VLOG("GPU clock floor through KGSL: off (DM_VK_GPU_FLOOR_KGSL=0, or the queue hint's extension without its feature)"); return; }
+    kg_scan(0);
+    g_kg_n = 0;
+    for (int i = 0; i < g_kg_nfd; i++) {
+        int w = -1; for (int j = 0; j < g_kg_wasn; j++) if (g_kg_wasfd[j] == g_kg_fd[i]) w = j;
+        for (unsigned id = 1; id < KG_IDS && g_kg_n < KG_CTX; id++)
+            if ((g_kg_own[i][id / 8] >> (id % 8) & 1) && !(w >= 0 && (g_kg_was[w][id / 8] >> (id % 8) & 1))) { g_kg[g_kg_n].fd = g_kg_fd[i]; g_kg[g_kg_n].id = id; g_kg_n++; }
+    }
+    if (g_kg_n) {   // the level form the kernel takes: 2-100 % with GMU DCVS, else -EINVAL and only 1 (highest)
+        int r = kg_set(g_kg[0].fd, g_kg[0].id, 1, 50); g_kg_host = r == -EINVAL; kg_set(g_kg[0].fd, g_kg[0].id, 0, 0);
+    }
+    char b[96]; size_t o = 0; b[0] = 0; for (int k = 0; k < g_kg_n && o < sizeof b; k++) o += (size_t)snprintf(b + o, sizeof b - o, "%s%u", k ? "," : "", g_kg[k].id);
+    if (g_kg_n) VLOG("GPU clock floor through KGSL: the queue's kernel context%s %s (%d descriptor%s on /dev/kgsl-3d0; %s), DM_VK_GPU_FLOOR (DM_VK_GPU_FLOOR_KGSL)",
+                     g_kg_n > 1 ? "s" : "", b, g_kg_nfd, g_kg_nfd == 1 ? "" : "s", g_kg_host ? "host DCVS: highest clock only" : "GMU DCVS: floor in % of the highest clock");
+    else VLOG("GPU clock floor through KGSL: %s", g_kg_nfd ? "no kernel context of the device's own (the ADPF floor)" : "no /dev/kgsl-3d0 descriptor (not an Adreno with KGSL; the ADPF floor)");
+}
+int vka_floor_kgsl(void) { return !V.perf_hint && g_kg_n > 0; }
+static VkResult kg_apply(int s) {   // the floor s % (0: none) on the queue's contexts
+    int bad = 0;
+    for (int k = 0; k < g_kg_n; k++) {
+        int r = s <= 0 ? kg_set(g_kg[k].fd, g_kg[k].id, 0, 0) : kg_set(g_kg[k].fd, g_kg[k].id, 1, s >= 100 || g_kg_host ? 1u : (unsigned)(s < 2 ? 2 : s));
+        if (r) { bad = r; static int n; if (n++ < 3) VRED("KGSL power constraint %d %% on context %u: %d", s, g_kg[k].id, r); }
+    }
+    return bad ? VK_ERROR_UNKNOWN : VK_SUCCESS;
+}
 static _Atomic int g_tail_n;   // DM_VK_GPU_FLOOR_AUTO=2: submissions with draws counted at their commit and not yet completed
 // The queue's hint (any thread: the replay's, the completion thread's). tail: the floor is s while a counted submission is pending, else 0, decided under the queue lock, so
 // a commit and a completion racing cannot apply their floors in the wrong order (before 2026-11-03 a completion's 0 could land after the next commit's floor)
-static void floor_set_(int s, int tail) {
+static void floor_set_(int s, int tail, int again) {   // again: send it even if unchanged (the KGSL rule, see kg_apply)
     static _Atomic int cur = -1;
-    if (!tail && atomic_load(&cur) == s) return;
+    if (!tail && !again && atomic_load(&cur) == s) return;
     pthread_mutex_lock(&V.qmu);
     if (tail) s = atomic_load(&g_tail_n) > 0 ? s : 0;
-    if (atomic_load(&cur) == s) { pthread_mutex_unlock(&V.qmu); return; }
-    struct { VkStructureType sType; void *pNext; uint32_t type, scale; } h = {(VkStructureType)1000302000, NULL, s >= 100 ? 2u : s > 0 ? 3u : 0u, s > 0 && s < 100 ? (uint32_t)s : 0u};
-    VkResult r = ((VkResult (*)(VkQueue, const void *))V.perf_hint)(V.q, &h);
+    if (!again && atomic_load(&cur) == s) { pthread_mutex_unlock(&V.qmu); return; }
+    VkResult r;
+    if (V.perf_hint) {
+        struct { VkStructureType sType; void *pNext; uint32_t type, scale; } h = {(VkStructureType)1000302000, NULL, s >= 100 ? 2u : s > 0 ? 3u : 0u, s > 0 && s < 100 ? (uint32_t)s : 0u};
+        r = ((VkResult (*)(VkQueue, const void *))V.perf_hint)(V.q, &h);
+    } else r = kg_apply(s);
     int was = atomic_exchange(&cur, s);
     pthread_mutex_unlock(&V.qmu);
-    if (was < 0 || VKA_ENV("DM_VK_GPU_FLOOR_LOG", 0) > 1) VLOG("GPU clock floor: %d %% (%s): %d", s, s >= 100 ? "highest" : s ? "scaled" : "default governor", r);
+    if (was < 0 || (was != s && VKA_ENV("DM_VK_GPU_FLOOR_LOG", 0) > 1)) VLOG("GPU clock floor%s: %d %% (%s): %d", V.perf_hint ? "" : " (KGSL)", s, s >= 100 ? "highest" : s ? "scaled" : "default governor", r);
 }
 // DM_VK_GPU_FLOOR_AUTO=2: the floor only for the tail. The driver's governor keeps the clock while the frame is recorded (its parts reach the GPU as fast as they are
 // recorded, so a faster GPU only waits longer); when a submission with draws is handed to the queue the floor goes to DM_VK_GPU_FLOOR, and back to the governor once
 // every such submission handed over has completed. A submission is counted when its span op is posted (vka_floor_tail_add) and the count is given back by that op on
 // completion, so the two always pair: before 2026-11-03 every completed submission with draws took one off, also those committed before a live switch to mode 2 or whose
 // end failed, and the floor could drop with a counted submission still on the GPU
-static int floor_mode(void) { return V.perf_hint ? VKA_ENV("DM_VK_GPU_FLOOR_AUTO", 0) : -1; }
+static int floor_mode(void) { return V.perf_hint || g_kg_n ? VKA_ENV("DM_VK_GPU_FLOOR_AUTO", 0) : -1; }
 static int floor_top(void) { int s = VKA_ENV("DM_VK_GPU_FLOOR", 100); return s < 0 ? 0 : s > 100 ? 100 : s; }
-// The floor without VK_QCOM_queue_perf_hint (Turnip, any driver but Qualcomm's): the ADPF session (vka_perf.c) reports each frame's span (recording start to the GPU end of
+// The floor without VK_QCOM_queue_perf_hint and without the KGSL constraint above (a driver that is not on KGSL, or DM_VK_GPU_FLOOR_KGSL=0): the ADPF session (vka_perf.c) reports each frame's span (recording start to the GPU end of
 // its last submission) with its GPU time against the shortest period, so the system raises the clocks the frame's work runs on when the frame takes longer than the period
 // the game could run at. Before 2026-11-05 there was no floor at all there: on Turnip DKB stayed at 20 fps with 33-36 ms of GPU time a frame, as the system driver did with
-// DM_VK_GPU_FLOOR=0. It has no level: DM_VK_GPU_FLOOR > 0 turns it on, 0 off, as does DM_VK_GPU_FLOOR_ADPF=0 (live); DM_VK_ADPF_SPAN set explicitly decides the reports
-int vka_floor_adpf(void) { return !V.perf_hint && floor_top() > 0 && VKA_ENV("DM_VK_GPU_FLOOR_ADPF", 1); }
+// DM_VK_GPU_FLOOR=0. It has no level: DM_VK_GPU_FLOOR > 0 turns it on, 0 off, as does DM_VK_GPU_FLOOR_ADPF=0 (live); DM_VK_ADPF_SPAN set explicitly decides the reports. On the Adreno 840 with Turnip it did not raise the GPU clock (282-646 MHz, mean 380; 2026-11-05)
+int vka_floor_adpf(void) { return !V.perf_hint && !g_kg_n && floor_top() > 0 && VKA_ENV("DM_VK_GPU_FLOOR_ADPF", 1); }
 int vka_floor_tail_add(void) { if (floor_mode() != 2) return 0; atomic_fetch_add(&g_tail_n, 1); return 1; }   // vka_exec.c, a submission with draws: 1 = counted
-void vka_floor_commit(int counted) { if (counted) floor_set_(floor_top(), 1); }   // before that submission is handed to the queue
+void vka_floor_commit(int counted) { if (counted) floor_set_(floor_top(), 1, 0); }   // before that submission is handed to the queue
 void vka_floor_done(int counted) {     // the completion thread, that submission done
     if (!counted) return;
     atomic_fetch_sub(&g_tail_n, 1);
-    if (floor_mode() == 2) floor_set_(floor_top(), 1);
+    if (floor_mode() == 2) floor_set_(floor_top(), 1, 0);
 }
 void vka_gpu_floor(void) {
     int mode = floor_mode(); if (mode < 0 || mode == 2) return;
     int s = VKA_ENV("DM_VK_GPU_FLOOR", 100); if (s < 0) s = 0; if (s > 100) s = 100;
     uint64_t vka_frame(void);
-    if (mode == 1) s = floor_auto(s, vka_frame());
-    floor_set_(s, 0);
+    uint64_t f = vka_frame();
+    if (mode == 1) s = floor_auto(s, f);
+    static uint64_t sent_f;   // the KGSL rule again every 30 frames (it is lost when the GMU registers the context again)
+    int again = !V.perf_hint && (f >= sent_f + 30 || f < sent_f);
+    if (again) sent_f = f;
+    floor_set_(s, 0, again);
 }
 #endif

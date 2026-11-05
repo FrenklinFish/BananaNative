@@ -571,6 +571,7 @@ def finish(key, w, job, c1):
     dropped = spv.strip_unused_caps(m)
     added = spv.formatless_storage_caps(m)
     n_precise = spv.precise_minmax(m)
+    hmma = stage == 'cs' and spv.hmma_lds(m)   # the HMMA helper's calls lowered at their sites, gathers shared (vk_android_spv.py hmma_lds)
     binds = [classify(stage, r, res, m) for r in m.resources()]
     storage_slots(stage, binds, res)
     try: place(stage, binds, m)
@@ -590,10 +591,14 @@ def finish(key, w, job, c1):
     if stage == 'ps':   # the variants of the same module (dmsh_abi_vk.h DMSH_VK_MOD_*)
         mods_, uint_mask = ps_variants(key, m)
         mods += mods_
+    if stage == 'cs':   # its subgroup shuffles through workgroup memory, for drivers without an arbitrary-index shuffle instruction (vk_android_spv.py shuffle_lds)
+        x = spv.Module(m.data())
+        if spv.shuffle_lds(x, VK['SHARED_MAX']): mods.append((VK['MOD_SHUFFLE_LDS'], x.data()))
     for variant, data in mods:
         err = validate(data, w, f'{key}_{variant}')
         if err: return 'spirv-val failed', err, None
     fa = facts_of(key, stage, m, job, res)
+    if hmma: fa['flags'] |= VK['F_HMMA']; fa['hmma_fns'] = [spv.HMMA_NAME]   # (lowered: the helper function is gone)
     if gl: fa['flags'] |= VK['F_GL_DEPTH']
     if alpha: fa['flags'] |= VK['F_ALPHA_TEST']
     if vcull: fa['flags'] |= VK['F_VIEWPORT_CULL']
@@ -607,7 +612,7 @@ def finish(key, w, job, c1):
             if not sp: e['kind'] = abi.KIND_UNKNOWN; continue   # (the replay then refuses the shader)
             e['bytes'] = sp['bytes']; shared = sp['workgroup']
     refl = {'key': key, 'stage': stage, 'source': f'{name}#{k}', 'pc_paired': pc_of[key], 'c1': c1.hex(), 'local': job.get('local') or [1, 1, 1], 'shared': shared,
-            'notes': res['notes'], 'vs_pad': pad, 'mesh': res.get('mesh'), 'ps_prim': prim, 'caps_dropped': dropped, 'caps_added': added, 'precise': n_precise, 'drv_reads': drv_reads(binds, m), 'tf': job.get('tf'), **fa,
+            'notes': res['notes'], 'vs_pad': pad, 'mesh': res.get('mesh'), 'ps_prim': prim, 'caps_dropped': dropped, 'caps_added': added, 'precise': n_precise, 'hmma_lds': hmma, 'drv_reads': drv_reads(binds, m), 'tf': job.get('tf'), **fa,
             'bindings': [{kk: v for kk, v in e.items() if kk not in ('id', 'tbind', 'index')} for e in binds]}
     loose = os.environ.get('DMSH_VK_LOOSE') == '1'
     return 'ok', '', (refl, [(variant, len(data), *pack_module(data), data if loose else None) for variant, data in mods])   # compressed here, in parallel
@@ -997,4 +1002,6 @@ print(f'64-bit float types left: {sum(1 for x in okr if "Float64" in x["caps"])}
 print(f'vertex shaders padded for their pixel shaders: {sum(1 for x in okr if x["vs_pad"])}; integer-only inputs retyped: {sum(1 for x in okr for t in x["vin"].values() if t)} inputs')
 hm = collections.Counter(n for x in okr for n in x['hmma_fns'])
 if hm: print('matrix helpers (cooperative matrix candidates): ' + ', '.join(f'{n} in {c} shaders' for n, c in hm.items()))
+if hm: print(f"HMMA helper calls lowered at their sites (hmma_lds): {sum(x.get('hmma_lds') or 0 for x in okr)} in {sum(1 for x in okr if x.get('hmma_lds'))} shaders")
+print(f"compute modules with their shuffles through workgroup memory (MOD_SHUFFLE_LDS): {sum(1 for x in okr if VK['MOD_SHUFFLE_LDS'] in x['variants'])}")
 print(f'library: game {GAME.id}, inputs {INPUTS}, chain {CHAIN}, vk chain {VKV}' + (f' (tools {TOOLS}, vk_android_same.tsv)' if TOOLS != VKV else ''))

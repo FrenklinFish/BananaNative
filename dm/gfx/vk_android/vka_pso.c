@@ -1056,7 +1056,7 @@ static VkPipeline cs_obtain(vka_shader *cs, const vka_layout *lay, int prewarm, 
     int spill = 0;   // shared memory in the spill buffer (vka_draw.c spill_dispatch): dispatched in parts with a base workgroup
     for (unsigned i = 0; i < cs->e->bind_count; i++) if (cs->b[i].kind == DMSH_VK_KIND_SHARED_SPILL) spill = 1;
     VkComputePipelineCreateInfo ci = {VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO, .flags = spill ? VK_PIPELINE_CREATE_DISPATCH_BASE_BIT : 0, .layout = lay->layout,
-        .stage = {VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, .pNext = pin ? &rsg : NULL, .stage = VK_SHADER_STAGE_COMPUTE_BIT, .module = cs->mods[DMSH_VK_MOD_BASE], .pName = "main"}};
+        .stage = {VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, .pNext = pin ? &rsg : NULL, .stage = VK_SHADER_STAGE_COMPUTE_BIT, .module = vka_shader_cs_module(cs), .pName = "main"}};
     VkPipeline p = VK_NULL_HANDLE; VkResult r; int over = 0;
     // Shared memory past the device's limit is invalid usage (the driver may refuse, crash or run it with less). The translator keeps a program's shared memory past
     // DMSH_VK_SHARED_MAX in a storage buffer (DMSH_VK_KIND_SHARED_SPILL), and e->shared is then what stays in workgroup memory; a program still over this device's

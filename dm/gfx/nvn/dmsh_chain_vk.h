@@ -1,5 +1,5 @@
 // Generated file (dm/gfx/tools/vk_android_build.py --header): the Android Vulkan shader library version this source tree expects. It covers DMSH_CHAIN
 // (the translator front half), vk_android_build.py, vk_android_spv.py, vk_android_delta.py and dmsh_abi_vk.h; the replay loads <library dir>/v-<V>/dmsh_vk.lib.
 // DMSH_VK_ABI: what the replay reads of a library (vk_android_delta.py abi_digest); a library of another version with this ABI is played while its update runs
-#define DMSH_VK_CHAIN "6607c8d19abc"
-#define DMSH_VK_ABI "01b52a48538b"
+#define DMSH_VK_CHAIN "b7632cc358f3"
+#define DMSH_VK_ABI "5c3ae03540de"

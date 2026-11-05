@@ -307,7 +307,7 @@ VkSampler vka_samp_default(void);                   // the sampler an unbound sa
 typedef struct vka_shader {
     uint64_t key; const dmsh_vk_entry *e; const dmsh_vk_bind *b;
     const vka_shlib *lib;               // the library the entry is in (its header's translator answers; its other modules)
-    VkShaderModule mods[4];             // by DMSH_VK_MOD_* variant, made when a pipeline first asks (the base when the shader is made)
+    VkShaderModule mods[5];             // by DMSH_VK_MOD_* variant, made when a pipeline first asks (the base when the shader is made)
     struct vka_vinmod *vin;             // vertex modules with integer-fed inputs retyped, by masks (vka_shader_vin_module)
     struct vka_vinmod *fout;            // pixel modules with float outputs retyped for integer targets, by masks (vka_shader_fout_module)
     vka_span c1; VkDeviceSize c1_len;   // the c1 bytes in static memory (none when c1_len is 0)
@@ -324,11 +324,12 @@ const char *vka_shader_lib_path(void);   // the library file loaded ("" before o
 vka_shader *vka_shader_by_key(uint64_t key);   // the game library's shader of key (the library loaded first if needed); NULL = not there or refused
 VkShaderModule vka_shader_module(vka_shader *s, int variant);
 uint32_t vka_shader_sg_pin(int stage);              // DMSH_VK_STAGE_*: the subgroup size its subgroup shaders' pipelines require (vka_shader.c sg_plan), 0 = none
+VkShaderModule vka_shader_cs_module(vka_shader *s);  // a compute shader's module: its DMSH_VK_MOD_SHUFFLE_LDS one where the device takes it (vka_shader.c shuffle_plan), else the base
 VkShaderModule vka_shader_gs_module(vka_shader *s);   // a geometry shader's module with its memory writes made once per primitive (vka_spv_gs_claim)
 #define VKA_GS_CLAIM_BINDING (DMSH_VK_STAGE_GS * DMSH_VK_STAGE_BINDINGS + DMSH_VK_STAGE_BINDINGS - 1)   // set 0: the claim words of such a shader (the stage's last binding)
 VkShaderModule vka_shader_fout_module(vka_shader *s, uint32_t umask, uint32_t smask);
 int vka_shader_fout_retyped(vka_shader *s, uint32_t umask, uint32_t smask);   // 1 when that module is a rewritten one (not the base module it falls back to)   // the base pixel module with those float outputs as uint / int vectors of their bits (vka_spv_fout_retype), made once per masks
-#define VKA_FS_RETYPE 4                  // vka_gkey.fs_variant beyond the library's DMSH_VK_MOD_*: the base pixel module with its float outputs at integer attachments retyped (vka_pso.c fout_masks)
+#define VKA_FS_RETYPE 4                  // vka_gkey.fs_variant beyond the library's pixel DMSH_VK_MOD_* (4 is DMSH_VK_MOD_SHUFFLE_LDS of compute modules, never a pixel variant): the base pixel module with its float outputs at integer attachments retyped (vka_pso.c fout_masks)
 VkShaderModule vka_shader_vin_module(vka_shader *s, uint32_t umask, uint32_t smask);   // the base module with those float inputs as uvec4 / ivec4 (vka_spv_vin_retype), made once per masks   // the module of that variant (DMSH_VK_MOD_*), made on first use; VK_NULL_HANDLE = the entry has none   // the shader of key in library L (the game's, or the selftest's own); NULL = not there or refused
 int vka_shlib_check_all(const vka_shlib *L);   // every module and compute pipeline of L made (DM_VK_SHLIB_CHECK=1): the failures
 int vka_static(VkDeviceSize n, VkDeviceSize align, vka_span *out);   // host-visible memory for the process's life (c1 bytes, the support and zero buffers)

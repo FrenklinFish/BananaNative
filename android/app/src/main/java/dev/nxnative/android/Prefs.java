@@ -134,8 +134,8 @@ final class Prefs {
     }
 
     /**
-     * Which build a log or a screenshot came from. Play app: "Banana Native 0.1 · 6a6448d · 2026-11-02" (the version up to its "-", the commit, the build date);
-     * test app: "Banana Native test · int@6a6448d · 11-02 19:51" (the branch without "android-", the commit, the build time). "+dirty" follows the commit when the
+     * Which build a log or a screenshot came from. Play app: "Banana Native 0.1 · 6a6448d" (the version up to its "-", the commit);
+     * test app: "Banana Native test · int@6a6448d" (the branch without "android-", the commit). "+dirty" follows the commit when the
      * tree had changes. The play app adds " · official" when the release key signed the APK, else " · unofficial build" (Signer). The main screen shows it and it
      * is the first line of every game log ("[nxlaunch] build ...").
      */
@@ -161,9 +161,9 @@ final class Prefs {
     /** Which key signed this APK, for logs and reports: the signer's SHA-256, first 16 hex digits */
     static String signerId(Context ctx) { return Signer.shortId(signers(ctx)); }
 
-    /** The build identifier alone (Signer.buildId): "launcher-2@4a15067 · 11-05 11:37", "0.1 · 6a6448d · 2026-11-02". Home shows it under its title (the build tag would not fit a phone's width) */
+    /** The build identifier alone (Signer.buildId): "launcher-2@4a15067", "0.1 · 6a6448d". Home shows it under its title (the build tag would not fit a phone's width) */
     static String buildId() {
-        return Signer.buildId(BuildConfig.NX_PLAY, BuildConfig.VERSION_NAME, BuildConfig.NX_COMMIT, BuildConfig.NX_DIRTY, BuildConfig.NX_BRANCH, BuildConfig.NX_BUILD_TIME);
+        return Signer.buildId(BuildConfig.NX_PLAY, BuildConfig.VERSION_NAME, BuildConfig.NX_COMMIT, BuildConfig.NX_DIRTY, BuildConfig.NX_BRANCH);
     }
 
     private static String buildTag() { return Signer.buildTag(BuildConfig.NX_PLAY, buildId()); }

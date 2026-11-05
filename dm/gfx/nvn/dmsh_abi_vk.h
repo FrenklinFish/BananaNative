@@ -103,6 +103,8 @@
 #define DMSH_VK_MOD_UINT 1               // every colour output as the unsigned integer vector of its bits: for a pipeline whose colour attachments are all UINT formats
 #define DMSH_VK_MOD_UINT_MIXED 2         // only the targets of the entry's uint_mask as unsigned integers, the others float: for exactly those UINT attachments
 #define DMSH_VK_MOD_DUAL 3               // output 1 as Location 0 Index 1: for a pipeline blending target 0 with a SRC1 factor (dualSrcBlend); profile table dual_want.tsv
+#define DMSH_VK_MOD_SHUFFLE_LDS 4        // compute: its 32-bit subgroup shuffles through workgroup memory (vk_android_spv.py shuffle_lds), for a driver without an arbitrary-index
+                                         // shuffle instruction (Turnip makes each one a loop); its workgroup memory, with the rows this adds, is at most DMSH_VK_SHARED_MAX bytes
 // How a module is stored: the SPIR-V words as they are, or one zstd frame of them (about a fifth of the size; the replay links zstd's decompressor)
 #define DMSH_VK_CODEC_RAW 0
 #define DMSH_VK_CODEC_ZSTD 1
@@ -122,7 +124,7 @@
 #define DMSH_VK_F_NV_PASSTHROUGH 16      // geometry passthrough through SPV_NV_geometry_shader_passthrough (none since the gs_passthrough answer)
 #define DMSH_VK_F_NV_VIEWPORT 32         // ViewportMaskNV / SPV_NV_viewport_array2 (none: see DMSH_VK_F_VIEWPORT_CULL)
 #define DMSH_VK_F_INTERLOCK 64           // fragment shader interlock (VK_EXT_fragment_shader_interlock)
-#define DMSH_VK_F_HMMA 128               // the HMMA helper dmsh_hmma16816_f16 (agl's upscaler): a VK_KHR_cooperative_matrix candidate
+#define DMSH_VK_F_HMMA 128               // the HMMA helper dmsh_hmma16816_f16 (agl's upscaler), its calls lowered in the module (vk_android_spv.py hmma_lds)
 #define DMSH_VK_F_NO_FACTS 256           // not in the answer table: queries took defaults
 #define DMSH_VK_F_INT_OUT 512            // a colour output written from integer bits: has a DMSH_VK_MOD_UINT module (and UINT_MIXED when it writes float outputs too)
 #define DMSH_VK_F_GL_DEPTH 1024          // has the DMSH_VK_SPEC_GL_DEPTH constant

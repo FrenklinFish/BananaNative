@@ -19,8 +19,8 @@ public final class SignerJvmTest {
         switch (a[0]) {
             case "sha256": System.out.println("sha256 " + Signer.sha256(Files.readAllBytes(Paths.get(a[1])))); break;
             case "tag": System.out.println("tag " + Signer.tag(a[1], a[2].equals("1"), rest)); break;
-            case "build": {   // build <play 0|1> <versionName> <commit> <dirty|-> <branch> <time>: "build <buildId>|<buildTag>"
-                String id = Signer.buildId(a[1].equals("1"), a[2], a[3], a[4].equals("-") ? "" : a[4], a[5], a[6]);
+            case "build": {   // build <play 0|1> <versionName> <commit> <dirty|-> <branch>: "build <buildId>|<buildTag>"
+                String id = Signer.buildId(a[1].equals("1"), a[2], a[3], a[4].equals("-") ? "" : a[4], a[5]);
                 System.out.println("build " + id + "|" + Signer.buildTag(a[1].equals("1"), id));
                 break;
             }

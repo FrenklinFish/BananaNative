@@ -32,9 +32,10 @@ Only these versions run; the app tells you if your dump is a different one.
 
 | GPU driver | Resolution | Frame rate |
 |---|---|---|
-| System (Qualcomm) | Phone 1080p | 30-60 fps (52-58 in the phone's performance mode) |
-| Turnip | Phone 720p (its default) | about 30 fps |
-| Turnip | Phone 1080p | about 20 fps (fix coming) |
+| System (Qualcomm) | Phone 1080p | 30 fps, with stretches of 55-58 |
+| Turnip | Phone 1080p | 30 fps, with stretches of 49-59 |
+
+Both drivers are held at 30 fps by the CPU (recording the frame's GPU work); 60 fps is planned.
 
 `0400C3F00006E000`: not measured yet. Your numbers depend on the phone, its temperature and power mode. The first visit to
 an area stutters while shaders are built, and a hot phone throttles: a cooler helps. Frame generation (Settings) can
@@ -95,10 +96,7 @@ If something doesn't work, start with Settings › **Readiness check**. A game's
   character selection screen can turn the 3D scene dark or black (the menus and the race HUD still draw). Free roam
   alone is not affected. Being fixed.
 - `040074A01BF12000`: some texture glitches during fights in some caves.
-- `040074A01BF12000` can drop to about 20 fps with Turnip drivers at Phone 1080p: its upscaler shader is too slow on
-  Adreno, a fix is coming. Until then the game starts at **Phone 720p** by default (about 30 fps on Turnip); the phone's
-  own driver (System), if the Readiness check passes with it, runs 1080p at 30-60 fps (the game's ⋯ › Game settings ›
-  Game resolution).
+- `040074A01BF12000` runs at 30 fps on both drivers: the CPU's work per frame holds it there. 60 fps is a later task.
 - `0400C3F00006E000` has more problems: trees flicker, ground textures are sometimes missing, and memory is tight on
   16 GB. It heats the phone a lot.
 - The first visit to an area stutters while its shaders and pipelines are built; later visits are smoother.
@@ -156,6 +154,10 @@ good videos get linked here.
 - **v0.1.1, 5 November 2026**: `.nup` files, emulator frontend launch, incremental shader updates (v0.1.0 packs are
   taken over without a rebuild), phone Prepare and about 1 GiB less RAM for `0400C3F00006E000`, RAM in the in-game stats, fewer stutters and less memory
   for large memory pools and large `.nup` files, saves and packs in the app's storage with pack export / import.
+- **v0.1.2, 5 November 2026**: hotfix for Prepare on shared storage, driver install, Add game and Turnip GPU clocks;
+  `040074A01BF12000` at Phone 720p by default on Turnip as a stopgap.
+- **v0.1.3, 5 November 2026**: `040074A01BF12000` at 30 fps on Turnip at Phone 1080p (was about 20): faster upscaler
+  shader on Adreno and a GPU clock floor for Turnip; Phone 1080p and dynamic resolution are the defaults again.
 
 ## License and credits
 

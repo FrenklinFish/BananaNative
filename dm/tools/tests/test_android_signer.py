@@ -12,7 +12,7 @@ REPO = Path(__file__).resolve().parents[3]
 SRC = REPO / 'android/app/src/main/java/dev/nxnative/android/Signer.java'
 TEST = REPO / 'android/app/src/jvmtest/java/dev/nxnative/android/SignerJvmTest.java'
 OFFICIAL = 'ad232b1c519e8f14d1f6dbeaa2569847002714306bc93f18924dd3a7e8abe23e'   # the v0.1.0 release APK's certificate (apksigner verify --print-certs)
-TAG = 'Banana Native 0.1 · 6a6448d · 2026-11-02'
+TAG = 'Banana Native 0.1 · 6a6448d'
 
 
 @unittest.skipUnless(shutil.which('javac') and shutil.which('java'), 'no JDK')
@@ -51,10 +51,10 @@ class Stamp(unittest.TestCase):
 
     def test_build_id(self):
         """Home's build identifier and the overlay's build tag come from one function: the tag is the app's name and the identifier"""
-        self.assertEqual(self.java('build', 0, '0.1.1-test', '4a150670aa', '-', 'android-launcher-2', '2026-11-05 11:37'),
-                         'launcher-2@4a15067 · 11-05 11:37|Banana Native test · launcher-2@4a15067 · 11-05 11:37')
-        self.assertEqual(self.java('build', 0, '0.1.1', 'unknown', '+dirty', 'int', '2026-11-05 11:37'), 'int@unknown+dirty · 11-05 11:37|Banana Native test · int@unknown+dirty · 11-05 11:37')
-        self.assertEqual(self.java('build', 1, '0.1-release', '6a6448d123', '-', 'main', '2026-11-02 19:51'), '0.1 · 6a6448d · 2026-11-02|' + TAG)
+        self.assertEqual(self.java('build', 0, '0.1.1-test', '4a150670aa', '-', 'android-launcher-2'),
+                         'launcher-2@4a15067|Banana Native test · launcher-2@4a15067')
+        self.assertEqual(self.java('build', 0, '0.1.1', 'unknown', '+dirty', 'int'), 'int@unknown+dirty|Banana Native test · int@unknown+dirty')
+        self.assertEqual(self.java('build', 1, '0.1-release', '6a6448d123', '-', 'main'), '0.1 · 6a6448d|' + TAG)
 
     def test_short_id(self):
         other = hashlib.sha256(b'x').hexdigest()

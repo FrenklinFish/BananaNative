@@ -712,3 +712,272 @@ def alpha_test(m, spec_id):
         out.append(x)
     m.ins = out; m.index()
     return n > 0
+
+
+OP_FUNCTION_PARAMETER, OP_FUNCTION_CALL = 55, 57
+OP_IADD, OP_ISUB, OP_IMUL, OP_SHR_LOGICAL, OP_SHR_ARITH, OP_SHL_LOGICAL, OP_BITWISE_OR, OP_BITWISE_XOR, OP_BITWISE_AND = 128, 130, 132, 194, 195, 196, 197, 198, 199
+OP_CONTROL_BARRIER, OP_GROUP_NON_UNIFORM_SHUFFLE = 224, 345
+SC_WORKGROUP, SCOPE_SUBGROUP, SEM_ACQ_REL_WORKGROUP = 4, 3, 0x8 | 0x100
+BUILTIN_SUBGROUP_SIZE, BUILTIN_SUBGROUP_ID, BUILTIN_SUBGROUP_LOCAL_INVOCATION_ID = 36, 40, 41
+CAP_GROUP_NON_UNIFORM, EXEC_MODE_LOCAL_SIZE = 61, 17
+VN_OPS = {OP_IADD, OP_ISUB, OP_IMUL, OP_SHR_LOGICAL, OP_SHR_ARITH, OP_SHL_LOGICAL, OP_BITWISE_OR, OP_BITWISE_XOR, OP_BITWISE_AND}
+
+
+def input_builtin(m, builtin, ty):
+    """The Input variable of a builtin (a plain variable), added with its decoration and in the entry point's interface when the module has none → its id"""
+    v, member = m.builtin_var(SC_INPUT, builtin)
+    if v is not None and member is None: return v
+    p = m.add_type(OP_TYPE_POINTER, SC_INPUT, ty); v = m.new_id()
+    m._insert_decl([4 << 16 | OP_VARIABLE, p, v, SC_INPUT])
+    m.ins.insert(next(k for k, x in enumerate(m.ins) if x[0] & 0xffff == OP_DECORATE), [4 << 16 | OP_DECORATE, v, DEC_BUILTIN, builtin])
+    k = next(k for k, x in enumerate(m.ins) if x[0] & 0xffff == OP_ENTRY_POINT)
+    m.ins[k] = m.ins[k] + [v]; m.ins[k][0] = len(m.ins[k]) << 16 | OP_ENTRY_POINT
+    m.index()
+    return v
+
+
+def workgroup_bytes(m):
+    """Bytes of the module's Workgroup variables (arrays of 32-bit scalars or vectors, as the translator declares them); None for another type"""
+    n = 0
+    for vid, (ptr, sc) in m.vars.items():
+        if sc != SC_WORKGROUP: continue
+        t, count = m.strip_arrays(m.pointee(ptr)[1])
+        comps = m.types[t][3] if m.op(t) == OP_TYPE_VECTOR else 1
+        s = m.scalar_of(t)
+        if m.op(s) not in (OP_TYPE_INT, OP_TYPE_FLOAT) or m.types[s][2] != 32 or not count: return None
+        n += 4 * comps * count
+    return n
+
+
+class BlockValues:
+    """Value numbers within a block of the translator's code, which keeps its registers in Function variables: a load of a variable numbers as the value last stored to it in
+    the block, or as (variable, version) with a version that every store and every call taking it as an argument moves; bit casts and copies keep their operand's number;
+    integer arithmetic numbers by its operation and operands' numbers, a load of an Input variable (or of a constant index into one) by the variable. Two values with one
+    number hold the same bits in every lane. see(x) before x is passed on; block()
+    at each label; function() at each OpFunction"""
+    def __init__(self, m): self.m = m; self.inptr = {}; self.function()
+    def function(self): self.fvars, self.fbase, self.ver, self.stored, self.vn = set(), {}, {}, {}, {}
+    def block(self): self.stored = {}
+    def __call__(self, i): return self.vn.get(i, i)
+    def key_of_var(self, p):   # the number of what a load of Function variable p would give here
+        b = self.fbase.get(p, p)
+        return self(self.stored[p]) if p in self.stored else ('ld', b, self.ver.get(b, 0))
+    def bump(self, p):
+        b = self.fbase.get(p, p); self.ver[b] = self.ver.get(b, 0) + 1; self.stored.pop(b, None)
+    def see(self, x):
+        m, op = self.m, x[0] & 0xffff
+        if op == OP_FUNCTION: self.function()
+        elif op == OP_LABEL: self.block()
+        elif (op == OP_VARIABLE and len(x) > 3 and x[3] == SC_FUNCTION) or (op == OP_FUNCTION_PARAMETER and m.op(x[1]) == OP_TYPE_POINTER and m.types[x[1]][2] == SC_FUNCTION):
+            self.fvars.add(x[2])   # a local variable, or the translator's pointer argument (written only through a store here or by a call)
+        elif op in (OP_ACCESS_CHAIN, OP_IN_BOUNDS_ACCESS_CHAIN) and (x[3] in self.fvars or x[3] in self.fbase): self.fbase[x[2]] = self.fbase.get(x[3], x[3])
+        elif op == OP_STORE and (x[1] in self.fvars or x[1] in self.fbase):
+            self.bump(x[1])
+            if x[1] in self.fvars: self.stored[x[1]] = x[2]
+        elif op == OP_LOAD and x[3] in self.fvars: self.vn[x[2]] = self.key_of_var(x[3])
+        elif op == OP_LOAD and (x[3] in self.inptr or m.vars.get(x[3], (0, 0))[1] == SC_INPUT): self.vn[x[2]] = ('in', self.inptr.get(x[3], x[3]))
+        elif op in (OP_ACCESS_CHAIN, OP_IN_BOUNDS_ACCESS_CHAIN) and m.vars.get(x[3], (0, 0))[1] == SC_INPUT and all(i in m.consts for i in x[4:]): self.inptr[x[2]] = (x[3], *x[4:])
+        elif op in (OP_BITCAST, OP_COPY_OBJECT): self.vn[x[2]] = self(x[3])
+        elif op in VN_OPS: self.vn[x[2]] = (op, self(x[3]), self(x[4]))
+        elif op == OP_FUNCTION_CALL:
+            for p in x[4:]:
+                if p in self.fvars or p in self.fbase: self.bump(p)
+
+def shuffle_lds(m, shared_max):
+    """The 32-bit subgroup shuffles of a compute module through workgroup memory (the library's DMSH_VK_MOD_SHUFFLE_LDS module, for drivers without an arbitrary-index
+    shuffle instruction): each lane stores the value at its slot of its subgroup's row (SubgroupId * SubgroupSize + lane), a subgroup barrier, the slot of the lane asked
+    for is read. Turnip has no such instruction: ir3 makes each OpGroupNonUniformShuffle a loop of rotates, one pass per distinct (index - lane) in the subgroup, up to 24
+    for the translator's LDSM / MOVM gathers (agl's upscaler network on Donkey Kong Bananza: 389 loops, 10.7 ms a dispatch on the Adreno 840 against 2.0 ms this way);
+    Qualcomm's driver shuffles natively and is faster with its base module (1.7 ms against 1.9). Two rows alternate, so a store comes after the other row's reads only
+    with the barrier of the exchange between them; an exchange of the value a row still holds in the same block reads it without a store or barrier (LDSM's four reads of
+    one address, MOVM's two); the last exchange before the block ends or another function is called gets a trailing barrier. The module is rewritten in place.
+    → bytes of workgroup memory added (0: not a compute module with such shuffles, or over shared_max with them; the module is then unchanged)"""
+    if m.model != 'cs': return 0
+    shuf = [x for x in m.ins if x[0] & 0xffff == OP_GROUP_NON_UNIFORM_SHUFFLE and m.op(x[1]) in (OP_TYPE_INT, OP_TYPE_FLOAT) and m.types[x[1]][2] == 32
+            and m.consts.get(x[3], (0, [0]))[1] == [SCOPE_SUBGROUP]]
+    ls = next((x[1:4] for x in m.modes if x[0] == EXEC_MODE_LOCAL_SIZE), None)   # (m.modes: the entry point's, without its id)
+    used = workgroup_bytes(m)
+    if not shuf or ls is None or used is None: return 0
+    words = -(-ls[0] * ls[1] * ls[2] // 128) * 128   # a row: SubgroupId * SubgroupSize + lane, subgroups of up to 128 lanes
+    if used + 8 * words > shared_max: return 0
+    u32 = m.add_type(OP_TYPE_INT, 32, 0)
+    arr = m.add_type(OP_TYPE_ARRAY, u32, m.add_const(u32, 2 * words))
+    p_arr = m.add_type(OP_TYPE_POINTER, SC_WORKGROUP, arr); p_u = m.add_type(OP_TYPE_POINTER, SC_WORKGROUP, u32)
+    xs = m.new_id(); m._insert_decl([4 << 16 | OP_VARIABLE, p_arr, xs, SC_WORKGROUP])
+    row_off = [None, m.add_const(u32, words)]; C = {v: m.add_const(u32, v) for v in (SCOPE_SUBGROUP, SEM_ACQ_REL_WORKGROUP)}
+    sgid, sgsz, sgl = (input_builtin(m, b, u32) for b in (BUILTIN_SUBGROUP_ID, BUILTIN_SUBGROUP_SIZE, BUILTIN_SUBGROUP_LOCAL_INVOCATION_ID))
+    if CAP_GROUP_NON_UNIFORM not in m.caps:
+        at = max(k for k, x in enumerate(m.ins) if x[0] & 0xffff == OP_CAPABILITY); m.ins.insert(at + 1, [2 << 16 | OP_CAPABILITY, CAP_GROUP_NON_UNIFORM])
+    nm = lit_string('dm_shuffle_rows'); m.ins.insert(next(k for k, y in enumerate(m.ins) if y[0] & 0xffff in (OP_NAME, OP_DECORATE)), [(2 + len(nm)) << 16 | OP_NAME, xs, *nm])
+    barrier = [4 << 16 | OP_CONTROL_BARRIER, C[SCOPE_SUBGROUP], C[SCOPE_SUBGROUP], C[SEM_ACQ_REL_WORKGROUP]]
+    m.index()
+    want = {id(x) for x in shuf}
+    calls, cur = {}, None   # functions that exchange, themselves or through a call: a call of one ends the caller's run of exchanges
+    for x in m.ins:
+        op = x[0] & 0xffff
+        if op == OP_FUNCTION: cur = x[2]; calls[cur] = [False, set()]
+        elif op == OP_GROUP_NON_UNIFORM_SHUFFLE and id(x) in want: calls[cur][0] = True
+        elif op == OP_FUNCTION_CALL: calls[cur][1].add(x[3])
+    exch = {f for f, (h, _) in calls.items() if h}
+    while True:
+        more = {f for f, (_, c) in calls.items() if f not in exch and c & exch}
+        if not more: break
+        exch |= more
+    out, trail = [], []   # trail: positions in out after an exchange's read that take a barrier
+    V = BlockValues(m)
+    rows, dirty, last = [None, None], [False, False], None   # the value each row holds in this block, rows read since the last barrier, the last exchange's read
+    def close():   # the block ends or a function that exchanges runs: the last exchange gets a trailing barrier, and the rows' contents count as unknown after it
+        nonlocal rows, dirty, last
+        if last is not None: trail.append(last)
+        rows, dirty, last = [None, None], [False, False], None
+    def em(op, ty, *ops):
+        r = m.new_id(); out.append([(3 + len(ops)) << 16 | op, ty, r, *ops]); return r
+    for x in m.ins:
+        op = x[0] & 0xffff
+        if op in (OP_LABEL, OP_FUNCTION_END) or (op == OP_FUNCTION_CALL and x[3] in exch): close()
+        V.see(x)
+        if op != OP_GROUP_NON_UNIFORM_SHUFFLE or id(x) not in want: out.append(x); continue
+        key = V(x[4])   # (a value number: the same in two shuffles of this block only when every lane's value is the same)
+        row = next((r for r in (0, 1) if rows[r] == key), None)
+        sg = em(OP_IMUL, u32, em(OP_LOAD, u32, sgid), em(OP_LOAD, u32, sgsz))
+        if row is None:   # store into a row nothing has read since the last barrier
+            clean = [r for r in (0, 1) if not dirty[r]]
+            if not clean: trail.append(last); clean = [0, 1]
+            row = next((r for r in clean if rows[r] is None), clean[0])
+            base = sg if row == 0 else em(OP_IADD, u32, sg, row_off[1])
+            v = x[4] if x[1] == u32 else em(OP_BITCAST, u32, x[4])
+            out.append([3 << 16 | OP_STORE, em(OP_ACCESS_CHAIN, p_u, xs, em(OP_IADD, u32, base, em(OP_LOAD, u32, sgl))), v])
+            out.append(list(barrier))
+            rows[row] = key; dirty = [False, False]   # the barrier orders every earlier read
+        else: base = sg if row == 0 else em(OP_IADD, u32, sg, row_off[1])
+        dirty[row] = True
+        r = em(OP_LOAD, u32, em(OP_ACCESS_CHAIN, p_u, xs, em(OP_IADD, u32, base, x[5])))
+        out.append([4 << 16 | (OP_COPY_OBJECT if x[1] == u32 else OP_BITCAST), x[1], x[2], r])
+        last = len(out)
+    for k in sorted(set(trail), reverse=True): out.insert(k, list(barrier))
+    m.ins = out; m.index()
+    return 8 * words
+
+
+HMMA_NAME = 'dmsh_hmma16816_f16'
+OP_MEMORY_BARRIER, OP_COMPOSITE_CONSTRUCT, OP_TYPE_FUNCTION_ = 225, 80, 33
+GLSL_FMA, GLSL_PACK_HALF_2X16, GLSL_UNPACK_HALF_2X16 = 50, 58, 62
+NO_RESULT_OPS = {OP_STORE, OP_CONTROL_BARRIER, OP_MEMORY_BARRIER, OP_RETURN, OP_RETURN_VALUE, 246, 247, 249, 250, 251, 252, OP_FUNCTION_END}
+
+
+def hmma_helper(m):
+    """The translator's HMMA.16816 helper (HelperFunctionManager.GenerateHmma16816F16) when it has the translator's shape: 11 pointer arguments, one block, 8 + 64 accesses
+    of one Workgroup array of u32 used by nothing else, two subgroup barriers → {fid, i32, u32, scratch, barrier}, else None"""
+    fid = functions_named(m).get(HMMA_NAME)
+    if fid is None: return None
+    a, e = m.function_range(fid)
+    i32 = m.ins[a][1]
+    if m.int_type(i32) != (32, 1): return None
+    params = [x for x in m.ins[a + 1:e] if x[0] & 0xffff == OP_FUNCTION_PARAMETER]
+    if len(params) != 11 or any(m.types.get(p[1], [0, 0, 0, 0])[2:4] != [SC_FUNCTION, i32] for p in params): return None
+    body = m.ins[a + 1 + len(params):e]
+    if sum(1 for x in body if x[0] & 0xffff == OP_LABEL) != 1: return None
+    chains = [x for x in body if x[0] & 0xffff in (OP_ACCESS_CHAIN, OP_IN_BOUNDS_ACCESS_CHAIN)]
+    if len(chains) != 8 + 64 or len({x[3] for x in chains}) != 1: return None
+    scratch = chains[0][3]; pwu = chains[0][1]
+    if m.vars.get(scratch, (0, 0))[1] != SC_WORKGROUP or m.types.get(pwu, [0, 0, 0])[2] != SC_WORKGROUP: return None
+    u32 = m.pointee(pwu)[1]; arr = m.pointee(m.vars[scratch][0])[1]
+    if m.int_type(u32) != (32, 0) or m.op(arr) != OP_TYPE_ARRAY or m.types[arr][2] != u32 or m.consts[m.types[arr][3]][1][0] % 4: return None
+    if any(scratch in x[1:] for k, x in enumerate(m.ins) if not (a <= k <= e) and not (x[0] & 0xffff in (OP_NAME, OP_DECORATE, OP_VARIABLE) or 19 <= x[0] & 0xffff <= 52)):
+        return None   # the scratch array is the helper's alone
+    groups, cur = [], None   # runs of barrier instructions: two equal ones (the translator's subgroupBarrier, or a memory barrier and an execution barrier)
+    for x in body:
+        if x[0] & 0xffff in (OP_CONTROL_BARRIER, OP_MEMORY_BARRIER):
+            if cur is None: cur = []; groups.append(cur)
+            cur.append(list(x))
+        else: cur = None
+    if len(groups) != 2 or groups[0] != groups[1]: return None
+    return {'fid': fid, 'i32': i32, 'u32': u32, 'scratch': scratch, 'barrier': groups[0]}
+
+
+def hmma_lds(m):
+    """Every call of the translator's HMMA.16816 helper (f16 sources and accumulator) replaced at its call site, with the gathers of A and B shared by the calls of a block
+    that take the same fragments. The translator's body stores the lane's 8 fragment words into its warp's 256-word block of the scratch array, then reads 64 words one by one
+    (both rows of A, both columns of B, for each output) and converts each half: 240 calls in agl's upscaler network on Donkey Kong Bananza, 35 ms a dispatch on the Adreno
+    840 with Qualcomm's driver, 29 ms on Turnip (with its shuffles). Here the block is uvec4 rows: A row-major (16 rows of 8 words) and B transposed (8 rows), each row's k
+    words in the order (k-word t, t + 4) for t = 0..3 so a lane's two words of a row are adjacent; C stays in the lane, which is the only one to need it. A gather is the
+    stores, a subgroup barrier, 8 uvec4 reads (the lane's two rows of A and two columns of B, converted to f32 once), a barrier; a call whose A (or B) fragments are those of
+    an earlier call in the block (the same value numbers, BlockValues) reuses its rows: agl's network multiplies two A tiles by two B tiles, so 8 calls gather 4 A and 6 B.
+    The arithmetic is the translator's (f32 FMAs from C over k in order, one rounding to f16), so D is bit for bit the same. 8.0 ms instead of 35 on Qualcomm's driver,
+    10.7 ms instead of 29 on Turnip (with shuffle_lds; 13 ms with the translator's body). The helper function is removed.
+    → number of calls lowered (0: no helper of the translator's shape; the module is then unchanged)"""
+    h = hmma_helper(m)
+    if h is None: return 0
+    fid, i32, u32, scratch = h['fid'], h['i32'], h['u32'], h['scratch']
+    glsl = ensure_glsl(m)
+    f32 = m.add_type(OP_TYPE_FLOAT, 32); v2f = m.add_type(OP_TYPE_VECTOR, f32, 2); uv4 = m.add_type(OP_TYPE_VECTOR, u32, 4)
+    n = m.consts[m.types[m.pointee(m.vars[scratch][0])[1]][3]][1][0]
+    arr4 = m.add_type(OP_TYPE_ARRAY, uv4, m.add_const(u32, n // 4))
+    p_arr4 = m.add_type(OP_TYPE_POINTER, SC_WORKGROUP, arr4); p_uv4 = m.add_type(OP_TYPE_POINTER, SC_WORKGROUP, uv4); p_u = m.add_type(OP_TYPE_POINTER, SC_WORKGROUP, u32)
+    k = next(k for k, x in enumerate(m.ins) if x[0] & 0xffff == OP_VARIABLE and x[2] == scratch)
+    x = m.ins.pop(k); x[1] = p_arr4; m._insert_decl(x)   # the scratch array as uvec4s, declared after its new type
+    CI = {v: m.add_const(i32, v) for v in (1, 2, 3, 8, 32)}
+    CU = {v: m.add_const(u32, v) for v in (0, 1)}
+    m.index()
+    calls = 0
+    for f in [x[2] for x in m.ins if x[0] & 0xffff == OP_FUNCTION and x[2] != fid]:
+        a, e = m.function_range(f)
+        out = []; V = BlockValues(m); cache = {}
+        def em(op, ty, *ops):
+            r = m.new_id(); out.append([(3 + len(ops)) << 16 | op, ty, r, *ops]); return r
+        def I(op, p, q): return em(op, i32, p, q)
+        for x in m.ins[a:e + 1]:
+            op = x[0] & 0xffff
+            if op == OP_LABEL: cache = {}
+            if not (op == OP_FUNCTION_CALL and x[3] == fid): V.see(x); out.append(x); continue
+            # [OpFunctionCall, i32, result, fid, lane, base, a0..a3, b0, b1, c0, c1, d1 (out)]
+            args = x[4:15]
+            key = [V.key_of_var(p) for p in args[:10]]
+            val = [em(OP_LOAD, i32, p) for p in args[:10]]
+            lane, bse = val[0], val[1]
+            g = I(OP_SHR_LOGICAL, lane, CI[2]); t = I(OP_BITWISE_AND, lane, CI[3])
+            kA = ('A', *key[:6]); kB = ('B', *key[:2], *key[6:8])
+            need = [q for q in (kA, kB) if q not in cache]
+            if need:
+                b4 = I(OP_SHR_LOGICAL, bse, CI[2])   # the warp's block in uvec4s: A rows at 2 r, B rows at 32 + 2 n
+                vi = I(OP_SHR_LOGICAL, t, CI[1]); c0 = em(OP_BITCAST, u32, I(OP_SHL_LOGICAL, I(OP_BITWISE_AND, t, CI[1]), CI[1])); c1 = em(OP_IADD, u32, c0, CU[1])
+                rowA = lambda r: I(OP_IADD, b4, I(OP_SHL_LOGICAL, r, CI[1]))
+                rowB = lambda c: I(OP_IADD, b4, I(OP_IADD, CI[32], I(OP_SHL_LOGICAL, c, CI[1])))
+                def st(row, w0, w1):   # the lane's k-words t and t + 4 of a row: components 2 (t & 1) and + 1 of its uvec4 t / 2
+                    v4 = I(OP_IADD, row, vi)
+                    for c, w in ((c0, w0), (c1, w1)): out.append([3 << 16 | OP_STORE, em(OP_ACCESS_CHAIN, p_u, scratch, v4, c), em(OP_BITCAST, u32, w)])
+                g8 = I(OP_IADD, g, CI[8])
+                if kA in need: st(rowA(g), val[2], val[4]); st(rowA(g8), val[3], val[5])
+                if kB in need: st(rowB(g), val[6], val[7])
+                out.extend(list(b) for b in h['barrier'])
+                def ld_row(r0):   # a row's 8 words, read as two uvec4, converted to vec2 (lo, hi halves) in k order
+                    w = []
+                    for p in range(2):
+                        v4 = em(OP_LOAD, uv4, em(OP_ACCESS_CHAIN, p_uv4, scratch, I(OP_IADD, r0, CI[1]) if p else r0))
+                        w += [em(OP_COMPOSITE_EXTRACT, u32, v4, c) for c in range(4)]
+                    return [em(OP_EXT_INST, v2f, glsl, GLSL_UNPACK_HALF_2X16, w[2 * (kw % 4) + kw // 4]) for kw in range(8)]
+                if kA in need: cache[kA] = [ld_row(rowA(g)), ld_row(rowA(g8))]
+                if kB in need:
+                    t2 = I(OP_SHL_LOGICAL, t, CI[1]); cache[kB] = [ld_row(rowB(t2)), ld_row(rowB(I(OP_IADD, t2, CI[1])))]
+                out.extend(list(b) for b in h['barrier'])
+            A, B = cache[kA], cache[kB]
+            d = []
+            for q in range(2):   # D rows g, g + 8: the translator's order, C then k = 0..15 per output
+                cv = em(OP_EXT_INST, v2f, glsl, GLSL_UNPACK_HALF_2X16, em(OP_BITCAST, u32, val[8 + q]))
+                acc = [em(OP_COMPOSITE_EXTRACT, f32, cv, 0), em(OP_COMPOSITE_EXTRACT, f32, cv, 1)]
+                for j in range(2):
+                    for kw in range(8):
+                        for hh in range(2):
+                            acc[j] = em(OP_EXT_INST, f32, glsl, GLSL_FMA, em(OP_COMPOSITE_EXTRACT, f32, A[q][kw], hh), em(OP_COMPOSITE_EXTRACT, f32, B[j][kw], hh), acc[j])
+                d.append(em(OP_BITCAST, i32, em(OP_EXT_INST, u32, glsl, GLSL_PACK_HALF_2X16, em(OP_COMPOSITE_CONSTRUCT, v2f, *acc))))
+            st_out = [3 << 16 | OP_STORE, args[10], d[1]]
+            out.append(st_out); V.see(st_out)
+            out.append([4 << 16 | OP_COPY_OBJECT, i32, x[2], d[0]])
+            calls += 1
+        m.ins[a:e + 1] = out
+    a, e = m.function_range(fid)   # the helper, no longer called
+    gone = {y[2] for y in m.ins[a:e + 1] if len(y) > 2 and (y[0] & 0xffff) not in NO_RESULT_OPS} | {y[1] for y in m.ins[a:e + 1] if y[0] & 0xffff == OP_LABEL}
+    del m.ins[a:e + 1]
+    m.ins = [y for y in m.ins if not (y[0] & 0xffff in (OP_NAME, OP_DECORATE) and y[1] in gone)]
+    m.index()
+    return calls

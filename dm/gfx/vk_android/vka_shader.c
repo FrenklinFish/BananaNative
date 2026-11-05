@@ -61,6 +61,26 @@ static void sg_plan(unsigned sg) {
 }
 uint32_t vka_shader_sg_pin(int stage) { return stage >= 0 && stage < 8 ? g_sg_pin[stage] : 0; }
 
+// Compute shaders' subgroup shuffles through workgroup memory (the library's DMSH_VK_MOD_SHUFFLE_LDS modules, vk_android_spv.py shuffle_lds). Turnip has no
+// arbitrary-index shuffle instruction: ir3 makes each OpGroupNonUniformShuffle a loop of rotates, one pass per distinct (index - lane) in the subgroup, and the translator's
+// LDSM / MOVM gathers take up to 24 (agl's upscaler network in DKB, 14a8aaf3e0a9edbd: 10.7 ms a dispatch on the Adreno 840, 2.0 ms with the module through workgroup
+// memory). Qualcomm's driver shuffles natively and runs the base module faster (1.7 ms against 1.9). DM_VK_SHUFFLE_LDS (restart): 1 = those modules, 0 = the base ones;
+// default 1 on VK_DRIVER_ID_MESA_TURNIP, 0 on other drivers. Needs DMSH_VK_SHARED_MAX bytes of shared memory (the library keeps the modules within it)
+static int g_shuffle_lds = -1;
+static void shuffle_plan(void) {
+    const char *ev = getenv("DM_VK_SHUFFLE_LDS");
+    int want = ev && *ev ? atoi(ev) != 0 : V.driver_id == VK_DRIVER_ID_MESA_TURNIP;
+    int fits = V.props.limits.maxComputeSharedMemorySize >= DMSH_VK_SHARED_MAX;
+    g_shuffle_lds = want && fits;
+    VLOG("compute subgroup shuffles: %s", g_shuffle_lds ? "through workgroup memory where the library has the module (DM_VK_SHUFFLE_LDS=0: the instruction)"
+         : want ? "the instruction (the device's shared memory is under DMSH_VK_SHARED_MAX)" : "the instruction (DM_VK_SHUFFLE_LDS=1: through workgroup memory)");
+}
+VkShaderModule vka_shader_cs_module(vka_shader *s) {
+    if (g_shuffle_lds < 0) shuffle_plan();
+    VkShaderModule m = g_shuffle_lds && vka_shlib_module(s->lib, s->e, DMSH_VK_MOD_SHUFFLE_LDS) ? vka_shader_module(s, DMSH_VK_MOD_SHUFFLE_LDS) : VK_NULL_HANDLE;
+    return m ? m : s->mods[DMSH_VK_MOD_BASE];   // (that module not made: logged by vka_shader_module; the base one)
+}
+
 const char *vka_shader_lib_path(void) { return g_lib_path; }
 
 static int lib_load(void) {
@@ -107,7 +127,7 @@ static int lib_load(void) {
     // The translator's answers in the header against this device: modules built for 64-lane subgroups split ballots and shuffles into 32-lane halves, so they are right on
     // 32 or 64 lanes; storage buffers are bound rounded down to ssbo_align, which the device's alignment must divide (android/SHADERS.md "Translator answers")
     unsigned sg = g_lib.h->subgroup_size ? g_lib.h->subgroup_size : 32, sa = g_lib.h->ssbo_align;
-    sg_plan(sg);
+    sg_plan(sg); shuffle_plan();
     if (sa && (sa % V.sb_align)) { VRED("shader library %s refused: built for storage buffers at %u-byte boundaries, the device needs %llu; nothing is drawn", path, sa, (unsigned long long)V.sb_align); vka_shlib_close(&g_lib); return 0; }
     char inputs[17]; vka_shlib_str(g_lib.h->inputs, inputs);
     VLOG("shader library %s: %u shaders, %u modules, %.1f MB (chain %s, Vulkan chain %s, inputs %s; %u-lane subgroups, storage buffers at %u)", path, g_lib.h->entry_count, g_lib.h->mod_count,
@@ -204,7 +224,7 @@ static VkShaderModule spv_module(const vka_shlib *L, const dmsh_vk_entry *e, con
     return mod;
 }
 VkShaderModule vka_shader_module(vka_shader *s, int variant) {
-    if (variant < 0 || variant > 3) return VK_NULL_HANDLE;
+    if (variant < 0 || variant > DMSH_VK_MOD_SHUFFLE_LDS) return VK_NULL_HANDLE;
     if (s->mods[variant]) return s->mods[variant];
     const dmsh_vk_module *m = vka_shlib_module(s->lib, s->e, variant);
     if (!m) return VK_NULL_HANDLE;
@@ -352,7 +372,7 @@ int vka_shlib_check_all(const vka_shlib *L) {
         vka_shader *s = vka_shader_make(L, e->key);
         if (!s) { refused++; continue; }
         made++;
-        for (int v = 1; v < 4; v++) if (vka_shlib_module(L, e, v) && !vka_shader_module(s, v)) nolayout++;   // the variants through the compiler too (counted as failures)
+        for (int v = 1; v <= DMSH_VK_MOD_SHUFFLE_LDS; v++) if (vka_shlib_module(L, e, v) && !vka_shader_module(s, v)) nolayout++;   // the variants through the compiler too (counted as failures)
         vka_shader *sh[VKA_NSTAGE] = {0}; int st = vka_nvn_stage(e->stage); if (st < 0) { nolayout++; continue; } sh[st] = s;
         vka_layout lay;
         if (!vka_layout_of(sh, st == 5, &lay)) { nolayout++; continue; }
