@@ -44,7 +44,7 @@ cmake -S $W/src/capstone-5.0.7/src -B $W/build/capstone -G Ninja -DCMAKE_TOOLCHA
 ninja -C $W/build/capstone >> $W/build/capstone.log
 cp -R $W/src/capstone-5.0.7/capstone $SP/; mkdir -p $SP/capstone/lib
 cp -L $W/build/capstone/libcapstone.so $SP/capstone/lib/libcapstone.so
-$NDK/toolchains/llvm/prebuilt/darwin-x86_64/bin/llvm-strip --strip-debug $SP/capstone/lib/libcapstone.so   # its debug info names the build folder (this Mac's paths)
+$BIN/llvm-strip --strip-debug $SP/capstone/lib/libcapstone.so   # its debug info names the build folder (this machine's paths); the NDK's own strip, as $CC, on any host
 # python-lz4 4.4.5: lz4 and lz4.block (the rewriter's NSO reader needs nothing else), its C extensions against the Android Python
 L=$W/src/lz4-4.4.5; mkdir -p $SP/lz4/block
 cp $L/lz4/__init__.py $L/lz4/version.py $SP/lz4/
