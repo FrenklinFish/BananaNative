@@ -49,6 +49,13 @@ class Stamp(unittest.TestCase):
         self.assertEqual(self.java('tag', TAG, 0, OFFICIAL), TAG)                                       # the test app makes no claim
         self.assertEqual(self.java('tag', TAG, 0, other), TAG)
 
+    def test_build_id(self):
+        """Home's build identifier and the overlay's build tag come from one function: the tag is the app's name and the identifier"""
+        self.assertEqual(self.java('build', 0, '0.1.1-test', '4a150670aa', '-', 'android-launcher-2', '2026-11-05 11:37'),
+                         'launcher-2@4a15067 · 11-05 11:37|Banana Native test · launcher-2@4a15067 · 11-05 11:37')
+        self.assertEqual(self.java('build', 0, '0.1.1', 'unknown', '+dirty', 'int', '2026-11-05 11:37'), 'int@unknown+dirty · 11-05 11:37|Banana Native test · int@unknown+dirty · 11-05 11:37')
+        self.assertEqual(self.java('build', 1, '0.1-release', '6a6448d123', '-', 'main', '2026-11-02 19:51'), '0.1 · 6a6448d · 2026-11-02|' + TAG)
+
     def test_short_id(self):
         other = hashlib.sha256(b'x').hexdigest()
         self.assertEqual(self.java('id', OFFICIAL), OFFICIAL[:16])

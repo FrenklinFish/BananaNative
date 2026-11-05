@@ -75,6 +75,21 @@ final class Frontend {
         return null;
     }
 
+    /**
+     * A SAF document ID's path within its volume (the part after "primary:" or "<volume ID>:") → the file's path under the volume's root. Most providers give
+     * it relative to the volume ("Switch2/x.nup"); some (the HyperOS picker, issue #19) give the file's whole path ("/storage/emulated/0/Switch2/x.nup" or
+     * "storage/emulated/0/…"), which joined to the root named the storage twice: a path that is already under the root, or under another name of the shared
+     * storage, is the file's own path
+     */
+    static String volumePath(String root, String rel) {
+        if (rel == null || rel.isEmpty()) return root;
+        String abs = "/" + rel.replaceFirst("^/+", "");
+        if (abs.equals(root) || abs.startsWith(root + "/")) return abs;
+        String n = normal(abs);
+        if (rel.startsWith("/") && normal(root).equals(PRIMARY) && n.startsWith(PRIMARY + "/")) return abs;   // under another name of the shared storage (/sdcard/…)
+        return root + abs;
+    }
+
     /** One name per file: the shared storage's aliases become /storage/emulated/0, "//", "/./" and a trailing '/' go */
     static String normal(String p) {
         if (p == null || p.isEmpty()) return p;

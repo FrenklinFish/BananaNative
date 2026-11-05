@@ -199,16 +199,17 @@ def map_keys(path):
     with open(path) as f: return {c[3] for c in (l.rstrip('\n').split('\t') for l in f) if len(c) > 4 and c[0].endswith('.bin')}
 
 
-def split_shaders(a, g, vdir, pkg):
+def split_shaders(a, g, vdir, pkg, parts=None):   # parts: the version's (romfs, exefs) when they are not vdir's own (pack_dump.version_part)
     """The Switch shader package from the dump, as the phone's split step makes it (the version's romfs and main, android/app PackService "split"): shader_split.py into
     <pkg> (written beside it, then renamed, so a stopped split leaves no half package). Its tables go beside the package. The library is the profile's (its shader_map.tsv
     decides what is built, and vk_android_build.py finds each of its shaders in the package by key), so the split must hold every shader of the profile's map: one that
     lacks any (a dump of another version, or incomplete) stops here"""
+    rd, ed = parts or (vdir / 'romfs', vdir / 'exefs')
     py = shader_python(a.shader_python, split=True)
     tmp = pkg.with_name(pkg.name + '.tmp'); shutil.rmtree(tmp, ignore_errors=True); tmp.mkdir(parents=True)
-    print(f'shaders: splitting the shaders out of {vdir / "romfs"} into {pkg} with {py} (a few minutes)', flush=True)
+    print(f'shaders: splitting the shaders out of {rd} into {pkg} with {py} (a few minutes)', flush=True)
     env = dict(os.environ, DM_GAME=g.id)
-    r = subprocess.run([py, str(SPLIT), str(vdir / 'romfs'), str(vdir / 'exefs' / 'main'), str(tmp / 'pkg'),
+    r = subprocess.run([py, str(SPLIT), str(rd), str(ed / 'main'), str(tmp / 'pkg'),
                         *[str(tmp / f) for f in ('shader_map.tsv', 'shader_facts.tsv', 'shader_pairs.tsv', 'pso_pairs.tsv')]], env=env)
     if r.returncode: raise Error(f'shader_split.py exit code {r.returncode}')
     if (g.dir / 'shader_map.tsv').is_file():
@@ -224,7 +225,7 @@ def split_shaders(a, g, vdir, pkg):
     tmp.rmdir()
 
 
-def pack_shaders(a, g, work, out, vdir):
+def pack_shaders(a, g, work, out, vdir, parts=None):
     """shaders/v-<V>/ in the pack: an up-to-date library from the cache (built there first when it is missing or stale, from the shader package, split from the dump
     first when there is none and --shader-pkg names none). → the library path in the pack, or None"""
     v = vk_chain(); name = VK_PREFIX + v
@@ -233,7 +234,7 @@ def pack_shaders(a, g, work, out, vdir):
     if not library_current(lib, g):
         if a.in_process: raise Error(f'no current shader library {lib}: --in-process does not build one yet (vk_android_build.py starts the translator and spirv-val as programs); --no-shaders packs without')
         pkg = (a.shader_pkg or work / 'android-shaders' / 'pkg').resolve()
-        if not pkg.is_dir(): split_shaders(a, g, vdir, pkg)   # also into a --shader-pkg folder that is not there yet
+        if not pkg.is_dir(): split_shaders(a, g, vdir, pkg, parts)   # also into a --shader-pkg folder that is not there yet
         py = shader_python(a.shader_python)
         print(f'shaders: building the Vulkan library {lib} from {pkg} with {py} (J={a.J}; about 10 minutes on DKB)', flush=True)
         (work / 'android-shaders' / 'work').mkdir(parents=True, exist_ok=True)
@@ -287,8 +288,8 @@ def main():
         ver = a.version if a.version is not None else max(vers, default=0)
         if ver and ver not in vers: raise Error(f'no updates/{ver} (have: {", ".join(map(str, sorted(vers))) or "none"})')
         vdir = pack_dump.version_dir(folder, vers, ver)
-        exe, romfs = vdir / 'exefs', vdir / 'romfs'
-        if not (exe / 'main.npdm').is_file() or not romfs.is_dir(): raise Error(f'{vdir}: no exefs/main.npdm and romfs')
+        exe, romfs = pack_dump.version_part(folder, vers, ver, 'exefs'), pack_dump.version_part(folder, vers, ver, 'romfs')   # its own, else the base's
+        if not (exe / 'main.npdm').is_file() or not romfs.is_dir(): raise Error(f'{vdir}: no exefs/main.npdm and romfs (neither its own nor the base\'s)')
         if (pid := pack_dump.program_id(exe / 'main.npdm')) != app: raise Error(f'{vdir}: program ID {pid:016X}, the base is {app:016X}')
         mods = g.words('modules')
         srcs = {m: exe / m for m in mods}
@@ -311,7 +312,7 @@ def main():
             finally: shutil.rmtree(out / '.nup-src', ignore_errors=True)   # the module copies a NUP game's rewrite read (rewriter_src)
         if a.code_only: print(f'done: the modules in {out} (--code-only: pack.tsv and the shaders unchanged)'); return
         shutil.copyfile(g.dir / 'game.tsv', out / 'game.tsv')
-        shaders = None if a.no_shaders else pack_shaders(a, g, folder.parent / f'{app:016X}-work', out, vdir)
+        shaders = None if a.no_shaders else pack_shaders(a, g, folder.parent / f'{app:016X}-work', out, vdir, (romfs, exe))
         top = folder.parent if pack_dump.nup.is_nup(folder) else folder   # a NUP file's paths are `<name>.nup:<package>/...`, relative to its folder
         rel = lambda p: p.relative_to(top).as_posix()
         rows = [('format', str(FORMAT)), ('title_id', f'{app:016X}'), ('name', g.get('name', '')), ('version', str(ver)), ('target', 'android'),

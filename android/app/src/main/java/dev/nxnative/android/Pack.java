@@ -148,26 +148,11 @@ final class Pack {
     }
 
     /**
-     * Whether a game folder or .nup is a whole dump Prepare can start from (DumpCheck then checks it fully against the profile's builds): base/exefs/main.npdm and a
-     * version to prepare, an update (updates/) or the base game itself (base/exefs/main and base/romfs: a game whose supported build is its base, version 0, such as
-     * Mario Kart World 1.8.0, has no update). A .nup the same: a base package, and an update package or a base with an ExeFS and a RomFS (its records only, not hashed:
-     * quick enough for a card). One version's folder (exefs/, romfs/) is not one: it needs a pack made elsewhere.
+     * Whether a game folder or .nup is a whole dump Prepare can start from (DumpCheck then checks it fully against the profile's builds): a version with its own
+     * exefs/main and main.npdm and a RomFS with files (its own or the base's), in any of the three layouts (DumpLayout: the base alone, such as Mario Kart World
+     * 1.8.0, an update alone that carries the whole game, or both). One version's folder (exefs/, romfs/ at its top) is not one: it needs a pack made elsewhere.
      */
-    static boolean isDump(File dir) {
-        if (Nup.isNup(dir)) {
-            try {
-                Nup n = Nup.peek(dir);
-                Nup.Pkg base = n.base();
-                return base != null && (!n.of(Nup.UPDATE).isEmpty() || base.exefsDir != Nup.NONE && base.romfsDir != Nup.NONE);
-            } catch (IOException e) {
-                return false;
-            }
-        }
-        if (!new File(dir, "base/exefs/main.npdm").isFile()) return false;
-        if (new File(dir, "updates").isDirectory()) return true;
-        String[] romfs = new File(dir, "base/romfs").list();
-        return new File(dir, "base/exefs/main").isFile() && romfs != null && romfs.length > 0;
-    }
+    static boolean isDump(File dir) { return DumpLayout.preparable(dir); }
 
     /** The ACI0 program ID of a main.npdm, as 16 upper-case hex digits (scripts/pack_dump.py program_id). */
     static String programId(File npdm) throws IOException {
@@ -207,7 +192,7 @@ final class Pack {
             }
         }
         File npdm = npdmOf(game);
-        if (npdm == null) throw new IOException(game + " has neither base/exefs/main.npdm nor exefs/main.npdm.");
+        if (npdm == null) throw new IOException(game + " has no main.npdm (base/exefs/, updates/<version>/exefs/ or exefs/).");
         return programId(npdm);
     }
 
@@ -215,13 +200,15 @@ final class Pack {
         return (b[o] & 0xffL) | (b[o + 1] & 0xffL) << 8 | (b[o + 2] & 0xffL) << 16 | (b[o + 3] & 0xffL) << 24;
     }
 
-    /** The game folder's main.npdm: a dump (base/exefs) or one version's files (exefs/). null when it is neither */
+    /** The game folder's main.npdm: a dump's (base/exefs, else the newest update's: an update-only dump) or one version's files' (exefs/). null when it is none of these */
     static File npdmOf(File game) {
         for (String p : new String[] {"base/exefs/main.npdm", "exefs/main.npdm"}) {
             File f = new File(game, p);
             if (f.isFile()) return f;
         }
-        return null;
+        long v = DumpLayout.newest(game);   // an update-only dump: the newest update's (an update's NPDM carries the base's program ID)
+        File f = v > 0 ? new File(game, "updates/" + v + "/exefs/main.npdm") : null;
+        return f != null && f.isFile() ? f : null;
     }
 
     /** Where a pack for this game folder usually is: <game>/../<id>-work/android-pack, or a pack folder inside the game folder. null when none is found */
@@ -249,7 +236,9 @@ final class Pack {
             if (!u.getName().matches("\\d+") || !new File(u, "romfs").isDirectory()) continue;
             if (best == null || Long.parseLong(u.getName()) > Long.parseLong(best.getName())) best = u;
         }
-        return best != null ? new File(best, "romfs") : null;
+        if (best != null) return new File(best, "romfs");
+        f = new File(game, "base/romfs");   // an update without a RomFS of its own: the base's (DumpLayout)
+        return f.isDirectory() ? f : null;
     }
 
     /**
@@ -259,6 +248,12 @@ final class Pack {
      * no such package or it has no RomFS; IOException when the .nup cannot be read
      */
     String romfsPath(File game) throws IOException {
+        String gv = gameVersion(game);
+        if (!gv.equals(version)) {   // the pack's build under another version of this dump: that version's RomFS (its own, else the base's), as Prepare would pack it
+            long v = Long.parseLong(gv);
+            if (!DumpLayout.hasRomfs(game, v)) return null;
+            return Nup.isNup(game) ? Nup.spec(game, DumpLayout.selector(game, v, true), "romfs") : DumpLayout.path(game, v, "romfs");
+        }
         if (!Nup.isNup(game)) {
             File f = romfs(game);
             return f == null ? null : f.getPath();
@@ -266,8 +261,22 @@ final class Pack {
         String sel = romfsSelector();
         Nup n = Nup.open(game);
         Nup.Pkg p = n.find(sel);
+        if (p != null && p.romfsDir == Nup.NONE && sel.startsWith("update/")) {   // an update without a RomFS of its own: the base's (DumpLayout)
+            sel = DumpLayout.selector(game, p.version, true);
+            p = n.find(sel);
+        }
         if (p == null || p.romfsDir == Nup.NONE) return null;
         return Nup.spec(game, sel, "romfs");
+    }
+
+    /**
+     * The version of a game (folder or .nup) that holds this pack's build: the newest whose modules have the pack's build IDs (DumpLayout.versionWith), else the
+     * pack's own version. A dump may keep the same build under another version number (Mario Kart World "1.8.1" with 1.8.0's code): identical build IDs are
+     * identical code, so the pack plays it as it is; another build is not found here, and BuildCheck refuses it
+     */
+    String gameVersion(File game) {
+        long v = DumpLayout.versionWith(game, BuildCheck.builds(this));
+        return v >= 0 ? String.valueOf(v) : version;
     }
 
     /** The package of a .nup game's RomFS: pack.tsv's romfs selector when it names a .nup package, else the pack's version's */

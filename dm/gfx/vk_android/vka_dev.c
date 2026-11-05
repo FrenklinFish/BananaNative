@@ -147,6 +147,9 @@ static int init_once(void) {
     vk.vkGetDeviceQueue(V.dev, V.qf, 0, &V.q);
     if (x_ph && fph.queuePerfHint) V.perf_hint = (void *)vk.vkGetDeviceProcAddr(V.dev, "vkQueueSetPerfHintQCOM");
     VLOG("GPU clock floor (VK_QCOM_queue_perf_hint): %s", V.perf_hint ? "available (DM_VK_GPU_FLOOR)" : x_ph ? "extension without the feature" : "not on this device");
+#if defined(__ANDROID__)
+    { int vka_floor_adpf(void); if (!V.perf_hint) VLOG("GPU clock floor through ADPF: %s", vka_floor_adpf() ? "each frame's span and GPU time reported against the game's shortest period (DM_VK_GPU_FLOOR_ADPF)" : "off (DM_VK_GPU_FLOOR=0 or DM_VK_GPU_FLOOR_ADPF=0)"); }
+#endif
 
     VkPhysicalDeviceMapMemoryPlacedPropertiesEXT pmp = {VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MAP_MEMORY_PLACED_PROPERTIES_EXT};
     VkPhysicalDeviceVulkan13Properties p13 = {VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_3_PROPERTIES, .pNext = placed ? &pmp : NULL};
@@ -563,14 +566,26 @@ void vka_up_stats(uint64_t *batches, uint64_t *waits, double *wait_ms) { if (bat
 // driver's governor. The cost is power while a frame's GPU work runs; a lower floor or 0 gives it back
 // A hint is the queue's state until changed; the kernel takes the highest of all queues' floors
 // DM_VK_GPU_FLOOR_AUTO=1 (live; default 0 = the fixed floor): the floor follows what the frame needs, between 0 and DM_VK_GPU_FLOOR. Each frame's span from the start of the replay's
-// recording of its first submission to the GPU end of its last (vka_exec.c, vka_floor_span: recording plus the GPU tail) is held against the period the frame aims at: the game's present period, at most
-// 33.3 ms (so a game held at 20 fps by the GPU end still aims at 30). Over the last 30 frames: the 90th percentile within 2 ms of the period raises the floor a step (within
+// recording of its first submission to the GPU end of its last (vka_exec.c, vka_floor_span: recording plus the GPU tail) is held against the period the frame aims at: the game's
+// shortest period (vka_floor_period_ns), not the period it presents at now. Over the last 30 frames: the 90th percentile within 2 ms of the period raises the floor a step (within
 // 0.5 ms: to DM_VK_GPU_FLOOR at once); more than 5 ms below it (DM_VK_GPU_FLOOR_LO; raise: DM_VK_GPU_FLOOR_HI, 2 ms) for 60 frames since the last change lowers it a step. Steps of 25 %
 enum { FSPAN = 64 };
 static _Atomic uint64_t g_fspan[FSPAN], g_fspan_f[FSPAN];   // per frame (mod FSPAN): its span in ns, and which frame it is
 static uint64_t g_floor_frames[5];                            // frames at each step (statistics)
 static double g_p90_sum; static uint64_t g_p90_n;
-extern _Atomic int64_t vka_period_ns;
+// The period the floor aims at, for every floor (the queue hint's DM_VK_GPU_FLOOR_AUTO=1 and the ADPF floor's reports, vka_perf.c): the game's shortest period, the shortest
+// present period it has asked for in this session and at most one 60 Hz vsync (16.7 ms), not the period it presents at now. A game with a dynamic present interval decides
+// its interval from how long its frames take: DKB's controller (main+0x204a18) steps from 3 vsyncs (20 fps) back to 2 only when its measure of the frame is below 20 ms. At
+// 20 fps the GPU idles a third of the time, its governor lowers the clock, the frame's GPU time grows to 33-36 ms (Adreno 840) and the game stays at 20 fps for good; a floor
+// aiming at the current period (50 ms, or the 33.3 ms cap the auto floor had) sees that frame on target and never raises the clock. Aiming at the shortest period keeps the
+// clock where the game can step back up. DM_VK_GPU_FLOOR_PERIOD=<ms> (live; default 0 = the shortest period) sets it instead (33.3: the cap before 2026-11-05)
+_Atomic int64_t vka_period_min_ns;   // the shortest present period the game asked for (vka_perf.c vka_perf_frame); 0 = none yet
+int64_t vka_floor_period_ns(void) {
+    double ms = VKA_ENVF("DM_VK_GPU_FLOOR_PERIOD", 0.0);
+    if (ms >= 4 && ms <= 200) return (int64_t)(ms * 1e6);
+    int64_t m = atomic_load_explicit(&vka_period_min_ns, memory_order_relaxed), v = 16666667;
+    return m >= 4000000 && m < v ? m : v;
+}
 void vka_floor_span(uint64_t frame, uint64_t ns) {           // the completion thread: a submission of frame ended ns after the frame began
     unsigned k = frame % FSPAN;
     if (atomic_load(&g_fspan_f[k]) != frame) { atomic_store(&g_fspan[k], 0); atomic_store(&g_fspan_f[k], frame); }
@@ -587,8 +602,7 @@ static int floor_auto(int top, uint64_t f) {
     for (uint64_t g = f > 3 ? f - 3 : 0; g > 0 && g + 34 > f && n < 30; g--) { unsigned k = g % FSPAN; if (atomic_load(&g_fspan_f[k]) == g && atomic_load(&g_fspan[k])) v[n++] = atomic_load(&g_fspan[k]); }
     if (n < 20) return cur;
     qsort(v, n, sizeof *v, cmp_u64);
-    double p90 = v[n * 9 / 10] / 1e6, per = atomic_load_explicit(&vka_period_ns, memory_order_relaxed) / 1e6;
-    if (per <= 0 || per > 33.4) per = 33.34;
+    double p90 = v[n * 9 / 10] / 1e6, per = vka_floor_period_ns() / 1e6;
     int was = cur;
     g_p90_sum += p90; g_p90_n++;
     double hi = VKA_ENVF("DM_VK_GPU_FLOOR_HI", 2.0), lo = VKA_ENVF("DM_VK_GPU_FLOOR_LO", 5.0);   // ms below the period: raise above per - hi, lower below per - lo
@@ -634,6 +648,11 @@ static void floor_set_(int s, int tail) {
 // end failed, and the floor could drop with a counted submission still on the GPU
 static int floor_mode(void) { return V.perf_hint ? VKA_ENV("DM_VK_GPU_FLOOR_AUTO", 0) : -1; }
 static int floor_top(void) { int s = VKA_ENV("DM_VK_GPU_FLOOR", 100); return s < 0 ? 0 : s > 100 ? 100 : s; }
+// The floor without VK_QCOM_queue_perf_hint (Turnip, any driver but Qualcomm's): the ADPF session (vka_perf.c) reports each frame's span (recording start to the GPU end of
+// its last submission) with its GPU time against the shortest period, so the system raises the clocks the frame's work runs on when the frame takes longer than the period
+// the game could run at. Before 2026-11-05 there was no floor at all there: on Turnip DKB stayed at 20 fps with 33-36 ms of GPU time a frame, as the system driver did with
+// DM_VK_GPU_FLOOR=0. It has no level: DM_VK_GPU_FLOOR > 0 turns it on, 0 off, as does DM_VK_GPU_FLOOR_ADPF=0 (live); DM_VK_ADPF_SPAN set explicitly decides the reports
+int vka_floor_adpf(void) { return !V.perf_hint && floor_top() > 0 && VKA_ENV("DM_VK_GPU_FLOOR_ADPF", 1); }
 int vka_floor_tail_add(void) { if (floor_mode() != 2) return 0; atomic_fetch_add(&g_tail_n, 1); return 1; }   // vka_exec.c, a submission with draws: 1 = counted
 void vka_floor_commit(int counted) { if (counted) floor_set_(floor_top(), 1); }   // before that submission is handed to the queue
 void vka_floor_done(int counted) {     // the completion thread, that submission done

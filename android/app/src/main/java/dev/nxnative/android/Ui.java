@@ -240,14 +240,31 @@ final class Ui {
     }
 
     /** A page's header, the same on every screen: 56 dp high; a leading view (the banana badge, or a back button), the title, and an optional trailing button */
-    static LinearLayout header(Context c, View leading, CharSequence title, View trailing) {
+    static LinearLayout header(Context c, View leading, CharSequence title, View trailing) { return header(c, leading, title, null, trailing); }
+
+    /** The same, with a small line under the title in the accent yellow (Home: the build identifier, Prefs.buildId), or none when null */
+    static LinearLayout header(Context c, View leading, CharSequence title, CharSequence subtitle, View trailing) {
         LinearLayout h = row(c);
         h.setMinimumHeight(dp(c, 56));
         if (leading != null) h.addView(leading);
         TextView t = title(c, title);
         t.setAccessibilityHeading(true);
-        t.setPadding(dp(c, leading != null ? 14 : 4), 0, dp(c, 8), 0);
-        h.addView(t, weight());
+        int pad = dp(c, leading != null ? 14 : 4);
+        if (subtitle == null) {
+            t.setPadding(pad, 0, dp(c, 8), 0);
+            h.addView(t, weight());
+        } else {
+            LinearLayout col = new LinearLayout(c);
+            col.setOrientation(LinearLayout.VERTICAL);
+            col.setPadding(pad, 0, dp(c, 8), 0);
+            col.addView(t);
+            TextView s = text(c, subtitle, 11, R.color.bn_accent, 600);
+            s.setSingleLine(true);
+            s.setEllipsize(TextUtils.TruncateAt.END);
+            s.setTextIsSelectable(true);
+            col.addView(s);
+            h.addView(col, weight());
+        }
         if (trailing != null) h.addView(trailing);
         return h;
     }

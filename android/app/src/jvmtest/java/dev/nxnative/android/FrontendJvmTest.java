@@ -34,6 +34,17 @@ public final class FrontendJvmTest {
         eq("/mnt/media_rw/1234-ABCD/x.nup", Frontend.embeddedPath("/ext/mnt/media_rw/1234-ABCD/x.nup"), "media_rw");
         eq(null, Frontend.embeddedPath("/document/primary:ROMs/x.nup"), "SAF document id");
         eq(null, Frontend.embeddedPath(null), "null path");
+        // SAF document IDs: the path after the volume, relative (most providers) or the whole path (the HyperOS picker, issue #19)
+        String P = "/storage/emulated/0";
+        eq(P + "/Switch2/x.nup", Frontend.volumePath(P, "Switch2/x.nup"), "relative to the volume");
+        eq(P, Frontend.volumePath(P, ""), "the volume itself");
+        eq(P + "/Switch2ROMS/x.nup", Frontend.volumePath(P, "/storage/emulated/0/Switch2ROMS/x.nup"), "whole path");
+        eq(P + "/Switch2ROMS/x.nup", Frontend.volumePath(P, "storage/emulated/0/Switch2ROMS/x.nup"), "whole path without its first slash");
+        eq("/sdcard/ROMs/x.nup", Frontend.volumePath(P, "/sdcard/ROMs/x.nup"), "whole path by an alias");
+        eq("/storage/1234-ABCD/ROMs/x.nup", Frontend.volumePath("/storage/1234-ABCD", "storage/1234-ABCD/ROMs/x.nup"), "SD card, whole path");
+        eq("/storage/1234-ABCD/ROMs/x.nup", Frontend.volumePath("/storage/1234-ABCD", "ROMs/x.nup"), "SD card, relative");
+        eq(P + "/storage/x.nup", Frontend.volumePath(P, "storage/x.nup"), "a folder named storage stays relative");
+        eq(P + "/sdcard/x.nup", Frontend.volumePath(P, "sdcard/x.nup"), "a folder named sdcard stays relative");
         // one name per file
         eq("/storage/emulated/0/ROMs/x.nup", Frontend.normal("/sdcard/ROMs/x.nup"), "/sdcard");
         eq("/storage/emulated/0/ROMs/x.nup", Frontend.normal("/storage/self/primary/ROMs/x.nup"), "self/primary");

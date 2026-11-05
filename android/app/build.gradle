@@ -48,7 +48,7 @@ if (!(nxPackEngine in ['fake', 'native'])) throw new GradleException("nxPackEngi
 def repo = file('../..')
 nxGames.each { g -> if (!new File(repo, "dm/games/$g/game.tsv").isFile()) throw new GradleException("nxGames: $g has no profile (dm/games/$g/game.tsv)") }
 def tsvRows = { String game, String key -> def t = new File(repo, "dm/games/$game/game.tsv"); t.isFile() ? t.readLines().findAll { it.startsWith(key + '\t') }.collect { it.split('\t') } : [] }
-def buildsOf = { String game -> tsvRows(game, 'build').collect { c -> def m = (c[1] =~ /\d+/); (m.find() ? m.group() : c[1]) + ' ' + c.drop(3).join(' ') }.join(';') }
+def buildsOf = { String game -> tsvRows(game, 'build').collect { c -> def m = (c[1] =~ /\d+/); (m.find() ? m.group() : c[1]) + (c.size() > 2 && c[2] ==~ /\d+(\.\d+)+/ ? ' @' + c[2] : '') + ' ' + c.drop(3).join(' ') }.join(';') }   // "<version> [@<display version>] <module>=<build ID> ..."
 def nameOf = { String game -> tsvRows(game, 'name').collect { it[1] }.find() ?: game }
 def defineOf = { String path, String name -> def f = new File(repo, path); def m = f.isFile() ? (f.text =~ /#define\s+${name}\s+"([^"]*)"/) : null; (m != null && m.find()) ? m.group(1) : 'unknown' }
 def shaderTotalOf = { String game -> def f = new File(repo, "dm/games/$game/shader_map.tsv"); f.isFile() ? f.readLines().count { it && !it.startsWith('#') && !it.startsWith('package\t') } : 0 }
@@ -74,7 +74,13 @@ def stampOf = { String game -> def f = new File(repo, "dm/games/$game/vk_delta.t
 // and last what Game resolution sets for it (Profile.resolutionEnv): "window" with window_fn rows (DM_WINDOW_SIZE), "scale:<choice>=<scale>/<console|handheld>,…" with
 // graphics_scale rows (DM_GRAPHICS_SCALE and DM_OPMODE), empty when it has neither (the launcher then offers no Game resolution for it)
 def resolutionOf = { String game -> !tsvRows(game, 'window_fn').isEmpty() ? 'window' : tsvRows(game, 'graphics_scale').with { rs -> rs.isEmpty() ? '' : 'scale:' + rs.collect { c -> "${c[1].trim()}=${c[2].trim()}/${c[3].trim()}" }.join(',') } }
-def nxProfiles = nxGames.collect { g -> [g, nameOf(g).replaceAll(/[\t\n\\"]/, ' '), shaderTotalOf(g), shaderInputsOf(g), buildsOf(g), reqsOf(g), statusOf(g), deltaOf(g), stampOf(g), resolutionOf(g)].join('\\t') }.join('\\n')
+// The RomFS checks (game.tsv romfs_check rows, as "<path>|<line>|<expected or main>", ';' between them: Profile.romfsChecks, RomfsCheck.java)
+def romfsChecksOf = { String game -> tsvRows(game, 'romfs_check').findAll { it.size() >= 4 }.collect { c -> [c[1].trim(), c[2].trim(), c[3].trim().replaceAll(/[\\"]/, ' ')].join('|') }.join(';') }
+// The profile's GPU timestamp mode (game.tsv gpu_timestamps: segment or submission, the host's default when it has no row): Game settings › GPU timing names it as "Game default"
+def gpuTsOf = { String game -> tsvRows(game, 'gpu_timestamps').with { rs -> rs.isEmpty() || rs[0].size() < 2 ? 'submission' : rs[0][1].trim() } }
+// The profile's default Game resolution (game.tsv android_window: one of Prefs.WINDOWS; empty without the key: the main screen's default)
+def windowOf = { String game -> tsvRows(game, 'android_window').with { rs -> rs.isEmpty() || rs[0].size() < 2 ? '' : rs[0][1].trim() } }
+def nxProfiles = nxGames.collect { g -> [g, nameOf(g).replaceAll(/[\t\n\\"]/, ' '), shaderTotalOf(g), shaderInputsOf(g), buildsOf(g), reqsOf(g), statusOf(g), deltaOf(g), stampOf(g), resolutionOf(g), romfsChecksOf(g), gpuTsOf(g), windowOf(g)].join('\\t') }.join('\\n')
 def lockOf = { String key -> def f = new File(repo, 'dm/gfx/tools/dmsh_chain.lock'); f.isFile() ? (f.readLines().find { it.startsWith(key + '\t') }?.split('\t')?.getAt(1) ?: 'unknown') : 'unknown' }
 
 android {

@@ -324,7 +324,7 @@ public final class ReadinessActivity extends Activity {
             }
         }
         if (!f.isDirectory() || !f.canRead()) return new Readiness.Check("Game files", Readiness.Status.FAIL, f + " is not a folder this app can read.", "access");
-        if (Pack.npdmOf(f) == null) return new Readiness.Check("Game files", Readiness.Status.FAIL, f + " has neither base/exefs/main.npdm nor exefs/main.npdm.", null);
+        if (Pack.npdmOf(f) == null) return new Readiness.Check("Game files", Readiness.Status.FAIL, f + " has no main.npdm (base/exefs/, updates/<version>/exefs/ or exefs/).", null);
         return new Readiness.Check("Game files", Readiness.Status.PASS, f + ": a folder that reads.", null);
     }
 

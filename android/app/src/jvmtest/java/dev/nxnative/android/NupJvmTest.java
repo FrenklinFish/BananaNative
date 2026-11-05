@@ -135,7 +135,7 @@ public final class NupJvmTest {
 
     // ---- Dumps Prepare starts from (Pack.isDump) ----
 
-    /** A whole dump: an update, or the base game alone with its code and RomFS (a game whose supported build is its base, Mario Kart World 1.8.0); never one version's folder */
+    /** A whole dump: an update, the base game alone with its code and RomFS (a game whose supported build is its base, Mario Kart World 1.8.0), or an update alone that carries the whole game (DumpLayout); never one version's folder */
     static void dumps(File repo, File d, File t) throws IOException, InterruptedException {
         check(Pack.isDump(d), "base/ and updates/: a dump");
         check(!Pack.isDump(new File(d, "base")) && !Pack.isDump(new File(d, "updates/458752")), "one version's folder is no dump");
@@ -153,7 +153,7 @@ public final class NupJvmTest {
         File nb = pack(repo, d, new File(t, "BaseOnly.nup"), "python3", true, "--only", "base");
         check(Nup.open(nb).of(Nup.UPDATE).isEmpty() && Pack.isDump(nb), "a .nup of the base game alone: a dump (version 0)");
         File nu = pack(repo, d, new File(t, "UpdateOnly.nup"), "python3", true, "--only", "update");
-        check(Nup.open(nu).base() == null && !Pack.isDump(nu), "an update-only .nup is no dump");
+        check(Nup.open(nu).base() == null && Pack.isDump(nu) && DumpLayout.versions(nu).equals(List.of(458752L)), "an update-only .nup that carries the whole game (its exefs and RomFS): a dump of that update (DumpLayout)");
         check(Pack.isDump(new File(t, "game-raw.nup")), "a .nup with the base and an update: a dump");
         check(!Pack.isDump(new File(t, "missing.nup")), "a .nup that is not there");
     }

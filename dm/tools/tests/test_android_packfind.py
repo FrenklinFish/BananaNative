@@ -27,7 +27,7 @@ class PackFindJvm(unittest.TestCase):
             d = Path(d)
             (d / 'stub').mkdir()
             (d / 'stub/BuildConfig.java').write_text(STUB)
-            srcs = [SRC / f'{n}.java' for n in ('PackFind', 'Pack', 'Nup', 'Zstd', 'Profile', 'ShaderLibs')]
+            srcs = [SRC / f'{n}.java' for n in ('PackFind', 'Pack', 'DumpLayout', 'BuildCheck', 'RomfsCheck', 'Nup', 'Zstd', 'Profile', 'ShaderLibs')]
             r = subprocess.run(['javac', '-Xlint:all,-try', '-Werror', '-d', str(d / 'classes'), *map(str, srcs), str(TEST), str(d / 'stub/BuildConfig.java')],
                                capture_output=True, text=True)
             self.assertEqual(r.returncode, 0, r.stdout + r.stderr)

@@ -42,8 +42,14 @@ final class Prefs {
     // takes the default (the main screen's Settings, global). DKB with nothing of its own set runs exactly as before ----
     static String gameKey(String key, String titleId) { return key + "@" + titleId; }
 
-    /** The game's window size: its own choice, else the default (window(c)) */
-    static String gameWindow(Context c, String titleId) { return of(c).getString(gameKey("window", titleId), window(c)); }
+    /** The game's window size: its own choice, else the default (defaultWindow) */
+    static String gameWindow(Context c, String titleId) { return of(c).getString(gameKey("window", titleId), defaultWindow(c, titleId)); }
+    /** A game's default window size: the main screen's when the player chose one there, else its profile's android_window (a workaround for one game, game.tsv), else Phone 1080p */
+    static String defaultWindow(Context c, String titleId) {
+        if (of(c).contains("window")) return window(c);
+        Profile p = Profile.of(titleId);
+        return p != null && java.util.Arrays.asList(WINDOWS).contains(p.window) ? p.window : WINDOWS[0];
+    }
     /** null: back to the default */
     static void gameWindow(Context c, String titleId, String v) { put(c, gameKey("window", titleId), v); }
     static boolean ownWindow(Context c, String titleId) { return of(c).contains(gameKey("window", titleId)); }
@@ -87,6 +93,10 @@ final class Prefs {
      * The game's own environment lines (KEY=VALUE, one a line; its Game settings), given to the host after the launcher's settings and env.txt, so they win for
      * this game; env-&lt;title ID&gt;.txt in the app's folder (adb) comes after them. "" = none
      */
+    /** GPU timing (Game settings): "segment" or "submission" passed to the host as DM_NVN_GPU_TS, null for the game's default (its profile's gpu_timestamps) */
+    static String gpuTs(Context c, String titleId) { return of(c).getString(gameKey("gpu_ts", titleId), null); }
+    static void gpuTs(Context c, String titleId, String mode) { put(c, gameKey("gpu_ts", titleId), mode); }
+
     static String gameEnv(Context c, String titleId) { return of(c).getString(gameKey("env", titleId), ""); }
     static void gameEnv(Context c, String titleId, String text) { put(c, gameKey("env", titleId), text == null || text.trim().isEmpty() ? null : text.trim()); }
 
@@ -151,16 +161,10 @@ final class Prefs {
     /** Which key signed this APK, for logs and reports: the signer's SHA-256, first 16 hex digits */
     static String signerId(Context ctx) { return Signer.shortId(signers(ctx)); }
 
-    private static String buildTag() {
-        String c = BuildConfig.NX_COMMIT, t = BuildConfig.NX_BUILD_TIME;
-        if (c.length() > 7 && !c.equals("unknown")) c = c.substring(0, 7);
-        c += BuildConfig.NX_DIRTY;
-        if (BuildConfig.NX_PLAY) {
-            String v = BuildConfig.VERSION_NAME;
-            int d = v.indexOf('-');
-            return "Banana Native " + (d > 0 ? v.substring(0, d) : v) + " · " + c + " · " + (t.length() >= 10 ? t.substring(0, 10) : t);
-        }
-        String b = BuildConfig.NX_BRANCH.startsWith("android-") ? BuildConfig.NX_BRANCH.substring(8) : BuildConfig.NX_BRANCH;
-        return "Banana Native test · " + b + "@" + c + " · " + (t.length() == 16 ? t.substring(5) : t);
+    /** The build identifier alone (Signer.buildId): "launcher-2@4a15067 · 11-05 11:37", "0.1 · 6a6448d · 2026-11-02". Home shows it under its title (the build tag would not fit a phone's width) */
+    static String buildId() {
+        return Signer.buildId(BuildConfig.NX_PLAY, BuildConfig.VERSION_NAME, BuildConfig.NX_COMMIT, BuildConfig.NX_DIRTY, BuildConfig.NX_BRANCH, BuildConfig.NX_BUILD_TIME);
     }
+
+    private static String buildTag() { return Signer.buildTag(BuildConfig.NX_PLAY, buildId()); }
 }

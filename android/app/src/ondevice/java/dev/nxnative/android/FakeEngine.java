@@ -145,16 +145,14 @@ final class FakeEngine implements PackEngine {
 
     private int library(PrintStream log, File cache) throws InterruptedException, IOException {
         File lib = new File(cache, "v-" + BuildConfig.NX_DMSH_VK_CHAIN);
-        File tmp = new File(cache, lib.getName() + ".tmp");
-        tmp.mkdirs();
+        Job.deleteTree(lib);   // written in place, as vk_android_build.py does (no folder renamed on shared storage: Outputs)
+        lib.mkdirs();
         for (int i = 0; i <= 10; i++) {
             log.println("progress " + i + " 10 library");
             work(600);
         }
-        write(new File(tmp, "dmsh_vk.lib"), "");
-        write(new File(tmp, "inputs.tsv"), "game\t" + game() + "\n");
-        if (lib.isDirectory()) Job.deleteTree(lib);
-        Files.move(tmp.toPath(), lib.toPath(), StandardCopyOption.ATOMIC_MOVE);
+        write(new File(lib, "dmsh_vk.lib"), "");
+        write(new File(lib, "inputs.tsv"), "game\t" + game() + "\n");
         return 0;
     }
 

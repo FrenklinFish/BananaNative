@@ -49,6 +49,6 @@ final class PathUtil {
             for (String p : new String[] {"/storage/" + volume, "/mnt/media_rw/" + volume}) if (new File(p).isDirectory()) { root = p; break; }
             if (root == null) return null;
         }
-        return rel.isEmpty() ? root : root + "/" + rel;
+        return Frontend.volumePath(root, rel);   // relative to the volume, or (some pickers) the whole path
     }
 }

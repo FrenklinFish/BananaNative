@@ -10,7 +10,6 @@ import android.widget.Toast;
 
 import java.io.File;
 import java.io.IOException;
-import java.util.ArrayList;
 import java.util.List;
 
 /**
@@ -83,10 +82,8 @@ public final class FrontendLaunch extends Activity {
     private Game ready(File game, String id) {
         if (Profile.missing(id, "This game") != null) return null;
         List<Game> list = Game.load(this);
-        List<String> dirs = new ArrayList<>();
-        for (Game g : list) dirs.add(g.gameDir);
-        int at = Frontend.card(dirs, game.getPath());
-        Game card = at >= 0 ? list.get(at) : null;
+        List<Integer> same = GameList.matches(list, id, game.getPath(), Game.key(game.getPath(), id), Game::key);   // its card: the same file (any spelling), or the same title and build
+        Game card = same.isEmpty() ? null : list.get(same.get(0));
         File packDir = card != null ? new File(card.packDir) : Folders.packFor(this, game, id);
         if (packDir == null || SaveUi.busy(id)) return null;
         Pack p;
@@ -100,13 +97,7 @@ public final class FrontendLaunch extends Activity {
         if (PackCheck.blocking(this, p, game) != null || Pack.libraryProblem(packDir, id) != null) return null;
         if (card != null) return card;
         Game g = new Game(id, p.name.isEmpty() ? id : p.name, game.getPath(), packDir.getPath());
-        synchronized (Game.class) {
-            List<Game> now = Game.load(this);
-            now.removeIf(x -> Frontend.same(x.gameDir, game.getPath()));
-            now.add(g);
-            Game.save(this, now);
-        }
-        return g;
+        return Game.put(this, g);
     }
 
     private void byTitleId(String tid) {

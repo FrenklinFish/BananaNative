@@ -271,7 +271,7 @@ final class Ondevice {
 
         /** Whether the list has this job's game with its pack */
         boolean listed(Job j) {
-            for (Game g : Game.load(a)) if (g.gameDir.equals(j.dump().getPath()) && g.packDir.equals(j.pack().getPath())) return true;
+            for (Game g : Game.load(a)) if (GameList.samePath(g.gameDir, j.dump().getPath()) && GameList.samePath(g.packDir, j.pack().getPath())) return true;
             return false;
         }
 
@@ -283,10 +283,7 @@ final class Ondevice {
             try { p = Pack.read(j.pack()); } catch (IOException e) { return; }
             if (p.simulated) return;
             Game g = new Game(j.titleId(), p.name.isEmpty() ? j.name() : p.name, j.dump().getPath(), j.pack().getPath());
-            List<Game> list = Game.load(a);
-            list.removeIf(x -> x.gameDir.equals(g.gameDir));
-            list.add(g);
-            Game.save(a, list);
+            Game.put(a, g);   // one card per game: replaces the entries of the same file or the same title and build (GameList)
             String picked = Folders.pickedPack(a, g.titleId);
             if (picked != null && !picked.equals(g.packDir)) Folders.pickedPack(a, g.titleId, g.packDir);
             a.refresh();
@@ -413,7 +410,7 @@ final class Ondevice {
             Profile prof = Profile.of(r.titleId);   // DumpCheck refused a dump without one
             String text = String.format(Locale.getDefault(), "%s, %d DLC.\n\nThe app builds the game's pack and %,d shaders from your dump, once: %s "
                     + "in the background, best on the charger. You can pause any time.\n\nNeeds about 1.5 GB (%.1f GB free): working files in %s, the pack in the app's storage (%s).",
-                    r.version == 0 ? "Base game" : "Update " + r.version, r.dlc, prof.shaderTotal, ShaderLibs.jobMinutesText(prof.shaderTotal), r.free / 1073741824.0, r.work, AppStorage.pack(a, r.titleId));
+                    (r.version == 0 ? "Base game" : "Update " + r.version) + (r.build >= 0 && r.build != r.version ? " (the code of " + prof.buildName(r.build) + ")" : ""), r.dlc, prof.shaderTotal, ShaderLibs.jobMinutesText(prof.shaderTotal), r.free / 1073741824.0, r.work, AppStorage.pack(a, r.titleId));
             Runnable go = () -> {
                 try {
                     Job j = Job.create(r, AppStorage.pack(a, r.titleId));
@@ -458,10 +455,7 @@ final class Ondevice {
                 Prefs.open(a, "ondevice").edit().putString("added", addedKey(j)).apply();
                 Pack p = Pack.read(packDir);
                 Game g = new Game(r.titleId, p.name.isEmpty() ? j.name() : p.name, r.dump.getPath(), packDir.getPath());
-                List<Game> list = Game.load(a);
-                list.removeIf(x -> x.gameDir.equals(g.gameDir));
-                list.add(g);
-                Game.save(a, list);
+                Game.put(a, g);   // one card per game (GameList)
                 a.refresh();
                 show();
                 new AlertDialog.Builder(a).setTitle("Ready to play").setMessage("Its pack fits: nothing needs preparing.\n\nPack: " + packDir).setPositiveButton("OK", null).show();
@@ -504,10 +498,7 @@ final class Ondevice {
                 return;
             }
             Game g = new Game(job.titleId(), p.name.isEmpty() ? job.name() : p.name, job.dump().getPath(), job.pack().getPath());
-            List<Game> list = Game.load(a);
-            list.removeIf(x -> x.gameDir.equals(g.gameDir));
-            list.add(g);
-            Game.save(a, list);
+            Game.put(a, g);   // one card per game: replaces the entries of the same file or the same title and build (GameList)
             a.refresh();
             a.launch(g);
         }

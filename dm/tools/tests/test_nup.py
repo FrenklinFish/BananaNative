@@ -287,7 +287,7 @@ public final class BuildConfig {
         t = Path(tempfile.mkdtemp(prefix='nupjvm_'))
         try:
             (t / 'BuildConfig.java').write_text(self.STUB)
-            subprocess.run(['javac', '-d', str(t / 'classes')] + [str(src / f'{c}.java') for c in ('Nup', 'Zstd', 'Pack', 'Profile', 'ShaderLibs')]
+            subprocess.run(['javac', '-d', str(t / 'classes')] + [str(src / f'{c}.java') for c in ('Nup', 'Zstd', 'Pack', 'DumpLayout', 'BuildCheck', 'RomfsCheck', 'Profile', 'ShaderLibs')]
                            + [str(REPO / 'android/app/src/jvmtest/java/dev/nxnative/android/NupJvmTest.java'), str(t / 'BuildConfig.java')], check=True, capture_output=True, text=True)
             (t / 'run').mkdir()
             r = subprocess.run(['java', '-cp', str(t / 'classes'), 'dev.nxnative.android.NupJvmTest', str(REPO), str(t / 'run')] + ([sys.executable] if have_zstd() else []),

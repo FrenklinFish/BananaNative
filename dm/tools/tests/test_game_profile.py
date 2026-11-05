@@ -1,5 +1,5 @@
 # dm/games/game.py's profile-key validation, on a synthetic profile: pso_gpu (the GPU architectures the app's offline pipeline archive is made for, beside pso_mtl4) takes, none and no others,
-# and a profile without the key generates its header unchanged
+# and a profile without the key generates its header unchanged; romfs_check (a RomFS file line that tells a version's data apart) takes <path> <line> <expected | main>
 from pathlib import Path
 import os
 import subprocess
@@ -38,6 +38,19 @@ class PsoGPU(unittest.TestCase):
             rc, out = header(rows)
             self.assertNotEqual(rc, 0, rows)
             self.assertIn(': pso_gpu takes 1-4 whitespace-separated GPU architectures', out, rows)
+
+
+class RomfsCheck(unittest.TestCase):
+    def test_valid_rows(self):
+        for rows in ('romfs_check\tSystem/RegionLangMask.txt\t4\tmain\n', 'romfs_check\tSystem/RegionLangMask.txt\t2\tNormal\nromfs_check\ta/b.txt\t1\tJPja USen\n'):
+            self.assertEqual(header(rows), (0, ''), rows)
+
+    def test_rejected_rows(self):
+        for rows in ('romfs_check\tSystem/RegionLangMask.txt\t4\n', 'romfs_check\t/abs.txt\t1\tmain\n', 'romfs_check\ta/../b.txt\t1\tmain\n',
+                     'romfs_check\ta.txt\t0\tmain\n', 'romfs_check\ta.txt\tx\tmain\n', 'romfs_check\ta.txt\t1\ta|b\n', 'romfs_check\ta.txt\t1\t \n'):
+            rc, out = header(rows)
+            self.assertNotEqual(rc, 0, rows)
+            self.assertIn(': romfs_check takes <path in the RomFS> <line, from 1>', out, rows)
 
 
 if __name__ == '__main__':

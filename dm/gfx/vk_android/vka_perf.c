@@ -31,6 +31,9 @@ static struct {
     void (*close)(APerformanceHintSession *);
     void *(*wd_create)(void); void (*wd_release)(void *); void (*wd_start)(void *, int64_t); void (*wd_total)(void *, int64_t); void (*wd_cpu)(void *, int64_t);
     void (*wd_gpu)(void *, int64_t); int (*report2)(APerformanceHintSession *, void *);
+    // API 36: a session made from a creation config, marked as part of the graphics pipeline (the frame's work, CPU and GPU, rather than any thread's); the feature query
+    void *(*cfg_create)(void); void (*cfg_release)(void *); void (*cfg_tids)(void *, const int32_t *, size_t); void (*cfg_target)(void *, int64_t); void (*cfg_pipeline)(void *, _Bool);
+    int (*create_cfg)(APerformanceHintManager *, void *, APerformanceHintSession **); _Bool (*feature)(int);
 } H;
 static pthread_mutex_t g_mu = PTHREAD_MUTEX_INITIALIZER;
 static APerformanceHintSession *g_s; static int g_state;   // 0 not tried, 1 usable, -1 not available / off
@@ -50,6 +53,14 @@ static int avail(void) {
     H.wd_total = dlsym(h, "AWorkDuration_setActualTotalDurationNanos"); H.wd_cpu = dlsym(h, "AWorkDuration_setActualCpuDurationNanos");
     H.wd_gpu = dlsym(h, "AWorkDuration_setActualGpuDurationNanos"); H.report2 = dlsym(h, "APerformanceHint_reportActualWorkDuration2");
     if (!H.get || !H.create || !H.target || !H.report || !H.get()) { VRED("no ADPF performance hint manager: the frame's threads run on the default governor"); return 0; }
+    H.cfg_create = dlsym(h, "ASessionCreationConfig_create"); H.cfg_release = dlsym(h, "ASessionCreationConfig_release"); H.cfg_tids = dlsym(h, "ASessionCreationConfig_setTids");
+    H.cfg_target = dlsym(h, "ASessionCreationConfig_setTargetWorkDurationNanos"); H.cfg_pipeline = dlsym(h, "ASessionCreationConfig_setGraphicsPipeline");
+    H.create_cfg = dlsym(h, "APerformanceHint_createSessionUsingConfig"); H.feature = dlsym(h, "APerformanceHint_isFeatureSupported");
+    if (H.feature) {   // APerformanceHintFeature in the NDK's order: sessions, power efficiency, surface binding, graphics pipeline, auto CPU, auto GPU
+        static const char *const nm[] = {"sessions", "power efficiency", "surface binding", "graphics pipeline", "auto CPU", "auto GPU"};
+        char b[160]; size_t o = 0; for (int i = 0; i < 6 && o < sizeof b; i++) o += (size_t)snprintf(b + o, sizeof b - o, "%s%s %d", i ? "," : "", nm[i], (int)H.feature(i));
+        VLOG("ADPF features: %s; report with GPU time %s", b, H.report2 && H.wd_gpu ? "yes" : "no");
+    }
     g_state = 1;
     return 1;
 }
@@ -58,9 +69,18 @@ static void session_update(void) {   // g_mu held
     g_dirty = 0;
     if (g_s && H.threads && !H.threads(g_s, g_tid, (size_t)g_nt)) return;
     if (g_s && H.close) H.close(g_s);
-    g_s = H.create(H.get(), g_tid, (size_t)g_nt, g_target);
+    g_s = NULL; int pipe = 0;
+    // DM_VK_ADPF_PIPELINE=0 (restart with the session; default 1): a plain session. With 1 (API 36) the session is made as part of the graphics pipeline, whose reported
+    // GPU time is the platform's input for the GPU's clock as well; a session the platform refuses as one (it limits graphics pipeline threads) is made plainly
+    if (H.cfg_create && H.cfg_tids && H.cfg_target && H.cfg_pipeline && H.create_cfg && VKA_ENV("DM_VK_ADPF_PIPELINE", 1)) {
+        void *c = H.cfg_create();
+        if (c) { H.cfg_tids(c, g_tid, (size_t)g_nt); H.cfg_target(c, g_target); H.cfg_pipeline(c, 1);
+                 int r = H.create_cfg(H.get(), c, &g_s); if (r || !g_s) { static int n; if (n++ < 2) VRED("ADPF graphics pipeline session of %d threads not made (%d): a plain one", g_nt, r); g_s = NULL; } else pipe = 1;
+                 if (H.cfg_release) H.cfg_release(c); }
+    }
+    if (!g_s) g_s = H.create(H.get(), g_tid, (size_t)g_nt, g_target);
     if (!g_s) { static int n; if (n++ < 2) VRED("ADPF session of %d threads not made", g_nt); }
-    else VLOG("ADPF session: %d threads, target %.2f ms", g_nt, g_target / 1e6);
+    else VLOG("ADPF session%s: %d threads, target %.2f ms", pipe ? " (graphics pipeline)" : "", g_nt, g_target / 1e6);
 }
 // The calling thread takes part in frames: into the session (once)
 void vka_perf_thread(int nice) {
@@ -84,15 +104,17 @@ void vka_perf_thread(int nice) {
 // the GPU end of its last submission (vka_exec.c, the same span as the adaptive GPU clock floor; the game's frame-rate controller measures about the same), CPU the
 // replay thread's time, GPU its busy time; the target p % of the period, at most 33.3 ms (so a game the controller dropped to 20 fps still aims at 30: with the 50 ms
 // period as target the session would lower the clocks until the frame took 50 ms and keep it there). Each frame is reported once. Not phone-checked (STUTTER-TEST.md)
-static int span_pct(void) { int p = VKA_ENV("DM_VK_ADPF_SPAN", 0); return p <= 0 ? 0 : p > 100 ? 100 : p; }
-static int64_t span_target(double period_s, int pct) {
-    double per = period_s > 0.004 && period_s < 0.2 ? period_s : 1 / 60.0; if (per > 1 / 30.0) per = 1 / 30.0;
-    return (int64_t)(per * 1e9 * pct / 100);
-}
+// Since 2026-11-05 the period is the game's shortest (vka_dev.c vka_floor_period_ns: 16.7 ms unless the game asked for less, or DM_VK_GPU_FLOOR_PERIOD), not the current
+// one capped at 33.3 ms: at 30 fps a frame the controller could only take back to 60 fps once it fits in a vsync. Unset (-1), DM_VK_ADPF_SPAN is 100 when the session is
+// the GPU clock floor (vka_floor_adpf: no VK_QCOM_queue_perf_hint, as on Turnip) and 0 otherwise
+static int span_pct(void) { int vka_floor_adpf(void); int p = VKA_ENV("DM_VK_ADPF_SPAN", -1); if (p < 0) p = vka_floor_adpf() ? 100 : 0; return p <= 0 ? 0 : p > 100 ? 100 : p; }
+static int64_t span_target(double period_s, int pct) { (void)period_s; int64_t vka_floor_period_ns(void); return vka_floor_period_ns() * pct / 100; }
 uint64_t vka_floor_span_of(uint64_t f); uint64_t vka_frame_start_ns(uint64_t f); uint64_t now_ns(void);
-_Atomic int64_t vka_period_ns;   // the present period the game asked for last (vka_dev.c's adaptive GPU clock floor)
 void vka_perf_frame(double period_s) {
-    if (period_s > 0.004 && period_s < 0.2) atomic_store_explicit(&vka_period_ns, (int64_t)(period_s * 1e9), memory_order_relaxed);
+    if (period_s > 0.004 && period_s < 0.2) {   // the shortest period the game asked for (vka_dev.c vka_floor_period_ns)
+        extern _Atomic int64_t vka_period_min_ns; int64_t p = (int64_t)(period_s * 1e9), m = atomic_load_explicit(&vka_period_min_ns, memory_order_relaxed);
+        if (!m || p < m) atomic_store_explicit(&vka_period_min_ns, p, memory_order_relaxed);
+    }
     if (!avail()) return;
     vka_perf_thread(0);
     static __thread int64_t last; struct timespec ts; clock_gettime(CLOCK_THREAD_CPUTIME_ID, &ts);

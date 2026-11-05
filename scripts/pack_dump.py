@@ -65,9 +65,18 @@ def updates(dump):   # {version: its folder} of updates/<version>/
     return {int(p.name): p for p in (dump / 'updates').iterdir() if p.is_dir() and p.name.isdigit()} if (dump / 'updates').is_dir() else {}
 
 
-def is_dump(folder):   # whether a folder has the layout above: base/exefs/main.npdm, and a RomFS in base/ or in an update (whose RomFS is the whole patched tree, so a dump
-    # that keeps only the update's, as on a phone with little room, is complete for that update; packing the base version itself then fails on its missing romfs)
-    return (folder / 'base/exefs/main.npdm').is_file() and ((folder / 'base/romfs').is_dir() or any((v / 'romfs').is_dir() for v in updates(folder).values()))
+def is_dump(folder):   # whether a folder has the layout above: a main.npdm in base/exefs or an update's exefs (an update-only dump carries the whole game), and a RomFS
+    # in base/ or in an update (whose RomFS is the whole patched tree, so a dump that keeps only the update's, as on a phone with little room, is complete for that update;
+    # packing the base version itself then fails on its missing romfs)
+    ups = updates(folder).values()
+    return ((folder / 'base/exefs/main.npdm').is_file() or any((v / 'exefs/main.npdm').is_file() for v in ups)) \
+        and ((folder / 'base/romfs').is_dir() or any((v / 'romfs').is_dir() for v in ups))
+
+
+def main_npdm(folder):   # the dump's main.npdm the title ID is read from: the base's, else the newest update's that has one (an update's NPDM carries the base's program ID)
+    if (folder / 'base/exefs/main.npdm').is_file(): return folder / 'base/exefs/main.npdm'
+    ups = [v for _, v in sorted(updates(folder).items()) if (v / 'exefs/main.npdm').is_file()]
+    return ups[-1] / 'exefs/main.npdm' if ups else folder / 'base/exefs/main.npdm'
 
 
 def nup_scan(path):
@@ -76,12 +85,13 @@ def nup_scan(path):
     except nup.Error as e: raise Error(str(e)) from None
     pkg = lambda p, sub='': romfs.Path(f'{n.path}:{p.selector}{sub}')
     base = [p for p in n.packages if p.kind == nup.BASE]
-    if not base or base[0].exefs == nup.NONE or not (pkg(base[0]) / 'exefs/main.npdm').is_file():
-        raise Error(f'{path}: no base package with exefs/main.npdm' + (' (an update-only NUP file: the base is in another one)' if not base else ''))
-    app = program_id(pkg(base[0]) / 'exefs/main.npdm')
+    # the title ID: the base's main.npdm, else the newest update's (a NUP file with only an update package that carries the whole game)
+    code = [p for p in base + sorted((p for p in n.packages if p.kind == nup.UPDATE), key=lambda p: -p.version) if p.exefs != nup.NONE and (pkg(p) / 'exefs/main.npdm').is_file()]
+    if not code: raise Error(f'{path}: no package with exefs/main.npdm (neither the base nor an update)')
+    app = program_id(pkg(code[0]) / 'exefs/main.npdm')
     if app & 0xFFF: raise Error(f'{path}: base program ID {app:016X} is not a base title ID')
     vers = {p.version: pkg(p) for p in n.packages if p.kind == nup.UPDATE}
-    if base[0].romfs == nup.NONE and not any(p.romfs != nup.NONE for p in n.packages if p.kind == nup.UPDATE): raise Error(f'{path}: no RomFS in the base or an update')
+    if not any(p.romfs != nup.NONE for p in n.packages if p.kind in (nup.BASE, nup.UPDATE)): raise Error(f'{path}: no RomFS in the base or an update')
     dlc = {}
     for p in n.packages:
         if p.kind != nup.ADDON: continue
@@ -95,11 +105,22 @@ def version_dir(dump, vers, ver):   # the folder of a version scan() found: upda
     return vers[ver] if ver else romfs.Path(f'{nup.open_nup(dump).path}:base') if nup.is_nup(dump) else dump / 'base'
 
 
+def version_part(dump, vers, ver, part):   # a version's exefs or romfs: its own when it has one (exefs with main, romfs with files), else the base's (an update overrides
+    # the base part by part: the Android launcher's DumpLayout reads dumps the same way)
+    own = version_dir(dump, vers, ver) / part
+    try: has = (own / 'main').is_file() if part == 'exefs' else own.is_dir() and any(True for _ in own.iterdir())
+    except (OSError, nup.Error): has = False
+    if has or not ver: return own
+    base = version_dir(dump, vers, 0) / part
+    try: return base if base.is_dir() else own
+    except (OSError, nup.Error): return own
+
+
 def scan(dump):
     """What a dump folder (or a NUP file) holds: (title ID, {update version: its folder}, {DLC title ID: its RomFS folder})"""
     if nup.is_nup(dump): return nup_scan(dump)
-    if not is_dump(dump): raise Error(f'{dump}: no base/exefs/main.npdm and base/romfs (or an update\'s romfs)')
-    app = program_id(dump / 'base/exefs/main.npdm')
+    if not is_dump(dump): raise Error(f'{dump}: no base/exefs/main.npdm (or an update\'s exefs/main.npdm) and base/romfs (or an update\'s romfs)')
+    app = program_id(main_npdm(dump))
     if app & 0xFFF: raise Error(f'{dump}: base program ID {app:016X} is not a base title ID')
     vers = updates(dump)
     dlc = {}

@@ -125,7 +125,7 @@ final class Job {
     /** Starts the chain's steps over with this APK's versions; the caller deletes their outputs */
     synchronized void resetChainSteps() throws JSONException {
         // the split is the dump's and stays valid, but a finished job deleted it: then it is made again too
-        int from = new File(dir(), "split").isDirectory() ? FIRST_CHAIN_STEP : FIRST_CHAIN_STEP - 1;
+        int from = Outputs.complete(new File(dir(), "split")) ? FIRST_CHAIN_STEP : FIRST_CHAIN_STEP - 1;
         for (int i = from; i < STEPS.length; i++) o.getJSONObject("steps").put(STEPS[i], new JSONObject().put("state", "pending").put("done", 0).put("total", 0).put("stage", ""));
         o.remove("shader_cache");
         o.put("apk", apk());
@@ -333,24 +333,8 @@ final class Job {
         return new File(c.getNoBackupFilesDir(), "split.scan/" + titleId());
     }
 
-    /** Syncs every file under f to the disk (the split's outputs, before they are renamed into place and the step is recorded done) */
-    static void syncTree(File f) throws IOException {
-        File[] kids = Files.isSymbolicLink(f.toPath()) ? null : f.listFiles();
-        if (kids != null) for (File k : kids) {
-            if (k.isDirectory()) syncTree(k);
-            else try (java.nio.channels.FileChannel ch = java.nio.channels.FileChannel.open(k.toPath(), java.nio.file.StandardOpenOption.WRITE)) { ch.force(true); }
-        }
-    }
-
     /** Deletes a folder of the job's own outputs: ondevice/ paths, and the pack the job made itself (Ondevice's Manage, asked first; never the dump or the saves) */
-    static void deleteTree(File f) {
-        File[] kids = Files.isSymbolicLink(f.toPath()) ? null : f.listFiles();   // a link goes, never what it points to
-        if (kids != null) for (File k : kids) {
-            if (k.isDirectory()) deleteTree(k);
-            else k.delete();
-        }
-        f.delete();
-    }
+    static void deleteTree(File f) { Outputs.deleteTree(f); }
 
     /** The job the launcher shows (the last started), remembered across processes */
     static File remembered(Context c) {

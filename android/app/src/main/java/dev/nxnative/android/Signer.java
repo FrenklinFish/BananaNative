@@ -45,7 +45,27 @@ final class Signer {
         return signers[0].substring(0, 16).toLowerCase(java.util.Locale.ROOT) + (signers.length > 1 ? "+" + (signers.length - 1) : "");
     }
 
-    /** The build tag with its mark: "<tag> · official", "<tag> · unofficial build", or the tag alone (test app) */
+    /**
+     * Which build this is, without the app's name: play app "0.1 · 6a6448d · 2026-11-02" (the version up to its "-", the commit, the build date); test app
+     * "int@6a6448d · 11-02 19:51" (the branch without "android-", the commit, the build time). "+dirty" follows the commit when the tree had changes. Home shows
+     * it under the title; {@link #buildTag} is it with the app's name, so the two never disagree
+     */
+    static String buildId(boolean play, String versionName, String commit, String dirty, String branch, String time) {
+        String c = commit;
+        if (c.length() > 7 && !c.equals("unknown")) c = c.substring(0, 7);
+        c += dirty;
+        if (play) {
+            int d = versionName.indexOf('-');
+            return (d > 0 ? versionName.substring(0, d) : versionName) + " · " + c + " · " + (time.length() >= 10 ? time.substring(0, 10) : time);
+        }
+        String b = branch.startsWith("android-") ? branch.substring(8) : branch;
+        return b + "@" + c + " · " + (time.length() == 16 ? time.substring(5) : time);
+    }
+
+    /** The build tag without its mark: "Banana Native &lt;buildId&gt;" (play app), "Banana Native test · &lt;buildId&gt;" (test app) */
+    static String buildTag(boolean play, String buildId) { return "Banana Native " + (play ? "" : "test · ") + buildId; }
+
+    /** The build tag with its mark:"<tag> · official", "<tag> · unofficial build", or the tag alone (test app) */
     static String tag(String tag, boolean play, String[] signers) {
         String m = mark(play, signers);
         return m == null ? tag : tag + " · " + m;

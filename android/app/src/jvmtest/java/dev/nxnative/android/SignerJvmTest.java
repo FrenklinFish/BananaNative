@@ -19,7 +19,12 @@ public final class SignerJvmTest {
         switch (a[0]) {
             case "sha256": System.out.println("sha256 " + Signer.sha256(Files.readAllBytes(Paths.get(a[1])))); break;
             case "tag": System.out.println("tag " + Signer.tag(a[1], a[2].equals("1"), rest)); break;
-            case "id": System.out.println("id " + Signer.shortId(java.util.Arrays.copyOfRange(a, 1, a.length))); break;
+            case "build": {   // build <play 0|1> <versionName> <commit> <dirty|-> <branch> <time>: "build <buildId>|<buildTag>"
+                String id = Signer.buildId(a[1].equals("1"), a[2], a[3], a[4].equals("-") ? "" : a[4], a[5], a[6]);
+                System.out.println("build " + id + "|" + Signer.buildTag(a[1].equals("1"), id));
+                break;
+            }
+            case "id":System.out.println("id " + Signer.shortId(java.util.Arrays.copyOfRange(a, 1, a.length))); break;
             case "official": System.out.println("official " + Signer.OFFICIAL); break;
             default: throw new IllegalArgumentException(a[0]);
         }

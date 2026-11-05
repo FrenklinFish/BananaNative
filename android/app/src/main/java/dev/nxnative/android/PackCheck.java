@@ -3,7 +3,6 @@ package dev.nxnative.android;
 import android.content.Context;
 
 import java.io.File;
-import java.io.FileInputStream;
 import java.io.IOException;
 import java.io.InputStream;
 import java.nio.charset.StandardCharsets;
@@ -11,7 +10,6 @@ import java.nio.file.Files;
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
 import java.util.HashMap;
-import java.util.LinkedHashMap;
 import java.util.Locale;
 import java.util.Map;
 import java.util.zip.ZipEntry;
@@ -33,84 +31,8 @@ import java.util.zip.ZipInputStream;
 final class PackCheck {
     private PackCheck() {}
 
-    /** The folder's modules of the pack's version: updates/&lt;version&gt;/exefs/&lt;module&gt; (version 0: base/exefs; a one-version folder: exefs/) */
-    static File module(File game, String version, String m) {
-        File f = "0".equals(version) ? new File(game, "base/exefs/" + m) : new File(game, "updates/" + version + "/exefs/" + m);
-        if (f.isFile()) return f;
-        File g = new File(game, "exefs/" + m);
-        return g.isFile() ? g : f;
-    }
-
-    /**
-     * A module of the pack's version in a game: a file of a folder (module), or a file of a .nup's package (update/&lt;version&gt;, base for 0).
-     * label names it in messages as the folder's relative path does ("updates/458752/exefs/main", "update/458752/exefs/main" in a .nup)
-     */
-    static final class Mod {
-        final File file;        // a folder's file
-        final Nup nup;          // or a .nup's
-        final Nup.Node node;
-        final String label;
-        final String error;     // the .nup could not be read
-
-        private Mod(File file, Nup nup, Nup.Node node, String label, String error) { this.file = file; this.nup = nup; this.node = node; this.label = label; this.error = error; }
-
-        boolean exists() { return file != null ? file.isFile() : node != null && !node.dir; }
-
-        /** The first n bytes (fewer when it is shorter) */
-        byte[] head(int n) throws IOException {
-            if (error != null) throw new IOException(error);
-            if (nup != null) return nup.read(node, n);
-            try (java.io.RandomAccessFile r = new java.io.RandomAccessFile(file, "r")) {
-                byte[] b = new byte[(int) Math.min(n, r.length())];
-                r.readFully(b);
-                return b;
-            }
-        }
-
-        /** Its bytes into the hash */
-        void hash(MessageDigest h) throws IOException {
-            if (error != null) throw new IOException(error);
-            if (nup != null) { h.update(nup.read(node, -1)); return; }
-            try (InputStream in = new FileInputStream(file)) {
-                byte[] buf = new byte[1 << 16];
-                int k;
-                while ((k = in.read(buf)) > 0) h.update(buf, 0, k);
-            }
-        }
-
-        /** What changes when it changes (the code check's cache) */
-        String stamp() {
-            if (file != null) return file.length() + ":" + file.lastModified();
-            return nup == null ? "none" : nup.file.length() + ":" + nup.file.lastModified() + ":" + label;
-        }
-    }
-
-    static Mod mod(File game, String version, String m) {
-        if (!Nup.isNup(game)) {
-            File f = module(game, version, m);
-            return new Mod(f, null, null, rel(game, f), null);
-        }
-        long v;
-        try { v = Long.parseLong(version); } catch (NumberFormatException e) { v = -1; }
-        String sel = v < 0 ? "update/" + version : Nup.versionSelector(v), label = sel + "/exefs/" + m;
-        try {
-            Nup n = Nup.open(game);
-            Nup.Pkg p = n.find(sel);
-            return new Mod(null, n, p == null ? null : n.lookup(p, "exefs/" + m), label, null);
-        } catch (IOException e) {
-            return new Mod(null, null, null, label, e.getMessage());
-        }
-    }
-
-    /** The pack's build rows: module → build ID (32 hex digits, as pack_android.py writes them) */
-    static Map<String, String> builds(Pack p) {
-        Map<String, String> out = new LinkedHashMap<>();
-        for (String b : p.builds) {
-            int eq = b.indexOf('=');
-            if (eq > 0) out.put(b.substring(0, eq), b.substring(eq + 1).toLowerCase(Locale.ROOT));
-        }
-        return out;
-    }
+    /** A module of the pack's version in a game (BuildCheck.mod) */
+    static BuildCheck.Mod mod(File game, String version, String m) { return BuildCheck.mod(game, version, m); }
 
     /**
      * null when the pack's code can be started with the game folder, else why not: a module whose rewrite did not finish (no key file: Pack.unfinishedModule),
@@ -139,49 +61,8 @@ final class PackCheck {
         return null;
     }
 
-    /** null when the pack's code is of the game build in the folder and of a build this APK supports, else why not (one or two sentences) */
-    static String build(Pack p, File game) {
-        Map<String, String> want = builds(p);
-        if (want.isEmpty()) return null;   // a pack from before the build rows: nothing to compare
-        String name = p.name.isEmpty() ? p.titleId : p.name;
-        for (Map.Entry<String, String> e : want.entrySet()) {
-            Mod nso = mod(game, p.version, e.getKey());
-            if (nso.error != null) return nso.error;
-            if (!nso.exists())
-                return "The pack is for " + name + " update " + p.version + ", but the game " + (nso.nup != null ? ".nup" : "folder") + " has no " + nso.label + ". Pick the dump that has that update, or Prepare again from this one.";
-            String id;
-            try {
-                id = DumpCheck.nsoBuildId(nso.head(0x60), e.getKey());
-            } catch (IOException ex) {
-                return nso.label + " cannot be read: " + ex.getMessage();
-            }
-            if (!id.startsWith(e.getValue()))
-                return "The pack was made from another build of " + name + " (" + e.getKey() + " " + e.getValue().substring(0, 12) + "…) than the one in the game folder ("
-                        + id.substring(0, 12) + "…, update " + p.version + "). Its code would crash with this game: Prepare again makes a pack from this folder.";
-        }
-        Profile prof = Profile.of(p.titleId);
-        Map<Long, Map<String, String>> sup = prof == null ? Map.of() : prof.buildMap();
-        if (!sup.isEmpty()) {
-            Map<String, String> row = null;
-            try { row = sup.get(Long.parseLong(p.version)); } catch (NumberFormatException e) { /* not a number: unsupported */ }
-            boolean ok = row != null;
-            if (ok) for (Map.Entry<String, String> e : row.entrySet()) {
-                String have = want.get(e.getKey());
-                if (have != null && !have.startsWith(e.getValue()) && !e.getValue().startsWith(have)) ok = false;
-            }
-            if (!ok) {
-                StringBuilder s = new StringBuilder();
-                for (Long v : sup.keySet()) s.append(s.length() == 0 ? "" : ", ").append(v);
-                return "The pack is for " + name + " update " + p.version + "; this app supports update " + s + " only. Dump the game with that update and Prepare it.";
-            }
-        }
-        return null;
-    }
-
-    private static String rel(File game, File f) {
-        String g = game.getPath() + "/", p = f.getPath();
-        return p.startsWith(g) ? p.substring(g.length()) : p;
-    }
+    /** null when the pack's code is of the game build in the folder and of a build this APK supports, else why not (BuildCheck.build; the build IDs that differ are in the message) */
+    static String build(Pack p, File game) { return BuildCheck.build(p, game).message; }
 
     /** null when the pack has this APK's shader library, else why not */
     static String shaders(File packDir, String titleId) { return Pack.libraryProblem(packDir, titleId); }
@@ -197,10 +78,11 @@ final class PackCheck {
      */
     static Boolean code(Context c, Pack p, File game) {
         String[] mods = p.modules;
+        String gv = p.gameVersion(game);   // the dump's version with the pack's build (BuildCheck.build)
         StringBuilder id = new StringBuilder(p.dir.getPath()).append('|').append(game.getPath());
         for (String m : mods) {
             File k = new File(p.dir, m + ".android.key");
-            id.append('|').append(k.length()).append(':').append(k.lastModified()).append(':').append(mod(game, p.version, m).stamp());
+            id.append('|').append(k.length()).append(':').append(k.lastModified()).append(':').append(mod(game, gv, m).stamp());
         }
         synchronized (codeCache) {
             if (codeCache.containsKey(id.toString())) return codeCache.get(id.toString());
@@ -217,7 +99,7 @@ final class PackCheck {
         if (!t.containsKey(gd + "game.tsv")) return null;   // the APK carries the profiles of its own games only: another game's pack is not this APK's to judge
         for (String m : p.modules) {
             File kf = new File(p.dir, m + ".android.key");
-            Mod nso = mod(game, p.version, m);
+            BuildCheck.Mod nso = mod(game, p.gameVersion(game), m);
             if (!kf.isFile() || !nso.exists()) return null;
             try {
                 String have = new String(Files.readAllBytes(kf.toPath()), StandardCharsets.UTF_8).trim();
@@ -230,7 +112,7 @@ final class PackCheck {
     }
 
     /** scripts/pack_android.py rewrite_key: SHA-256 over name\0bytes of the REWRITER files, the module, the profile's patches.py (when there is one) and game.tsv */
-    static String rewriteKey(Map<String, byte[]> t, String gameDir, String module, Mod nso) throws IOException {
+    static String rewriteKey(Map<String, byte[]> t, String gameDir, String module, BuildCheck.Mod nso) throws IOException {
         MessageDigest h;
         try {
             h = MessageDigest.getInstance("SHA-256");

@@ -10,7 +10,7 @@ import java.util.Arrays;
 import java.util.List;
 
 /**
- * A game's own settings (its Manage sheet › Game settings…): resolution, frame rate cap, GPU driver and extra environment lines, stored per title ID (Prefs.gameKey,
+ * A game's own settings (its Manage sheet › Game settings…): resolution, frame rate cap, GPU driver, GPU timing and extra environment lines, stored per title ID (Prefs.gameKey,
  * GpuDriver.choice). Each starts as "Default", which follows the main screen's Settings (global); a value set here wins for this game only. The in-game panel's frame
  * rate cap is this game's too. GameActivity reads them at start.
  */
@@ -34,6 +34,7 @@ final class GameSettings {
             Ui.add(box, fixed.view, 0);
         } else Ui.add(box, new Ui.Setting(a, "⏱️", "Frame rate cap", v -> cap(a, g, again)).value(capLabel(a, id)).chevron(a).view, 0);
         Ui.add(box, new Ui.Setting(a, "🎮", "GPU driver", v -> driver(a, g, again)).value(driverLabel(a, id)).chevron(a).view, 0);
+        Ui.add(box, new Ui.Setting(a, "⏲️", "GPU timing", v -> gpuTiming(a, g, again)).value(gpuTsLabel(a, id)).chevron(a).view, 0);
         Ui.Setting ret = new Ui.Setting(a, "⏸️", "Pause on return", null).toggle(a, Prefs.pauseOnReturn(a, id), (b, on) -> Prefs.pauseOnReturn(a, id, on));
         ret.value("Coming back from the background, the game waits paused for a tap");
         Ui.add(box, ret.view, 0);
@@ -60,9 +61,51 @@ final class GameSettings {
         return GpuDriver.choice(a, id) != null ? l : "Default · " + l;
     }
 
+    static final String[] GPU_TS = {"segment", "submission"};
+
+    private static String gpuTsName(String mode) { return mode.equals("segment") ? "Per segment" : "Per submission"; }
+
+    static String gpuTsLabel(MainActivity a, String id) {
+        String m = Prefs.gpuTs(a, id);
+        Profile p = Profile.of(id);
+        return m != null ? gpuTsName(m) : "Game default · " + gpuTsName(p == null ? "submission" : p.gpuTs);
+    }
+
+    /**
+     * GPU timing: what the game's GPU timestamps measure (DM_NVN_GPU_TS; game.tsv gpu_timestamps is the default). Per segment: each timestamp gets the GPU time of
+     * its place in the submission, so a game's dynamic resolution and frame pacing see the real GPU time; per submission: every timestamp of a submission gets
+     * its completion time (the older behaviour)
+     */
+    private static void gpuTiming(MainActivity a, Game g, Runnable done) {
+        Profile p = Profile.of(g.titleId);
+        String[] labels = {"Game default (" + gpuTsName(p == null ? "submission" : p.gpuTs) + ")", "Per segment", "Per submission"};
+        String m = Prefs.gpuTs(a, g.titleId);
+        int checked = m == null ? 0 : 1 + Math.max(0, Arrays.asList(GPU_TS).indexOf(m));
+        LinearLayout box = new LinearLayout(a);
+        box.setOrientation(LinearLayout.VERTICAL);
+        AlertDialog[] d = new AlertDialog[1];
+        box.addView(Ui.small(a, "Per segment: the game's timestamps see the real GPU time, so its dynamic resolution can adapt. Per submission: one time for the whole "
+                + "submission (the older behaviour). A DM_NVN_GPU_TS line in env.txt wins."));
+        android.widget.RadioGroup rg = new android.widget.RadioGroup(a);
+        for (int k = 0; k < labels.length; k++) {
+            android.widget.RadioButton rb = new android.widget.RadioButton(a);
+            rb.setText(labels[k]);
+            rb.setId(k + 1);
+            rg.addView(rb);
+        }
+        rg.check(checked + 1);
+        rg.setOnCheckedChangeListener((x, w) -> {
+            Prefs.gpuTs(a, g.titleId, w <= 1 ? null : GPU_TS[w - 2]);
+            d[0].dismiss();
+            done.run();
+        });
+        Ui.add(box, rg, 8);
+        d[0] = Ui.sheet(a, "GPU timing · " + g.name, box).setNegativeButton("Cancel", null).show();
+    }
+
     private static void resolution(MainActivity a, Game g, Runnable done) {
         String[] labels = new String[Prefs.WINDOWS.length + 1];
-        labels[0] = "Default (the main screen's: " + Prefs.windowName(Prefs.window(a), false) + ")";
+        labels[0] = "Default (" + Prefs.windowName(Prefs.defaultWindow(a, g.titleId), false) + ")";
         System.arraycopy(Prefs.WINDOW_NAMES, 0, labels, 1, Prefs.WINDOW_NAMES.length);
         int checked = Prefs.ownWindow(a, g.titleId) ? 1 + Math.max(0, Arrays.asList(Prefs.WINDOWS).indexOf(Prefs.gameWindow(a, g.titleId))) : 0;
         new AlertDialog.Builder(a).setTitle("Game resolution · " + g.name).setSingleChoiceItems(labels, checked, (x, w) -> {

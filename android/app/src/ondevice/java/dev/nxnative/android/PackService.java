@@ -28,7 +28,6 @@ import java.io.IOException;
 import java.io.RandomAccessFile;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
-import java.nio.file.StandardCopyOption;
 import java.text.SimpleDateFormat;
 import java.util.ArrayList;
 import java.util.Date;
@@ -310,7 +309,11 @@ public final class PackService extends Service {
             if (j.next() < 0) {
                 j.state("done", null, null);
                 // the split and the translation results are not needed once the library is in the pack
-                Job.deleteTree(new File(j.dir(), "split"));
+                try {
+                    Outputs.delete(new File(j.dir(), "split"));
+                } catch (IOException e) {
+                    Log.w(TAG, "split: " + e.getMessage());   // the job is done all the same; a later split begins by deleting it again
+                }
                 Job.deleteTree(j.splitScan(this));
                 Job.deleteTree(new File(j.dir(), "xlate"));
                 Job.deleteTree(new File(j.dir(), "lib"));
@@ -372,7 +375,8 @@ public final class PackService extends Service {
         // The tools' arguments: the in-process forms (pack_android.py --in-process: the rewriter in the same Python; shader_split.py with J=1 below: no process pool;
         // vk_android_build.py with the translator and the validator as libraries, XLATE / SPIRV_VAL below; the app's process must not fork, ONDEVICE.md "No subprocesses").
         // The split is resumable by RomFS file: its scan results are kept in the app's own storage (Job.splitScan, DM_SPLIT_RESUME, shader_split.py ScanCache) and a rerun scans only the files
-        // that have none; it writes its outputs into split.tmp/ at its end, which then becomes split/.
+        // that have none; it writes its outputs into split/ at its end, which counts as complete only once its marker is written after them (Outputs: no folder is
+        // renamed on shared storage, where MediaProvider may refuse it).
         // The shaders step is resumable by shader: each result is a file in xlate/ (DMSH_VK_RESULTS) and a rerun skips the shaders that have one; it writes the
         // library (lib/v-<DMSH_VK_CHAIN>/) from the results at its end. The pack step copies the library into the pack (--shader-cache)
         switch (s) {
@@ -381,15 +385,17 @@ public final class PackService extends Service {
                 argv = new String[] {dump.getPath(), "--version", v, "--out", pack.getPath(), "--code-only", "-j", "1", "--in-process"};
                 break;
             case "split":
-                Job.deleteTree(splitTmp);   // only outputs a stopped run may have half written: the split writes them all at its end; what it kept is in Job.splitScan
-                splitTmp.mkdirs();
+                // only outputs a stopped run may have half written: the split writes them all at its end; what it kept is in Job.splitScan. The marker goes first
+                Outputs.begin(split);
+                Job.deleteTree(splitTmp);   // left by an older build, which wrote into split.tmp/ and renamed it
                 tool = "dm/gfx/tools/shader_split.py";
-                argv = new String[] {upRomfs, upMain, new File(splitTmp, "pkg").getPath(),
-                        new File(splitTmp, "shader_map.tsv").getPath(), new File(splitTmp, "shader_facts.tsv").getPath(), new File(splitTmp, "shader_pairs.tsv").getPath(),
-                        new File(splitTmp, "pso_pairs.tsv").getPath()};
+                argv = new String[] {upRomfs, upMain, new File(split, "pkg").getPath(),
+                        new File(split, "shader_map.tsv").getPath(), new File(split, "shader_facts.tsv").getPath(), new File(split, "shader_pairs.tsv").getPath(),
+                        new File(split, "pso_pairs.tsv").getPath()};
                 break;
             case "shaders": {
-                if (!new File(split, "pkg").isDirectory()) {   // the split went (a finished job deletes it; an APK update then translates again): split first
+                // the split went (a finished job deletes it; an APK update then translates again), or it is not complete (no marker; also an older build's split/): split first
+                if (!Outputs.complete(split)) {
                     j.stepState("split", "pending");
                     return "interrupted";
                 }
@@ -458,9 +464,7 @@ public final class PackService extends Service {
         if (code == PackEngine.INTERRUPTED) return "interrupted";
         if (code != 0) return s + " stopped with code " + code + (tail.lastRed != null ? ": " + tail.lastRed : "") + " (log: " + log + ")";
         if (s.equals("split")) {
-            Job.syncTree(splitTmp);   // on the disk before the rename, so a reboot after the step is recorded done cannot leave cut tables in split/
-            Job.deleteTree(split);
-            Files.move(splitTmp.toPath(), split.toPath(), StandardCopyOption.ATOMIC_MOVE);
+            Outputs.finish(split);   // every output synced, then the marker: a reboot after the step is recorded done cannot leave cut tables accepted in split/
             // the scan results go only once job.json records the split done (work()): a kill before that resumes from them instead of scanning everything again
         }
         long t = j.stepTotal(i);
@@ -481,7 +485,11 @@ public final class PackService extends Service {
         } catch (IOException | RuntimeException | UnsatisfiedLinkError e) {
             return "cannot compare the dump's shaders with the app's list: " + e.getMessage();
         }
-        Job.deleteTree(split);   // a Retry splits again, from the start
+        try {
+            Outputs.delete(split);   // a Retry splits again, from the start
+        } catch (IOException e) {
+            Log.w(TAG, "split: " + e.getMessage());   // its step is pending: the next run's Outputs.begin tries again
+        }
         Job.deleteTree(j.splitScan(this));
         j.stepState("split", "pending");
         return "the dump's shaders are not the ones this app knows for " + j.name() + " (" + Profile.versionName(j.version()) + ", " + have.getName()

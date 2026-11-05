@@ -28,21 +28,17 @@ Only these versions run; the app tells you if your dump is a different one.
 
 ## Performance
 
-Measured on the tested phone (Snapdragon 8 Elite Gen 5, 16 GB), in the first level, with the performance overlay on and
-frame generation off. Your numbers will differ with the phone, its temperature and its power settings.
+`040074A01BF12000` on the tested phone (Snapdragon 8 Elite Gen 5, 16 GB), first level, frame generation off:
 
-| Title ID | Resolution | GPU driver | Phone power mode | Frame rate |
-|---|---|---|---|---|
-| `040074A01BF12000` | 1080p (default) | Qualcomm (system) | Normal | about 30 fps |
-| `040074A01BF12000` | 1080p (default) | Qualcomm (system) | Performance mode | 52-58 fps |
-| `040074A01BF12000` | Original (2880x1620) | Qualcomm (system) | Performance mode | about 30 fps |
-| `040074A01BF12000` | 1080p (default) | Turnip | Normal | 17-32 fps |
-| `0400C3F00006E000` | 1080p (default) | Qualcomm (system) | Performance mode | not measured yet |
+| GPU driver | Resolution | Frame rate |
+|---|---|---|
+| System (Qualcomm) | Phone 1080p | 30-60 fps (52-58 in the phone's performance mode) |
+| Turnip | Phone 720p (its default) | about 30 fps |
+| Turnip | Phone 1080p | about 20 fps (fix coming) |
 
-- In the phone's performance mode the game reaches its own 60 fps interval in places. A stable 60 is the next goal.
-- Frame generation (Settings) can take 30 fps to a 60 / 90 / 120 fps target, with some added latency.
-- The phone throttles when hot, and the frame rate drops with it. A cooler helps keep it up.
-- The first visit to an area stutters while shaders are built; play a minute before judging the frame rate.
+`0400C3F00006E000`: not measured yet. Your numbers depend on the phone, its temperature and power mode. The first visit to
+an area stutters while shaders are built, and a hot phone throttles: a cooler helps. Frame generation (Settings) can
+take 30 fps to a 60 / 90 / 120 fps target, with some added latency.
 
 ## What you need
 
@@ -99,6 +95,10 @@ If something doesn't work, start with Settings › **Readiness check**. A game's
   character selection screen can turn the 3D scene dark or black (the menus and the race HUD still draw). Free roam
   alone is not affected. Being fixed.
 - `040074A01BF12000`: some texture glitches during fights in some caves.
+- `040074A01BF12000` can drop to about 20 fps with Turnip drivers at Phone 1080p: its upscaler shader is too slow on
+  Adreno, a fix is coming. Until then the game starts at **Phone 720p** by default (about 30 fps on Turnip); the phone's
+  own driver (System), if the Readiness check passes with it, runs 1080p at 30-60 fps (the game's ⋯ › Game settings ›
+  Game resolution).
 - `0400C3F00006E000` has more problems: trees flicker, ground textures are sometimes missing, and memory is tight on
   16 GB. It heats the phone a lot.
 - The first visit to an area stutters while its shaders and pipelines are built; later visits are smoother.
@@ -127,6 +127,13 @@ Something wrong on your phone: open an [issue](https://github.com/moceure/Banana
 (phone, chip and RAM, GPU driver, game version, and the log from Settings › **Share log**). Every report from a phone
 other than the tested one helps. Questions, ideas and "it runs on my phone" reports go to
 [Discussions](https://github.com/moceure/BananaNative/discussions).
+
+> [!IMPORTANT]
+> **This GitHub repository is the only official place for Banana Native.** The project has no Discord server,
+> subreddit, Telegram group, X / social media account or website, and nobody speaks for it anywhere else. Download the
+> APK only from [Releases](https://github.com/moceure/BananaNative/releases): a copy from anywhere else may be modified
+> or malicious. Nobody connected to the project will ask you for money, keys, game files or account details. To reach
+> the developer, use issues or Discussions here.
 
 ## Videos and device reports
 

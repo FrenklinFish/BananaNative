@@ -90,8 +90,8 @@ the rest after it is unambiguous. Tools take these wherever they take the matchi
   renamed `.nup` still plays; a pack made from a folder falls back to `update/<pack version>` or `base`). `DM_AOC_DIR/<index>.nup`
   links to the game's own `.nup` when it holds that add-on, else to the `.nup` the aoc row names, else the game's own.
 - Prepare on the phone (PackService) passes `<N>` (the `.nup`) to pack_android.py and `<N>:update/<v>/romfs`,
-  `<N>:update/<v>/exefs/main` (`<N>:base/…` for version 0) to shader_split.py. It needs a `.nup` with a base and an update, or a base with its own ExeFS and RomFS when the profile's build is the base game (`Pack.isDump`); DumpCheck checks the TOC hash,
-  the base, the profile's update, main / main.npdm / RomFS and each module's build ID.
+  `<N>:update/<v>/exefs/main` (`<N>:base/…` for version 0) to shader_split.py. It takes any of three layouts (`DumpLayout`): the base alone with its ExeFS and RomFS (a game whose build is its base), an update alone that carries the whole game, or both; a version's ExeFS and RomFS are its own, else the base's, and the version is the one whose modules are a profile build, found by build ID wherever it is. A `.nup` of another build is refused with what it holds and the build this app supports. DumpCheck checks the TOC hash,
+  the version's main / main.npdm / RomFS, each module's build ID and the profile's `romfs_check` rows (`RomfsCheck`: the RomFS is that version's data).
 - Readiness: a "Game files" row per game (a `.nup` must open and pass its TOC hash).
 - Tests: `NupJvmTest` (javac + java, no Gradle runner yet; see its header): 293 checks on a synthetic `.nup`, 30 on the
   real DKB one.

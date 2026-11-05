@@ -71,7 +71,7 @@ final class DriverFetch {
         return c;
     }
 
-    private static String why(Exception e) {
+    private static String why(Throwable e) {
         if (e instanceof UnknownHostException || e instanceof ConnectException) return "No network (cannot reach GitHub)";
         if (e instanceof SocketTimeoutException) return "No network (GitHub did not answer in time)";
         if (e instanceof Failure) return e.getMessage();
@@ -137,7 +137,7 @@ final class DriverFetch {
         AlertDialog wait = busy(a, "Reading the releases of " + repo + "…");
         new Thread(() -> {
             List<Asset> l = null; String err = null;
-            try { l = list(repo); } catch (IOException | JSONException | RuntimeException e) { err = why(e); }
+            try { l = list(repo); } catch (Throwable e) { err = why(e); }   // nothing on this thread may end the app
             final List<Asset> got = l; final String fail = err;
             UI.post(() -> {
                 if (gone(a)) return;
@@ -157,7 +157,7 @@ final class DriverFetch {
         AlertDialog wait = busy(a, "Downloading " + as.name + "…");
         new Thread(() -> {
             GpuDriver.Info i = null; String err = null;
-            try { i = fetch(a, as); } catch (IOException | RuntimeException e) { err = why(e); }
+            try { i = fetch(a, as); } catch (Throwable e) { err = why(e); }   // a damaged zip throws unchecked exceptions too (DriverZip turns them into reasons)
             final GpuDriver.Info got = i; final String fail = err;
             if (got != null) GpuDriver.select(a, got);
             UI.post(() -> {

@@ -81,11 +81,13 @@ public final class LauncherJvmTest {
         check(b.size() == 2 && b.get(458752L).get("sdk").equals("bb") && b.get(0L).get("main").equals("cc"), "the builds, lower case");
         check(l.get(1).buildMap().isEmpty(), "no builds");
         // The versions a refused dump is told about (DumpCheck): version 0 is the base game itself, whose supported build needs no update (Mario Kart World 1.8.0)
-        check(l.get(0).supported().equals("This app supports Donkey Kong Bananza (040074A01BF12000) as the base game (no update) or update 458752 only: dump the game with that update installed."),
+        check(l.get(0).supported().equals("This app supports Donkey Kong Bananza (040074A01BF12000) update 458752 (main aa…) or the base game (main cc…) only."),
                 "supported, base and an update: " + l.get(0).supported());
-        Profile mkw = Profile.parse("0400C3F00006E000\tMario Kart World\t11604\tabcdef012345\t0 main=d00e4f39").get(0);
-        check(mkw.supported().equals("This app supports Mario Kart World (0400C3F00006E000) as the base game (no update) only: dump the game without an update."),
+        // with the display version build.gradle passes from game.tsv's build row ("@1.8.0"), which buildMap ignores
+        Profile mkw = Profile.parse("0400C3F00006E000\tMario Kart World\t11604\tabcdef012345\t0 @1.8.0 main=d00e4f399e411d0613aa8d26b1c02fef").get(0);
+        check(mkw.supported().equals("This app supports Mario Kart World (0400C3F00006E000) 1.8.0 (the base game, version 0, main d00e4f399e411d06…) only."),
                 "supported, the base only: " + mkw.supported());
+        check(mkw.buildMap().get(0L).size() == 1 && "1.8.0".equals(mkw.display(0)) && mkw.display(1) == null, "display version: " + mkw.buildMap());
         // Game resolution (build.gradle resolutionOf, the 10th column): the window size for a window_fn game, the graphics scale and operation mode for a graphics_scale one
         check(!l.get(0).hasResolution() && l.get(0).resolutionEnv("1920x1080").isEmpty(), "no column: no Game resolution");
         Profile win = Profile.parse("040074A01BF12000\tD\t0\tx\t\t\t\t\t\twindow").get(0);
