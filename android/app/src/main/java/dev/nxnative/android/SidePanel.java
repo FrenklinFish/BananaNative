@@ -17,7 +17,7 @@ import android.widget.TextView;
 
 /**
  * The in-game panel: slides in from the right over the running game, which goes on behind it. It holds the frame rate cap (Native.fpsCapSet), frame generation
- * (Lsfg.rows, Native.frameGenSet), the overlay's items (Overlay.rows), the on-screen controls' rows (TouchControls.controlRows) and Stop. Every change applies at once,
+ * (Lsfg.rows, Native.frameGenSet), FSR 1 upscaling (Fsr.rows), the overlay's items (Overlay.rows), the on-screen controls' rows (TouchControls.controlRows) and Stop. Every change applies at once,
  * without going back to the launcher, and is kept for the next start. Opened by Back (the phone's button or its edge swipe), a long press on the on-screen controls'
  * show / hide button, or a gamepad's Home / guide button (KEYCODE_BUTTON_MODE); closed the same ways, by a tap beside it, or by B on a gamepad, whose D-pad and A move
  * through it meanwhile (GameActivity.dispatchKeyEvent).
@@ -139,6 +139,8 @@ final class SidePanel extends FrameLayout {
         fpsNow = note("");
 
         lsfgNow = Lsfg.rows(act, box, "", () -> { Lsfg.push(act); refresh(); });
+
+        Fsr.rows(act, box);
 
         head("Overlay");
         Overlay.rows(act, box, null);
