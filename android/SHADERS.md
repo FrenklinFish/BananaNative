@@ -180,12 +180,14 @@ One file, `dmsh_vk.lib`, little-endian (structs in `dmsh_abi_vk.h`):
 | Part | Size | |
 |---|---|---|
 | `dmsh_vk_header` | 128 | magic `MSVK`, version 1, `chain`, `vk_chain`, `game`, `inputs` (16 bytes each, NUL padded), then counts and offsets of the three tables and the blob, `subgroup_size` and `ssbo_align` (the translator answers; 0 in older libraries), `abi` (12 hex digits, `DMSH_VK_ABI`; zero before `ea193cf243cd`) |
-| `dmsh_vk_entry` × n | 64 each | sorted by `key` (the 16-hex shader key as a big-endian number): binary search with the host's program key. Stage, flags, first module and count, first binding and count, compute size, c1 bytes, vertex input and colour output types, `uint_mask` (the `MOD_UINT_MIXED` module's integer targets) |
+| `dmsh_vk_entry` × n | 64 each | sorted by `key` (the 16-hex shader key as a big-endian number): binary search with the host's program key. Stage, flags, first module and count, first binding and count, compute size, c1 bytes (offset: `c1_off`, high 32 bits in `c1_off_hi`), vertex input and colour output types, `uint_mask` (the `MOD_UINT_MIXED` module's integer targets) |
 | `dmsh_vk_bind` | 24 each | the records above |
-| `dmsh_vk_module` | 16 each | offset in the blob, SPIR-V size, stored size, variant (`MOD_*`, the base first), codec: `RAW` or `ZSTD` (one frame; the replay links zstd's decompressor) |
+| `dmsh_vk_module` | 16 each | offset in the blob (`off`, bits 32-47 in `off_hi`), SPIR-V size, stored size, variant (`MOD_*`, the base first), codec: `RAW` or `ZSTD` (one frame; the replay links zstd's decompressor) |
 | blob | | from `blob_off`, 16-byte aligned pieces: the modules and the c1 bytes |
 
-The format stays version 1: the header and entry fields above came out of reserved bytes (zero in an older library, which means 32 lanes, exact storage buffer binding, no mixed module), and an older library's entries have only the base module. A new variant is another module record of the same entry, with the next `DMSH_VK_MOD_*` number.
+The format stays version 1: the header and entry fields above came out of reserved bytes (zero in an older library, which means 32 lanes, exact storage buffer binding, no mixed module, offsets under 4 GiB), and an older library's entries have only the base module. A new variant is another module record of the same entry, with the next `DMSH_VK_MOD_*` number.
+
+**Libraries past 4 GiB.** Pokémon Pokopia's 131,426 shaders make a blob of about 9.8 GB, past what 32-bit offsets address. A module's offset takes bits 32-47 from `off_hi` and an entry's c1 offset its high 32 bits from `c1_off_hi` (`vka_shlib_mod_off`, `vka_shlib_c1_off`; `vk_android_delta.py` `mod_off`, `c1_off`); both are 0 in a smaller library, which is written as before. `c1_off_hi` is a position in the file, so the [entry hash](#delta-updates) leaves it out as it leaves out `c1_off`. `write_library` keeps only the tables in memory and copies each module from its result file into place (`Stored`), and `--check` maps the library instead of reading it: neither holds the blob in memory as a whole.
 
 ## What the replay does
 

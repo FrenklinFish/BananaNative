@@ -31,9 +31,13 @@ def vk_values(path=ABI_VK):
 
 VK = vk_values()
 HEAD = struct.Struct('<II16s16s16s16sIIIIIIQQHH12s')   # dmsh_vk_header; the last 12 bytes: abi (DMSH_VK_ABI, 12 characters, no NUL; zero in a library made before it)
-ENTRY = struct.Struct('<QQBBHIIHH3HBBIIII8x')            # dmsh_vk_entry
-MOD = struct.Struct('<IIIBBH')                            # dmsh_vk_module
-POS = (20, 24, 44)   # the entry's positions in its file: first module, first binding, c1 offset (zeroed in the hash and in a reused entry, set again by write_library)
+ENTRY = struct.Struct('<QQBBHIIHH3HBBIIII8x')            # dmsh_vk_entry; the last 8 bytes: c1_off_hi (a position, below) and reserved
+MOD = struct.Struct('<IIIBBH')                            # dmsh_vk_module; the last field: off_hi, bits 32-47 of the offset
+POS = (20, 24, 44, 56)   # the entry's positions in its file: first module, first binding, c1 offset and its high 32 bits (zeroed in the hash and in a reused entry, set again by write_library)
+
+
+def mod_off(off, off_hi): return off_hi << 32 | off   # a module record's offset in the blob (dmsh_abi_vk.h: off_hi is 0 unless the blob passes 4 GiB)
+def c1_off(entry): return struct.unpack_from('<I', entry, 56)[0] << 32 | struct.unpack_from('<I', entry, 44)[0]   # an entry's c1 offset in the blob
 assert HEAD.size == VK['HEADER_SIZE'] and ENTRY.size == VK['ENTRY_SIZE'] and MOD.size == VK['MOD_SIZE']
 HASH_LEN = 16   # hex digits of an entry hash in the manifest: 64 bits, against at most tens of thousands of entries a game
 
@@ -99,13 +103,14 @@ class Library:
         o = self.eo + ENTRY.size * i
         e = bytes(self.m[o:o + ENTRY.size])
         key, _, _, mc, _, m0, b0, bc = struct.unpack_from('<QQBBHIIH', e)
-        c1_off, c1_len = struct.unpack_from('<II', e, 44)
-        if m0 + mc > self.nm or b0 + bc > self.nb or c1_off + c1_len > self.blob_size: raise ValueError(f'{self.path}: entry {key:016x} out of range')
+        c1o, c1_len = c1_off(e), struct.unpack_from('<I', e, 48)[0]
+        if m0 + mc > self.nm or b0 + bc > self.nb or c1o + c1_len > self.blob_size: raise ValueError(f'{self.path}: entry {key:016x} out of range')
         binds = bytes(self.m[self.bo + VK['BIND_SIZE'] * b0:self.bo + VK['BIND_SIZE'] * (b0 + bc)])
-        c1 = bytes(self.m[self.blob_off + c1_off:self.blob_off + c1_off + c1_len])
+        c1 = bytes(self.m[self.blob_off + c1o:self.blob_off + c1o + c1_len])
         mods = []
         for j in range(m0, m0 + mc):
-            off, size, stored, variant, codec, _ = MOD.unpack_from(self.m, self.mo + MOD.size * j)
+            off, size, stored, variant, codec, off_hi = MOD.unpack_from(self.m, self.mo + MOD.size * j)
+            off = mod_off(off, off_hi)
             if off + stored > self.blob_size: raise ValueError(f'{self.path}: entry {key:016x}: a module out of the blob')
             mods.append((variant, size, self.m[self.blob_off + off:self.blob_off + off + stored], codec))
         return f'{key:016x}', e, binds, c1, mods

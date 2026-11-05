@@ -248,7 +248,8 @@ def locate(keys, loc, files, skey):
 def check_library(path, validator, nj):
     """Read a library back as the replay does (dmsh_abi_vk.h): the header, entries sorted by key, every binding and module in range, each module decompressed to SPIR-V of
     its recorded size and valid for spirv-val --target-env vulkan1.3. → [problems]"""
-    d = open(path, 'rb').read(); bad = []
+    with open(path, 'rb') as f: d = mmap.mmap(f.fileno(), 0, access=mmap.ACCESS_READ)   # mapped as the replay maps it: a large game's library is several GB
+    bad = []
     magic, version, chain, vkc, game, inputs, ne, eo, nb, bo, nm, mo, blob_off, blob_size, sg, sa = struct.unpack_from('<II16s16s16s16sIIIIIIQQHH', d, 0)
     if magic != VK['LIB_MAGIC'] or version != VK['LIB_VERSION']: return [f'magic {magic:#x} version {version}']
     if blob_off + blob_size != len(d): bad.append('blob does not end the file')
@@ -258,14 +259,18 @@ def check_library(path, validator, nj):
     for i in range(ne):
         key, _, stage, mc, flags, m0, b0, bc = struct.unpack_from('<QQBBHIIH', d, eo + VK['ENTRY_SIZE'] * i)
         if m0 + mc > nm or b0 + bc > nb or stage > VK['STAGE_MS']: bad.append(f'{key:016x}: entry out of range'); continue
+        _e = d[eo + VK['ENTRY_SIZE'] * i:eo + VK['ENTRY_SIZE'] * (i + 1)]
+        if delta.c1_off(_e) + struct.unpack_from('<I', _e, 48)[0] > blob_size: bad.append(f'{key:016x}: c1 bytes out of the blob')
         vs = [struct.unpack_from('<IIIBBH', d, mo + VK['MOD_SIZE'] * j)[3] for j in range(m0, m0 + mc)]
         if not vs or vs[0] != VK['MOD_BASE'] or len(set(vs)) != len(vs): bad.append(f'{key:016x}: modules {vs}: the base module first, each variant once')
         for j in range(m0, m0 + mc):
-            off, size, stored, variant, codec, _ = struct.unpack_from('<IIIBBH', d, mo + VK['MOD_SIZE'] * j)
+            off, size, stored, variant, codec, off_hi = struct.unpack_from('<IIIBBH', d, mo + VK['MOD_SIZE'] * j)
+            off = delta.mod_off(off, off_hi)
             if off + stored > blob_size: bad.append(f'{key:016x}: module out of the blob'); continue
-            jobs_.append((f'{key:016x}_{variant}', d[blob_off + off:blob_off + off + stored], size, codec))
+            jobs_.append((f'{key:016x}_{variant}', blob_off + off, stored, size, codec))
     def one(job):
-        tag, raw, size, codec = job
+        tag, at, n, size, codec = job
+        raw = d[at:at + n]   # read when checked, not all at once
         if codec == VK['CODEC_ZSTD']:
             if zstd is None: return f'{tag}: zstd module and no zstd module in this Python'
             raw = zstd.decompress(raw)
@@ -669,33 +674,63 @@ def entry_parts(key, refl, nmods):
     return entry, bytes(binds), c1
 
 
+class Stored:
+    """A module's stored bytes left in its result file until the library is written (read_result): a large game's modules (Pokemon Pokopia's: 9.8 GB) are never all in
+    memory at once"""
+    __slots__ = ('path', 'off', 'n')
+    def __init__(self, path, off, n): self.path, self.off, self.n = path, off, n
+    def __len__(self): return self.n
+    def read(self):
+        with open(self.path, 'rb') as f:
+            f.seek(self.off); d = f.read(self.n)
+        if len(d) != self.n: sys.exit(f'[RED] {self.path} changed while the library was written: run again')
+        return d
+
+
+def stored_bytes(s): return s.read() if isinstance(s, Stored) else s
+
+
+BLOB_MAX = 1 << 48   # module offsets have 48 bits (off, off_hi), c1 offsets 64 (dmsh_abi_vk.h)
+
+
 def write_library(results):
-    """dmsh_vk.lib: header, entries sorted by key, binding records, module records, blob (dmsh_abi_vk.h)"""
+    """dmsh_vk.lib: header, entries sorted by key, binding records, module records, blob (dmsh_abi_vk.h). The tables are made first, with each blob piece's place; then
+    the pieces are written one at a time, so the blob is never in memory as a whole. Offsets past 4 GiB keep their high bits in c1_off_hi / off_hi, which are 0 in a
+    smaller library: that one is written as before"""
     ok = sorted(((k, r) for k, st, _, r in results if st == 'ok'), key=lambda x: key_int(x[0]))
-    entries, binds, mods = bytearray(), bytearray(), bytearray(); blob = bytearray()
+    entries, binds, mods = bytearray(), bytearray(), bytearray(); pieces = []; blen = 0
     nb = nm = 0
     def put(b):
-        nonlocal blob
-        blob += b'\0' * (-len(blob) % 16); off = len(blob); blob += b; return off
+        nonlocal blen
+        blen += -blen % 16; off = blen; pieces.append((off, b)); blen += len(b)
+        if blen > BLOB_MAX: sys.exit(f'[RED] the library blob passes {BLOB_MAX >> 40} TiB, the most a module record addresses')
+        return off
     for key, (refl, modules) in ok:
         entry, bb, c1 = entry_parts(key, refl, len(modules))
         c1_off = put(c1) if c1 else 0
         b0, m0 = nb, nm
         for variant, size, stored, codec, _ in modules:
-            mods += struct.pack('<IIIBBH', put(stored), size, len(stored), variant, codec, 0); nm += 1
+            off = put(stored)
+            mods += struct.pack('<IIIBBH', off & 0xFFFFFFFF, size, len(stored), variant, codec, off >> 32); nm += 1
         binds += bb; nb += len(bb) // VK['BIND_SIZE']
         e = bytearray(entry)
-        for o, v in zip(delta.POS, (m0, b0, c1_off)): struct.pack_into('<I', e, o, v)
+        for o, v in zip(delta.POS, (m0, b0, c1_off & 0xFFFFFFFF, c1_off >> 32)): struct.pack_into('<I', e, o, v)
         entries += e
     hs = VK['HEADER_SIZE']; eo = hs; bo = eo + len(entries); mo = bo + len(binds); blob_off = (mo + len(mods) + 15) // 16 * 16
     pad = lambda s: s.encode()[:16].ljust(16, b'\0')   # NUL padded; a 16-character value (a title ID) has no terminator
     head = delta.HEAD.pack(VK['LIB_MAGIC'], VK['LIB_VERSION'], pad(CHAIN), pad(VKV), pad(GAME.id), pad(INPUTS),
-                           len(ok), eo, nb, bo, nm, mo, blob_off, len(blob), ANSWERS['subgroup_size'], ANSWERS['ssbo_align'], ABI.encode())
+                           len(ok), eo, nb, bo, nm, mo, blob_off, blen, ANSWERS['subgroup_size'], ANSWERS['ssbo_align'], ABI.encode())
     assert len(head) == hs and len(entries) == len(ok) * VK['ENTRY_SIZE'] and len(binds) == nb * VK['BIND_SIZE'] and len(mods) == nm * VK['MOD_SIZE']
-    data = head + entries + binds + mods; data += b'\0' * (blob_off - len(data)) + blob
+    data = head + entries + binds + mods; data += b'\0' * (blob_off - len(data))
     path = os.path.join(out, VK['LIB_FILE']); tmp = path + '.tmp'
-    open(tmp, 'wb').write(data); os.replace(tmp, path)
-    return path, len(data)
+    with open(tmp, 'wb') as f:
+        f.write(data); pos = 0
+        for off, b in pieces:
+            b = stored_bytes(b)
+            f.write(b'\0' * (off - pos)); f.write(b); pos = off + len(b)
+        assert pos == blen and f.tell() == blob_off + blen
+    os.replace(tmp, path)
+    return path, blob_off + blen
 
 
 # ---- the build
@@ -743,15 +778,20 @@ def write_result(key, st, err, r, ps_in):
 
 def read_result(key):
     """→ (key, status, error, (reflection, [(variant, size, stored, codec, SPIR-V or None)]) or None), as fin() returns it. The reflection has been through JSON, as index.json
-    writes it, so a result read back and a result just made write the same library"""
-    d = open(result_path(key), 'rb').read()
-    n = struct.unpack_from('<I', d, 8)[0]; h = json.loads(d[12:12 + n]); o = 12 + n
-    if not h['refl']: return key, h['st'], h['err'], None
-    mods, loose = [], os.environ.get('DMSH_VK_LOOSE') == '1'
-    for variant, size, ln, codec in h['modules']:
-        stored = d[o:o + ln]; o += ln
-        if len(stored) != ln: sys.exit(f'[RED] {result_path(key)} is cut short: delete it and run again')
-        mods.append((variant, size, stored, codec, (zstd.decompress(stored) if codec == VK['CODEC_ZSTD'] else stored) if loose else None))
+    writes it, so a result read back and a result just made write the same library. The stored bytes stay in the file (Stored) unless DMSH_VK_LOOSE wants the SPIR-V"""
+    p = result_path(key)
+    with open(p, 'rb') as f:
+        d = f.read(12); n = struct.unpack_from('<I', d, 8)[0]; h = json.loads(f.read(n)); o = 12 + n
+        end = os.fstat(f.fileno()).st_size
+        if not h['refl']: return key, h['st'], h['err'], None
+        mods, loose = [], os.environ.get('DMSH_VK_LOOSE') == '1'
+        for variant, size, ln, codec in h['modules']:
+            if o + ln > end: sys.exit(f'[RED] {p} is cut short: delete it and run again')
+            if loose:
+                f.seek(o); stored = f.read(ln)
+                mods.append((variant, size, stored, codec, zstd.decompress(stored) if codec == VK['CODEC_ZSTD'] else stored))
+            else: mods.append((variant, size, Stored(p, o, ln), codec, None))
+            o += ln
     return key, h['st'], h['err'], (h['refl'], mods)
 
 
@@ -909,7 +949,7 @@ try:   # the package descriptors are closed however the translation ends (the ph
                     elif h and h.get('reused') and k in _need:   # kept from an older library: the inputs its base module reads, as finish() takes them
                         _r = read_result(k)[3]
                         _b = next(m for m in _r[1] if m[0] == VK['MOD_BASE'])
-                        PS_INPUTS[k] = set(spv.Module(delta.spirv(_b[2], _b[3], zstd)).io(spv.SC_INPUT))
+                        PS_INPUTS[k] = set(spv.Module(delta.spirv(stored_bytes(_b[2]), _b[3], zstd)).io(spv.SC_INPUT))
         batches = [_phase[i:i + BATCH] for i in range(0, len(_phase), BATCH)]
         with cf.ThreadPoolExecutor(NJ) as ex:
             for _ in ex.map(run_batch, batches): pass

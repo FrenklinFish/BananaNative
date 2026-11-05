@@ -65,4 +65,5 @@ The first boot shows the language list: `A`, `LUp`, `A` picks English. The chara
 - [Ampere instructions new in Pokémon Pokopia](../../../docs/reference/shaders.md#ampere-instructions-new-in-pokémon-pokopia).
 - [A shader build that keeps its packages in memory runs one worker at a time](../../../docs/reference/shaders.md#a-shader-build-that-keeps-its-packages-in-memory-runs-one-worker-at-a-time): the full build at one or two shaders a second (resolved).
 - [Integer buffer textures read through float slots](../../../docs/reference/rendering.md#integer-buffer-textures-read-through-float-slots).
+- [A Vulkan shader library past 4 GiB](../../../docs/reference/shaders.md#a-vulkan-shader-library-past-4-gib): the full Android library (131,426 shaders, a 9.8 GB blob) was not written.
 - [The Joy-Con mouse pointer](../../../docs/reference/services.md#the-joy-con-mouse-pointer) and [GameShare guest displays](../../../docs/reference/services.md#gameshare-guest-displays): boot aborts.

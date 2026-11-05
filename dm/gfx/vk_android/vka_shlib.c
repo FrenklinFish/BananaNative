@@ -49,12 +49,12 @@ int vka_shlib_check(vka_shlib *L, const void *base, size_t size, const char *cha
         if (i && e->key <= L->ent[i - 1].key) return fail(err, errn, "entry %u (key %016llx) out of order", i, (unsigned long long)e->key);
         if ((uint64_t)e->bind + e->bind_count > h->bind_count) return fail(err, errn, "entry %016llx: bindings past the table", (unsigned long long)e->key);
         if ((uint64_t)e->mod + e->mod_count > h->mod_count || !e->mod_count) return fail(err, errn, "entry %016llx: modules past the table", (unsigned long long)e->key);
-        if ((uint64_t)e->c1_off + e->c1_len > h->blob_size) return fail(err, errn, "entry %016llx: c1 bytes past the blob", (unsigned long long)e->key);
+        if (vka_shlib_c1_off(e) + e->c1_len > h->blob_size) return fail(err, errn, "entry %016llx: c1 bytes past the blob", (unsigned long long)e->key);
         if (e->stage > DMSH_VK_STAGE_MS) return fail(err, errn, "entry %016llx: stage %u", (unsigned long long)e->key, e->stage);
     }
     for (uint32_t i = 0; i < h->mod_count; i++) {
         const dmsh_vk_module *m = &L->mod[i];
-        if ((uint64_t)m->off + m->stored > h->blob_size) return fail(err, errn, "module %u past the blob", i);
+        if (vka_shlib_mod_off(m) + m->stored > h->blob_size) return fail(err, errn, "module %u past the blob", i);
         if (m->codec != DMSH_VK_CODEC_RAW && m->codec != DMSH_VK_CODEC_ZSTD) return fail(err, errn, "module %u: codec %u", i, m->codec);
         if (m->size & 3 || m->size < 20 || (m->codec == DMSH_VK_CODEC_RAW && m->stored != m->size)) return fail(err, errn, "module %u: %u bytes of SPIR-V, %u stored", i, m->size, m->stored);
     }
@@ -99,7 +99,7 @@ const dmsh_vk_module *vka_shlib_module(const vka_shlib *L, const dmsh_vk_entry *
 uint32_t *vka_shlib_spirv(const vka_shlib *L, const dmsh_vk_module *m, size_t *nbytes, char *err, size_t errn) {
     uint32_t *w = malloc(m->size);
     if (!w) { fail(err, errn, "%u bytes for a module", m->size); return NULL; }
-    const uint8_t *src = L->blob + m->off;
+    const uint8_t *src = L->blob + vka_shlib_mod_off(m);
     if (m->codec == DMSH_VK_CODEC_RAW) memcpy(w, src, m->size);
     else {
         size_t r = ZSTD_decompress(w, m->size, src, m->stored);

@@ -172,10 +172,11 @@ typedef struct {
     uint8_t fout_mask;       // colour targets written (output locations)
     uint8_t uint_mask;       // the DMSH_VK_MOD_UINT_MIXED module's unsigned integer targets (0: no such module; older libraries: always 0)
     uint32_t shared;         // compute shared memory bytes (the answer table's)
-    uint32_t c1_off;         // the c1 bytes, in the blob
+    uint32_t c1_off;         // the c1 bytes, in the blob: the low 32 bits of their offset (c1_off_hi has the rest)
     uint32_t c1_len;
     uint32_t vin_mask;       // vertex inputs read, by location (NVN attribute index)
-    uint32_t reserved[2];
+    uint32_t c1_off_hi;      // the high 32 bits of the c1 offset: 0 unless the blob passes 4 GiB (Pokemon Pokopia's is 9.8 GB), so an older library reads the same
+    uint32_t reserved;
 } dmsh_vk_entry;
 
 typedef struct {
@@ -196,12 +197,12 @@ typedef struct {
 } dmsh_vk_bind;
 
 typedef struct {
-    uint32_t off;            // the module's bytes in the blob (from blob_off)
+    uint32_t off;            // the module's bytes in the blob (from blob_off): the low 32 bits of their offset
     uint32_t size;           // SPIR-V bytes (decompressed)
     uint32_t stored;         // bytes in the blob
     uint8_t variant;         // DMSH_VK_MOD_*
     uint8_t codec;           // DMSH_VK_CODEC_*
-    uint16_t reserved;
+    uint16_t off_hi;         // bits 32-47 of the offset: 0 unless the blob passes 4 GiB, so an older library reads the same
 } dmsh_vk_module;
 
 #ifdef __cplusplus

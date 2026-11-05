@@ -106,6 +106,21 @@ class EntryHash(unittest.TestCase):
                       delta.entry_hash(e, bd, c1, [(1, m[0][1])]), delta.entry_hash(e, bd, c1, [(0, spirv(40, 2))]), delta.entry_hash(e, bd, c1, m + [(1, spirv(8, 1))])):
             self.assertNotEqual(h, other)
 
+    def test_high_offset_bits(self):
+        """Offsets past 4 GiB (a blob as Pokemon Pokopia's, 9.8 GB) keep their high bits in the module's off_hi and the entry's c1_off_hi: read as part of the offset
+        (here they point past this small blob, so the entry is refused), and not part of the hash, as the low bits are not"""
+        write_lib(self.tmp / 'A.lib', '111111111111', shaders=[('00000000000000aa', [spirv(40, 1)], b'\x01' * 16)])
+        L = delta.Library(str(self.tmp / 'A.lib')); L.entry(0); mo, eo = L.mo, L.eo; L.close()
+        for at in (mo + 14, eo + 56):   # off_hi, c1_off_hi
+            d = bytearray((self.tmp / 'A.lib').read_bytes()); struct.pack_into('<H', d, at, 1); (self.tmp / 'B.lib').write_bytes(bytes(d))
+            L2 = delta.Library(str(self.tmp / 'B.lib'))
+            with self.assertRaises(ValueError): L2.entry(0)
+            L2.close()
+        self.assertEqual(delta.mod_off(0x10, 2), 0x200000010)
+        e = bytearray(entry('00000000000000aa', c1_off=0x20)); struct.pack_into('<I', e, 56, 3)
+        self.assertEqual(delta.c1_off(e), 0x300000020)
+        self.assertEqual(delta.entry_hash(bytes(e), bind(0), b'', []), delta.entry_hash(entry('00000000000000aa'), bind(0), b'', []), 'c1_off_hi is a position in the file')
+
 
 class Manifest(unittest.TestCase):
     H = {'00000000000000aa': '0123456789abcdef', '00000000000000bb': '-'}
