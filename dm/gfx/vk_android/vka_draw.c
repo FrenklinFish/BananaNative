@@ -1092,7 +1092,7 @@ static vka_shader *inst_variant(vka_shader *s, uint32_t binding) {
         if (w && fread(w, 1, (size_t)n, f) == (size_t)n && w[0] == 0x07230203) {
             VkShaderModuleCreateInfo ci = {VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO, .codeSize = (size_t)n, .pCode = w}; VkShaderModule m = VK_NULL_HANDLE;
             if (!vk.vkCreateShaderModule(V.dev, &ci, NULL, &m) && (v = calloc(1, sizeof *v))) {
-                *v = *s; memset(v->mods, 0, sizeof v->mods); v->mods[DMSH_VK_MOD_BASE] = m; v->vin = v->fout = NULL; v->gs_claim = VK_NULL_HANDLE; v->key = s->key ^ 0x494e5354494e5354ull;
+                *v = *s; memset(v->mods, 0, sizeof v->mods); v->mods[DMSH_VK_MOD_BASE] = m; v->vin = v->fout = NULL; v->gs_claim = VK_NULL_HANDLE; v->key = s->key ^ VKA_INST_KEY_XOR;
                 VLOG("instanced runs: variant of %016llx (binding %u) loaded", (unsigned long long)s->key, binding);
             }
         }
@@ -1101,7 +1101,7 @@ static vka_shader *inst_variant(vka_shader *s, uint32_t binding) {
     if (!v) {   // no file (the usual case): made from the library's SPIR-V (vka_spv_instance); a file in the folder above overrides it
         VkShaderModule m = vka_shader_inst_module(s, binding, 30);
         if (m && (v = calloc(1, sizeof *v))) {
-            *v = *s; memset(v->mods, 0, sizeof v->mods); v->mods[DMSH_VK_MOD_BASE] = m; v->vin = v->fout = NULL; v->gs_claim = VK_NULL_HANDLE; v->key = s->key ^ 0x494e5354494e5354ull;
+            *v = *s; memset(v->mods, 0, sizeof v->mods); v->mods[DMSH_VK_MOD_BASE] = m; v->vin = v->fout = NULL; v->gs_claim = VK_NULL_HANDLE; v->key = s->key ^ VKA_INST_KEY_XOR;
             static _Atomic int nm; if (atomic_fetch_add(&nm, 1) < 32) VLOG("instanced runs: variant of %016llx (binding %u) made", (unsigned long long)s->key, binding);
         } else if (m) vk.vkDestroyShaderModule(V.dev, m, NULL);
     }

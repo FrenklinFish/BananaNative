@@ -715,7 +715,7 @@ static void pw_append(const pwrec *r, const void *kb) {   // caller holds g_pw_m
 static void pw_note(int kind, vka_shader *const sh[5], const void *kb, uint32_t klen) {   // a pipeline the frame path made: into the list unless it is there
     if (!g_pw_path[0]) return;
     pwrec r; memset(&r, 0, sizeof r); r.kind = (uint8_t)kind; r.klen = klen;
-    for (int i = 0; i < 5; i++) r.key[i] = sh[i] ? sh[i]->key : 0;
+    for (int i = 0; i < 5; i++) { if (vka_shader_is_variant(sh[i])) return; r.key[i] = sh[i] ? sh[i]->key : 0; }   // an instanced variant: made at its first draw (VKA_INST_KEY_XOR)
     uint64_t h = fnv(kb, klen, fnv(&r, sizeof r, 1469598103934665603ull));
     pthread_mutex_lock(&g_pw_mu);
     if (pw_set_add(h)) { pw_append(&r, kb); g_pw_dirty = 1; }
@@ -830,7 +830,10 @@ static void *pw_main(void *a) {
         vka_shader *sh[VKA_NSTAGE]; memset(sh, 0, sizeof sh); int bad = !pw_rec_ok(&r, kb);
         if (bad) {}
         else if (r.kind == 1) { if (!(sh[5] = vka_shader_by_key(r.key[0]))) bad = 1; }
-        else for (int s = 0; s < 5; s++) if (r.key[s] && !(sh[s] = vka_shader_by_key(r.key[s]))) bad = 1;
+        else {
+            for (int s = 0; s < 5; s++) if (r.key[s] && vka_shader_variant_key(r.key[s])) bad = 2;   // an older list's instanced variant: dropped quietly
+            for (int s = 0; s < 5 && !bad; s++) if (r.key[s] && !(sh[s] = vka_shader_by_key(r.key[s]))) bad = 1;
+        }
         vka_layout lay;
         if (!bad && !vka_layout_of(sh, r.kind == 1, &lay)) bad = 1;
         int made = 0;

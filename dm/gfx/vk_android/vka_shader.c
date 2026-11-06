@@ -373,6 +373,10 @@ vka_shader *vka_shader_make(const vka_shlib *L, uint64_t key) {
 }
 
 // A shader of the game's library by key, the library loaded if it is not yet (the prewarm threads, vka_pso.c); NULL = no library, not in it, or refused
+int vka_shader_variant_key(uint64_t key) {
+    pthread_mutex_lock(&g_mu); int ok = lib_load(); pthread_mutex_unlock(&g_mu);
+    return ok && !vka_shlib_find(&g_lib, key) && vka_shlib_find(&g_lib, key ^ VKA_INST_KEY_XOR);
+}
 vka_shader *vka_shader_by_key(uint64_t key) {
     pthread_mutex_lock(&g_mu); int ok = lib_load(); pthread_mutex_unlock(&g_mu);
     return ok ? vka_shader_make(&g_lib, key) : NULL;
