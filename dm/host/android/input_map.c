@@ -8,8 +8,8 @@ uint64_t nxin_key_button(int k, int labelled) {
     switch (k) {
     case AK_BUTTON_A: return labelled ? DM_BTN_A : DM_BTN_B;   // bottom
     case AK_BUTTON_B: return labelled ? DM_BTN_B : DM_BTN_A;   // right
-    case AK_BUTTON_X: return labelled ? DM_BTN_X : DM_BTN_Y;   // left
-    case AK_BUTTON_Y: return labelled ? DM_BTN_Y : DM_BTN_X;   // top
+    case AK_BUTTON_X: return labelled == 1 ? DM_BTN_X : DM_BTN_Y;   // left (labelled 2: A and B by label, X and Y by position)
+    case AK_BUTTON_Y: return labelled == 1 ? DM_BTN_Y : DM_BTN_X;   // top
     case AK_BUTTON_L1: return DM_BTN_L;
     case AK_BUTTON_R1: return DM_BTN_R;
     case AK_BUTTON_L2: return DM_BTN_ZL;

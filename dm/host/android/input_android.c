@@ -53,9 +53,9 @@ static int take(int device, const char *name, int labelled) {   // under g_mu
     if (p < 0) { if (!had) LOG("[RED] input: device %d (%s): every player is taken", device, name ? name : "?"); return -1; }
     if (!had) {
         const char *e = getenv("DM_PAD_LABELLED");
-        g_labelled[p] = e ? atoi(e) != 0 : labelled; memset(&g_pad[p], 0, sizeof g_pad[p]);
+        g_labelled[p] = e ? atoi(e) : labelled; memset(&g_pad[p], 0, sizeof g_pad[p]);   // 1: all four face buttons by label; 2: A and B by label, X and Y by position
         dm_pad_players(pad_slot_mask(&g_slots));
-        LOG("input: device %d (%s) is player %d%s", device, name && *name ? name : "unnamed", p + 1, g_labelled[p] ? ", face buttons by label" : "");
+        LOG("input: device %d (%s) is player %d%s", device, name && *name ? name : "unnamed", p + 1, g_labelled[p] == 1 ? ", face buttons by label" : g_labelled[p] == 2 ? ", A and B by label, X and Y by position" : "");
     }
     return p;
 }

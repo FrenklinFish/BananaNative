@@ -10,6 +10,8 @@ static void t_keys(void) {
     CHECK(nxin_key_button(AK_BUTTON_A, 0) == DM_BTN_B && nxin_key_button(AK_BUTTON_B, 0) == DM_BTN_A, "A / B by position");
     CHECK(nxin_key_button(AK_BUTTON_X, 0) == DM_BTN_Y && nxin_key_button(AK_BUTTON_Y, 0) == DM_BTN_X, "X / Y by position");
     CHECK(nxin_key_button(AK_BUTTON_A, 1) == DM_BTN_A && nxin_key_button(AK_BUTTON_Y, 1) == DM_BTN_Y, "by label");
+    CHECK(nxin_key_button(AK_BUTTON_A, 2) == DM_BTN_A && nxin_key_button(AK_BUTTON_B, 2) == DM_BTN_B
+          && nxin_key_button(AK_BUTTON_X, 2) == DM_BTN_Y && nxin_key_button(AK_BUTTON_Y, 2) == DM_BTN_X, "A / B by label, X / Y by position");
     static const struct { int k; uint64_t b; } m[] = {
         {AK_BUTTON_L1, DM_BTN_L}, {AK_BUTTON_R1, DM_BTN_R}, {AK_BUTTON_L2, DM_BTN_ZL}, {AK_BUTTON_R2, DM_BTN_ZR}, {AK_BUTTON_THUMBL, DM_BTN_LS}, {AK_BUTTON_THUMBR, DM_BTN_RS},
         {AK_BUTTON_START, DM_BTN_PLUS}, {AK_BUTTON_SELECT, DM_BTN_MINUS}, {AK_DPAD_UP, DM_BTN_UP}, {AK_DPAD_DOWN, DM_BTN_DOWN}, {AK_DPAD_LEFT, DM_BTN_LEFT}, {AK_DPAD_RIGHT, DM_BTN_RIGHT},

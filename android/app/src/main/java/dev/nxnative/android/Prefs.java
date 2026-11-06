@@ -41,6 +41,14 @@ final class Prefs {
     // ---- A game's own settings (its Manage sheet › Game settings, the in-game panel), stored per title ID as "<key>@<title ID>"; a game without its own value
     // takes the default (the main screen's Settings, global). DKB with nothing of its own set runs exactly as before ----
     static String gameKey(String key, String titleId) { return key + "@" + titleId; }
+    /** Xbox button label swap: 0 off; 1 labels (the prompts' A/B and X/Y drawn the Xbox way: DM_XBOX_LABELS, hle_fs.c); 2 labels + confirm with A (A and B by label,
+     *  DM_PAD_LABELLED=2, so only X/Y are redrawn). The main screen's default (off), then each game's own */
+    static final String[] XBOX_NAMES = {"Off", "Swap labels for X/Y and A/B", "Swap labels for X/Y, swap buttons A/B"};
+    static int xboxButtons(Context c) { int v = of(c).getInt("xbox_buttons", 0); return v >= 0 && v < XBOX_NAMES.length ? v : 0; }
+    static void xboxButtonsDefault(Context c, int v) { of(c).edit().putInt("xbox_buttons", v).commit(); }
+    static int xboxButtons(Context c, String titleId) { int v = of(c).getInt(gameKey("xbox_buttons", titleId), xboxButtons(c)); return v >= 0 && v < XBOX_NAMES.length ? v : 0; }
+    static void xboxButtons(Context c, String titleId, int v) { of(c).edit().putInt(gameKey("xbox_buttons", titleId), v).commit(); }
+    static String xboxLabel(int v) { return XBOX_NAMES[v]; }
 
     /** The game's window size: its own choice, else the default (defaultWindow) */
     static String gameWindow(Context c, String titleId) { return of(c).getString(gameKey("window", titleId), defaultWindow(c, titleId)); }

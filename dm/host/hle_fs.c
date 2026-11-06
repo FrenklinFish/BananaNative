@@ -753,8 +753,11 @@ static void fs_stat_note(int read, uint64_t t0, uint64_t bytes) {
 void dm_fs_time(uint64_t *open_ns, uint64_t *read_ns, uint64_t *read_bytes) {
     if (open_ns) *open_ns = atomic_load(&g_fst_open_ns); if (read_ns) *read_ns = atomic_load(&g_fst_read_ns); if (read_bytes) *read_bytes = atomic_load(&g_fst_read_b);
 }
+// Xbox button labels (DM_XBOX_LABELS=1, below h_fs_GetFileOpenMode): a font archive the game opens is served patched from memory; -1 when it is not one or the patch did not apply
+static int labels_open(const char *path, int mode);
 HLE_FORCE("_ZN2nn2fs8OpenFileEPNS0_10FileHandleEPKci", "fsp-srv → open(2)", Result, h_fs_OpenFile, uint64_t *out, const char *path, int mode) {
     int mi; int64_t k; uint64_t fst0 = now_ns();
+    { int lf = labels_open(path, mode); if (lf >= 0) { g_fmode[lf] = (uint8_t)mode; *out = FH_OUT(lf); return RES_OK; } }
     if (img_path(path, &mi, &k)) {
         if (k < 0) return err_res("open", path);
         if (!g_mnt[mi].img->e[k].type) return RES_PATH_NOT_FOUND;
@@ -887,6 +890,176 @@ HLE_FORCE("_ZN2nn2fs9CloseFileENS0_10FileHandleE", "fsp-srv → close(2)", void,
     g_fmode[(int)h & 0xffff] = 0; atomic_store(&g_ftxn[(int)h & 0xffff], 0);
     close((int)h); }
 HLE_FORCE("_ZN2nn2fs15GetFileOpenModeENS0_10FileHandleE", "fsp-srv; the open mode is recorded by the host", int, h_fs_GetFileOpenMode, uint64_t h) { h = FH_IN(h); return IMG_H(h) ? MODE_READ : g_fmode[(int)h & 0xffff]; }
+
+// ---------- Xbox button labels (DM_XBOX_LABELS=1; off by default) ----------
+// The button prompts are drawn with Nintendo's NinDev-HardKey font: U+E0E0..E0E3 are A, B, X, Y. With an Xbox-style pad the labels on the buttons are the other way
+// round (A bottom, B right, X left, Y top), so these prompts name the wrong button. This swaps the drawings of A with B and X with Y, nothing else: what the buttons
+// do stays the same. The font is not shipped: it is patched from the game's own files when the game opens a font archive (<mount>:/Font/*.bfarc.zs; Donkey Kong Bananza's content:/Font/Font.Nin_Ounce_NVN2.bfarc.zs), in memory.
+// The archive (zstd, a SARC inside) holds its fonts as BFTTF: an 8-byte header and an OpenType font, all XOR'ed with a 4-byte key. Each font is found by its masked
+// "OTTO" signature, unmasked, checked for the four characters (cmap), patched in place (CFF CharStrings and hmtx swapped, the same sizes; checksums again) and masked
+// again; the archive's size does not change, so its own tables stay valid. The result is served as a zstd frame of raw blocks from a memfd
+#ifdef DM_NUP_ZSTD
+#include <sys/mman.h>
+unsigned long long ZSTD_getFrameContentSize(const void *src, size_t src_size);
+static const uint8_t LB_KEY[4] = {0xa6, 0x01, 0x85, 0x02};
+static uint32_t lb_be32(const uint8_t *p) { return (uint32_t)p[0] << 24 | (uint32_t)p[1] << 16 | (uint32_t)p[2] << 8 | p[3]; }
+static uint16_t lb_be16(const uint8_t *p) { return (uint16_t)(p[0] << 8 | p[1]); }
+static void lb_put32(uint8_t *p, uint32_t v) { p[0] = (uint8_t)(v >> 24); p[1] = (uint8_t)(v >> 16); p[2] = (uint8_t)(v >> 8); p[3] = (uint8_t)v; }
+static uint32_t lb_sum(const uint8_t *p, size_t n) {   // an OpenType checksum: big-endian words, the tail padded with zeros
+    uint32_t s = 0; for (size_t i = 0; i < n; i += 4) { uint8_t w[4] = {0}; memcpy(w, p + i, n - i < 4 ? n - i : 4); s += lb_be32(w); } return s;
+}
+static int lb_table(const uint8_t *f, size_t n, const char *tag, uint32_t *off, uint32_t *len, size_t *rec) {
+    uint16_t nt = lb_be16(f + 4);
+    for (uint16_t i = 0; i < nt && 12 + 16u * (i + 1u) <= n; i++) {
+        const uint8_t *r = f + 12 + 16 * i;
+        if (!memcmp(r, tag, 4)) { *off = lb_be32(r + 8); *len = lb_be32(r + 12); if (rec) *rec = (size_t)(r - f); return *off <= n && *len <= n - *off; }
+    }
+    return 0;
+}
+static int lb_gid(const uint8_t *f, size_t n, uint32_t cp) {   // the glyph of a character (cmap format 4 or 12), 0 when none
+    uint32_t co, cl; if (!lb_table(f, n, "cmap", &co, &cl, NULL) || cl < 4) return 0;
+    const uint8_t *c = f + co; uint16_t ns = lb_be16(c + 2);
+    for (uint16_t i = 0; i < ns && 4 + 8u * (i + 1u) <= cl; i++) {
+        uint32_t so = lb_be32(c + 4 + 8 * i + 4); if (so + 8 > cl) continue;
+        const uint8_t *t = c + so; uint16_t fmt = lb_be16(t);
+        if (fmt == 12 && so + 16 <= cl) {
+            uint32_t ng = lb_be32(t + 12);
+            for (uint32_t g = 0; g < ng && so + 16 + 12 * (g + 1) <= cl; g++) {
+                const uint8_t *e = t + 16 + 12 * g; uint32_t a = lb_be32(e), b = lb_be32(e + 4);
+                if (cp >= a && cp <= b) return (int)(lb_be32(e + 8) + cp - a);
+            }
+        } else if (fmt == 4) {
+            uint16_t sx = lb_be16(t + 6) / 2; const uint8_t *ends = t + 14, *starts = ends + 2 * sx + 2, *deltas = starts + 2 * sx, *ranges = deltas + 2 * sx;
+            if (so + 16 + 8u * sx > cl) continue;
+            for (uint16_t k = 0; k < sx; k++) {
+                uint16_t e = lb_be16(ends + 2 * k), st = lb_be16(starts + 2 * k); if (cp < st || cp > e) continue;
+                uint16_t d = lb_be16(deltas + 2 * k), ro = lb_be16(ranges + 2 * k);
+                if (!ro) return (uint16_t)(cp + d);
+                const uint8_t *gp = ranges + 2 * k + ro + 2 * (cp - st); if (gp + 2 > c + cl) return 0;
+                uint16_t g = lb_be16(gp); return g ? (uint16_t)(g + d) : 0;
+            }
+        }
+    }
+    return 0;
+}
+static int lb_index(const uint8_t *p, const uint8_t *end, uint16_t *count, uint8_t *osz, const uint8_t **offs, const uint8_t **data, const uint8_t **after) {   // a CFF INDEX
+    if (p + 2 > end) return 0;
+    *count = lb_be16(p);
+    if (!*count) { *after = p + 2; return 1; }
+    if (p + 3 > end) return 0;
+    *osz = p[2];
+    if (*osz < 1 || *osz > 4) return 0;
+    *offs = p + 3; *data = *offs + (*count + 1) * *osz - 1; if (*data + 1 > end) return 0;
+    uint32_t last = 0; for (int b = 0; b < *osz; b++) last = last << 8 | (*offs)[*count * *osz + b];
+    *after = *data + last; return *after <= end;
+}
+static uint32_t lb_off(const uint8_t *offs, uint8_t osz, uint32_t k) { uint32_t v = 0; for (int b = 0; b < osz; b++) v = v << 8 | offs[k * osz + b]; return v; }
+static int lb_charstrings(const uint8_t *cff, size_t n, uint32_t *at) {   // the Top DICT's CharStrings offset (operator 17)
+    const uint8_t *end = cff + n, *offs, *data, *after; uint16_t cnt; uint8_t osz;
+    const uint8_t *p = cff + cff[2];
+    if (!lb_index(p, end, &cnt, &osz, &offs, &data, &after)) return 0;   // Name INDEX
+    if (!lb_index(after, end, &cnt, &osz, &offs, &data, &after) || !cnt) return 0;   // Top DICT INDEX
+    const uint8_t *d = data + lb_off(offs, osz, 0), *de = data + lb_off(offs, osz, 1); long ops[48]; int no = 0;
+    while (d < de) {
+        uint8_t b = *d++;
+        if (b >= 32 && b <= 246) { if (no < 48) ops[no++] = b - 139; }
+        else if (b >= 247 && b <= 250) { if (no < 48) ops[no++] = (b - 247) * 256 + *d + 108; d++; }
+        else if (b >= 251 && b <= 254) { if (no < 48) ops[no++] = -(b - 251) * 256 - *d - 108; d++; }
+        else if (b == 28) { if (no < 48) ops[no++] = (int16_t)lb_be16(d); d += 2; }
+        else if (b == 29) { if (no < 48) ops[no++] = (int32_t)lb_be32(d); d += 4; }
+        else if (b == 30) { while (d < de && (*d & 0x0f) != 0x0f && (*d & 0xf0) != 0xf0) d++; d++; if (no < 48) ops[no++] = 0; }
+        else { if (b == 12) d++; else if (b == 17 && no) { *at = (uint32_t)ops[no - 1]; return *at < n; } no = 0; }
+    }
+    return 0;
+}
+static int lb_swap_font(uint8_t *f, size_t n, int pairs) {   // 1 when this is the button font and its pairs were swapped (pairs: 1 A/B, 2 X/Y)
+    if (n < 12 || memcmp(f, "OTTO", 4)) return 0;
+    int g[4]; for (int i = 0; i < 4; i++) if (!(g[i] = lb_gid(f, n, 0xE0E0 + (uint32_t)i))) return 0;
+    uint32_t co, cl, ho, hl, eo, el, ao, al; size_t crec, hrec, arec;
+    if (!lb_table(f, n, "CFF ", &co, &cl, &crec) || !lb_table(f, n, "hmtx", &ho, &hl, &hrec) || !lb_table(f, n, "hhea", &eo, &el, NULL) || el < 36
+        || !lb_table(f, n, "head", &ao, &al, &arec) || al < 12) return 0;
+    uint16_t nhm = lb_be16(f + eo + 34); for (int i = 0; i < 4; i++) if ((uint32_t)g[i] >= nhm || 4u * (uint32_t)g[i] + 4 > hl) return 0;
+    uint8_t *cff = f + co; uint32_t csat; if (!lb_charstrings(cff, cl, &csat)) return 0;
+    const uint8_t *offs, *data, *after; uint16_t cnt; uint8_t osz;
+    if (!lb_index(cff + csat, cff + cl, &cnt, &osz, &offs, &data, &after)) return 0;
+    for (int i = 0; i < 4; i++) if (g[i] >= cnt) return 0;
+    uint32_t total = lb_off(offs, osz, cnt) - 1; uint8_t *nd = malloc(total ? total : 1); uint32_t *no = malloc(sizeof *no * (cnt + 1u)); if (!nd || !no) { free(nd); free(no); return 0; }
+    uint32_t pos = 0;
+    for (uint32_t k = 0; k < cnt; k++) {
+        uint32_t src = k;
+        if (pairs & 1) src = k == (uint32_t)g[0] ? (uint32_t)g[1] : k == (uint32_t)g[1] ? (uint32_t)g[0] : src;
+        if (pairs & 2) src = k == (uint32_t)g[2] ? (uint32_t)g[3] : k == (uint32_t)g[3] ? (uint32_t)g[2] : src;
+        uint32_t a = lb_off(offs, osz, src) - 1, b = lb_off(offs, osz, src + 1) - 1; no[k] = pos; memcpy(nd + pos, data + 1 + a, b - a); pos += b - a;
+    }
+    no[cnt] = pos;
+    uint8_t *wo = (uint8_t *)(uintptr_t)offs;
+    for (uint32_t k = 0; k <= cnt; k++) { uint32_t v = no[k] + 1; for (int b = osz - 1; b >= 0; b--) { wo[k * osz + b] = (uint8_t)v; v >>= 8; } }
+    memcpy((uint8_t *)(uintptr_t)data + 1, nd, total); free(nd); free(no);
+    uint8_t *hm = f + ho, t[4];
+    for (int i = 0; i < 4; i += 2) if (pairs >> (i / 2) & 1) { memcpy(t, hm + 4 * g[i], 4); memcpy(hm + 4 * g[i], hm + 4 * g[i + 1], 4); memcpy(hm + 4 * g[i + 1], t, 4); }
+    lb_put32(f + ao + 8, 0);
+    lb_put32(f + crec + 4, lb_sum(f + co, cl)); lb_put32(f + hrec + 4, lb_sum(f + ho, hl)); lb_put32(f + arec + 4, lb_sum(f + ao, al));
+    lb_put32(f + ao + 8, 0xB1B0AFBAu - lb_sum(f, n));
+    return 1;
+}
+static int lb_patch_archive(uint8_t *a, size_t n, int pairs) {   // the button fonts patched in place: their number
+    uint8_t sig[4]; for (int i = 0; i < 4; i++) sig[i] = (uint8_t)("OTTO"[i] ^ LB_KEY[i]);
+    int done = 0;
+    for (size_t p = 8; p + 4 <= n; p++) {
+        if (memcmp(a + p, sig, 4)) continue;
+        size_t s = p - 8; uint8_t h[8]; for (int i = 0; i < 8; i++) h[i] = a[s + i] ^ LB_KEY[i & 3];
+        uint32_t len = lb_be32(h + 4); if (len < 12 || len > n - p) continue;
+        uint8_t *f = malloc(len); if (!f) continue;
+        for (uint32_t i = 0; i < len; i++) f[i] = a[p + i] ^ LB_KEY[i & 3];
+        if (lb_swap_font(f, len, pairs)) { for (uint32_t i = 0; i < len; i++) a[p + i] = f[i] ^ LB_KEY[i & 3]; done++; p += len - 1; }
+        free(f);
+    }
+    return done;
+}
+// The pairs to swap: A/B and X/Y with the face buttons by position; X/Y alone when A and B already go by label (DM_PAD_LABELLED=2: the confirm / cancel swap);
+// none with all four by label (DM_PAD_LABELLED=1), where the game's own letters already match
+static int labels_on(void) {
+    static int on = -1;
+    if (on < 0) {
+        const char *e = getenv("DM_XBOX_LABELS"), *pl = getenv("DM_PAD_LABELLED"); int lab = pl ? atoi(pl) : 0;
+        on = e && atoi(e) > 0 ? (lab == 1 ? 0 : lab == 2 ? 2 : 3) : 0;
+        if (on) LOG("Xbox button labels on (DM_XBOX_LABELS): font archives are patched as the game opens them (%s)", on == 2 ? "X / Y; A and B go by label" : "A / B and X / Y");
+    }
+    return on;
+}
+static __thread int g_labels_busy;
+static int labels_open(const char *path, int mode) {
+    if (g_labels_busy || !labels_on() || (mode & (MODE_WRITE | MODE_APPEND))) return -1;
+    size_t pl = strlen(path); if (pl < 9 || strcmp(path + pl - 9, ".bfarc.zs") || !strstr(path, "/Font/")) return -1;   // content:/Font/Font.Nin_Ounce_NVN2.bfarc.zs
+    g_labels_busy = 1; int fd = -1; uint8_t *z = NULL, *a = NULL, *o = NULL; uint64_t h = 0; int64_t zn = 0;
+    if (h_fs_OpenFile(&h, path, MODE_READ) != RES_OK) goto out;
+    if (h_fs_GetFileSize(&zn, h) != RES_OK || zn <= 0 || !(z = malloc((size_t)zn))) { h_fs_CloseFile(h); goto out; }
+    size_t got = 0; Result r = h_fs_ReadFile(&got, h, 0, z, (size_t)zn); h_fs_CloseFile(h);
+    if (r != RES_OK || got != (size_t)zn) goto out;
+    unsigned long long an = ZSTD_getFrameContentSize(z, (size_t)zn);
+    if (an == 0 || an >= (1ull << 31) || !(a = malloc((size_t)an))) { LOG("[RED] Xbox button labels: %s has no usable size in its zstd frame: served as it is", path); goto out; }
+    size_t dn = ZSTD_decompress(a, (size_t)an, z, (size_t)zn);
+    if (ZSTD_isError(dn) || dn != an) { LOG("[RED] Xbox button labels: %s does not decompress (%s): served as it is", path, ZSTD_isError(dn) ? ZSTD_getErrorName(dn) : "short"); goto out; }
+    int nf = lb_patch_archive(a, dn, labels_on());
+    if (!nf) { LOG("Xbox button labels: no button font in %s", path); goto out; }
+    size_t nb = (dn + 131071) / 131072, on = 4 + 1 + 8 + nb * 3 + dn, w = 0; if (!(o = malloc(on))) goto out;   // a zstd frame of raw blocks
+    o[0] = 0x28; o[1] = 0xb5; o[2] = 0x2f; o[3] = 0xfd; o[4] = 0xe0; w = 5;   // magic; single segment, an 8-byte content size
+    for (int i = 0; i < 8; i++) o[w++] = (uint8_t)((unsigned long long)dn >> (8 * i));
+    for (size_t b = 0; b < nb; b++) {
+        size_t len = dn - b * 131072 < 131072 ? dn - b * 131072 : 131072; uint32_t hd = (uint32_t)(len << 3) | (b + 1 == nb ? 1u : 0u);
+        o[w++] = (uint8_t)hd; o[w++] = (uint8_t)(hd >> 8); o[w++] = (uint8_t)(hd >> 16); memcpy(o + w, a + b * 131072, len); w += len;
+    }
+    fd = memfd_create("xbox-labels", MFD_CLOEXEC);
+    if (fd < 0 || fd >= (int)sizeof g_fmode) { if (fd >= 0) close(fd); fd = -1; goto out; }
+    for (size_t put = 0; put < w;) { ssize_t k = write(fd, o + put, w - put); if (k <= 0) { close(fd); fd = -1; goto out; } put += (size_t)k; }
+    LOG("Xbox button labels: %s served with %s swapped in %d font(s)", path, labels_on() == 2 ? "X/Y" : "A/B and X/Y", nf);
+out:
+    free(z); free(a); free(o); g_labels_busy = 0;
+    return fd;
+}
+#else
+static int labels_open(const char *path, int mode) { (void)path; (void)mode; return -1; }
+#endif
 
 // ---------- Path operations ----------
 HLE_FORCE("_ZN2nn2fs10CreateFileEPKcl", "fsp-srv → open(O_CREAT|O_EXCL)+ftruncate", Result, h_fs_CreateFile, const char *path, int64_t sz) {
