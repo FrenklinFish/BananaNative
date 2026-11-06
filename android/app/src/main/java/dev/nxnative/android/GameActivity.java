@@ -438,12 +438,14 @@ public final class GameActivity extends Activity implements SurfaceHolder.Callba
             String gpuNote = GpuDriver.env(this, id, env);   // the game's GPU driver, else the main screen's (DM_VK_DRIVER)
             String ts = Prefs.gpuTs(this, id);   // Game settings › GPU timing; unset: the profile's gpu_timestamps (a DM_NVN_GPU_TS line of env.txt or the game's own lines comes later and wins)
             if (ts != null) env.add("DM_NVN_GPU_TS=" + ts);
-            if (Prefs.rumble(this, id)) { rumble = new Rumble(this); if (!rumble.start()) rumble = null; }   // Rumble (Game settings, Settings)
             env.addAll(user);
             for (String kv : env) if (kv.startsWith("DM_OVERLAY=")) overlayEnv = !kv.substring(11).trim().equals("0");
             String[] args = {"nxhost", packDir.getPath()};
             int r = Native.start(args, env.toArray(new String[0]), log.getPath(), files.getPath());
             if (r != 0) throw new IOException("the host did not start (" + r + (r == -1 ? ": a start was already tried in this process" : "") + ")");
+            // Rumble (Game settings, Settings) once the host has its environment and the log (Native.start): its DM_RUMBLE / DM_RUMBLE_GAIN are read then, and the
+            // setup lines reach the game's log. Pads registered before get their vibrator now
+            if (Prefs.rumble(this, id)) { rumble = new Rumble(this); if (!rumble.start()) rumble = null; else for (int p : pads) rumble.route(p); }
             // Whether this game picks its own frame rate (the host's cap status: no rate it can hold), remembered for its Game settings, which then offer no cap.
             // Read once the game has run a while (the host finds the game's limiter after it starts); the in-game panel updates it too
             ui.postDelayed(this::noteOwnRate, 30000);

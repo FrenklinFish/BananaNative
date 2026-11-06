@@ -42,7 +42,7 @@ final class Rumble {
         phone = v != null && v.hasVibrator() ? v : null;
     }
 
-    /** Before Native.start: installs the listener and gives player 1 the phone (until a controller takes it) */
+    /** Right after Native.start (the host reads DM_RUMBLE then, and its lines reach the log): installs the listener and gives player 1 the phone (until a controller takes it) */
     boolean start() {
         if (!Native.setRumbleListener(this)) return false;
         set(0, phone);
