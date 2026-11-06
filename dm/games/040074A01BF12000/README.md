@@ -110,6 +110,7 @@ On the phone (Honor PNM-N49, Adreno 840, 16 GB):
 
 ## Found on this game
 
+- [Command encoder thread on a core all frame on the Vulkan replay](../../../docs/reference/rendering.md#command-encoder-thread-on-a-core-all-frame-on-the-vulkan-replay): `vk-enc` took 69 % of a core at 25 draws a frame.
 - ["Pack from other tools" on a pack the app made itself](../../../docs/reference/packing.md#pack-from-other-tools-on-a-pack-the-app-made-itself): its profile's host rows (`gpu_timestamps`, `android_window`, `romfs_check`) made the phone's packs stale (resolved).
 - [A shader package of another split gives shaders other shaders' code](../../../docs/reference/shaders.md#a-shader-package-of-another-split-gives-shaders-other-shaders-code): the 0.1.0 release pack's black picture, a library built from a base + update + DLC split (28,932 shaders) with the profile's map of the update's split (22,852).
 - Everything under [Boot](#boot-mac) is new: the first Switch 2 game here.

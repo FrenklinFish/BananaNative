@@ -62,16 +62,20 @@ static inline uint64_t wait_change(_Atomic uint64_t *a, uint64_t old) {
     return v;
 }
 static uint64_t mono_ns(void) { struct timespec t; clock_gettime(CLOCK_MONOTONIC, &t); return (uint64_t)t.tv_sec * 1000000000ull + (uint64_t)t.tv_nsec; }
+// How long either thread waits with WFE before the futex (DM_VK_ENC_SPIN). The clock is read at every wake, not every so many wakes: with nothing stored to the line, WFE
+// returns only at the kernel's event stream tick (10 kHz), so a count of wakes is a count of 100 us ticks. A thread on WFE still runs: it counts as CPU time, keeps its core
+// out of idle and looks busy to the frequency governor
+static _Atomic uint64_t g_spin_ns = 200000;
+static inline int spin_over(uint64_t t0) { return mono_ns() - t0 > atomic_load_explicit(&g_spin_ns, memory_order_relaxed); }
 
 // The producer waits until the consumer's tail reaches at least `want` (spinning a little, then on the futex)
 static inline void flush_pub(void);
 static void wait_tail(uint64_t want) {
     flush_pub();   // what it waits for must be handed over
-    uint64_t t0_ = 0;
-    for (int i = 0;; i++) {   // the encoder is usually close behind: wait on its tail for up to ~0.2 ms
+    for (uint64_t t0_ = mono_ns();;) {   // the encoder is usually close behind: wait on its tail for a short while
         uint64_t t = atomic_load_explicit(&g_tail, memory_order_acquire); if (t >= want) return;
         wait_change(&g_tail, t);
-        if (i % 64 == 63) { uint64_t n = mono_ns(); if (!t0_) t0_ = n; else if (n - t0_ > 200000) break; }
+        if (spin_over(t0_)) break;
     }
     g_n_waits++; uint64_t t0 = mono_ns();
     // An event count: the sequence is read before the flag is set, so an encoder that sees the flag (and a tail at or past want) bumps it after that read and the futex
@@ -387,11 +391,10 @@ static void *enc_main(void *arg) {
         uint64_t h = atomic_load_explicit(&g_head, memory_order_acquire);
         if (t == h) {
             // Empty: spin while the replay thread is recording (its next call comes within microseconds), then sleep until a call comes
-            uint64_t t0 = 0; int i = 0;
-            for (;;) {
+            for (uint64_t t0 = mono_ns();;) {
                 h = atomic_load_explicit(&g_head, memory_order_acquire); if (h != t) break;
                 wait_change(&g_head, t);
-                if (++i % 64 == 0) { uint64_t n = mono_ns(); if (!t0) t0 = n; else if (n - t0 > 200000) break; }
+                if (spin_over(t0)) break;
             }
             if (h == t) {
                 uint32_t s = atomic_load(&g_cseq);   // (an event count, as wait_tail's)
@@ -443,6 +446,7 @@ void vka_enc_start(VkCommandBuffer cb) {
     extern int vka_gp_active;
     if (!VKA_ENV("DM_VK_ENC", 1) || vka_gp_active || vka_nan_on() || !up()) { atomic_store(&g_ecb, VK_NULL_HANDLE); return; }
     { int bt = VKA_ENV("DM_VK_ENC_BATCH", 4096); g_batch = bt < 0 ? 0 : bt > (1 << 20) ? (1 << 20) : (uint32_t)bt; }   // live: from this submission
+    { int us = VKA_ENV("DM_VK_ENC_SPIN", 200); atomic_store_explicit(&g_spin_ns, (uint64_t)(us < 0 ? 0 : us > 100000 ? 100000 : us) * 1000, memory_order_relaxed); }   // live: from this submission
     atomic_store(&g_ecb, cb);
 }
 // Before vkEndCommandBuffer, a submit, or any other use of the command buffer or its pool: every call made
