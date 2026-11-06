@@ -13,9 +13,9 @@ void crash_set_trap_hook(int (*fn)(ucontext_t *uc));
 #if !PLAT_IOS
 // Syntax module:offset[@x0 offset]. Put a brk at the guest address; on hit print x0..x3 (and the readable strings they point to) and a backtrace, then execute the original instruction from a trampoline slot and jump back.
 // The trampoline borrows x16: place probes only at function entries or at points where x16 is dead; the original instruction must not be PC-relative (adr/adrp/b/bl/ldr literal/cbz...).
-#define MAX_PROBE 16
+#define MAX_PROBE 64
 typedef void (*probe_fn)(ucontext_t *uc);
-static struct { uint64_t at; uint32_t *slot; unsigned hits; char name[40]; long dump, dpost; probe_fn fn; int freg; long foff; uint64_t fval; int hreg; } g_probe[MAX_PROBE];   // dpost: @*xN+off+dpost
+static struct { uint64_t at; uint32_t *slot; unsigned hits; char name[40]; long dump, dpost; probe_fn fn; int freg; long foff; uint64_t fval; int hreg; int once; } g_probe[MAX_PROBE];   // once: removed after its callback's first hit   // dpost: @*xN+off+dpost
 
 // !xN: treat xN as a sead::ExpHeap and print its free and used blocks (block size at block +0x18, alignment pad at +0x12). Settings (docs/agents/05-debugging.md):
 // DM_PROBE_HEAP=<name>,<start>,<size>,<free list>,<used list> layout by sead version (hex; node offset at list +0x14), default SMBW 0,28,30,b0,c8 (no name), BotW 28,38,40,e0,f8;
@@ -154,14 +154,16 @@ static void probe_add(module_t *m, uint64_t off, long dump, probe_fn fn) {
     if (!g_slots) g_slots = mmap(NULL, 0x4000, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANON, -1, 0);
     uint64_t at = (uint64_t)m->base + off;
     uint32_t *w = (uint32_t *)at, *sl = g_slots + g_nprobe * 8;
+    if (g_slots_sealed) mprotect(g_slots, 0x4000, PROT_READ | PROT_WRITE | PROT_EXEC);   // a probe added while the game runs: the slot page opened for it (still executable: other probes resume through it)
     sl[0] = *w;                                  // Original instruction
     sl[1] = 0x58000050;                          // ldr x16, #8
     sl[2] = 0xD61F0200;                          // br x16
     *(uint64_t *)(sl + 3) = at + 4;
-    uint64_t pg = at & ~0x3FFFull;
-    if (mprotect((void *)pg, 0x4000, PROT_READ | PROT_WRITE)) die("probe mprotect");
+    if (g_slots_sealed) { mprotect(g_slots, 0x4000, PROT_READ | PROT_EXEC); plat_icache_invalidate(sl, 32); }
+    uint64_t ps = (uint64_t)getpagesize(), pg = at & ~(ps - 1);   // the host's page (4 KB on Android): a 16 KB block could take a data page next to the code read-only
+    if (mprotect((void *)pg, ps, PROT_READ | PROT_WRITE)) die("probe mprotect");
     *w = 0xD43E0000;                             // brk #0xf000
-    mprotect((void *)pg, 0x4000, PROT_READ | PROT_EXEC);
+    mprotect((void *)pg, ps, PROT_READ | PROT_EXEC);
     plat_icache_invalidate(w, 4);
     g_probe[g_nprobe].at = at; g_probe[g_nprobe].slot = sl; g_probe[g_nprobe].dump = dump; g_probe[g_nprobe].fn = fn; g_probe[g_nprobe].freg = -1; g_probe[g_nprobe].hreg = -1;
     snprintf(g_probe[g_nprobe].name, sizeof g_probe[0].name, "%s+%#llx", m->name, off);
@@ -175,6 +177,8 @@ static void probe_add(module_t *m, uint64_t off, long dump, probe_fn fn) {
 // the old and new values and a backtrace. Any other instruction (atomics, exclusives) is logged once per pc and the page is unprotected for it, then protected again a millisecond later
 // (a store in that millisecond goes unseen). STEINS;GATE RE:BOOT: the engine object's page takes bursts of stores every frame, and a watch that unprotected the page for each fault missed
 // the one that matters; this one found it at once (main+0x389e90, a setter its start-up code calls with 0: the game renders 1280x720 docked by its own choice)
+static void watch_start(void);
+static atomic_flag g_wlk = ATOMIC_FLAG_INIT;   // held while the watched page is opened and shut around one store (handler threads, the arming thread)
 static uint64_t g_wat, g_wlen, g_wpg, g_wpsz; static uint8_t *g_walias; static _Atomic int g_warmed;
 static void watch_where(const char *tag, uint64_t a) {
     module_t *m = module_of((void *)a); Dl_info di;
@@ -230,12 +234,14 @@ static int watch_fault(void *addr, int is_write, void *ucv) {
     uint64_t a = (uint64_t)addr;
     if (!is_write || a < g_wpg || a >= g_wpg + g_wpsz) return 0;
     ucontext_t *uc = ucv; uint64_t pc = PLAT_UC_PC(uc), ea = 0, wbv = 0; unsigned len = 0; int wb = -1; uint8_t data[64];
-    if (g_walias && watch_decode(uc, *(uint32_t *)pc, &ea, &len, data, &wb, &wbv)) {
+    if (watch_decode(uc, *(uint32_t *)pc, &ea, &len, data, &wb, &wbv)) {   // (no alias mapping, Android: the page is opened for this one store and shut again, microseconds)
         int hit = ea < g_wat + g_wlen && ea + len > g_wat; uint64_t old = hit ? watch_val() : 0;
+        if (!g_walias) { while (atomic_flag_test_and_set(&g_wlk)) {} mprotect((void *)g_wpg, g_wpsz, PROT_READ | PROT_WRITE); }
         for (unsigned i = 0; i < len; i++) {   // bytes in the watched page go through the alias; a store crossing into the next page writes the rest directly
             uint64_t b = ea + i;
-            if (b >= g_wpg && b < g_wpg + g_wpsz) g_walias[b - g_wpg] = data[i]; else *(volatile uint8_t *)b = data[i];
+            if (g_walias && b >= g_wpg && b < g_wpg + g_wpsz) g_walias[b - g_wpg] = data[i]; else *(volatile uint8_t *)b = data[i];
         }
+        if (!g_walias) { if (atomic_load(&g_warmed)) mprotect((void *)g_wpg, g_wpsz, PROT_READ); atomic_flag_clear(&g_wlk); }
         if (wb >= 0) { if (wb == 31) PLAT_UC_SP(uc) = wbv; else if (wb == 29) PLAT_UC_FP(uc) = wbv; else if (wb == 30) PLAT_UC_LR(uc) = wbv; else PLAT_UC_X(uc, wb) = wbv; }
         PLAT_UC_PC(uc) = pc + 4;
         if (hit) {
@@ -248,6 +254,26 @@ static int watch_fault(void *addr, int is_write, void *ucv) {
         }
         return 1;
     }
+    // CAS / CASA / CASL / CASAL (all sizes) carried out here, without an alias: every store to the page faults, so doing them one at a time under a lock is atomic
+    // for all writers (Donkey Kong Bananza: a lock on the watched page takes thousands a second; opening the page for each let the stage name's write slip through)
+    { uint32_t in = *(uint32_t *)pc;
+      if ((in & 0x3fa07c00) == 0x08a07c00) {
+          unsigned sz = 1u << (in >> 30), rs = (in >> 16) & 31, rn = (in >> 5) & 31, rt = in & 31;
+          uint64_t a = rn == 31 ? PLAT_UC_SP(uc) : PLAT_UC_X(uc, rn), mask = sz == 8 ? ~0ull : (1ull << (8 * sz)) - 1;
+          uint64_t cmp = (rs == 31 ? 0 : PLAT_UC_X(uc, rs)) & mask, nv = (rt == 31 ? 0 : PLAT_UC_X(uc, rt)) & mask, old = 0;
+          while (atomic_flag_test_and_set(&g_wlk)) {}
+          mprotect((void *)g_wpg, g_wpsz, PROT_READ | PROT_WRITE);
+          memcpy(&old, (void *)a, sz);
+          int hit = old == cmp && a < g_wat + g_wlen && a + sz > g_wat;
+          if (old == cmp) { __atomic_thread_fence(__ATOMIC_SEQ_CST); memcpy((void *)a, &nv, sz); __atomic_thread_fence(__ATOMIC_SEQ_CST); }
+          if (atomic_load(&g_warmed)) mprotect((void *)g_wpg, g_wpsz, PROT_READ);
+          atomic_flag_clear(&g_wlk);
+          if (rs != 31) PLAT_UC_X(uc, rs) = old;
+          PLAT_UC_PC(uc) = pc + 4;
+          if (hit) { flockfile(stderr); fprintf(stderr, "[dm] WATCH %#llx compare-and-swap at %#llx: %#llx -> %#llx", (unsigned long long)g_wat, (unsigned long long)a, (unsigned long long)old, (unsigned long long)nv);
+                     watch_where("pc", pc); watch_where("lr", PLAT_UC_LR(uc)); fputc('\n', stderr); dm_backtrace(PLAT_UC_FP(uc)); funlockfile(stderr); }
+          return 1;
+      } }
     // Exclusive and atomic stores (STXR / STLXR / STLR / STXP, CAS, SWP, LD<op>) address [Xn] with no offset: one that reaches the watched bytes is reported like a store, every time
     // (its new value lands when it runs on the unprotected page). Tears of the Kingdom's memory-shortage flag is set by such a store, and the page it lies on takes many of them
     { uint32_t in = *(uint32_t *)pc; int ex = (in & 0x3f000000) == 0x08000000, at = (in & 0x3f200c00) == 0x38200000;   // exclusive class (CAS / CASP among them); LD<op> / SWP
@@ -268,7 +294,9 @@ static int watch_fault(void *addr, int is_write, void *ucv) {
     { static uint64_t seen[16]; static _Atomic int ns; int k = 0, n = atomic_load(&ns);   // not a store form the handler carries out: let it run on an unprotected page
       while (k < n && k < 16 && seen[k] != pc) k++;
       if (k == n && n < 16) { seen[atomic_fetch_add(&ns, 1) & 15] = pc; flockfile(stderr); fprintf(stderr, "[dm] WATCH: instruction %08x not emulated, page unprotected for it:", *(uint32_t *)pc); watch_where("pc", pc); fputc('\n', stderr); funlockfile(stderr); } }
+    while (atomic_flag_test_and_set(&g_wlk)) {}
     mprotect((void *)g_wpg, g_wpsz, PROT_READ | PROT_WRITE); atomic_store(&g_warmed, 0);
+    atomic_flag_clear(&g_wlk);
     return 1;
 }
 static void *watch_arm(void *p) {
@@ -279,9 +307,11 @@ static void *watch_arm(void *p) {
             if (!plat_mem_region(g_wpg, &ra, &rs, &prot) && ra <= g_wpg && (prot & PROT_WRITE)) {
                 if (!g_walias) {   // a second, writable mapping of the same page, for the handler's stores
                     g_walias = plat_mem_alias((void *)g_wpg, g_wpsz);
-                    LOG("WATCH %#llx armed, value %#llx%s", (unsigned long long)g_wat, (unsigned long long)watch_val(), g_walias ? "" : " ([RED] no alias mapping: every store unprotects the page)");
+                    static uint64_t told; if (told != g_wat) { told = g_wat; LOG("WATCH %#llx armed, value %#llx%s", (unsigned long long)g_wat, (unsigned long long)watch_val(), g_walias ? "" : " (no alias mapping: each store goes through with the page opened for it)"); }
                 }
-                atomic_store(&g_warmed, 1); mprotect((void *)g_wpg, g_wpsz, PROT_READ); }
+                while (atomic_flag_test_and_set(&g_wlk)) {}
+                atomic_store(&g_warmed, 1); mprotect((void *)g_wpg, g_wpsz, PROT_READ);
+                atomic_flag_clear(&g_wlk); }
         }
         usleep(1000);
     }
@@ -339,8 +369,18 @@ static void watch_install(void) {
                if (*end == '=') { g_pwant = 1; g_pval = strtoull(end + 1, 0, 16); }
                if (!g_poll || !g_plen || g_plen > 8) die("DM_PROBE_POLL format: <address>[+<length up to 8>][=<value>] (hex)");
                pthread_t t; pthread_create(&t, NULL, poll_run, NULL); pthread_detach(t); } }
+    watch_start();
+}
+static void watch_start(void) {   // DM_PROBE_WATCH at start, or later through the live control (probe_live)
     const char *e = getenv("DM_PROBE_WATCH"); if (!e) return;
-    char *end; g_wat = strtoull(e, &end, 16); g_wlen = *end == '+' ? strtoull(end + 1, 0, 16) : 8;
+    char *end; uint64_t want = strtoull(e, &end, 16);
+    if (g_wat) {   // a new address through the live control: the old page writable again, the arming thread takes the new one
+        if (want == g_wat) return;
+        atomic_store(&g_warmed, 1); mprotect((void *)g_wpg, g_wpsz, PROT_READ | PROT_WRITE);
+        g_wlen = *end == '+' ? strtoull(end + 1, 0, 16) : 8; g_wpg = want & ~(g_wpsz - 1); g_walias = NULL; g_wat = want; atomic_store(&g_warmed, 0);
+        LOG("write watch moved to %#llx + %#llx", (unsigned long long)g_wat, (unsigned long long)g_wlen); return;
+    }
+    g_wat = want; g_wlen = *end == '+' ? strtoull(end + 1, 0, 16) : 8;
     if (!g_wat || !g_wlen) die("DM_PROBE_WATCH format: <address>[+<length>] (hex)");
     g_wpsz = (uint64_t)getpagesize(); g_wpg = g_wat & ~(g_wpsz - 1);
     if (g_wat + g_wlen > g_wpg + g_wpsz) die("DM_PROBE_WATCH: the watched bytes must lie in one host page");
@@ -349,6 +389,88 @@ static void watch_install(void) {
     LOG("write watch on %#llx + %#llx (host page %#llx)", (unsigned long long)g_wat, (unsigned long long)g_wlen, (unsigned long long)g_wpg);
 }
 
+#endif
+
+#if !PLAT_IOS
+// ---------- Dev tools, changed while the game runs (DM_DEVTOOLS=1 at start; off by default, nothing below runs without it) ----------
+// A thread looks at the live control's generation (vka_ctl.c: an "env KEY=VALUE" line in DM_CTL, android/tools/nxctl.sh env) five times a second and, when it moved,
+// reads DM_PROBE_LIVE, DM_PROBE_WATCH and DM_TELEPORT again
+extern _Atomic uint32_t vka_env_gen __attribute__((weak));
+static int devtools_on(void) { static int on = -1; if (on < 0) { const char *e = getenv("DM_DEVTOOLS"); on = e && atoi(e) > 0; } return on; }
+static module_t *main_mod(void) { for (int i = 0; i < g_nmod; i++) if (!strcmp(g_mod[i].name, "main")) return &g_mod[i]; return NULL; }
+// Teleport into a stage the way a door does (Donkey Kong Bananza, main build e25c90c1 only). A door calls main+0x14fd3a0(holder, stage, arrival GUID): main+0x14fd3f0
+// fills the stage-change request (stage name string at +0x18, scenario +0x20, arrival GUID string at +0x28, type +0x30 = 1, +0x34 = 2) and sets its flag byte +0; the
+// scene ends and the sequence (main+0x668684) builds the stage named there. The request is a heap object whose two strings point at buffers inside it (+0x158 and
+// +0x288): found by that shape in the game's read-write memory on the first DM_TELEPORT (a second or two), kept while it still has it. DM_TELEPORT=<stage>,<arrival GUID> writes it and sets the flag; DM_TELEPORT=? logs the last request (go through
+// a door, then ask: that pair is a target). Limits: from the overworld only (a sublevel requested from inside another one asks for a second stage heap and crashes the
+// load), and leaving a teleported stage reloads it instead of returning to the overworld
+static uint64_t g_tp;   // the request, once found
+static int tp_shape(uint64_t r) { uint64_t a = 0, b = 0; return !plat_mem_read(r + 0x18, &a, 8) && !plat_mem_read(r + 0x28, &b, 8) && a == r + 0x158 && b == r + 0x288; }
+static uint64_t tp_find(void) {
+    if (g_tp && tp_shape(g_tp)) return g_tp;
+    g_tp = 0;
+    FILE *f = fopen("/proc/self/maps", "r"); if (!f) return 0;
+    char line[512]; unsigned long long lo, hi; char perm[8];
+    while (!g_tp && fgets(line, sizeof line, f)) {
+        if (sscanf(line, "%llx-%llx %7s", &lo, &hi, perm) != 3 || perm[0] != 'r' || perm[1] != 'w' || lo < 0x4000000000ull || hi > 0x8000000000ull) continue;
+        for (uint64_t q = lo; q + 0x300 <= hi; q += 8)   // guest memory is mapped at its own addresses
+            if (*(volatile uint64_t *)(uintptr_t)(q + 0x18) == q + 0x158 && *(volatile uint64_t *)(uintptr_t)(q + 0x28) == q + 0x288) { g_tp = q; break; }
+    }
+    fclose(f);
+    return g_tp;
+}
+static int tp_str(uint64_t obj, char *out, size_t n, uint64_t *buf) {   // a request string: a pointer to its own buffer right after it, capacity 0x100
+    uint64_t p = 0; uint32_t cap = 0;
+    if (plat_mem_read(obj, &p, 8) || plat_mem_read(obj + 8, &cap, 4) || p != obj + 12 || cap != 0x100) return -1;
+    if (out) { if (plat_mem_read(p, out, n - 1)) return -1; out[n - 1] = 0; }
+    if (buf) *buf = p;
+    return 0;
+}
+static void teleport_live(void) {
+    const char *e = getenv("DM_TELEPORT"); static char last[160];
+    if (!e || !strcmp(e, last)) return;
+    strlcpy(last, e, sizeof last);
+    module_t *m = main_mod();
+    if (!m || strcmp(m->build_id, "e25c90c1c136638885659fd55bf8a03b")) { LOG("[RED] teleport: only for Donkey Kong Bananza's main build e25c90c1"); return; }
+    uint64_t so = 0, go = 0, sb = 0, gb = 0, req = tp_find(); char st[64], gu[64];
+    if (!req || plat_mem_read(req + 0x18, &so, 8) || plat_mem_read(req + 0x28, &go, 8) || tp_str(so, st, sizeof st, &sb) || tp_str(go, gu, sizeof gu, &gb)) {
+        LOG("[RED] teleport: the stage-change request was not found in the game's memory"); g_tp = 0; return; }
+    if (!strcmp(e, "?")) { LOG("teleport: the last request was %s,%s", st, gu); return; }
+    char stage[128], guid[64]; const char *c = strchr(e, ',');
+    if (!c || c - e >= (long)sizeof stage || strlen(c + 1) >= sizeof guid) { LOG("[RED] teleport: DM_TELEPORT=<stage>,<arrival GUID> (or ? for the last door's)"); return; }
+    memcpy(stage, e, (size_t)(c - e)); stage[c - e] = 0; strlcpy(guid, c + 1, sizeof guid);
+    char *sp = (char *)(uintptr_t)sb, *gp = (char *)(uintptr_t)gb;
+    memset(sp, 0, 128); memcpy(sp, stage, strlen(stage)); memset(gp, 0, 64); memcpy(gp, guid, strlen(guid));
+    *(int32_t *)(uintptr_t)(req + 0x20) = 1; *(int32_t *)(uintptr_t)(req + 0x30) = 1; *(int32_t *)(uintptr_t)(req + 0x34) = 2;
+    __atomic_thread_fence(__ATOMIC_SEQ_CST);
+    *(volatile uint8_t *)(uintptr_t)req = 1;
+    LOG("teleport: to %s (arrival %s), was %s (request at %#llx)", stage, guid, st, (unsigned long long)req);
+}
+// DM_PROBE_LIVE=<hex offset>[,...] (into main): each new offset gets a printing probe while the game runs, no restart (at most 6 printed hits each unless
+// DM_PROBE_LIMIT says otherwise). The same rules as DM_PROBE: function entries, never a PC-relative instruction
+static void probe_live(void) {
+    watch_start();
+    teleport_live();
+    module_t *m = main_mod(); const char *e = getenv("DM_PROBE_LIVE"); if (!e || !m) return;
+    if (!g_probe_limit) g_probe_limit = 6;
+    char spec[512]; strlcpy(spec, e, sizeof spec);
+    for (char *t = strtok(spec, ","); t; t = strtok(NULL, ",")) {
+        uint64_t off = strtoull(t, 0, 16), at = (uint64_t)m->base + off; int have = 0;
+        for (int i = 0; i < g_nprobe; i++) if (g_probe[i].at == at) have = 1;
+        if (!have && off && g_nprobe < MAX_PROBE) { probe_add(m, off, -1, NULL); LOG("probe: main+%#llx added while running", (unsigned long long)off); }
+    }
+}
+static void *devtools_run(void *arg) {
+    (void)arg; uint32_t gen = 0;
+    for (;;) { usleep(200000); uint32_t g = atomic_load_explicit(&vka_env_gen, memory_order_relaxed); if (g != gen) { gen = g; probe_live(); } }
+    return NULL;
+}
+static void devtools_start(void) {
+    if (!devtools_on()) return;
+    if (!&vka_env_gen) { LOG("[RED] dev tools: this host has no live control (vka_env_gen): DM_DEVTOOLS does nothing"); return; }
+    pthread_t t; pthread_create(&t, NULL, devtools_run, NULL); pthread_detach(t);
+    LOG("dev tools on (DM_DEVTOOLS): DM_PROBE_LIVE, DM_PROBE_WATCH and DM_TELEPORT are read again at each live control change");
+}
 #endif
 
 void probe_install(void) {
@@ -393,7 +515,9 @@ void probe_install(void) {
             }
         }
     }
+    if (devtools_on() && !g_slots) g_slots = mmap(NULL, 0x4000, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANON, -1, 0);   // live probes need the slot page sealed now
     if (g_slots && !g_slots_sealed) { mprotect(g_slots, 0x4000, PROT_READ | PROT_EXEC); plat_icache_invalidate(g_slots, 0x4000); g_slots_sealed = 1; }
     watch_install();
+    devtools_start();
 #endif
 }
