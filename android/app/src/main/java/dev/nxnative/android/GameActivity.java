@@ -62,6 +62,7 @@ public final class GameActivity extends Activity implements SurfaceHolder.Callba
     private final HashSet<Integer> pads = new HashSet<>();   // the gamepads connected: the on-screen controls hide while there is one
     private File log;
     private final Handler ui = new Handler(Looper.getMainLooper());
+    private volatile Rumble rumble;   // the game's vibration on the controller's or the phone's vibrator
     private boolean input, started;
     private InputManager inputManager;
     private AudioManager audio;
@@ -434,6 +435,7 @@ public final class GameActivity extends Activity implements SurfaceHolder.Callba
             Fsr.env(this, env);   // FSR 1 upscaling (the in-game panel)
             int cap = Prefs.fpsCap(this, id);   // the game's own frame rate cap (its in-game panel, its Game settings), else the main screen's (unset: the profile's fps_target)
             if (cap >= 0) env.add("DM_FPS_TARGET=" + cap);
+            if (Prefs.rumble(this, id)) { rumble = new Rumble(this); if (!rumble.start()) rumble = null; }   // Rumble (Game settings, Settings)
             String gpuNote = GpuDriver.env(this, id, env);   // the game's GPU driver, else the main screen's (DM_VK_DRIVER)
             String ts = Prefs.gpuTs(this, id);   // Game settings › GPU timing; unset: the profile's gpu_timestamps (a DM_NVN_GPU_TS line of env.txt or the game's own lines comes later and wins)
             if (ts != null) env.add("DM_NVN_GPU_TS=" + ts);
@@ -526,6 +528,7 @@ public final class GameActivity extends Activity implements SurfaceHolder.Callba
     @Override protected void onDestroy() {
         TextInput.gone(this);
         ui.removeCallbacksAndMessages(null);
+        if (rumble != null) rumble.stopAll();
         if (inputManager != null) inputManager.unregisterInputDeviceListener(this);
         if (audio != null) {
             if (focus != null) audio.abandonAudioFocusRequest(focus);
@@ -682,6 +685,7 @@ public final class GameActivity extends Activity implements SurfaceHolder.Callba
         paused = true;
         Native.lifecycle(4);
         Native.motionStop();
+        if (rumble != null) rumble.stopAll();
         pausedView.setVisibility(View.VISIBLE);
     }
 
@@ -751,7 +755,11 @@ public final class GameActivity extends Activity implements SurfaceHolder.Callba
         Native.deviceRemoved(id); deviceAxes.remove(id);
         if (pads.remove(id)) controls.setGamepad(!pads.isEmpty());
     }
-    private void padConnected(int id) { if (pads.add(id)) controls.setGamepad(true); }
+    private void padConnected(int id) {
+        if (!pads.add(id)) return;
+        controls.setGamepad(true);
+        if (rumble != null) rumble.route(id);
+    }
     @Override public void onInputDeviceChanged(int id) { deviceAxes.remove(id); }
 
     @Override public boolean dispatchKeyEvent(KeyEvent e) {
