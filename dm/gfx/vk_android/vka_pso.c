@@ -345,10 +345,11 @@ static int pstate_fill(pstate *P, vka_shader *const sh[VKA_NSTAGE], const vka_la
     P->ri = (VkPipelineRenderingCreateInfo){VK_STRUCTURE_TYPE_PIPELINE_RENDERING_CREATE_INFO, .colorAttachmentCount = k->ncolor, .pColorAttachmentFormats = P->cf,
                                             .depthAttachmentFormat = (VkFormat)k->dfmt, .stencilAttachmentFormat = (VkFormat)k->sfmt};
     P->tess = !mesh && (sh[3] || sh[4]); P->mesh = mesh;
-    P->ci = (VkGraphicsPipelineCreateInfo){VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO, .pNext = &P->ri, .stageCount = P->ns, .pStages = P->ss, .pVertexInputState = mesh ? NULL : &P->vi,
+    P->ci = (VkGraphicsPipelineCreateInfo){VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO, .pNext = vka_classic_rp() ? P->ri.pNext : &P->ri, .stageCount = P->ns, .pStages = P->ss, .pVertexInputState = mesh ? NULL : &P->vi,
         .pInputAssemblyState = mesh ? NULL : &P->ia,
         .pTessellationState = P->tess ? &P->ts : NULL, .pViewportState = &P->vp, .pRasterizationState = &P->rs, .pMultisampleState = &P->ms, .pDepthStencilState = &P->ds, .pColorBlendState = &P->bs,
         .pDynamicState = &P->dy, .layout = lay->layout};
+    if (vka_classic_rp()) { P->ci.renderPass = vka_rp_compat(P->cf, k->ncolor, (VkFormat)k->dfmt, (VkFormat)k->sfmt, k->samples); P->ci.subpass = 0; }   // DM_VK_CLASSIC_RP
     P->set0 = lay->set0;
     return 1;
 }
@@ -435,7 +436,7 @@ static uint64_t g_nlib[NLIB], g_nlinked, g_nopt; static double g_lib_ms, g_link_
 static const char *const g_lib_name[NLIB] = {"vertex input", "pre-rasterization", "fragment shader", "fragment output", "pre-rasterization + fragment shader"};
 enum { A_NOCACHE = 1, A_RETAIN = 2, A_NORI = 4, A_COMBINED = 8 };
 static unsigned g_pre_adapt; static int g_pre_probed, g_pre_refused; static _Atomic int g_gpl_off;
-static int gpl_on(void) { return V.gpl && !atomic_load(&g_gpl_off); }
+static int gpl_on(void) { return V.gpl && !atomic_load(&g_gpl_off) && !vka_classic_rp(); }   // (classic render passes: full pipelines only)
 // A library's map value: the library, LIB_REFUSED (the driver refused it: the whole pipeline is made instead) or LIB_BUSY (a thread is making it). Several threads link
 // (the replay thread, the DM_VK_PSO_ASYNC threads) and often miss the same part at once (one fragment shader under many vertex shaders): the first claims the key with
 // LIB_BUSY and makes it, the others wait for it on g_lib_cv instead of compiling it again (each copy a slow compile, a second map entry and a leaked library). A thread

@@ -488,3 +488,105 @@ fail:
     return NULL;
 #undef FAIL
 }
+
+// vka_spv_instance: an instanced variant of a vertex or pixel shader (vka_draw.c's instanced runs, DM_VK_INSTANCE). Draws that repeat one mesh with only one uniform
+// block's offset changed become one instanced draw: every read of the block at `binding` (the translator's vec4 data[4096] constant buffer) goes to data[i + d],
+// d (vec4 units) a uint vertex input at location `loc`, fed per instance by the replay, and passed on as a flat uint output at the same location; in the pixel shader a
+// flat uint input at `loc`. Checked against a Python reference built on SPIRV-Tools (for Donkey Kong Bananza's 14 most used
+// pairs both give the same module byte for byte once reassembled, and spirv-val accepts it), made at pipeline time. Where a read of the block could not be moved (a chain with one index, a load of the whole
+// block, the block handed to a function) this refuses the shader instead
+enum { OpTypeVoid = 19, OpTypeForwardPointerX = 39, OpSpecConstant = 50, OpFunctionCall = 57, OpIAdd = 128, DecFlat = 14, BIInstanceIndex = 43 };
+static int no_result(uint32_t op) {   // function-body instructions without a result type (the rest carry [type, result] in words 1-2)
+    return op == OpStore || op == OpBranch || op == OpBranchConditional || op == OpSwitch || op == OpReturn || op == OpReturnValue || op == OpKill || op == OpUnreachable
+        || op == OpSelectionMerge || op == OpLoopMerge || op == OpLabel || op == OpCopyMemory || op == OpCopyMemorySized || op == OpImageWrite || op == OpAtomicStore
+        || op == OpTerminateInvocation || op == OpFunctionEnd || op == 224 || op == 225 || op == 8 || op == 317 || op == 5380 || op == 218 || op == 219;
+}
+uint32_t *vka_spv_instance(const uint32_t *w, size_t nw, uint32_t binding, uint32_t loc, size_t *out_nw, char *err, size_t errn) {
+#undef FAIL
+#define FAIL(...) do { snprintf(err, errn, __VA_ARGS__); goto fail; } while (0)
+    uint32_t *type_of = NULL; vec_t o = {0};
+    if (nw < 5 || w[0] != 0x07230203) { snprintf(err, errn, "not SPIR-V"); return NULL; }
+    uint32_t bound = w[3];
+    if (!(type_of = calloc(bound, 4))) { snprintf(err, errn, "out of memory"); return NULL; }
+    // Pass 1: the stage and entry point, the block's variable, the int types, the places the additions go, the result type of every value an index can be
+    int model = -1; uint32_t entry = 0, var = 0, t_u = 0, t_s = 0;
+    size_t first_type = 0, first_dec = 0, first_fn = 0, last_gvar = 0;
+    for (size_t i = 5; i < nw;) {
+        uint32_t op = w[i] & 0xffff, len = w[i] >> 16;
+        if (!len || i + len > nw) FAIL("bad instruction at word %zu", i);
+        if (op == OpEntryPoint && model < 0 && len >= 3) { model = (int)w[i + 1]; entry = w[i + 2]; }
+        else if (op == OpDecorate && len >= 4 && w[i + 2] == DecBinding && w[i + 3] == binding) var = w[i + 1];
+        else if (op == OpDecorate && len >= 4 && w[i + 2] == DecLocation && w[i + 3] == loc) FAIL("location %u is taken", loc);
+        else if (op == OpDecorate && len >= 4 && w[i + 2] == DecBuiltIn && w[i + 3] == BIInstanceIndex) FAIL("the shader reads its instance index");
+        else if (op == OpTypeInt && len >= 4 && w[i + 2] == 32) { if (w[i + 3] && !t_s) t_s = w[i + 1]; else if (!w[i + 3] && !t_u) t_u = w[i + 1]; }
+        if (op == OpDecorate && !first_dec) first_dec = i;
+        if (op >= OpTypeVoid && op < OpTypeForwardPointerX && !first_type) first_type = i;
+        if (op == OpFunction && !first_fn) first_fn = i;
+        if (op == OpVariable && !first_fn) last_gvar = i;
+        if ((op == OpConstant || op == OpSpecConstant) && len >= 3 && w[i + 2] < bound) type_of[w[i + 2]] = w[i + 1];
+        else if (first_fn && op != OpFunction && !no_result(op) && len >= 3 && w[i + 2] < bound) type_of[w[i + 2]] = w[i + 1];
+        i += len;
+    }
+    if (model != 0 && model != 4) FAIL("only vertex and pixel shaders (execution model %d)", model);
+    if (!var) FAIL("no variable at binding %u", binding);
+    if (!first_type || !first_dec || !first_fn || !last_gvar) FAIL("no types, decorations, functions or global variables");
+    // New ids in the tool's order: uint (when missing), the Input pointer, the input; for a vertex shader the Output pointer and the output
+    uint32_t nid = bound, u_new = 0;
+    if (!t_u) t_u = u_new = nid++;
+    uint32_t p_in = nid++, v_in = nid++, p_out = 0, v_out = 0;
+    if (model == 0) { p_out = nid++; v_out = nid++; }
+    // Pass 2: the module with the additions; per function the input loaded once (after the entry block's variables) and every chain into the block moved by it
+    if (!put_n(&o, w, 5)) FAIL("out of memory");
+    int in_fn = 0, need_load = 0; uint32_t fn = 0, ld = 0, ldi = 0, moved = 0;
+    for (size_t i = 5; i < nw;) {
+        uint32_t op = w[i] & 0xffff, len = w[i] >> 16;
+        if (i == first_dec) {
+            uint32_t d[] = {4u << 16 | OpDecorate, v_in, DecLocation, loc, 3u << 16 | OpDecorate, v_in, DecFlat};
+            if (model == 0) { uint32_t dv[] = {4u << 16 | OpDecorate, v_in, DecLocation, loc, 4u << 16 | OpDecorate, v_out, DecLocation, loc, 3u << 16 | OpDecorate, v_out, DecFlat};
+                              if (!put_n(&o, dv, 11)) FAIL("out of memory"); }
+            else if (!put_n(&o, d, 7)) FAIL("out of memory");
+        }
+        if (op == OpFunction) { in_fn = 1; fn = w[i + 2]; need_load = 0; if (!put_n(&o, w + i, len)) FAIL("out of memory"); i += len; continue; }
+        if (op == OpLabel && in_fn && !need_load && !ld) { need_load = 1; if (!put_n(&o, w + i, len)) FAIL("out of memory"); i += len; continue; }
+        if (in_fn && need_load == 1 && op != OpVariable) {   // the entry block's loads, after its variables
+            ld = nid++; ldi = t_s ? nid++ : 0;
+            uint32_t l[] = {4u << 16 | OpLoad, t_u, ld, v_in}; if (!put_n(&o, l, 4)) FAIL("out of memory");
+            if (ldi) { uint32_t b[] = {4u << 16 | OpBitcast, t_s, ldi, ld}; if (!put_n(&o, b, 4)) FAIL("out of memory"); }
+            if (v_out && fn == entry) { uint32_t s[] = {3u << 16 | OpStore, v_out, ld}; if (!put_n(&o, s, 3)) FAIL("out of memory"); }
+            need_load = 2;
+        }
+        if ((op == OpAccessChain || op == OpInBoundsAccessChain) && len >= 4 && w[i + 3] == var) {
+            if (len < 6) FAIL("a chain into the block with one index");
+            uint32_t idx = w[i + 5], it = idx < bound ? type_of[idx] : 0, add = nid++;
+            if (it != t_u && !(it == t_s && t_s)) FAIL("an index of a type other than a 32-bit int");
+            uint32_t a[] = {5u << 16 | OpIAdd, it, add, idx, it == t_u ? ld : ldi}; if (!put_n(&o, a, 5)) FAIL("out of memory");
+            size_t at = o.n; if (!put_n(&o, w + i, len)) FAIL("out of memory");
+            o.w[at + 5] = add; moved++; i += len; continue;
+        }
+        if ((op == OpLoad && len >= 4 && w[i + 3] == var) || (op == OpStore && len >= 3 && w[i + 1] == var) || (op == OpCopyObject && len >= 4 && w[i + 3] == var)
+            || ((op == OpPtrAccessChain || op == OpInBoundsPtrAccessChain) && len >= 4 && w[i + 3] == var)) FAIL("the block used other than through chains");
+        if (op == OpFunctionCall) for (uint32_t k = 4; k < len; k++) if (w[i + k] == var) FAIL("the block handed to a function");
+        if (op == OpFunctionEnd) { in_fn = 0; ld = ldi = 0; }
+        if (op == OpEntryPoint) {   // the interface gets the new variables
+            size_t at = o.n; if (!put_n(&o, w + i, len) || !put(&o, v_in) || (v_out && !put(&o, v_out))) FAIL("out of memory");
+            o.w[at] = (len + 1 + (v_out != 0)) << 16 | OpEntryPoint; i += len; continue;
+        }
+        if (!put_n(&o, w + i, len)) FAIL("out of memory");
+        if (i == first_type) {
+            if (u_new) { uint32_t t[] = {4u << 16 | OpTypeInt, u_new, 32, 0}; if (!put_n(&o, t, 4)) FAIL("out of memory"); }
+            uint32_t p[] = {4u << 16 | OpTypePointer, p_in, SCInput, t_u}; if (!put_n(&o, p, 4)) FAIL("out of memory");
+            if (p_out) { uint32_t q[] = {4u << 16 | OpTypePointer, p_out, SCOutput, t_u}; if (!put_n(&o, q, 4)) FAIL("out of memory"); }
+        }
+        if (i == last_gvar) {
+            uint32_t v[] = {4u << 16 | OpVariable, p_in, v_in, SCInput}; if (!put_n(&o, v, 4)) FAIL("out of memory");
+            if (v_out) { uint32_t x[] = {4u << 16 | OpVariable, p_out, v_out, SCOutput}; if (!put_n(&o, x, 4)) FAIL("out of memory"); }
+        }
+        i += len;
+    }
+    if (!moved) FAIL("no reads of the block");
+    o.w[3] = nid;
+    free(type_of); *out_nw = o.n; return o.w;
+fail:
+    free(type_of); free(o.w); return NULL;
+#undef FAIL
+}

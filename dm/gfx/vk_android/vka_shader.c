@@ -223,6 +223,22 @@ static VkShaderModule spv_module(const vka_shlib *L, const dmsh_vk_entry *e, con
     if (r) { snprintf(err, errn, "vkCreateShaderModule %d (variant %u of %016llx)", r, m->variant, (unsigned long long)key); *why = err; return VK_NULL_HANDLE; }
     return mod;
 }
+// An instanced variant (vka_draw.c's instanced runs): the base module with the uniform block at `binding` read at data[i + d] (vka_spv_instance), made from the
+// library's SPIR-V; the caller caches it. VK_NULL_HANDLE (the reason logged a few times) when the shader cannot take it
+VkShaderModule vka_shader_inst_module(vka_shader *s, uint32_t binding, uint32_t loc) {
+    char err[256]; const dmsh_vk_module *m = vka_shlib_module(s->lib, s->e, DMSH_VK_MOD_BASE);
+    size_t nb = 0; uint32_t *w = m ? vka_shlib_spirv(s->lib, m, &nb, err, sizeof err) : NULL;
+    if (!w) return VK_NULL_HANDLE;
+    if (s->e->flags & DMSH_VK_F_SUBGROUP) single_lane(s->key, s->e->stage, &w, &nb);
+    size_t on = 0; uint32_t *o = vka_spv_instance(w, nb / 4, binding, loc, &on, err, sizeof err);
+    free(w);
+    if (!o) { static _Atomic int n; if (atomic_fetch_add(&n, 1) < 16) VLOG("instanced runs: shader %016llx (binding %u) takes no variant: %s", (unsigned long long)s->key, binding, err); return VK_NULL_HANDLE; }
+    VkShaderModuleCreateInfo ci = {VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO, .codeSize = on * 4, .pCode = o};
+    VkShaderModule mod = VK_NULL_HANDLE; VkResult r = vk.vkCreateShaderModule(V.dev, &ci, NULL, &mod);
+    free(o);
+    if (r) { VRED("instanced runs: variant of %016llx (binding %u): vkCreateShaderModule %d", (unsigned long long)s->key, binding, r); return VK_NULL_HANDLE; }
+    return mod;
+}
 VkShaderModule vka_shader_module(vka_shader *s, int variant) {
     if (variant < 0 || variant > DMSH_VK_MOD_SHUFFLE_LDS) return VK_NULL_HANDLE;
     if (s->mods[variant]) return s->mods[variant];

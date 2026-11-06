@@ -33,7 +33,7 @@
     X(vkCreateFence) X(vkDestroyFence) X(vkWaitForFences) X(vkResetFences) \
     X(vkCmdPipelineBarrier) X(vkCmdCopyBuffer) X(vkCmdUpdateBuffer) X(vkCmdFillBuffer) X(vkCmdCopyBufferToImage) X(vkCmdCopyImageToBuffer) \
     X(vkCmdCopyImage) X(vkCmdBlitImage) X(vkCmdResolveImage) X(vkCmdClearColorImage) X(vkCmdClearDepthStencilImage) X(vkCmdClearAttachments) \
-    X(vkCmdBeginRendering) X(vkCmdEndRendering) \
+    X(vkCmdBeginRendering) X(vkCmdEndRendering) X(vkCmdBeginRenderPass) X(vkCmdEndRenderPass) X(vkCreateRenderPass) X(vkCreateFramebuffer) \
     X(vkCreateDescriptorSetLayout) X(vkCreateDescriptorPool) X(vkAllocateDescriptorSets) X(vkUpdateDescriptorSets) \
     X(vkCreateSwapchainKHR) X(vkDestroySwapchainKHR) X(vkGetSwapchainImagesKHR) X(vkAcquireNextImageKHR) X(vkQueuePresentKHR) \
     X(vkGetRefreshCycleDurationGOOGLE) X(vkGetPastPresentationTimingGOOGLE) \
@@ -212,6 +212,7 @@ typedef struct vka_img {
     uint64_t serial; const uint8_t *mem; nvn_texdesc d; nvn_texlayout L;
     VkImage img; vka_imem m; vka_fmt f; VkImageUsageFlags usage; VkImageAspectFlags aspect;
     uint32_t w, h, depth, layers, levels, samples; uint64_t bytes;
+    VkImageCreateFlags cflags; uint32_t nvf; VkFormat vf[6];   // as created: flags and the view format list (none: nvf 0), for imageless framebuffers (DM_VK_CLASSIC_RP)
     int refs, inited, gpu_owned, cpu_dirty;
     int no_storage;          // remaking it with storage use was refused (img_storage_upgrade): not tried again
     int holds;               // references taken from outside the recording thread (vka_tex_acquire / vka_tex_ref: the present, frame generation, capture), which read img unlocked: the image is not remade while held (img_storage_upgrade)
@@ -325,6 +326,7 @@ vka_shader *vka_shader_by_key(uint64_t key);   // the game library's shader of k
 VkShaderModule vka_shader_module(vka_shader *s, int variant);
 uint32_t vka_shader_sg_pin(int stage);              // DMSH_VK_STAGE_*: the subgroup size its subgroup shaders' pipelines require (vka_shader.c sg_plan), 0 = none
 VkShaderModule vka_shader_cs_module(vka_shader *s);  // a compute shader's module: its DMSH_VK_MOD_SHUFFLE_LDS one where the device takes it (vka_shader.c shuffle_plan), else the base
+VkShaderModule vka_shader_inst_module(vka_shader *s, uint32_t binding, uint32_t loc);   // an instanced variant of the base module (vka_spv_instance), made each call
 VkShaderModule vka_shader_gs_module(vka_shader *s);   // a geometry shader's module with its memory writes made once per primitive (vka_spv_gs_claim)
 #define VKA_GS_CLAIM_BINDING (DMSH_VK_STAGE_GS * DMSH_VK_STAGE_BINDINGS + DMSH_VK_STAGE_BINDINGS - 1)   // set 0: the claim words of such a shader (the stage's last binding)
 VkShaderModule vka_shader_fout_module(vka_shader *s, uint32_t umask, uint32_t smask);
@@ -364,8 +366,12 @@ typedef struct {
     float blend_color[4], alpha_ref;
     p_prim_restart restart; int rast_discard, tf_on;
     int inited;
+    uint32_t bind_gen;                 // raised by every state record but a uniform buffer bind (vka_draw.c's instanced runs: a draw that joins without its walk)
+    uint32_t ubo_dirty[VKA_NSTAGE];    // uniform buffer slots bound since the open run's last draw, a bit per slot
 } vka_dstate;
 void vka_dstate_reset(vka_dstate *d);
+int vka_classic_rp(void);   // DM_VK_CLASSIC_RP: the game's passes as VkRenderPasses with imageless framebuffers (vka_draw.c)
+VkRenderPass vka_rp_compat(const VkFormat *cf, uint32_t n, VkFormat df, VkFormat sf, uint32_t samples);   // a render pass pipelines of those targets are made against
 int vka_state_op(vka_dstate *d, uint32_t op, const void *a);   // 1 = a state record, taken
 // The render pass the draws of a submission go into: opened at a draw, closed by anything that is not a draw or state (vka_rp_end), and by a new SET_RT
 void vka_draw_sub_begin(VkCommandBuffer cb, unsigned slot);    // the slot's per-draw descriptor sets are free again (its last fence is done)

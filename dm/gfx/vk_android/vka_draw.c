@@ -15,6 +15,7 @@
 #include <string.h>
 
 static VkCommandBuffer g_cb; static unsigned g_slot; static int g_prof, g_dyn_filter = 1, g_pass_keep = 1, g_vb_filter = 1;   // g_prof: DM_VK_PROF
+static int g_inst_on;   // DM_VK_INSTANCE (the instanced runs below)
 uint64_t vka_n_rp;   // render passes the draws opened (vka_exec.c replay statistics)
 static uint64_t g_draws, g_skipped, g_dispatches;
 static uint32_t g_claim_words;   // the draw's claim words (an upper bound of its primitives): 0 = its geometry shader takes no claim
@@ -43,6 +44,7 @@ void vka_dstate_reset(vka_dstate *d) {   // NVN's defaults (nvn_mtl.m state_rese
 int nvn_dpool_base(const void *pool, int tex);   // hle_nvn.c: where a descriptor pool's IDs start in the host table
 int vka_state_op(vka_dstate *d, uint32_t op, const void *a) {
     if (!d->inited) vka_dstate_reset(d);
+    if (op != OP_BIND_UBO && op != OP_BIND_UBO_SMALL) { d->bind_gen++; }
     switch (op) {
     case OP_SET_TEX_POOL: case OP_SET_SAMP_POOL: { int tex = op == OP_SET_TEX_POOL, b = nvn_dpool_base(((const p_set_pool *)a)->pool, tex); if (tex) d->b.tex_base = b; else d->b.samp_base = b; break; }
     case OP_BIND_PROGRAM: { const p_bind_program *b = a;
@@ -63,7 +65,7 @@ int vka_state_op(vka_dstate *d, uint32_t op, const void *a) {
     case OP_BIND_VATTR: { const p_bind_vattr *b = a; if (b->first >= 0 && b->first + b->n <= 16) { memcpy(&d->attr[b->first], b->st, 4 * (size_t)b->n); if (b->first + b->n > d->nattr) d->nattr = b->first + b->n; } break; }
     case OP_BIND_VSTREAM: { const p_bind_vstream *b = a; if (b->first >= 0 && b->first + b->n <= 16) { memcpy(&d->stream[b->first], b->st, 8 * (size_t)b->n); if (b->first + b->n > d->nstream) d->nstream = b->first + b->n; } break; }
     case OP_BIND_VBUF: case OP_BIND_VBUF1: { p_bind_vbuf tmp; const p_bind_vbuf *b = vbuf_rec(op, a, &tmp); if (b->first >= 0 && b->first + b->n <= 16) memcpy(&d->vbuf[b->first], b->r, sizeof *b->r * (size_t)b->n); break; }
-    case OP_BIND_UBO: case OP_BIND_UBO_SMALL: { p_bind_buf tmp; const p_bind_buf *b = bind_buf_rec(op, a, &tmp); if (b->stage >= 0 && b->stage < VKA_NSTAGE && b->index >= 0 && b->index < 16) d->b.ubo[b->stage][b->index] = (vka_range){b->addr, b->size}; break; }
+    case OP_BIND_UBO: case OP_BIND_UBO_SMALL: { p_bind_buf tmp; const p_bind_buf *b = bind_buf_rec(op, a, &tmp); if (b->stage >= 0 && b->stage < VKA_NSTAGE && b->index >= 0 && b->index < 16) { d->ubo_dirty[b->stage] |= 1u << b->index; d->b.ubo[b->stage][b->index] = (vka_range){b->addr, b->size}; } break; }
     case OP_BIND_SSBO: { const p_bind_buf *b = a; if (b->stage >= 0 && b->stage < VKA_NSTAGE && b->index >= 0 && b->index < 16) d->b.ssbo[b->stage][b->index] = (vka_range){b->addr, b->size}; break; }
     case OP_BIND_TEX: case OP_BIND_TEX1: { p_bind_handles t1; const p_bind_handles *b = bind_rec(op, a, &t1);
         if (b->n < 0 || b->n > 32) { VRED_ONCE("texture bind record with count %d: overwritten after recording", b->n); break; }
@@ -116,7 +118,7 @@ void vka_draw_sub_begin(VkCommandBuffer cb, unsigned slot) {
     g_cb = cb; g_slot = slot % NSLOT; vka_dyn_invalidate();
     { void vka_mem_rec_thread(void); vka_mem_rec_thread(); }   // the address lookups' cache outside TLS for the recording thread (vka_mem.c)
     drv_memo_reset();   // the last submission's scratch spans go with its fence
-    g_prof = VKA_ENV("DM_VK_PROF", 0) != 0; g_dyn_filter = VKA_ENV("DM_VK_DYN_FILTER", 1); g_pass_keep = VKA_ENV("DM_VK_PASS_KEEP", 1); g_vb_filter = VKA_ENV("DM_VK_VB_FILTER", 1);   // live: from this submission
+    g_prof = VKA_ENV("DM_VK_PROF", 0) != 0; g_dyn_filter = VKA_ENV("DM_VK_DYN_FILTER", 1); g_pass_keep = VKA_ENV("DM_VK_PASS_KEEP", 1); g_vb_filter = VKA_ENV("DM_VK_VB_FILTER", 1); g_inst_on = VKA_ENV("DM_VK_INSTANCE", 0);   // live: from this submission
     for (int i = 0; i < g_ndp[g_slot]; i++) vk.vkResetDescriptorPool(V.dev, g_dp[g_slot][i], 0);   // the slot's last submission is done (mtl_sub_begin waited for it)
     g_cur_dp[g_slot] = 0;
     vka_pso_save(0);
@@ -148,7 +150,7 @@ static VkDescriptorSet set_alloc(VkDescriptorSetLayout l) {
 
 // ---------- The render pass ----------
 static struct {
-    int on; VkRect2D area; uint32_t layers, samples;
+    int on, classic; VkRect2D area; uint32_t layers, samples;   // classic: begun as a VkRenderPass (DM_VK_CLASSIC_RP)
     uint32_t ncolor; VkFormat cf[8]; uint8_t ckind[8]; VkFormat df, sf;
     vka_img *cim[8]; uint32_t clv[8], cl0[8]; int nci;   // the colour attachments (DM_VK_NANSCAN)
     p_set_rt rt; int has_rt;                             // the targets it was opened for: a later SET_RT of the same targets keeps it open
@@ -175,12 +177,78 @@ static int rt_same(const p_set_rt *a, int ha, const p_set_rt *b, int hb) {
     }
     return 1;
 }
+// ---------- Classic render passes (DM_VK_CLASSIC_RP) ----------
+// The game's passes as VkRenderPass objects begun with an imageless VkFramebuffer instead of dynamic rendering. Qualcomm's driver (Adreno 740, 512.863) spends 13 us of
+// CPU in a vkCmdBeginRendering + vkCmdEndRendering pair at the least and ~40 us in Donkey Kong Bananza's level (a quarter of the encoder thread, with ~110 passes a frame);
+// a render pass with an imageless framebuffer takes ~1.5 us (a Vulkan micro-benchmark on the same device). Render passes and framebuffers are made once per shape and kept (by targets' formats,
+// loads and clears; by each attachment's image flags, usage, size and view formats); every attachment stays in GENERAL as before. Pipelines are made against a render
+// pass of the same formats (vka_rp_compat: Vulkan's compatibility ignores loads and clears), without graphics pipeline libraries. Restart only
+int vka_classic_rp(void) { static int on = -1; if (on < 0) { const char *e = getenv("DM_VK_CLASSIC_RP"); on = e && atoi(e) != 0; if (on) VLOG("classic render passes (DM_VK_CLASSIC_RP)"); } return on; }
+typedef struct { VkFormat cf[8]; uint32_t n; VkFormat ds; uint32_t d, s, samples, clear; } rpkey;   // clear: bit i colour i, bit 8 depth, bit 9 stencil
+static struct { rpkey k; VkRenderPass rp; } g_rpc[256]; static int g_nrpc; static pthread_mutex_t g_rpmu = PTHREAD_MUTEX_INITIALIZER;
+static VkRenderPass rp_obtain(const rpkey *k) {
+    pthread_mutex_lock(&g_rpmu);
+    for (int i = 0; i < g_nrpc; i++) if (!memcmp(&g_rpc[i].k, k, sizeof *k)) { VkRenderPass r = g_rpc[i].rp; pthread_mutex_unlock(&g_rpmu); return r; }
+    VkAttachmentDescription at[9]; VkAttachmentReference cr[8], dr; uint32_t na = 0;
+    VkSampleCountFlagBits sc = (VkSampleCountFlagBits)(k->samples ? k->samples : 1);
+    for (uint32_t i = 0; i < k->n; i++) {
+        if (k->cf[i] == VK_FORMAT_UNDEFINED) { cr[i] = (VkAttachmentReference){VK_ATTACHMENT_UNUSED, VK_IMAGE_LAYOUT_GENERAL}; continue; }
+        at[na] = (VkAttachmentDescription){0, k->cf[i], sc, k->clear >> i & 1 ? VK_ATTACHMENT_LOAD_OP_CLEAR : VK_ATTACHMENT_LOAD_OP_LOAD, VK_ATTACHMENT_STORE_OP_STORE,
+                                           VK_ATTACHMENT_LOAD_OP_DONT_CARE, VK_ATTACHMENT_STORE_OP_DONT_CARE, VK_IMAGE_LAYOUT_GENERAL, VK_IMAGE_LAYOUT_GENERAL};
+        cr[i] = (VkAttachmentReference){na++, VK_IMAGE_LAYOUT_GENERAL};
+    }
+    if (k->ds) {
+        at[na] = (VkAttachmentDescription){0, k->ds, sc, k->d && (k->clear >> 8 & 1) ? VK_ATTACHMENT_LOAD_OP_CLEAR : VK_ATTACHMENT_LOAD_OP_LOAD, VK_ATTACHMENT_STORE_OP_STORE,
+                                           k->s && (k->clear >> 9 & 1) ? VK_ATTACHMENT_LOAD_OP_CLEAR : VK_ATTACHMENT_LOAD_OP_LOAD, VK_ATTACHMENT_STORE_OP_STORE, VK_IMAGE_LAYOUT_GENERAL, VK_IMAGE_LAYOUT_GENERAL};
+        dr = (VkAttachmentReference){na++, VK_IMAGE_LAYOUT_GENERAL};
+    }
+    VkSubpassDescription sd = {0, VK_PIPELINE_BIND_POINT_GRAPHICS, 0, NULL, k->n, cr, NULL, k->ds ? &dr : NULL, 0, NULL};
+    VkRenderPassCreateInfo ci = {VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO, .attachmentCount = na, .pAttachments = at, .subpassCount = 1, .pSubpasses = &sd};
+    VkRenderPass r = VK_NULL_HANDLE; VkResult e = vk.vkCreateRenderPass(V.dev, &ci, NULL, &r);
+    if (e) { VRED_ONCE("vkCreateRenderPass %d", e); r = VK_NULL_HANDLE; }
+    else if (g_nrpc < 256) { g_rpc[g_nrpc].k = *k; g_rpc[g_nrpc++].rp = r; }
+    pthread_mutex_unlock(&g_rpmu);
+    return r;
+}
+VkRenderPass vka_rp_compat(const VkFormat *cf, uint32_t n, VkFormat df, VkFormat sf, uint32_t samples) {
+    rpkey k; memset(&k, 0, sizeof k);
+    if (n > 8) n = 8; memcpy(k.cf, cf, n * sizeof *cf); k.n = n; k.ds = df ? df : sf; k.d = df != 0; k.s = sf != 0; k.samples = samples ? samples : 1;
+    return rp_obtain(&k);
+}
+typedef struct { VkImageCreateFlags fl; VkImageUsageFlags u; uint32_t w, h, nl, nvf; VkFormat vf[6]; } fbatt;
+typedef struct { VkRenderPass rp; uint32_t w, h, layers, na; fbatt a[9]; } fbkey;
+enum { FBC_N = 1024 };
+static struct { fbkey k; VkFramebuffer fb; int used; } g_fbc[FBC_N];
+static VkFramebuffer fb_obtain(const fbkey *k) {   // (the recording thread only)
+    uint64_t h = 1469598103934665603ull; const uint8_t *p = (const uint8_t *)k; for (size_t i = 0; i < sizeof *k; i++) { h ^= p[i]; h *= 1099511628211ull; }
+    for (uint32_t i = (uint32_t)h & (FBC_N - 1), m = 0; m < 32; m++, i = (i + 1) & (FBC_N - 1)) {
+        if (g_fbc[i].used && !memcmp(&g_fbc[i].k, k, sizeof *k)) return g_fbc[i].fb;
+        if (!g_fbc[i].used) {
+            VkFramebufferAttachmentImageInfo ai[9];
+            for (uint32_t a = 0; a < k->na; a++) ai[a] = (VkFramebufferAttachmentImageInfo){VK_STRUCTURE_TYPE_FRAMEBUFFER_ATTACHMENT_IMAGE_INFO, NULL, k->a[a].fl, k->a[a].u, k->a[a].w, k->a[a].h, k->a[a].nl, k->a[a].nvf, k->a[a].vf};
+            VkFramebufferAttachmentsCreateInfo fa = {VK_STRUCTURE_TYPE_FRAMEBUFFER_ATTACHMENTS_CREATE_INFO, NULL, k->na, ai};
+            VkFramebufferCreateInfo ci = {VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO, .pNext = &fa, .flags = VK_FRAMEBUFFER_CREATE_IMAGELESS_BIT, .renderPass = k->rp, .attachmentCount = k->na,
+                                          .width = k->w, .height = k->h, .layers = k->layers};
+            VkFramebuffer fb = VK_NULL_HANDLE; VkResult e = vk.vkCreateFramebuffer(V.dev, &ci, NULL, &fb);
+            if (e) { VRED_ONCE("vkCreateFramebuffer %d", e); return VK_NULL_HANDLE; }
+            g_fbc[i].k = *k; g_fbc[i].fb = fb; g_fbc[i].used = 1; return fb;
+        }
+    }
+    VRED_ONCE("framebuffer cache full: passes fall back to dynamic rendering"); return VK_NULL_HANDLE;
+}
+static fbatt fb_att(const vka_img *im, uint32_t lv, uint32_t nl, VkFormat view) {
+    fbatt a; memset(&a, 0, sizeof a);
+    a.fl = im->cflags; a.u = im->usage; if (view != im->f.vk && (a.u & VK_IMAGE_USAGE_STORAGE_BIT)) a.u &= ~(VkImageUsageFlags)VK_IMAGE_USAGE_STORAGE_BIT;   // (as vka_view restricts an sRGB view)
+    a.w = im->w >> lv ? im->w >> lv : 1; a.h = im->h >> lv ? im->h >> lv : 1; a.nl = nl;
+    if (im->nvf) { a.nvf = im->nvf; memcpy(a.vf, im->vf, sizeof a.vf); } else { a.nvf = 1; a.vf[0] = view; }
+    return a;
+}
 // Game barriers (OP_BARRIER) that came with a pass open: taken inside it (DM_VK_BAR_KEEP), ended it at once, ended it later at a draw that needed it (bar_hazard)
 static uint64_t g_bar_in, g_bar_kept, g_bar_late;
 void vka_rp_end(void) {
     if (PC.n) pc_flush();
     if (!R.on) return;
-    vk.vkCmdEndRendering(g_cb);
+    if (R.classic) vk.vkCmdEndRenderPass(g_cb); else vk.vkCmdEndRendering(g_cb);
     vka_barrier(g_cb);   // the pass's writes before whatever reads them next (copies, the present, the next pass's samples)
     R.on = 0; vka_tex_feedback(NULL, NULL, 0);
     if (vka_nan_on()) vka_nan_pass(g_cb, R.cim, R.clv, R.cl0, R.nci);
@@ -199,6 +267,7 @@ static int rp_begin(const p_set_rt *rt, int has_rt, const vka_dstate *d) {
     if (PC.n && !rt_same(rt, has_rt, &PC.rt, 1)) pc_flush();                             // clears of other targets: done before
     VkRenderingAttachmentInfo ca[8], da = {0}, sa; uint32_t w = UINT32_MAX, h = UINT32_MAX, layers = UINT32_MAX, samples = 0;
     vka_img *fb_im[9]; uint32_t fb_lv[9]; int nfb = 0;   // the attachments' images and levels (vka_tex_feedback)
+    vka_img *s_im[9] = {0}; uint32_t s_lv[9] = {0}, s_nl[9] = {0};   // per colour slot and the depth / stencil target (8): for a classic pass's framebuffer
     memset(&R, 0, sizeof R);
     if (has_rt) R.rt = *rt; R.has_rt = has_rt;
     int n = has_rt ? (rt->n < 8 ? rt->n : 8) : 0;
@@ -216,7 +285,7 @@ static int rp_begin(const p_set_rt *rt, int has_rt, const vka_dstate *d) {
         vka_tex_own(im, g_cb);   // (a zero-shared image gets memory of its own before it is drawn into: no pass is open here)
         VkImageView v = vka_view(im, f.view, nl > 1 ? VK_IMAGE_VIEW_TYPE_2D_ARRAY : VK_IMAGE_VIEW_TYPE_2D, VK_IMAGE_ASPECT_COLOR_BIT, lv, 1, l0, nl, NULL);
         if (!v) continue;
-        ca[i].imageView = v; R.cf[i] = f.view; R.ckind[i] = f.kind; samples = im->samples; fb_im[nfb] = im; fb_lv[nfb++] = lv;
+        ca[i].imageView = v; R.cf[i] = f.view; R.ckind[i] = f.kind; samples = im->samples; fb_im[nfb] = im; fb_lv[nfb++] = lv; s_im[i] = im; s_lv[i] = lv; s_nl[i] = nl;
         R.cim[R.nci] = im; R.clv[R.nci] = lv; R.cl0[R.nci++] = l0;
         uint32_t lw = im->w >> lv ? im->w >> lv : 1, lh = im->h >> lv ? im->h >> lv : 1;
         R.cnl[i] = nl; R.cext[i] = (VkExtent2D){lw, lh};
@@ -235,7 +304,7 @@ static int rp_begin(const p_set_rt *rt, int has_rt, const vka_dstate *d) {
                 da = (VkRenderingAttachmentInfo){VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO, .imageView = v, .imageLayout = VK_IMAGE_LAYOUT_GENERAL, .loadOp = VK_ATTACHMENT_LOAD_OP_LOAD, .storeOp = VK_ATTACHMENT_STORE_OP_STORE};
                 if (im->aspect & VK_IMAGE_ASPECT_DEPTH_BIT) { dp = &da; R.df = im->f.vk; }
                 if (im->aspect & VK_IMAGE_ASPECT_STENCIL_BIT) { sp = &da; R.sf = im->f.vk; }
-                samples = im->samples; fb_im[nfb] = im; fb_lv[nfb++] = lv;
+                samples = im->samples; fb_im[nfb] = im; fb_lv[nfb++] = lv; s_im[8] = im; s_lv[8] = lv; s_nl[8] = nl;
                 uint32_t lw = im->w >> lv ? im->w >> lv : 1, lh = im->h >> lv ? im->h >> lv : 1;
                 R.dnl = nl; R.dext = (VkExtent2D){lw, lh};
                 if (lw < w) w = lw; if (lh < h) h = lh; if (nl < layers) layers = nl;
@@ -278,7 +347,32 @@ static int rp_begin(const p_set_rt *rt, int has_rt, const vka_dstate *d) {
         if (dp || sp) snprintf(b + bn, bn < sizeof b ? sizeof b - bn : 0, " d:%d%s", R.df ? R.df : R.sf, (dp ? dp : sp)->loadOp == VK_ATTACHMENT_LOAD_OP_CLEAR ? "C" : "");
         vka_gp_pass(b);
     }
-    vk.vkCmdBeginRendering(g_cb, &ri);
+    R.classic = 0;
+    if (vka_classic_rp()) {   // DM_VK_CLASSIC_RP: the same pass as a VkRenderPass with an imageless framebuffer
+        rpkey k; memset(&k, 0, sizeof k); fbkey fk; memset(&fk, 0, sizeof fk);
+        VkImageView views[9]; VkClearValue cv[9]; uint32_t na = 0;
+        k.n = (uint32_t)n; k.samples = R.samples;
+        for (int i = 0; i < n; i++) {
+            if (!ca[i].imageView) { k.cf[i] = VK_FORMAT_UNDEFINED; continue; }
+            k.cf[i] = R.cf[i]; if (ca[i].loadOp == VK_ATTACHMENT_LOAD_OP_CLEAR) k.clear |= 1u << i;
+            fk.a[na] = fb_att(s_im[i], s_lv[i], s_nl[i], R.cf[i]); views[na] = ca[i].imageView; cv[na++] = ca[i].clearValue;
+        }
+        if (dp || sp) {
+            k.ds = R.df ? R.df : R.sf; k.d = dp != NULL; k.s = sp != NULL;
+            if (dp && dp->loadOp == VK_ATTACHMENT_LOAD_OP_CLEAR) k.clear |= 1u << 8; if (sp && sp->loadOp == VK_ATTACHMENT_LOAD_OP_CLEAR) k.clear |= 1u << 9;
+            fk.a[na] = fb_att(s_im[8], s_lv[8], s_nl[8], k.ds); views[na] = da.imageView;
+            cv[na].depthStencil.depth = da.clearValue.depthStencil.depth; cv[na++].depthStencil.stencil = sa.clearValue.depthStencil.stencil;
+        }
+        VkRenderPass rp = rp_obtain(&k);
+        fk.rp = rp; fk.w = R.area.extent.width; fk.h = R.area.extent.height; fk.layers = layers; fk.na = na;
+        VkFramebuffer fb = rp && s_im[0] != (vka_img *)1 ? fb_obtain(&fk) : VK_NULL_HANDLE;
+        if (fb) {
+            VkRenderPassAttachmentBeginInfo ab = {VK_STRUCTURE_TYPE_RENDER_PASS_ATTACHMENT_BEGIN_INFO, NULL, na, views};
+            VkRenderPassBeginInfo rb = {VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO, .pNext = na ? &ab : NULL, .renderPass = rp, .framebuffer = fb, .renderArea = R.area, .clearValueCount = na, .pClearValues = cv};
+            vk.vkCmdBeginRenderPass(g_cb, &rb, VK_SUBPASS_CONTENTS_INLINE); R.classic = 1;
+        }
+    }
+    if (!R.classic) vk.vkCmdBeginRendering(g_cb, &ri);
     R.on = 1; vka_n_rp++; if (g_dyn_filter == 2) vka_dyn_invalidate();   // DM_VK_DYN_FILTER=2: the dynamic state set again at each pass (bisect)
     for (int k = 0; k < nlate; k++) { VkClearAttachment c = {late[k]->asp, late[k]->ci >= 0 ? (uint32_t)late[k]->ci : 0, late[k]->in}; VkClearRect cr = {late[k]->rc, 0, layers}; vk.vkCmdClearAttachments(g_cb, 1, &c, 1, &cr); }
     PC.n = 0;
@@ -582,7 +676,7 @@ VkImageView placeholder(uint8_t dim, int storage) {
 static uint64_t g_pt_last, g_pt[9], g_ps[6]; static int g_pt_ph;
 static inline uint64_t cntvct(void) { uint64_t v; __asm__ volatile("mrs %0, cntvct_el0" : "=r"(v)); return v; }
 // ---------- Set 0 from the walk ----------
-typedef struct { VkWriteDescriptorSet w[512]; VkDescriptorBufferInfo bi[512]; VkDescriptorImageInfo ii[512]; VkBufferView bv[512]; uint32_t n; } writes_t;
+typedef struct { VkWriteDescriptorSet w[512]; VkDescriptorBufferInfo bi[512]; VkDescriptorImageInfo ii[512]; VkBufferView bv[512]; uint64_t ad[512]; uint32_t n; } writes_t;   // ad: a guest buffer's address (0 = other)
 static writes_t g_w;
 static vka_res g_res[512];   // the NaN scan's own walk (DM_VK_NANSCAN_FS)
 // One stage's results as descriptor writes. 0 = the draw cannot run (logged)
@@ -591,6 +685,7 @@ static int stage_writes(const vka_dstate *d, int st, const vka_shader *sh, const
         if (g_w.n == 512) { VRED_ONCE("more than 512 descriptors in one draw"); return 0; }
         uint32_t k = g_w.n;
         VkWriteDescriptorSet *w = &g_w.w[k]; VkDescriptorBufferInfo *bi = &g_w.bi[k]; VkDescriptorImageInfo *ii = &g_w.ii[k];
+        g_w.ad[k] = r[i].what == VKA_R_BUF ? r[i].addr : 0;
         *w = (VkWriteDescriptorSet){VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, .dstBinding = r[i].binding, .dstArrayElement = r[i].elem, .descriptorCount = 1, .descriptorType = (VkDescriptorType)r[i].desc};
         int ok = 1;
         switch (r[i].desc) {
@@ -719,6 +814,24 @@ static int push_same(VkPipelineBindPoint bp, VkPipelineLayout layout) {
     if (g_dwn) { g_pd_delta_w += g_dwn; g_pd_delta_all += g_w.n; return 2; }
     return 0;
 }
+static int g_sets_dry, g_dry_pool;   // DM_VK_INSTANCE: bind_sets only builds the writes (g_w) when g_sets_dry is set, and sets_push binds them later
+// The writes of g_w bound: pushed (only what changed since the last push) or as a set, and the texture pool set
+static int sets_push(const vka_layout *lay, VkPipelineBindPoint bp, int any_pool) {
+    uint64_t t2_ = g_prof ? cntvct() : 0;
+    if (lay->push) { int ps = g_w.n ? push_same(bp, lay->layout) : 1;
+                     if (ps == 0) vk.vkCmdPushDescriptorSetKHR(g_cb, bp, lay->layout, 0, g_w.n, g_w.w);
+                     else if (ps == 2) vk.vkCmdPushDescriptorSetKHR(g_cb, bp, lay->layout, 0, g_dwn, g_dw); }
+    else {
+        g_pd[bp == VK_PIPELINE_BIND_POINT_COMPUTE].n = 0;   // set 0 bound as a set: the last push is no longer what the draws see
+        VkDescriptorSet set = set_alloc(lay->set0); if (!set) return 0;
+        for (uint32_t i = 0; i < g_w.n; i++) g_w.w[i].dstSet = set;
+        if (g_w.n) vk.vkUpdateDescriptorSets(V.dev, g_w.n, g_w.w, 0, NULL);
+        vk.vkCmdBindDescriptorSets(g_cb, bp, lay->layout, 0, 1, &set, 0, NULL);
+    }
+    if (g_prof) g_ps[2] += cntvct() - t2_;
+    if (any_pool) { VkDescriptorSet ps = vka_bindless_set(); if (ps) vk.vkCmdBindDescriptorSets(g_cb, bp, lay->layout, 1, 1, &ps, 0, NULL); else VRED_ONCE("a shader reads the texture pool and there is no pool set"); }
+    return 1;
+}
 static int bind_sets(const vka_dstate *d, vka_shader *const sh[VKA_NSTAGE], const vka_layout *lay, VkPipelineBindPoint bp, c0_at *c0) {
     g_w.n = 0;
     int any_pool = 0;
@@ -741,20 +854,8 @@ static int bind_sets(const vka_dstate *d, vka_shader *const sh[VKA_NSTAGE], cons
         g_w.bi[k] = (VkDescriptorBufferInfo){cs.buf, cs.off, n};
         g_w.w[k] = (VkWriteDescriptorSet){VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, .dstBinding = VKA_GS_CLAIM_BINDING, .descriptorCount = 1, .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, .pBufferInfo = &g_w.bi[k]};
     }
-    uint64_t t2_ = g_prof ? cntvct() : 0;
-    if (lay->push) { int ps = g_w.n ? push_same(bp, lay->layout) : 1;
-                     if (ps == 0) vk.vkCmdPushDescriptorSetKHR(g_cb, bp, lay->layout, 0, g_w.n, g_w.w);
-                     else if (ps == 2) vk.vkCmdPushDescriptorSetKHR(g_cb, bp, lay->layout, 0, g_dwn, g_dw); }
-    else {
-        g_pd[bp == VK_PIPELINE_BIND_POINT_COMPUTE].n = 0;   // set 0 bound as a set: the last push is no longer what the draws see
-        VkDescriptorSet set = set_alloc(lay->set0); if (!set) return 0;
-        for (uint32_t i = 0; i < g_w.n; i++) g_w.w[i].dstSet = set;
-        if (g_w.n) vk.vkUpdateDescriptorSets(V.dev, g_w.n, g_w.w, 0, NULL);
-        vk.vkCmdBindDescriptorSets(g_cb, bp, lay->layout, 0, 1, &set, 0, NULL);
-    }
-    if (g_prof) g_ps[2] += cntvct() - t2_;
-    if (any_pool) { VkDescriptorSet ps = vka_bindless_set(); if (ps) vk.vkCmdBindDescriptorSets(g_cb, bp, lay->layout, 1, 1, &ps, 0, NULL); else VRED_ONCE("a shader reads the texture pool and there is no pool set"); }
-    return 1;
+    if (g_sets_dry) { g_dry_pool = any_pool; return 1; }   // DM_VK_INSTANCE: the writes only (sets_push binds them)
+    return sets_push(lay, bp, any_pool);
 }
 // Images first used by a draw (from the walk, walk_all), or remade with storage use (vka_tex.c img_storage_upgrade): dry = only whether there is one
 static int make_images(const vka_dstate *d, vka_shader *const sh[VKA_NSTAGE], int dry) {
@@ -898,8 +999,159 @@ static void ib_bind(VkBuffer b, VkDeviceSize o, VkIndexType t) {
     if (IB.valid && g_vb_filter && IB.b == b && IB.o == o && IB.t == t) return;
     vk.vkCmdBindIndexBuffer(g_cb, b, o, t); IB.valid = 1; IB.b = b; IB.o = o; IB.t = t;
 }
-void vka_dyn_invalidate(void) { DY.valid = 0; VB.valid = 0; IB.valid = 0; g_pd[0].n = g_pd[1].n = 0; }
+static void inst_reset(void);
+void vka_dyn_invalidate(void) { DY.valid = 0; VB.valid = 0; IB.valid = 0; g_pd[0].n = g_pd[1].n = 0; inst_reset(); }
 #define PT(i) do { if (g_prof) { uint64_t t_ = cntvct(); if ((i) > 0 && g_pt_ph == (i) - 1) g_pt[(i) > 0 ? (i) - 1 : 0] += t_ - g_pt_last; g_pt_last = t_; g_pt_ph = (i); } } while (0)
+// ---------- Instanced runs (DM_VK_INSTANCE) ----------
+// Donkey Kong Bananza draws many objects as runs of draws that repeat one mesh (the same pipeline, index range, base vertex and vertex streams) and differ only in where one
+// 256-byte uniform block sits: the object's constants, read by the vertex shader and by the pixel shader through one binding each, moved by the same amount (a third of the
+// level's draws, in runs of 32 on average). On an Adreno 740 (AYN Odin 2 Portal) every draw costs the GPU about 1-1.5 us however small, so such a run
+// is drawn as one instanced draw: from its second draw on, the shaders are instanced variants (vka_spv_instance: the block read at data[i + d], d per instance
+// from a uint vertex input at location 30, passed to the pixel shader as a flat input), the block is bound as a window from the run's first offset, and each further draw
+// only writes its d into the run's table (an instance-rate vertex buffer) and raises the instance count of the run's indirect draw, in host-visible memory before the
+// submission. A draw joins only when nothing was recorded since the run's last one (the encoder's call count): anything else closes the run and the draw is drawn alone.
+// Variants are rewritten from the library's SPIR-V when a run first asks for them (a file <dir>/<shader key>.b<binding>.spv overrides one: DM_VK_INSTANCE_DIR, else
+// "instance" beside the DM_ROMFS_OVERLAY folder); a pair without both is never instanced. DM_VK_INSTANCE=1 turns the runs on (live; off by default)
+uint64_t vka_enc_total(void); int vka_enc_on(void);
+enum { INST_LOC = 30, INST_BIND = 31, INST_CAP = 256 };
+typedef struct { uint32_t binding, type; uint64_t a, b, c; } ikw;   // a write as compared: buffer, offset, range / sampler, view, layout
+typedef struct {
+    int valid; VkPipeline p; VkBuffer ib; VkDeviceSize io; VkIndexType it; uint32_t cnt; int32_t bv; uint64_t mark;
+    uint32_t nw; ikw w[64]; uint64_t ad[64];
+    uint32_t nb, na, used, zb; int zero; VkVertexInputBindingDescription2EXT b[33]; VkVertexInputAttributeDescription2EXT a[32]; uint64_t va[16], vs[16];
+} isnap;
+static isnap g_ia;   // the last direct indexed draw drawn alone that a run could start from
+static struct { int open; isnap base; VkPipeline ipipe; uint32_t wv, wp; VkDeviceSize win_v, win_p; uint32_t *args, *table, n; uint64_t mark;
+    // the fast join (inst_fast): the moved block's uniform slots and their addresses at the run's first draw, the state generation, the draw's own records
+    int fast, iv, ip; vka_range uv, up; uint32_t gen; uint64_t ibuf; int32_t prim, itype; int has_rt, has_sc; p_set_rt rt; p_scissor sc; } RUN;
+static uint64_t g_inst_runs, g_inst_joined, g_inst_falls, g_inst_fast;
+static int inst_snap(isnap *s, VkPipeline p, VkBuffer ib, VkDeviceSize io, VkIndexType it, const p_draw_idx *di, const vka_dstate *d) {
+    if (g_w.n > 64) return s->valid = 0;
+    s->p = p; s->ib = ib; s->io = io; s->it = it; s->cnt = (uint32_t)di->count; s->bv = di->base_vertex; s->nw = g_w.n;
+    for (uint32_t i = 0; i < g_w.n; i++) {
+        const VkWriteDescriptorSet *w = &g_w.w[i]; ikw *k = &s->w[i]; k->binding = w->dstBinding | w->dstArrayElement << 16; k->type = w->descriptorType;
+        if (w->pBufferInfo) { k->a = (uint64_t)w->pBufferInfo->buffer; k->b = w->pBufferInfo->offset; k->c = w->pBufferInfo->range; }
+        else if (w->pImageInfo) { k->a = (uint64_t)w->pImageInfo->sampler; k->b = (uint64_t)w->pImageInfo->imageView; k->c = w->pImageInfo->imageLayout; }
+        else { k->a = w->pTexelBufferView ? (uint64_t)*w->pTexelBufferView : 0; k->b = k->c = 0; }
+        s->ad[i] = g_w.ad[i];
+    }
+    s->nb = VI.nb; s->na = VI.na; s->used = VI.used; s->zb = VI.zb; s->zero = VI.zero;
+    memcpy(s->b, VI.b, VI.nb * sizeof *VI.b); memcpy(s->a, VI.a, VI.na * sizeof *VI.a);
+    for (int st = 0; st < 16; st++) { s->va[st] = VI.used >> st & 1 ? d->vbuf[st].address : 0; s->vs[st] = VI.used >> st & 1 ? d->vbuf[st].size : 0; }
+    return s->valid = 1;
+}
+// The same draw as snapshot s apart from its descriptors: index range, base vertex, vertex input and streams
+static int inst_same_draw(const isnap *s, VkBuffer ib, VkDeviceSize io, VkIndexType it, const p_draw_idx *di, const vka_dstate *d) {
+    if (!s->valid || s->ib != ib || s->io != io || s->it != it || s->cnt != (uint32_t)di->count || s->bv != di->base_vertex) return 0;
+    if (s->nb != VI.nb || s->na != VI.na || s->used != VI.used || s->zb != VI.zb || s->zero != VI.zero) return 0;
+    if (memcmp(s->b, VI.b, VI.nb * sizeof *VI.b) || memcmp(s->a, VI.a, VI.na * sizeof *VI.a)) return 0;
+    for (int st = 0; st < 16; st++) if (VI.used >> st & 1 && (s->va[st] != d->vbuf[st].address || s->vs[st] != d->vbuf[st].size)) return 0;
+    return 1;
+}
+// g_w against snapshot s: 2 = the same but for one vertex uniform write and one pixel uniform write moved by the same amount (*wv, *wp, *delta); 0 = otherwise.
+// With want_v / want_p given (a run's moved writes) only those may differ
+static int inst_cmp(const isnap *s, uint32_t *wv, uint32_t *wp, int64_t *delta, int fixed) {
+    if (g_w.n != s->nw) return 0;
+    int nd = 0; uint32_t m[2] = {0, 0};
+    for (uint32_t i = 0; i < g_w.n; i++) {
+        const VkWriteDescriptorSet *w = &g_w.w[i]; const ikw *k = &s->w[i];
+        if ((w->dstBinding | w->dstArrayElement << 16) != k->binding || w->descriptorType != k->type) return 0;
+        uint64_t a, b, c;
+        if (w->pBufferInfo) { a = (uint64_t)w->pBufferInfo->buffer; b = w->pBufferInfo->offset; c = w->pBufferInfo->range; }
+        else if (w->pImageInfo) { a = (uint64_t)w->pImageInfo->sampler; b = (uint64_t)w->pImageInfo->imageView; c = w->pImageInfo->imageLayout; }
+        else { a = w->pTexelBufferView ? (uint64_t)*w->pTexelBufferView : 0; b = c = 0; }
+        if (a == k->a && b == k->b && c == k->c) continue;
+        if (w->descriptorType != VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER || a != k->a || c != k->c || nd == 2) return 0;
+        m[nd++] = i;
+    }
+    if (nd == 0 && fixed) { *delta = 0; return 2; }   // the run's base again
+    if (nd != 2) return 0;
+    uint32_t v = m[0], f = m[1];
+    if (g_w.w[v].dstBinding >= DMSH_VK_STAGE_BINDINGS || g_w.w[f].dstBinding < DMSH_VK_STAGE_FS * DMSH_VK_STAGE_BINDINGS || g_w.w[f].dstBinding >= (DMSH_VK_STAGE_FS + 1) * DMSH_VK_STAGE_BINDINGS) return 0;
+    int64_t dv = (int64_t)g_w.bi[v].offset - (int64_t)s->w[v].b, dp = (int64_t)g_w.bi[f].offset - (int64_t)s->w[f].b;
+    if (dv != dp) return 0;
+    if (fixed && (v != *wv || f != *wp)) return 0;
+    *wv = v; *wp = f; *delta = dv; return 2;
+}
+// The instanced variant of shader s with the block at binding moved (NULL = none: no file, or it does not load)
+static vka_shader *inst_variant(vka_shader *s, uint32_t binding) {
+    static struct { uint64_t key; uint32_t binding; vka_shader *v; } cache[128]; static int ncache;
+    for (int i = 0; i < ncache; i++) if (cache[i].key == s->key && cache[i].binding == binding) return cache[i].v;
+    if (ncache == 128) return NULL;
+    static char dir[512]; static int dir_set;
+    if (!dir_set) { dir_set = 1; const char *e = getenv("DM_VK_INSTANCE_DIR"), *o = getenv("DM_ROMFS_OVERLAY");
+        if (e && *e) snprintf(dir, sizeof dir, "%s", e);
+        else if (o && *o) { snprintf(dir, sizeof dir, "%s", o); char *sl = strrchr(dir, '/'); if (sl && !sl[1]) { *sl = 0; sl = strrchr(dir, '/'); } if (sl) snprintf(sl, sizeof dir - (size_t)(sl - dir), "/instance"); }
+        VLOG("instanced runs: variants made from the library's SPIR-V; files in %s override them", dir[0] ? dir : "(no folder: DM_VK_INSTANCE_DIR or DM_ROMFS_OVERLAY)"); }
+    vka_shader *v = NULL;
+    char path[700]; snprintf(path, sizeof path, "%s/%016llx.b%u.spv", dir, (unsigned long long)s->key, binding);
+    FILE *f = dir[0] ? fopen(path, "rb") : NULL;
+    if (f) {
+        fseek(f, 0, SEEK_END); long n = ftell(f); fseek(f, 0, SEEK_SET);
+        uint32_t *w = n > 20 && n % 4 == 0 ? malloc((size_t)n) : NULL;
+        if (w && fread(w, 1, (size_t)n, f) == (size_t)n && w[0] == 0x07230203) {
+            VkShaderModuleCreateInfo ci = {VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO, .codeSize = (size_t)n, .pCode = w}; VkShaderModule m = VK_NULL_HANDLE;
+            if (!vk.vkCreateShaderModule(V.dev, &ci, NULL, &m) && (v = calloc(1, sizeof *v))) {
+                *v = *s; memset(v->mods, 0, sizeof v->mods); v->mods[DMSH_VK_MOD_BASE] = m; v->vin = v->fout = NULL; v->gs_claim = VK_NULL_HANDLE; v->key = s->key ^ 0x494e5354494e5354ull;
+                VLOG("instanced runs: variant of %016llx (binding %u) loaded", (unsigned long long)s->key, binding);
+            }
+        }
+        free(w); fclose(f);
+    }
+    if (!v) {   // no file (the usual case): made from the library's SPIR-V (vka_spv_instance); a file in the folder above overrides it
+        VkShaderModule m = vka_shader_inst_module(s, binding, 30);
+        if (m && (v = calloc(1, sizeof *v))) {
+            *v = *s; memset(v->mods, 0, sizeof v->mods); v->mods[DMSH_VK_MOD_BASE] = m; v->vin = v->fout = NULL; v->gs_claim = VK_NULL_HANDLE; v->key = s->key ^ 0x494e5354494e5354ull;
+            static _Atomic int nm; if (atomic_fetch_add(&nm, 1) < 32) VLOG("instanced runs: variant of %016llx (binding %u) made", (unsigned long long)s->key, binding);
+        } else if (m) vk.vkDestroyShaderModule(V.dev, m, NULL);
+    }
+    cache[ncache].key = s->key; cache[ncache].binding = binding; cache[ncache++].v = v;
+    return v;
+}
+static void inst_close(void) { RUN.open = 0; }
+static void inst_reset(void) { RUN.open = 0; g_ia.valid = 0; }
+// A draw that joins the open run without its walk: nothing but the run's two uniform slots was bound since the run's last draw, nothing was recorded, the same
+// draw record, targets and scissor; the slots moved by one amount inside the windows. Every other draw takes the full path (which may still join)
+static int inst_fast(vka_dstate *d, const p_set_rt *rt, int has_rt, const p_scissor *sc, int has_sc, const p_draw_idx *di) {
+    if (d->bind_gen != RUN.gen) return 0;
+    if (RUN.n >= INST_CAP) return 0;
+    if (vka_enc_total() != RUN.mark) return 0;
+    if (di->ind || di->mdi_cnt || di->ibuf != RUN.ibuf || di->count != (int32_t)RUN.base.cnt || di->base_vertex != RUN.base.bv || di->itype != RUN.itype || di->prim != RUN.prim
+        || di->instances > 1 || di->base_instance || d->b.base_instance) return 0;
+    for (int st = 0; st < VKA_NSTAGE; st++) { uint32_t allow = st == 0 ? 1u << RUN.iv : st == 1 ? 1u << RUN.ip : 0; /* NVN stages: 0 vertex, 1 fragment */ if (d->ubo_dirty[st] & ~allow) return 0; }
+    if (has_rt != RUN.has_rt || (has_rt && memcmp(rt, &RUN.rt, sizeof *rt)) || has_sc != RUN.has_sc || (has_sc && memcmp(sc, &RUN.sc, sizeof *sc))) return 0;
+    vka_range v = d->b.ubo[0][RUN.iv], f = d->b.ubo[1][RUN.ip];
+    int64_t dv = (int64_t)v.addr - (int64_t)RUN.uv.addr, dp = (int64_t)f.addr - (int64_t)RUN.up.addr;
+    if (dv != dp || dv < 0 || (dv & 15) || v.size != RUN.uv.size || f.size != RUN.up.size) return 0;
+    if ((uint64_t)dv + RUN.base.w[RUN.wv].c > RUN.win_v || (uint64_t)dv + RUN.base.w[RUN.wp].c > RUN.win_p) return 0;
+    RUN.table[RUN.n++] = (uint32_t)(dv / 16); RUN.args[1] = RUN.n;
+    memset(d->ubo_dirty, 0, sizeof d->ubo_dirty);
+    g_inst_joined++; g_inst_fast++; g_draws++;
+    return 1;
+}
+// After a run's first draw or a full-path join: what inst_fast compares against
+static void inst_fast_arm(vka_dstate *d, const p_set_rt *rt, int has_rt, const p_scissor *sc, int has_sc, const p_draw_idx *di, int first) {
+    if (first) {
+        RUN.fast = 0; RUN.iv = RUN.ip = -1;
+        for (int i = 0; i < 16; i++) { if (RUN.iv < 0 && d->b.ubo[0][i].addr == g_w.ad[RUN.wv]) RUN.iv = i; if (RUN.ip < 0 && d->b.ubo[1][i].addr == g_w.ad[RUN.wp]) RUN.ip = i; }
+        if (RUN.iv < 0 || RUN.ip < 0 || !g_w.ad[RUN.wv] || !g_w.ad[RUN.wp]) {
+            static int n; if (n++ < 3) { char b[600]; size_t o = 0; for (int i = 0; i < 16; i++) o += (size_t)snprintf(b + o, sizeof b - o, " %llx/%llx", (unsigned long long)d->b.ubo[0][i].addr, (unsigned long long)d->b.ubo[1][i].addr);
+                VLOG("fast join not armed: moved addresses %llx %llx (writes %u %u), slots vs/fs:%s", (unsigned long long)g_w.ad[RUN.wv], (unsigned long long)g_w.ad[RUN.wp], RUN.wv, RUN.wp, b); }
+            return; }
+        RUN.uv = d->b.ubo[0][RUN.iv]; RUN.up = d->b.ubo[1][RUN.ip];
+        RUN.ibuf = di->ibuf; RUN.prim = di->prim; RUN.itype = di->itype;
+        RUN.has_rt = has_rt; if (has_rt) RUN.rt = *rt; RUN.has_sc = has_sc; if (has_sc) RUN.sc = *sc;
+        RUN.fast = VKA_ENV("DM_VK_INSTANCE_FAST", 1) != 0;
+    }
+    RUN.gen = d->bind_gen; memset(d->ubo_dirty, 0, sizeof d->ubo_dirty);
+}
+// The index buffer of a direct indexed draw as the draw would bind it; 0 = not one a run can take
+static int inst_ib(const p_draw_idx *di, VkBuffer *ib, VkDeviceSize *io, VkIndexType *it) {
+    *it = di->itype == 0 ? VK_INDEX_TYPE_UINT8 : di->itype == 1 ? VK_INDEX_TYPE_UINT16 : VK_INDEX_TYPE_UINT32;
+    size_t isz = di->itype == 0 ? 1 : di->itype == 1 ? 2 : 4;
+    if (*it == VK_INDEX_TYPE_UINT8 && !V.idx8) return 0;
+    return di->count > 0 && vka_addr(di->ibuf, isz * (uint64_t)di->count, ib, io, NULL) && !(*io % isz);
+}
 void vka_draw_prof(char *b, size_t n, double draws) {
     if (!g_prof || draws <= 0) { if (n) b[0] = 0; return; }
     uint64_t f; __asm__ volatile("mrs %0, cntfrq_el0" : "=r"(f)); double us = 1e6 / (double)f / draws;
@@ -908,11 +1160,16 @@ void vka_draw_prof(char *b, size_t n, double draws) {
     if (o < n) o += snprintf(b + o, n - o, "; pushes %.0f%% skipped as the last one", g_pd_skip + g_pd_push ? 100.0 * g_pd_skip / (double)(g_pd_skip + g_pd_push) : 0.0);
     g_pd_skip = g_pd_push = 0;
     if (o < n) o += snprintf(b + o, n - o, "; sets: walk %.2f, writes %.2f (driver segments %.2f, %.1f images %.2f), push %.2f", g_ps[0] * us, g_ps[1] * us, g_ps[3] * us, g_ps[5] / draws, g_ps[4] * us, g_ps[2] * us);
+    if (g_inst_on && o < n) o += snprintf(b + o, n - o, "; instanced runs %llu (%.1f draws joined each, %.0f%% of them without the walk), %llu fell back to single draws",
+                                          (unsigned long long)g_inst_runs, g_inst_runs ? (double)g_inst_joined / (double)g_inst_runs : 0.0,
+                                          g_inst_joined ? 100.0 * (double)g_inst_fast / (double)g_inst_joined : 0.0, (unsigned long long)g_inst_falls);
+    g_inst_runs = g_inst_joined = g_inst_fast = g_inst_falls = 0;
     memset(g_ps, 0, sizeof g_ps);
     memset(g_pt, 0, sizeof g_pt);
 }
 void vka_draw(vka_dstate *d, const p_set_rt *rt, int has_rt, const p_scissor *sc, int has_sc, const p_draw *dw, const p_draw_idx *di) {
     if (!g_cb || !draws_on() || !statics()) { g_skipped++; return; }
+    if (RUN.open && RUN.fast && di && !dw && g_inst_on && inst_fast(d, rt, has_rt, sc, has_sc, di)) return;   // DM_VK_INSTANCE: the run's next object, no walk
     if (!d->inited) vka_dstate_reset(d);
     uint64_t mdi = dw ? dw->mdi_cnt : di->mdi_cnt; int mdi_i = dw ? dw->mdi_i : di->mdi_i;
     if (mdi) { uint32_t cnt = 0; if (!cpu_read(mdi, &cnt, 4) || (uint32_t)mdi_i >= cnt) return;   // past the multi-draw's count (read now: a count the GPU writes in this submission is not seen)
@@ -1057,12 +1314,64 @@ void vka_draw(vka_dstate *d, const p_set_rt *rt, int has_rt, const p_scissor *sc
     PT(4);
     VkPipeline p = vka_gfx_pipeline(sh, &lay, &k);
     if (!p) { g_skipped++; return; }
-    if (!DY.valid || !g_dyn_filter || DY.pipe != p) { vk.vkCmdBindPipeline(g_cb, VK_PIPELINE_BIND_POINT_GRAPHICS, p); DY.pipe = p; VB.vin_stale = 1; }
+    // DM_VK_INSTANCE: a direct indexed draw of one instance with only vertex and pixel shaders, their base modules and no retyped inputs may join the open run (its
+    // instanced pipeline stays bound) or start one (decided at the sets, below)
+    VkBuffer i_ib = VK_NULL_HANDLE; VkDeviceSize i_io = 0; VkIndexType i_it = VK_INDEX_TYPE_UINT16;
+    int icand = g_inst_on && !mesh && di && !di->ind && !expand && di->instances <= 1 && d->b.base_instance == 0 && sh[1] && !sh[2] && !sh[3] && !sh[4] && !d->rast_discard
+                && !(k.vin_u | k.vin_s) && k.fs_variant == DMSH_VK_MOD_BASE && lay.push && vka_enc_on() && inst_ib(di, &i_ib, &i_io, &i_it);
+    int ijoin = icand && RUN.open && p == RUN.base.p && DY.valid && DY.pipe == RUN.ipipe && vka_enc_total() == RUN.mark && inst_same_draw(&RUN.base, i_ib, i_io, i_it, di, d);
+    if (!ijoin) {
+        if (RUN.open) inst_close();
+        if (!DY.valid || !g_dyn_filter || DY.pipe != p) { vk.vkCmdBindPipeline(g_cb, VK_PIPELINE_BIND_POINT_GRAPHICS, p); DY.pipe = p; VB.vin_stale = 1; }
+    }
     if (vka_nan_on()) vka_nan_draw(mesh ? sh[7]->key : sh[0]->key, fs ? fs->key : 0);
     PT(5);
-    if (!bind_sets(d, sh, &lay, VK_PIPELINE_BIND_POINT_GRAPHICS, NULL)) { g_skipped++; return; }
+    int istart = 0; uint32_t i_wv = 0, i_wp = 0; int64_t i_d = 0; vka_span i_ta = {0}, i_aa = {0};
+    if (ijoin || (icand && g_ia.valid)) {
+        g_sets_dry = 1; int ok = bind_sets(d, sh, &lay, VK_PIPELINE_BIND_POINT_GRAPHICS, NULL); g_sets_dry = 0;
+        if (!ok) { if (ijoin) inst_close(); g_skipped++; return; }
+        if (ijoin) {
+            i_wv = RUN.wv; i_wp = RUN.wp;
+            ijoin = !g_dry_pool && inst_cmp(&RUN.base, &i_wv, &i_wp, &i_d, 1) == 2 && i_d >= 0 && !(i_d & 15) && RUN.n < INST_CAP
+                    && (VkDeviceSize)i_d + g_w.bi[i_wv].range <= RUN.win_v && (VkDeviceSize)i_d + g_w.bi[i_wp].range <= RUN.win_p;
+            if (!ijoin) {   // not the run's draw after all: drawn alone with its own pipeline
+                inst_close(); g_inst_falls++;
+                vk.vkCmdBindPipeline(g_cb, VK_PIPELINE_BIND_POINT_GRAPHICS, p); DY.pipe = p; VB.valid = 0; g_pd[0].n = 0;
+                if (!sets_push(&lay, VK_PIPELINE_BIND_POINT_GRAPHICS, g_dry_pool)) { g_skipped++; return; }
+            }
+        } else {   // a run from the last draw drawn alone: the same draw with the object block moved
+            istart = !g_dry_pool && p == g_ia.p && DY.pipe == p && vka_enc_total() == g_ia.mark && inst_same_draw(&g_ia, i_ib, i_io, i_it, di, d)
+                     && inst_cmp(&g_ia, &i_wv, &i_wp, &i_d, 0) == 2 && !(VI.zero && VI.zb == INST_BIND) && VI.nb < 33 && VI.na < 32;
+            vka_shader *vv = istart ? inst_variant(sh[0], g_w.w[i_wv].dstBinding) : NULL, *vp = vv ? inst_variant(sh[1], g_w.w[i_wp].dstBinding) : NULL;
+            VkPipeline ip = VK_NULL_HANDLE; VkDeviceSize wv = 0, wp = 0;
+            if (vp) { vka_shader *ishv[VKA_NSTAGE]; memcpy(ishv, sh, sizeof ishv); ishv[0] = vv; ishv[1] = vp; ip = vka_gfx_pipeline(ishv, &lay, &k); }
+            if (ip) {   // the windows: the block's buffer from the run's first offset, up to 64 KB (the translator's data[4096])
+                VkBuffer b; VkDeviceSize o; uint64_t r;
+                if (g_w.ad[i_wv] && (r = vka_addr_run(g_w.ad[i_wv], 65536, &b, &o)) && b == g_w.bi[i_wv].buffer && o == g_w.bi[i_wv].offset) wv = (r > 65536 ? 65536 : r) & ~(VkDeviceSize)15;
+                if (g_w.ad[i_wp] && (r = vka_addr_run(g_w.ad[i_wp], 65536, &b, &o)) && b == g_w.bi[i_wp].buffer && o == g_w.bi[i_wp].offset) wp = (r > 65536 ? 65536 : r) & ~(VkDeviceSize)15;
+                if (wv > V.ub_range) wv = V.ub_range & ~(VkDeviceSize)15; if (wp > V.ub_range) wp = V.ub_range & ~(VkDeviceSize)15;
+            }
+            istart = ip && wv >= g_w.bi[i_wv].range && wp >= g_w.bi[i_wp].range && inst_snap(&RUN.base, p, i_ib, i_io, i_it, di, d)
+                     && vka_scratch(4 * INST_CAP, 16, &i_ta) && vka_scratch(20, 4, &i_aa);
+            if (istart) {
+                vk.vkCmdBindPipeline(g_cb, VK_PIPELINE_BIND_POINT_GRAPHICS, ip); DY.pipe = ip; VB.valid = 0;
+                g_w.bi[i_wv].range = wv; g_w.bi[i_wp].range = wp;
+                vk.vkCmdPushDescriptorSetKHR(g_cb, VK_PIPELINE_BIND_POINT_GRAPHICS, lay.layout, 0, g_w.n, g_w.w); g_pd[0].n = 0;
+                RUN.open = 1; RUN.ipipe = ip; RUN.wv = i_wv; RUN.wp = i_wp; RUN.win_v = wv; RUN.win_p = wp; RUN.n = 1;
+                RUN.table = (uint32_t *)i_ta.ptr; RUN.args = (uint32_t *)i_aa.ptr; RUN.table[0] = 0;
+            } else if (!sets_push(&lay, VK_PIPELINE_BIND_POINT_GRAPHICS, g_dry_pool)) { g_skipped++; return; }
+        }
+    } else if (!bind_sets(d, sh, &lay, VK_PIPELINE_BIND_POINT_GRAPHICS, NULL)) { g_skipped++; return; }
     PT(6);
-    if (!mesh) vin_bind(d);
+    if (!mesh && !ijoin) {
+        if (istart) {   // the run's table as an instance-rate input at INST_LOC
+            VI.b[VI.nb++] = (VkVertexInputBindingDescription2EXT){VK_STRUCTURE_TYPE_VERTEX_INPUT_BINDING_DESCRIPTION_2_EXT, NULL, INST_BIND, 4, VK_VERTEX_INPUT_RATE_INSTANCE, 1};
+            VI.a[VI.na++] = (VkVertexInputAttributeDescription2EXT){VK_STRUCTURE_TYPE_VERTEX_INPUT_ATTRIBUTE_DESCRIPTION_2_EXT, NULL, INST_LOC, INST_BIND, VK_FORMAT_R32_UINT, 0};
+            vin_bind(d);
+            VI.nb--; VI.na--;
+            VkDeviceSize tsz = 4 * INST_CAP; vk.vkCmdBindVertexBuffers2(g_cb, INST_BIND, 1, &i_ta.buf, &i_ta.off, &tsz, NULL);
+        } else vin_bind(d);
+    }
 
     // Viewport and scissor. The translator writes clip space for Metal (y up, origin upper left): Metal's viewport, flipped for a lower-left window origin as on Metal, then given
     // a negative height, maps it as Metal does (android/SHADERS.md "Depth and Y")
@@ -1155,13 +1464,25 @@ void vka_draw(vka_dstate *d, const p_set_rt *rt, int has_rt, const p_scissor *sc
             for (int i = 0; i < di->count; i++) ((uint16_t *)s.ptr)[i] = (uint16_t)src[i];
             free(src); ib = s.buf; io = s.off; it = VK_INDEX_TYPE_UINT16;
             if (restart) VRED_ONCE("primitive restart with widened 8-bit indices");
+        } else if (ijoin) {   // the run's next object: its offset in the table, one more instance; nothing recorded unless something was since the run's last draw
+            if (vka_enc_total() == RUN.mark) { RUN.table[RUN.n++] = (uint32_t)(i_d / 16); RUN.args[1] = RUN.n; g_inst_joined++; g_draws++; inst_fast_arm(d, rt, has_rt, sc, has_sc, di, 0); PT(8); return; }
+            inst_close(); g_inst_falls++;   // (a dynamic state was set for it): drawn alone after all
+            vk.vkCmdBindPipeline(g_cb, VK_PIPELINE_BIND_POINT_GRAPHICS, p); DY.pipe = p; VB.valid = 0; g_pd[0].n = 0;
+            vin_bind(d);
+            if (!sets_push(&lay, VK_PIPELINE_BIND_POINT_GRAPHICS, 0)) { g_skipped++; return; }
+            ijoin = 0; ib = i_ib; io = i_io; it = i_it;
         } else if (!vka_addr(di->ibuf, ind ? isz : isz * (uint64_t)(di->count > 0 ? di->count : 1), &ib, &io, NULL) || io % isz) SKIP("index buffer at %#llx is not in placed guest RAM: skipped", (unsigned long long)di->ibuf);
         ib_bind(ib, io, it);
         if (ind) { VkBuffer b; VkDeviceSize o; if (!vka_addr(ind, 20, &b, &o, NULL) || (o & 3)) SKIP("indirect draw arguments at %#llx are not in placed guest RAM: skipped", (unsigned long long)ind);
                    vk.vkCmdDrawIndexedIndirect(g_cb, b, o, 1, 20); }
-        else vk.vkCmdDrawIndexed(g_cb, (uint32_t)di->count, inst, 0, di->base_vertex, binst);
+        else if (istart) {   // the run's first draw: indirect, its instance count raised by the draws that join
+            RUN.args[0] = (uint32_t)di->count; RUN.args[1] = 1; RUN.args[2] = 0; RUN.args[3] = (uint32_t)di->base_vertex; RUN.args[4] = 0;
+            vk.vkCmdDrawIndexedIndirect(g_cb, i_aa.buf, i_aa.off, 1, 20); RUN.mark = vka_enc_total(); g_inst_runs++;
+            inst_fast_arm(d, rt, has_rt, sc, has_sc, di, 1);
+        } else vk.vkCmdDrawIndexed(g_cb, (uint32_t)di->count, inst, 0, di->base_vertex, binst);
     }
     g_draws++;
+    if (icand && !istart && !RUN.open) { if (inst_snap(&g_ia, p, i_ib, i_io, i_it, di, d)) g_ia.mark = vka_enc_total(); } else g_ia.valid = 0;   // a run may start from this draw
     PT(8);
     if (vka_nan_on() >= 2 && vka_nan_split(R.cim, R.nci)) vka_rp_end();   // DM_VK_NANSCAN=2: a scan inside the game's pass
 }
