@@ -434,12 +434,12 @@ public final class GameActivity extends Activity implements SurfaceHolder.Callba
             Fsr.env(this, env);   // FSR 1 upscaling (the in-game panel)
             int cap = Prefs.fpsCap(this, id);   // the game's own frame rate cap (its in-game panel, its Game settings), else the main screen's (unset: the profile's fps_target)
             if (cap >= 0) env.add("DM_FPS_TARGET=" + cap);
-            int xb = Prefs.xboxButtons(this, id);   // Xbox button label swap (Game settings, Settings)
-            if (xb > 0) env.add("DM_XBOX_LABELS=1");
-            if (xb == 2) env.add("DM_PAD_LABELLED=2");
             String gpuNote = GpuDriver.env(this, id, env);   // the game's GPU driver, else the main screen's (DM_VK_DRIVER)
             String ts = Prefs.gpuTs(this, id);   // Game settings › GPU timing; unset: the profile's gpu_timestamps (a DM_NVN_GPU_TS line of env.txt or the game's own lines comes later and wins)
             if (ts != null) env.add("DM_NVN_GPU_TS=" + ts);
+            int xb = Prefs.xboxButtons(this, id);   // Xbox button label swap (Game settings, Settings)
+            if (xb > 0) env.add("DM_XBOX_LABELS=1");
+            if (xb == 2) env.add("DM_PAD_LABELLED=2");
             env.addAll(user);
             for (String kv : env) if (kv.startsWith("DM_OVERLAY=")) overlayEnv = !kv.substring(11).trim().equals("0");
             String[] args = {"nxhost", packDir.getPath()};
