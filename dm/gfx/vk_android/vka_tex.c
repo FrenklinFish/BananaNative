@@ -2034,4 +2034,113 @@ vka_img *vka_cap_shared(const tex_t *t) {
     pthread_mutex_unlock(&g_tmu);
     return im;
 }
+// ---------- CPU texel reads (nvnTextureReadTexels; the Mac's is mtl_read_texels in nvn_mtl.m) ----------
+// The game reads a texture's texels into its own memory. Two sources:
+// - the GPU never wrote it: its guest storage holds the content, read (and de-swizzled) there;
+// - the GPU wrote it (render target, copy destination, shader image): copied back from its Vulkan image.
+// Android used to leave the destination unwritten: Pokémon Pokopia's sky was black (it reads back a GPU-written 30x16 texture). DM_VK_READTEXELS=0: the old behaviour
+static pthread_mutex_t g_rtmu = PTHREAD_MUTEX_INITIALIZER;
+static VkCommandPool g_rtpool; static VkCommandBuffer g_rtcb; static VkFence g_rtfe; static VkBuffer g_rtbuf; static VkDeviceMemory g_rtmem; static void *g_rtmap; static VkDeviceSize g_rtsize;
+static int rt_buf(VkDeviceSize n) {   // the host-visible buffer the GPU copies into, grown to n bytes (under g_rtmu)
+    if (g_rtsize >= n) return 1;
+    if (g_rtbuf) { vk.vkDestroyBuffer(V.dev, g_rtbuf, NULL); vk.vkFreeMemory(V.dev, g_rtmem, NULL); g_rtbuf = VK_NULL_HANDLE; g_rtmem = VK_NULL_HANDLE; g_rtsize = 0; }
+    VkBufferCreateInfo bi = {VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO, .size = n, .usage = VK_BUFFER_USAGE_TRANSFER_DST_BIT};
+    if (vk.vkCreateBuffer(V.dev, &bi, NULL, &g_rtbuf)) { g_rtbuf = VK_NULL_HANDLE; return 0; }
+    VkMemoryRequirements mr; vk.vkGetBufferMemoryRequirements(V.dev, g_rtbuf, &mr);
+    uint32_t t = vka_mem_type(mr.memoryTypeBits, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT | VK_MEMORY_PROPERTY_HOST_CACHED_BIT, 0);
+    if (t == UINT32_MAX) t = vka_mem_type(mr.memoryTypeBits, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT, 0);
+    VkMemoryAllocateInfo ai = {VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO, .allocationSize = mr.size, .memoryTypeIndex = t};
+    if (t == UINT32_MAX || vk.vkAllocateMemory(V.dev, &ai, NULL, &g_rtmem) || vk.vkBindBufferMemory(V.dev, g_rtbuf, g_rtmem, 0) || vk.vkMapMemory(V.dev, g_rtmem, 0, VK_WHOLE_SIZE, 0, &g_rtmap)) {
+        if (g_rtmem) vk.vkFreeMemory(V.dev, g_rtmem, NULL);
+        vk.vkDestroyBuffer(V.dev, g_rtbuf, NULL); g_rtbuf = VK_NULL_HANDLE; g_rtmem = VK_NULL_HANDLE; return 0;
+    }
+    g_rtsize = n; return 1;
+}
+// Copies region r of the image's level / layers into dst: one copy submitted once the queue is idle (so the GPU's writes are done), then waited for. 0 = not done
+static int rt_gpu(vka_img *im, unsigned level, unsigned layer0, const NVNcopyRegion *r, uint8_t *dst, size_t row, size_t img, size_t wb, size_t hb, int nz) {
+    uint32_t lv = level;
+    if (!vka_img_lv(im, &lv) || im->samples > 1 || (im->aspect & ~(VkImageAspectFlags)VK_IMAGE_ASPECT_COLOR_BIT)) return 0;
+    int bw, bh, gbpb = nvn_fmt_bpb(im->d.format, &bw, &bh);
+    if (gbpb != im->f.bpb || bw != im->f.bw || bh != im->f.bh) return 0;   // the image is not in the guest's bytes (a substituted format)
+    int is3d = im->d.target == NVN_TEXTURE_TARGET_3D;
+    VkDeviceSize n = (VkDeviceSize)wb * hb * nz;
+    pthread_mutex_lock(&g_rtmu);
+    int ok = 0;
+    if (!g_rtpool) { VkCommandPoolCreateInfo pi = {VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO, .flags = VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT, .queueFamilyIndex = V.qf};
+                     if (vk.vkCreateCommandPool(V.dev, &pi, NULL, &g_rtpool)) g_rtpool = VK_NULL_HANDLE; }
+    if (g_rtpool && !g_rtcb) { VkCommandBufferAllocateInfo ai = {VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO, .commandPool = g_rtpool, .level = VK_COMMAND_BUFFER_LEVEL_PRIMARY, .commandBufferCount = 1};
+                               if (vk.vkAllocateCommandBuffers(V.dev, &ai, &g_rtcb)) g_rtcb = VK_NULL_HANDLE; }
+    if (!g_rtfe) { VkFenceCreateInfo fi = {VK_STRUCTURE_TYPE_FENCE_CREATE_INFO}; if (vk.vkCreateFence(V.dev, &fi, NULL, &g_rtfe)) g_rtfe = VK_NULL_HANDLE; }
+    VkCommandBuffer cb = g_rtcb; VkFence fe = g_rtfe;
+    if (cb && fe && rt_buf(n) && vka_queue_idle()) {
+        if (!vk.vkResetCommandBuffer(cb, 0) && !vk.vkResetFences(V.dev, 1, &fe)) {
+            VkCommandBufferBeginInfo bi = {VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO, .flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT};
+            vk.vkBeginCommandBuffer(cb, &bi);
+            VkMemoryBarrier mb = {VK_STRUCTURE_TYPE_MEMORY_BARRIER, .srcAccessMask = VK_ACCESS_MEMORY_WRITE_BIT, .dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT};
+            vk.vkCmdPipelineBarrier(cb, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 1, &mb, 0, NULL, 0, NULL);
+            VkBufferImageCopy c[64]; int nc = 0;
+            for (int z = 0; z < nz && nc < 64; z++) {
+                uint32_t sl = is3d ? 0 : layer0 + (uint32_t)r->zoffset + (uint32_t)z;
+                if (!is3d && sl >= im->layers) break;
+                c[nc++] = (VkBufferImageCopy){(VkDeviceSize)z * wb * hb, 0, 0, {VK_IMAGE_ASPECT_COLOR_BIT, lv, sl, 1},
+                                              {r->xoffset, r->yoffset, is3d ? r->zoffset + z : 0}, {(uint32_t)r->width, (uint32_t)(r->height > 0 ? r->height : 1), 1}};
+            }
+            if (nc) vk.vkCmdCopyImageToBuffer(cb, im->img, VK_IMAGE_LAYOUT_GENERAL, g_rtbuf, (uint32_t)nc, c);
+            VkMemoryBarrier hb_ = {VK_STRUCTURE_TYPE_MEMORY_BARRIER, .srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT, .dstAccessMask = VK_ACCESS_HOST_READ_BIT};
+            vk.vkCmdPipelineBarrier(cb, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_HOST_BIT, 0, 1, &hb_, 0, NULL, 0, NULL);
+            vk.vkEndCommandBuffer(cb);
+            VkSubmitInfo si = {VK_STRUCTURE_TYPE_SUBMIT_INFO, .commandBufferCount = 1, .pCommandBuffers = &cb};
+            pthread_mutex_lock(&V.qmu); VkResult sr = vk.vkQueueSubmit(V.q, 1, &si, fe); pthread_mutex_unlock(&V.qmu);
+            if (nc == nz && !sr && !vk.vkWaitForFences(V.dev, 1, &fe, VK_TRUE, vka_hang_ns())) {
+                for (int z = 0; z < nz; z++) for (size_t y = 0; y < hb; y++) memcpy(dst + z * img + y * row, (uint8_t *)g_rtmap + ((size_t)z * hb + y) * wb, wb);
+                ok = 1;
+            }
+        }
+    }
+    pthread_mutex_unlock(&g_rtmu);
+    return ok;
+}
+// (hle_nvn.c read_texels: the game has waited for the GPU, as NVN requires; row and img are dst's pitches)
+void mtl_read_texels(const tex_t *t, unsigned level, unsigned layer0, const NVNcopyRegion *r, uint8_t *dst, size_t row, size_t img) {
+    if (!t || !r || !dst || !VKA_ENV("DM_VK_READTEXELS", 1)) return;
+    int bw, bh, bpb = nvn_fmt_bpb(t->d.format, &bw, &bh);
+    int nz = r->depth > 0 ? r->depth : 1, is3d = t->d.target == NVN_TEXTURE_TARGET_3D;
+    if (!bpb || r->width <= 0) return;
+    size_t wb = (size_t)((r->width + bw - 1) / bw) * bpb, hb = (size_t)((r->height > 0 ? r->height : 1) + bh - 1) / bh, x0 = (size_t)(r->xoffset / bw) * bpb, y0 = (size_t)r->yoffset / bh;
+    vka_img *im = vka_ok() ? vka_tex_acquire(t->serial) : NULL;
+    int gpu = im && im->gpu_owned, done = 0; const char *how = "storage";
+    if (gpu) { done = rt_gpu(im, level, layer0, r, dst, row, img, wb, hb, nz); how = done ? "image (GPU-written)" : "storage (the GPU-written image could not be copied back)"; }
+    if (!done && t->mem) {   // from guest storage
+        const uint8_t *mem = t->mem; uint8_t *part = NULL;
+        if (t->pool && pool_sparse(t->pool)) {   // through the page table, unmapped pages as 0 (the range itself may be inaccessible)
+            if ((part = malloc(t->L.size ? t->L.size : 1))) { nvn_sparse_copy(t->pool, part, (uint64_t)(uintptr_t)t->mem, t->L.size); mem = part; }
+        }
+        uint32_t lw = t->d.width >> level ? t->d.width >> level : 1, lh = t->d.height >> level ? t->d.height >> level : 1, lz = is3d ? (t->d.depth >> level ? t->d.depth >> level : 1) : 1;
+        size_t lp = (size_t)((lw + bw - 1) / bw) * bpb, lr = (lh + bh - 1) / bh;
+        if (t->d.flags & (NVN_TEXTURE_FLAGS_LINEAR | NVN_TEXTURE_FLAGS_LINEAR_RENDER_TARGET)) {   // rows at the texture's pitch (level 0, as the uploads take it)
+            size_t pitch = t->d.stride ? t->d.stride : lp;
+            if (level == 0 && !is3d) {
+                for (int z = 0; z < nz; z++) { uint64_t lo = (uint64_t)(layer0 + r->zoffset + z) * t->L.layer_size;
+                    for (size_t y = 0; y < hb; y++) { uint64_t so = lo + (y0 + y) * pitch + x0; if (so + wb <= t->L.size) memcpy(dst + z * img + y * row, mem + so, wb); else memset(dst + z * img + y * row, 0, wb); } }
+                done = 1;
+            }
+        } else if (mem) {   // block-linear: the whole level de-swizzled, then the region's rows copied
+            uint8_t *lin = malloc(lp * lr * lz); done = lin != NULL;
+            for (int z = 0; z < nz && lin; z++) {
+                unsigned layer = is3d ? 0 : layer0 + (unsigned)r->zoffset + (unsigned)z;
+                if ((is3d && z == 0) || !is3d) if (nvn_deswizzle(&t->d, level, layer, mem, lin, lp)) { done = 0; break; }
+                const uint8_t *src = lin + (is3d ? (size_t)(r->zoffset + z) * lp * lr : 0);
+                for (size_t y = 0; y < hb && y0 + y < lr; y++) memcpy(dst + z * img + y * row, src + (y0 + y) * lp + x0, wb);
+            }
+            free(lin);
+        }
+        free(part);
+    }
+    if (!done) memset(dst, 0, img * (size_t)(nz - 1) + row * (hb - 1) + wb);   // zeros rather than whatever dst held
+    static _Atomic int nl; if (atomic_fetch_add(&nl, 1) < 8)
+        VLOG("%sReadTexels: texture serial %llu %ux%ux%u target %d format %#x flags %#x level %u layer %u, region %d,%d,%d %dx%dx%d: read from its %s%s", done ? "" : "[RED] ",
+             (unsigned long long)t->serial, t->d.width, t->d.height, t->d.depth, t->d.target, t->d.format, t->d.flags, level, layer0, r->xoffset, r->yoffset, r->zoffset, r->width, r->height, r->depth,
+             done ? how : "nothing readable", done ? "" : ": zeros");
+    if (im) vka_tex_drop(im);
+}
 #endif

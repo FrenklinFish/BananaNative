@@ -24,7 +24,6 @@ void mtl_mem_stat(unsigned long long a0, unsigned long long a1) { (void)a0; (voi
 uint64_t mtl_pkg_edge_skips(void) { RED(__func__); return 0; }
 uint64_t mtl_pkg_miss(void) { RED(__func__); return 0; }
 int mtl_pso_prebuild_tool(void) { RED(__func__); return 0; }
-void mtl_read_texels(const tex_t *t, unsigned level, unsigned layer0, const NVNcopyRegion *r, uint8_t *dst, size_t row, size_t img) { (void)t; (void)level; (void)layer0; (void)r; (void)dst; (void)row; (void)img; RED(__func__); }
 void mtl_ub_present(double iv_ms) { (void)iv_ms; RED(__func__); }
 uint64_t mtl_udc_saved_bytes(void) { RED(__func__); return 0; }
 uint64_t mtl_upload_gpu_ns_take(void) { RED(__func__); return 0; }
