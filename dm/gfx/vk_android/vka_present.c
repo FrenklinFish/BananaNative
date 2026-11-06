@@ -548,7 +548,11 @@ static int present_one(const pq_item *it) {
     if (!it->fence) ti.waitSemaphoreValueCount = 1;
     frame_rate(it->period); refresh_poll();
     uint64_t want = 0, period = (uint64_t)((it->hold > 0 ? it->hold : it->period) * 1e9);
-    if (g_refresh_ns && period > g_refresh_ns * 3 / 2) {   // hold each image for its present period: the panel refreshes faster than the game presents
+    // With frame generation every image gets a time too, at least one refresh after the one before: a game frame and its generated frames are handed over back to back,
+    // and with their hold under 1.5 refreshes (4x at 25 fps: 10 ms) they went out untimed, two landed in one refresh and the compositor dropped one (on the Portal
+    // about 48 of 105 a second, mostly generated frames, so the screen showed little more than the game's own rate)
+    if (g_fg_on && g_refresh_ns && period < g_refresh_ns) period = g_refresh_ns;
+    if (g_refresh_ns && (period > g_refresh_ns * 3 / 2 || g_fg_on)) {   // hold each image for its present period: the panel refreshes faster than the game presents
         uint64_t now = now_ns(); want = g_last_desired ? g_last_desired + period : now;
         if (want < now) want = now;
         g_last_desired = want; want -= g_refresh_ns / 2;
