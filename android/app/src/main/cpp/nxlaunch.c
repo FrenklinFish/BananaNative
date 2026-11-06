@@ -1,7 +1,10 @@
 // The launcher's JNI shim (dev.nxnative.android.Native): starts the host's nxhost_main on a thread of its own and carries the host's output to a log file and to logcat.
 // It also hands the game screen's Surface, the input events and the Activity lifecycle on to the host, and runs the Vulkan selftest, through the C entry points libnxhost.so
 // exports (dm/host/android/input_android.h, dm/gfx/vk_android/vk_android.h). They are weak, so a host without one still loads, and the call does nothing (android/README.md).
+#define _GNU_SOURCE   // cpu_set_t and sched_setaffinity (thread placement)
 #include <android/log.h>
+#include <dirent.h>
+#include <sched.h>
 #include <android/native_window_jni.h>
 #include <errno.h>
 #include <fcntl.h>
@@ -305,4 +308,50 @@ JNIEXPORT jint JNICALL Java_dev_nxnative_android_Native_selftest(JNIEnv *env, jc
     fprintf(stderr, "[nxlaunch] graphics selftest returned %d: %s\n", r, r ? "FAIL" : "PASS");
     if (w) ANativeWindow_release(w);   // the replay holds its own reference
     return r;
+}
+
+// ---- Thread placement (Native.pinThreads, every few seconds while the game runs): the replay thread (vk-replay, the most work a frame: 9-18 ms in DKB) gets the
+// fastest cores to itself, and the command encoder (vk-enc: 5-8 ms of work, the rest spinning for the next call, which only heats the core it is on) and the game's own
+// threads (named "0x<id> ...") go to the cores at 75 % of the top clock or more, so none of them runs on the small cores; without such cores they share the fastest. The clusters are the cores' top clocks (cpuinfo_max_freq). Android may reset a thread to all cores,
+// and each call places the ones not where they belong. Returns the number placed by this call ----
+static long cpu_max_khz(int c) {
+    char path[96]; snprintf(path, sizeof path, "/sys/devices/system/cpu/cpu%d/cpufreq/cpuinfo_max_freq", c);
+    FILE *f = fopen(path, "r"); long v = 0; if (f) { if (fscanf(f, "%ld", &v) != 1) v = 0; fclose(f); }
+    return v;
+}
+JNIEXPORT jint JNICALL Java_dev_nxnative_android_Native_pinThreads(JNIEnv *env, jclass cls) {
+    (void)env; (void)cls;
+    static cpu_set_t fast, mid; static int ready;
+    if (!ready) {
+        int n = (int)sysconf(_SC_NPROCESSORS_CONF); if (n > CPU_SETSIZE) n = CPU_SETSIZE;
+        long top = 0;
+        for (int c = 0; c < n; c++) { long k = cpu_max_khz(c); if (k > top) top = k; }
+        if (!top) return -1;   // no cpufreq: leave the scheduler alone
+        // Fast: the cores at the top clock. Middle: the others at 75 % of it or more (a mid cluster: 2.8 of 3.19 GHz on a Snapdragon 8 Gen 2, 3.53 of 4.32 on an
+        // 8 Elite), never the small cores (1.8 of 2.8 on an older big.LITTLE). Without a middle group the encoder and the game share the fast cores
+        CPU_ZERO(&fast); CPU_ZERO(&mid);
+        for (int c = 0; c < n; c++) { long k = cpu_max_khz(c); if (k == top) CPU_SET(c, &fast); else if (k * 4 >= top * 3) CPU_SET(c, &mid); }
+        if (!CPU_COUNT(&mid)) mid = fast;
+        ready = 1;
+        fprintf(stderr, "[nxlaunch] thread placement: the replay thread on %d core(s) at %ld MHz, the encoder and the game on %d%s\n",
+                CPU_COUNT(&fast), top / 1000, CPU_COUNT(&mid), CPU_EQUAL(&mid, &fast) ? " (the same: no middle cluster)" : "");
+    }
+    DIR *d = opendir("/proc/self/task"); if (!d) return 0;
+    int placed = 0; struct dirent *e;
+    while ((e = readdir(d))) {
+        int tid = atoi(e->d_name); if (tid <= 0) continue;
+        char path[64], name[32] = ""; snprintf(path, sizeof path, "/proc/self/task/%d/comm", tid);
+        FILE *f = fopen(path, "r"); if (!f) continue;
+        if (!fgets(name, sizeof name, f)) name[0] = 0; fclose(f);
+        name[strcspn(name, "\n")] = 0;
+        int g = !strcmp(name, "vk-replay") ? 1 : !strcmp(name, "vk-enc") || !strncmp(name, "0x", 2) ? 2 : 0;
+        if (!g) continue;   // not a placed thread; looked at again next time (a thread may be renamed after it starts)
+        // Checked every call, not once: the replay thread starts under the name of the game thread that made it, and Android resets every thread to all cores
+        // when it moves the app between foreground and background
+        const cpu_set_t *to = g == 1 ? &fast : &mid; cpu_set_t cur;
+        if (!sched_getaffinity(tid, sizeof cur, &cur) && CPU_EQUAL(&cur, to)) continue;
+        if (!sched_setaffinity(tid, sizeof *to, to)) placed++;   // fails while a core is parked (core control at low load): the next call places it
+    }
+    closedir(d);
+    return placed;
 }

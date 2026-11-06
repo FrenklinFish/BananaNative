@@ -179,6 +179,18 @@ public final class GameActivity extends Activity implements SurfaceHolder.Callba
     private boolean overlayOn() { return overlayEnv != null ? overlayEnv : Prefs.overlay(this); }
 
     /** The overlay, twice a second: top right the frame rate and the other items that are on (Overlay); nothing is read while it is off */
+    /** Thread placement (Native.pinThreads): every 5 s, for threads the game and the replay start later; stops when the phone reports no clocks */
+    private final Runnable pinRun = this::pinTick;
+    private void pinTick() {
+        if (Native.pinThreads() < 0) return;
+        ui.postDelayed(pinRun, 5000);
+    }
+    /** At the start and when a recreated screen attaches to the running game (attach: the old screen's loops were stopped); one loop, never two */
+    private void pinStart() {
+        ui.removeCallbacks(pinRun);
+        if (Prefs.pinThreads(this, titleId())) ui.postDelayed(pinRun, 2000);
+    }
+
     private void fpsTick() {
         if (stopped || paused) { ui.postDelayed(this::fpsTick, 2000); return; }   // nothing to show: no readings (thermal, battery, the host's counters) while suspended
         boolean on = overlayOn();
@@ -434,6 +446,7 @@ public final class GameActivity extends Activity implements SurfaceHolder.Callba
             Fsr.env(this, env);   // FSR 1 upscaling (the in-game panel)
             int cap = Prefs.fpsCap(this, id);   // the game's own frame rate cap (its in-game panel, its Game settings), else the main screen's (unset: the profile's fps_target)
             if (cap >= 0) env.add("DM_FPS_TARGET=" + cap);
+            pinStart();   // Use fast cores (Game settings, Settings)
             String gpuNote = GpuDriver.env(this, id, env);   // the game's GPU driver, else the main screen's (DM_VK_DRIVER)
             String ts = Prefs.gpuTs(this, id);   // Game settings › GPU timing; unset: the profile's gpu_timestamps (a DM_NVN_GPU_TS line of env.txt or the game's own lines comes later and wins)
             if (ts != null) env.add("DM_NVN_GPU_TS=" + ts);
@@ -494,6 +507,7 @@ public final class GameActivity extends Activity implements SurfaceHolder.Callba
         // Pause-on-return only after a real trip to the background: a screen recreated while it showed (a wallpaper colour or theme change) does not pause the game
         if (hostPaused == 1 || hostInBackground && Prefs.pauseOnReturn(this, titleId())) { paused = true; Native.lifecycle(4); pausedView.setVisibility(View.VISIBLE); }
         ui.postDelayed(this::fpsTick, 500);
+        pinStart();
     }
 
     /** The game's screen was stopped (the game in the background) and not started again; a stop for a configuration change is no trip to the background */
