@@ -152,6 +152,12 @@ public final class MainActivity extends Activity {
         overlayRow = new Ui.Setting(this, "👀", "Overlay", v -> overlayItems())
                 .toggle(this, Prefs.overlay(this), (b, on) -> { Prefs.overlay(this, on); refreshSettings(); });
         play.addView(overlayRow.view);
+        Ui.Setting touch = new Ui.Setting(this, "🎮", "On-screen controls", null).chevron(this);
+        touch.view.setOnClickListener(v -> new AlertDialog.Builder(this).setTitle("On-screen controls")
+                .setSingleChoiceItems(TouchControls.MODE_NAMES, TouchControls.mode(this), (d, w) -> { TouchControls.mode(this, w); touch.value(touchLabel(w)); d.dismiss(); })
+                .setNegativeButton("Cancel", null).show());
+        touch.value(touchLabel(TouchControls.mode(this)));
+        play.addView(touch.view);
         resRow = new Ui.Setting(this, "🖼️", "Resolution", v -> gameRes()).chevron(this);
         play.addView(resRow.view);
         if (!Profile.anyResolution()) resRow.view.setVisibility(View.GONE);   // no game of this APK has a window_fn or graphics_scale lever: the default would do nothing
@@ -911,4 +917,6 @@ public final class MainActivity extends Activity {
     }
 
     void error(String msg) { new AlertDialog.Builder(this).setMessage(msg).setPositiveButton("OK", null).show(); }
+
+    private static String touchLabel(int m) { return m == TouchControls.MODE_AUTO ? "Auto: hidden while a controller is connected" : TouchControls.MODE_NAMES[m]; }
 }

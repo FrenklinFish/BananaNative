@@ -29,8 +29,8 @@ import java.util.concurrent.Executors;
  * The overlay's top-right text over the game (GameActivity polls it twice a second while the overlay is on; nothing is read while it is off): the frame rate and frame
  * time (nxhost_fps), the throttle dot, the GPU's time a frame (nxhost_fps), the CPU clock caps, the battery and the memory (MemText: the game process's VmRSS and
  * the phone's RAM in use, read every 2 s on a thread of its own). Android text only, no GPU work. Each item has its own
- * switch (Prefs.overlayItem), all on by default, under the master switch (Prefs.overlay). The build tag top left is not one of them: it is always shown (GameActivity),
- * so every screenshot and recording names its build.
+ * switch (Prefs.overlayItem), all on by default, under the master switch (Prefs.overlay). The build tag top left is one of them too (GameActivity), on by default
+ * like the rest, so screenshots and recordings name their build; the log's first line names it either way.
  *
  * <p>The throttle dot, worst of three readings:
  * <ul>
@@ -51,6 +51,7 @@ final class Overlay {
             {"gpu", "GPU time a frame"},
             {"cpu", "CPU clock caps"},
             {"battery", "Battery temperature and level"},
+            {"tag", "Build tag"},
             {"memory", "Memory: the game's and the phone's"},
     };
 
