@@ -50,16 +50,10 @@ namespace Ryujinx.Graphics.Shader.Translation.Transforms
                 {
                     switch (src.GetCbufOffset())
                     {
-                        case Constants.NvnBaseVertexByteOffset / 4:
-                            operation.SetSource(srcIndex, GenerateLoad(IoVariable.BaseVertex));
-                            modified = true;
-                            break;
+                        // Banana Native: only the base instance. An indirect draw's is in the record the game's GPU culling writes, so the replay cannot put it in c0; the
+                        // base vertex stays in c0 (VertexIndex holds it already) and so does the draw index (the replay draws a multi-draw's records one at a time)
                         case Constants.NvnBaseInstanceByteOffset / 4:
                             operation.SetSource(srcIndex, GenerateLoad(IoVariable.BaseInstance));
-                            modified = true;
-                            break;
-                        case Constants.NvnDrawIndexByteOffset / 4:
-                            operation.SetSource(srcIndex, GenerateLoad(IoVariable.DrawIndex));
                             modified = true;
                             break;
                     }

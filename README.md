@@ -73,7 +73,7 @@ Saves and prepared packs are in the app's own storage (`Android/data/<app>/files
 
 ## Known issues
 
-- Mario Kart World: prepare it on a Mac (on the phone its code rewrite runs out of memory). Some road and ground textures may be missing and trees can flicker. Memory is tight on 16 GB phones.
+- Mario Kart World: prepare it on a Mac (on the phone its code rewrite runs out of memory). Some road and ground textures may be missing. Memory is tight on 16 GB phones.
 - The phone gets hot, and the frame rate drops when it throttles. Let it cool down.
 - A new version of the app can need its shaders made again (the app says so and offers Prepare); a pack from an older version is not used yet.
 - Tested on one phone only.

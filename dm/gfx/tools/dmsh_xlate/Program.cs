@@ -170,6 +170,7 @@ static class SwshXlate
         // Job ssbo_align: the device's storage buffer offset alignment. Set, the host binds each storage buffer at its address rounded down to it, and the shader adds the
         // difference (GlobalToStorage: offset = address − (base & −align)); unset, a storage buffer starts exactly at its c0 address
         public bool QueryHasUnalignedStorageBuffer() => _job["ssbo_align"] != null;
+        public bool QueryHasConstantBufferDrawParameters() => _job["ssbo_align"] != null;   // Android Vulkan: c0 + 0x644 reads BaseInstance, which holds an indirect draw's (Metal: dmsh_build.py vs_base_instance)
         public int QueryHostStorageBufferOffsetAlignment() => _job["ssbo_align"] is JsonNode al ? (int)al : 16;
         public GpuGraphicsState QueryGraphicsState()
         {

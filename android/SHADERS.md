@@ -90,7 +90,7 @@ A profile may list the shaders its game needs in `dm/games/<id>/shader_seen.tsv`
 | `spv_single_lane` (subgroups in vertex functions) | skipped | Vulkan has subgroup operations in every stage the device lists in `subgroupSupportedStages` |
 | Geometry lowering (`dmsh_geometry.py` `_bg` / `_bl` / `_bgv`, `dmsh_mesh.py` `_m3`), `gs_slice`, `vs_layer`, `vs_layer_entry` | skipped | the phone has geometry and tessellation stages: a geometry shader is translated as one (`gs` modules) |
 | `vs_discard` | skipped | rasterizer discard keeps the vertex stage's side effects |
-| `vs_base_instance` (the base instance from Metal) | not yet | the replay writes `c0 + 0x644` per draw; DKB has no shader that reads it |
+| `vs_base_instance` (the base instance from Metal) | changed: the translator reads `BaseInstance` for `c0 + 0x644` in vertex shaders (`DrawParametersReplace.cs`, on jobs with `ssbo_align`); the replay still writes the word for the other stages | [The base instance of indirect draws comes from the device on Android](../docs/reference/shaders.md#the-base-instance-of-indirect-draws-comes-from-the-device-on-android) |
 | `vs_tf` (transform feedback by stores) | not yet | flag `F_TF`; the phone has `VK_EXT_transform_feedback`, which wants `Xfb` decorations; DKB has none |
 | `fs_uint` (`main0_u`, `main0_m`), `fs_dual` (`main0_d`) | kept, as module variants `MOD_UINT`, `MOD_UINT_MIXED`, `MOD_DUAL` | [Variants](#variants) |
 | `dmsh_alpha` (`_ba`) | changed: a uint specialization constant in the base module, the reference in the support buffer | [Variants](#variants) |
