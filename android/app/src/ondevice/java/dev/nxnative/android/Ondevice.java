@@ -86,6 +86,15 @@ final class Ondevice {
 
     /** Whether Home shows the preparing card now */
     static boolean showing() { return panel != null && panel.view.getVisibility() == View.VISIBLE; }
+    /** The progress card when it shows (MainActivity puts it into the game list: at its game's place, or first for a game not listed yet), else null */
+    static View cardView() { return panel != null && panel.view.getVisibility() == View.VISIBLE ? panel.view : null; }
+    /** The job's own Manage sheet (Forget, the deletes), from the game's ⋯ while its card is the progress card */
+    static void manageJob(MainActivity a) { if (panel != null && panel.a == a) panel.manage(); }
+    /** Whether the progress card shows this game (its dump and pack): its card in the list is then the progress card, one card per game */
+    static boolean shows(Game g) {
+        Job j = panel != null && panel.view.getVisibility() == View.VISIBLE ? panel.job : null;
+        return j != null && GameList.samePath(g.gameDir, j.dump().getPath()) && GameList.samePath(g.packDir, j.pack().getPath());
+    }
 
     static boolean activityResult(MainActivity a, int request, int result, Intent data) {
         if (request != PICK_DUMP) return false;
@@ -112,7 +121,7 @@ final class Ondevice {
     private static final class Panel implements ServiceConnection {
         final MainActivity a;
         final LinearLayout view, card;
-        final TextView head, title, status, detail;
+        final TextView head, title, status, detail, tile;
         final ProgressBar bar;
         final Button go;
         final Ui.Action play;
@@ -136,15 +145,21 @@ final class Ondevice {
             card = view;   // one card: the heading and ⋯ Manage, the state, the progress, the buttons
             LinearLayout top = Ui.row(a);
             top.setGravity(android.view.Gravity.TOP);
-            head = Ui.heading(a, "Preparing");
-            head.setAccessibilityHeading(true);
+            // laid out as a game card (MainActivity.gameCard): the game's tile, its name and state line, ⋯; MainActivity puts it into the game list
+            tile = Ui.tile(a, "", 52);
+            top.addView(tile);
+            head = Ui.text(a, "", 17, R.color.bn_text, 700);
+            head.setMaxLines(2);
+            head.setEllipsize(android.text.TextUtils.TruncateAt.END);
             title = Ui.small(a, "");
             LinearLayout tc = new LinearLayout(a);   // in a column of its own, as the game cards: a bare TextView with weight kept its first (one-line) height
             tc.setOrientation(LinearLayout.VERTICAL);
+            tc.setPadding(dp(14), 0, dp(4), 0);
             tc.addView(head);
             tc.addView(title);
             top.addView(tc, Ui.weight());
-            more = Ui.more(a, "Manage the preparing job", v -> manage());
+            // ⋯: a listed game's own Manage (Game settings, saves, packs ... and Preparing, which leads here: manageJob); a game not listed yet: the job's
+            more = Ui.more(a, "Manage", v -> { Game g = job != null ? listedGame(job) : null; if (g != null) a.manageGame(g); else manage(); });
             LinearLayout.LayoutParams mp = (LinearLayout.LayoutParams) more.getLayoutParams();
             mp.leftMargin = dp(8);
             top.addView(more, mp);
@@ -258,15 +273,30 @@ final class Ondevice {
             if (!was) a.refresh();   // the games' empty card hides while this one shows
             String st = job.state();
             String sim = "fake".equals(BuildConfig.NX_PACK_ENGINE) ? "  (simulated engine)" : "";
-            head.setText(("done".equals(st) ? "" : "pending".equals(st) ? "Ready to prepare: " : "failed".equals(st) ? "Could not prepare " : "Preparing ") + job.name());
-            title.setText("Update " + job.version() + sim);
+            head.setText(job.name());
+            String n = job.name().trim();
+            tile.setText(n.isEmpty() ? "?" : n.substring(0, n.offsetByCodePoints(0, 1)).toUpperCase(Locale.ROOT));
+            title.setText(("done".equals(st) ? "Prepared" : "pending".equals(st) ? "Ready to prepare" : "failed".equals(st) ? "Could not prepare" : "Preparing") + " · update " + job.version() + sim);
             status.setText(job.statusText(alive));
             bar.setProgress((int) Math.round(job.overall() * 1000));
             detail.setText(String.format(Locale.getDefault(), "%d %%  ·  shaders %,d of %,d", Math.round(job.overall() * 100), job.shadersDone(), job.shadersTotal()));
             boolean running = alive && ("running".equals(st) || "paused".equals(st) && !"user".equals(job.reason()) && !"timeout".equals(job.reason()));
             go.setText(running ? "Pause" : "done".equals(st) && !job.apkChanged() ? "Prepare again" : "failed".equals(st) ? "Retry" : "pending".equals(st) ? "Start" : "Resume");
             go.setEnabled(!"done".equals(st) || job.apkChanged());
-            play.setEnabled(ready && !running);
+            play.setEnabled(ready && !running || !ready && playsOld(job));
+        }
+
+        // A listed game whose shaders are being updated plays with its older library of the same ABI meanwhile (Pack.playableLibrary), as its own card did: the list
+        // leaves that card out while this one shows (shows). Checked at most every 5 s: show runs every second and both read files
+        private long oldAt; private boolean oldOk;
+        boolean playsOld(Job j) {
+            long now = android.os.SystemClock.uptimeMillis();
+            if (now - oldAt > 5000) { oldAt = now; oldOk = listedGame(j) != null && Pack.playableLibrary(j.pack(), j.titleId()) != null; }
+            return oldOk;
+        }
+        Game listedGame(Job j) {
+            for (Game g : Game.load(a)) if (GameList.samePath(g.gameDir, j.dump().getPath()) && GameList.samePath(g.packDir, j.pack().getPath())) return g;
+            return null;
         }
 
         /** Whether the list has this job's game with its pack */
@@ -490,7 +520,8 @@ final class Ondevice {
         }
 
         void play() {
-            if (job == null || !ready(job)) return;
+            if (job == null) return;
+            if (!ready(job)) { Game g = playsOld(job) ? listedGame(job) : null; if (g != null) a.launch(g); return; }   // the older library while the update runs
             Pack p;
             try { p = Pack.read(job.pack()); } catch (IOException e) { a.error(e.getMessage()); return; }
             if (p.simulated) {
