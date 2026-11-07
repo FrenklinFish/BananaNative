@@ -315,11 +315,13 @@ typedef struct vka_shader {
     int bad;                            // refused: no module, an unknown binding, an NV-only capability (logged once with its key)
     int gs_fx;                          // a geometry shader's memory writes (vka_spv_gs_claim): above 0, its draws bind a claim buffer at VKA_GS_CLAIM_BINDING
     VkShaderModule gs_claim;            // its module with those writes under the per-primitive claim, made when a pipeline first asks
+    uint32_t inst_bind;                 // an instanced variant: the uniform binding it was made for + 1 (the prewarm list records it with the base key)
 } vka_shader;
 // An instanced variant's key (vka_draw.c's instanced runs): its base shader's key XOR this. It is no key of the shader library, and the variant depends on the uniform
-// binding it was made for, which a pipeline key does not record: the prewarm list leaves such pipelines out (they are made at their first draw)
+// binding it was made for, which a pipeline key does not record: the prewarm list records the base key and the binding instead (pwrec.inst)
 #define VKA_INST_KEY_XOR 0x494e5354494e5354ull
 static inline int vka_shader_is_variant(const vka_shader *s) { return s && s->e && s->key != s->e->key; }
+vka_shader *vka_inst_variant(vka_shader *s, uint32_t binding);   // the instanced variant of s for that binding (vka_draw.c), for the prewarm threads; NULL with DM_VK_INSTANCE off
 int vka_shader_variant_key(uint64_t key);   // 1 when a key is no library key but an instanced variant's (an older prewarm list's record), without a red line
 typedef struct { vka_shader *sh[VKA_NSTAGE]; unsigned bad; } vka_progsh;   // by NVN stage; bad: stages whose shader is refused (bit = NVN stage) or VKA_BAD_MISSING (their draws are skipped)
 #define VKA_BAD_MISSING (1u << VKA_NSTAGE)   // vka_progsh.bad: a stage's shader is not in the library (its NVN stage unknown)

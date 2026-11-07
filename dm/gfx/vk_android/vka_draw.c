@@ -1074,7 +1074,12 @@ static int inst_cmp(const isnap *s, uint32_t *wv, uint32_t *wp, int64_t *delta, 
     *wv = v; *wp = f; *delta = dv; return 2;
 }
 // The instanced variant of shader s with the block at binding moved (NULL = none: no file, or it does not load)
-static vka_shader *inst_variant(vka_shader *s, uint32_t binding) {
+static vka_shader *inst_variant_make(vka_shader *s, uint32_t binding);
+// The frame path and the prewarm threads (instanced variants in the prewarm list: vka_inst_variant) share the cache, so one variant is made once
+static pthread_mutex_t g_ivmu = PTHREAD_MUTEX_INITIALIZER;
+static vka_shader *inst_variant(vka_shader *s, uint32_t binding) { pthread_mutex_lock(&g_ivmu); vka_shader *v = inst_variant_make(s, binding); pthread_mutex_unlock(&g_ivmu); return v; }
+vka_shader *vka_inst_variant(vka_shader *s, uint32_t binding) { return VKA_ENV("DM_VK_INSTANCE", 0) ? inst_variant(s, binding) : NULL; }
+static vka_shader *inst_variant_make(vka_shader *s, uint32_t binding) {
     static struct { uint64_t key; uint32_t binding; vka_shader *v; } cache[128]; static int ncache;
     for (int i = 0; i < ncache; i++) if (cache[i].key == s->key && cache[i].binding == binding) return cache[i].v;
     if (ncache == 128) return NULL;
@@ -1092,7 +1097,7 @@ static vka_shader *inst_variant(vka_shader *s, uint32_t binding) {
         if (w && fread(w, 1, (size_t)n, f) == (size_t)n && w[0] == 0x07230203) {
             VkShaderModuleCreateInfo ci = {VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO, .codeSize = (size_t)n, .pCode = w}; VkShaderModule m = VK_NULL_HANDLE;
             if (!vk.vkCreateShaderModule(V.dev, &ci, NULL, &m) && (v = calloc(1, sizeof *v))) {
-                *v = *s; memset(v->mods, 0, sizeof v->mods); v->mods[DMSH_VK_MOD_BASE] = m; v->vin = v->fout = NULL; v->gs_claim = VK_NULL_HANDLE; v->key = s->key ^ VKA_INST_KEY_XOR;
+                *v = *s; memset(v->mods, 0, sizeof v->mods); v->mods[DMSH_VK_MOD_BASE] = m; v->vin = v->fout = NULL; v->gs_claim = VK_NULL_HANDLE; v->key = s->key ^ VKA_INST_KEY_XOR; v->inst_bind = binding + 1;
                 VLOG("instanced runs: variant of %016llx (binding %u) loaded", (unsigned long long)s->key, binding);
             }
         }
@@ -1101,7 +1106,7 @@ static vka_shader *inst_variant(vka_shader *s, uint32_t binding) {
     if (!v) {   // no file (the usual case): made from the library's SPIR-V (vka_spv_instance); a file in the folder above overrides it
         VkShaderModule m = vka_shader_inst_module(s, binding, 30);
         if (m && (v = calloc(1, sizeof *v))) {
-            *v = *s; memset(v->mods, 0, sizeof v->mods); v->mods[DMSH_VK_MOD_BASE] = m; v->vin = v->fout = NULL; v->gs_claim = VK_NULL_HANDLE; v->key = s->key ^ VKA_INST_KEY_XOR;
+            *v = *s; memset(v->mods, 0, sizeof v->mods); v->mods[DMSH_VK_MOD_BASE] = m; v->vin = v->fout = NULL; v->gs_claim = VK_NULL_HANDLE; v->key = s->key ^ VKA_INST_KEY_XOR; v->inst_bind = binding + 1;
             static _Atomic int nm; if (atomic_fetch_add(&nm, 1) < 32) VLOG("instanced runs: variant of %016llx (binding %u) made", (unsigned long long)s->key, binding);
         } else if (m) vk.vkDestroyShaderModule(V.dev, m, NULL);
     }
