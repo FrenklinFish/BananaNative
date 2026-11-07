@@ -938,9 +938,10 @@ namespace Ryujinx.Graphics.Shader.Instructions
                         // The instruction component order is the inverse of GLSL's.
                         Operand res = context.Lod(type, flags, setAndBinding, compIndex ^ 1, sources);
 
-                        res = context.FPMultiply(res, ConstF(256.0f));
+                        // Banana Native: unsigned 24.8 with a negative LOD clamped to 0, as Maxwell returns it (yuzu #10234; nx2android: Tears of the Kingdom's cloud particles)
+                        res = context.FPMultiply(context.FPMaximum(res, ConstF(0.0f)), ConstF(256.0f));
 
-                        Operand fixedPointValue = context.FP32ConvertToS32(res);
+                        Operand fixedPointValue = context.FP32ConvertToU32(res);
 
                         context.Copy(d, fixedPointValue);
                     }

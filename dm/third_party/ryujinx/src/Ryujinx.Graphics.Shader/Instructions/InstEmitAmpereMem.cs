@@ -235,6 +235,16 @@ namespace Ryujinx.Graphics.Shader.Instructions
                 }
             }
 
+            // The address is read once, before any result is written, the zeros of a false predicate too: the destination may be the address register (LDG.128 R0, [R0.64]; Unreal Engine 5.4's bounds-checked
+            // reads of its scene data, LDG.P R5, [R5 + UR4], which read at the table's start when R5 was zeroed first: every instance at the first one's transform, and a black scene)
+            (Operand[] los, Operand[] his) = (new Operand[count], new Operand[count]);
+
+            for (int index = 0; index < count; index++)
+            {
+                (Operand lo, Operand hi) = AGlobalAddress(context, x, 90, 32, index * 4);
+                (los[index], his[index]) = (context.Copy(lo), context.Copy(hi));
+            }
+
             Operand lblSkip = null;
 
             if (pred != null)
@@ -246,14 +256,6 @@ namespace Ryujinx.Graphics.Shader.Instructions
 
                 lblSkip = Label();
                 context.BranchIfFalse(lblSkip, pred);
-            }
-
-            // The address is read once, before any result is written (the destination may be the address register: LDG.128 R0, [R0.64])
-            (Operand[] los, Operand[] his) = (new Operand[count], new Operand[count]);
-
-            for (int index = 0; index < count; index++)
-            {
-                (los[index], his[index]) = AGlobalAddress(context, x, 90, 32, index * 4);
             }
 
             for (int index = 0; index < count; index++)
@@ -931,7 +933,9 @@ namespace Ryujinx.Graphics.Shader.Instructions
                 }
 
                 Operand res = context.Lod(type, flags, setAndBinding, comp ^ 1, sources);
-                context.Copy(results[r++], context.FP32ConvertToS32(context.FPMultiply(res, ConstF(256.0f))));
+                // Banana Native: unsigned 24.8 with a negative LOD (a magnified texture) clamped to 0, as the hardware returns it; converted signed it read as a huge unsigned one
+                // (yuzu #10234; nx2android found Tears of the Kingdom's cloud particles reading it so)
+                context.Copy(results[r++], context.FP32ConvertToU32(context.FPMultiply(context.FPMaximum(res, ConstF(0.0f)), ConstF(256.0f))));
             }
         }
 
