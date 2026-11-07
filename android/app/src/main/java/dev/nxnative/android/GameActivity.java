@@ -146,6 +146,7 @@ public final class GameActivity extends Activity implements SurfaceHolder.Callba
         pausedView.setOnClickListener(v -> unpause());
         root.addView(pausedView, root.indexOfChild(handle), new FrameLayout.LayoutParams(FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.MATCH_PARENT));
         setContentView(root);
+        immersive();
         TextInput.screen(this);   // the keyboard applet's input box shows on this screen (again, when the game was waiting on it as the screen was recreated)
         // The host starts once per process. A screen created again while it runs (Android recreated the activity: "Don't keep activities", a font or language
         // change while in the background) takes its window over; a screen restored into a new process (Android ended the old one while it was in the background)
@@ -691,6 +692,21 @@ public final class GameActivity extends Activity implements SurfaceHolder.Callba
         pausedView.setVisibility(View.GONE);
         Native.lifecycle(5);
         if (resumedNow) Native.motionStart();
+    }
+
+    /** Full screen: the status and navigation bars (and the swipe handle) are hidden, a swipe from the edge shows them for a moment; the picture also runs under a display cutout */
+    private void immersive() {
+        getWindow().getAttributes().layoutInDisplayCutoutMode = android.view.WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_ALWAYS;
+        getWindow().setDecorFitsSystemWindows(false);
+        android.view.WindowInsetsController c = getWindow().getInsetsController();
+        if (c == null) return;
+        c.setSystemBarsBehavior(android.view.WindowInsetsController.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE);
+        c.hide(android.view.WindowInsets.Type.systemBars());
+    }
+
+    @Override public void onWindowFocusChanged(boolean hasFocus) {
+        super.onWindowFocusChanged(hasFocus);
+        if (hasFocus) immersive();   // the bars come back after a dialog, the keyboard or the notification shade
     }
 
     @Override protected void onStart() {
