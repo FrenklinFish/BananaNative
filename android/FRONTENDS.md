@@ -27,6 +27,10 @@ The extra `game` with the file's path is the most reliable form. The app opens g
 
 All files access must be on (the app asks for it on Home).
 
+## Home screen shortcuts
+
+Home's game menu (long-press a card, or ⋯) has **Add to home screen**: the launcher pins a shortcut with the game's name and tile. It sends `title_id` to `FrontendLaunch`, so it behaves like the `title_id` form above (a ready game starts at once; anything that needs you opens Home), and it follows the card if the game or pack is moved. The menu entry shows only when the launcher supports pinning.
+
 ## In the frontend's own Switch list
 
 A frontend needs no change of its own: each one lets you add an emulator by its component. Until a frontend ships Banana Native in its bundled emulator list, you add it once, by hand:
