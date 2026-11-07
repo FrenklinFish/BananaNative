@@ -11,6 +11,12 @@
 #include <unistd.h>
 #include <sched.h>
 #include <stdio.h>
+#include <stdlib.h>
+#ifdef __ANDROID__
+#define DIRTY_BLOCK_KB 64
+#else
+#define DIRTY_BLOCK_KB 0
+#endif
 
 // Order of page state and mprotect: the side changing protection first sets the state to BUSY and sets the final state only after mprotect has landed; other threads wait when they see BUSY.
 //   set read-only: NONE -> BUSY -> mprotect(read-only) -> PROT; unprotect: PROT -> BUSY -> mprotect(writable) -> NONE.
@@ -28,11 +34,18 @@ enum { BLK_SHIFT = 10, BLK = 1 << BLK_SHIFT, NBLK = 256, MAX_RANGE = BLK * NBLK 
 // Ranges are rounded to host pages (16 KB) but guest memory pools are only 4 KB aligned: adjacent pools share their first / last pages, so one address can fall in several registered ranges.
 // So: "is this texture tracked" looks for a range that holds its whole span; a fault / host pre-write unprotects and stamps every range covering that page; pool destruction identifies its range by the pool's exact start mem.
 // (Previously the first range containing the address was always taken: two SMBW ASTC 6x5 textures whose pool's first page is shared with a small preceding pool were judged untracked and re-uploaded on every use, about 6 MB per frame)
-typedef struct { uintptr_t base, end, mem; _Atomic uint8_t *state; _Atomic uint64_t *gen; size_t cap; _Atomic int live; } range_t;
+typedef struct { uintptr_t base, end, mem; _Atomic uint8_t *state; _Atomic uint64_t *gen; uint8_t *ever; size_t cap; _Atomic int live; } range_t;
 static _Atomic(range_t *) g_blk[NBLK];
 static inline range_t *rg(int i) { return &atomic_load_explicit(&g_blk[i >> BLK_SHIFT], memory_order_acquire)[i & (BLK - 1)]; }
 static _Atomic int g_nr;
 static uintptr_t g_pg, g_shift;
+// Protection changes in blocks of this many bytes, aligned to it, less one (DM_DIRTY_BLOCK_KB; 0 = by the page). Android's GPU memory is mapped by the kernel driver, and such maps never merge
+// again once mprotect has split them: page-by-page tracking left a mapping per page ever protected, and Mario Kart World reached the system's limit of 65,530 mappings a process
+// (39,726 of them single pages of /kgsl-3d0), after which any allocation in the process fails. In blocks, splits only land on block boundaries. The cost is on the safe side: a write
+// stamps the whole block, so a texture beside the written one may upload again, so it starts only under pressure: when DM_DIRTY_BLOCK_AT separate regions have been protected for the first time. Regions, not pages:
+// a large texture is many pages and one split, and Donkey Kong Bananza passes 16,384 pages at its title with 4,000 textures. Games that never get there stay page by page, with no extra uploads
+static _Atomic uintptr_t g_bmask;
+static uintptr_t g_bwant; static uint64_t g_ever, g_block_at;   // the block mask to use; regions first protected (under g_slot_mu), and the count where blocks start
 static _Atomic uint64_t g_now = 1;
 static _Atomic uint64_t g_faults, g_preps;
 static _Atomic uint64_t g_adds_total;
@@ -69,6 +82,13 @@ static range_t *find_span(uintptr_t a, size_t len) {
     for (int i = 0; i < n; i++) { range_t *r = rg(i); if (live_at(i) && a >= r->base && a + len <= r->end) return r; }
     return NULL;
 }
+// Pages p..q widened to their blocks, within the range
+static void block_bounds(const range_t *r, uintptr_t *p, uintptr_t *q) {
+    uintptr_t a = (r->base + (*p << g_shift)) & ~g_bmask, b = (r->base + (*q << g_shift)) | g_bmask;
+    if (a < r->base) a = r->base;
+    if (b >= r->end) b = r->end - 1;
+    *p = (a - r->base) >> g_shift; *q = (b - r->base) >> g_shift;
+}
 static void stamp_page(range_t *r, uintptr_t p) {
     atomic_store(&r->gen[p], atomic_fetch_add(&g_now, 1) + 1);
     // Publish completion after the generation: a checker may have cached "clean" using the incremented clock before the generation store. Both fault and host-write paths
@@ -90,12 +110,15 @@ static int release_page(range_t *r, uintptr_t p, _Atomic uint64_t *count) {
         if (!busy_wait(r, p)) return 0;
     }
 }
+static void release_pages(range_t *r, uintptr_t p, uintptr_t q, _Atomic uint64_t *count);
 static int on_fault(void *addr, int is_write, void *uc) {
     (void)uc;
     if (!is_write) return 0;
     uintptr_t a = (uintptr_t)addr; int ours = 0, n = atomic_load(&g_nr);
     for (int i = 0; i < n; i++)   // Every range sharing the page must be released: releasing only one leaves the other range's state at "protected", and later writes no longer fault and are missed
-        { range_t *r = rg(i); if (live_at(i) && a >= r->base && a < r->end) ours |= release_page(r, (a - r->base) >> g_shift, &g_faults); }
+        { range_t *r = rg(i); if (live_at(i) && a >= r->base && a < r->end) {
+            uintptr_t p = (a - r->base) >> g_shift, q = p; int mine = release_page(r, p, &g_faults); ours |= mine;
+            if (mine && g_bmask) { block_bounds(r, &p, &q); release_pages(r, p, q, &g_faults); } } }
     return ours;
 }
 // Unprotect pages p..q of a range with one mprotect per run of protected pages (a host write over a whole texture, e.g. WriteTexels, used to make one system call per 16 KB page:
@@ -121,13 +144,19 @@ static void prep_write(void *addr, size_t len) {
         range_t *r = rg(i);
         if (!live_at(i) || e <= r->base || a >= r->end) continue;
         uintptr_t lo = a > r->base ? a : r->base, hi = e < r->end ? e : r->end;
-        release_pages(r, (lo - r->base) >> g_shift, (hi - 1 - r->base) >> g_shift, &g_preps);
+        uintptr_t p = (lo - r->base) >> g_shift, q = (hi - 1 - r->base) >> g_shift;
+        if (g_bmask) block_bounds(r, &p, &q);
+        release_pages(r, p, q, &g_preps);
     }
 }
 
 void nvn_dirty_add_range(const void *mem, size_t size) {
     static int inited;
-    if (!inited) { inited = 1; g_pg = (uintptr_t)getpagesize(); g_shift = __builtin_ctzl(g_pg); plat_timebase(&g_tb); dm_fault_hook_register(on_fault); dm_guest_write_prep_register(prep_write); }
+    if (!inited) { inited = 1; g_pg = (uintptr_t)getpagesize(); g_shift = __builtin_ctzl(g_pg); plat_timebase(&g_tb);
+        { const char *e = getenv("DM_DIRTY_BLOCK_KB"); size_t kb = e ? strtoul(e, NULL, 0) : DIRTY_BLOCK_KB; size_t b = kb << 10;   // a power of two of at least a page, else by the page
+          g_bwant = b > g_pg && !(b & (b - 1)) ? b - 1 : 0;
+          e = getenv("DM_DIRTY_BLOCK_AT"); g_block_at = e ? strtoull(e, NULL, 0) : 8192;
+          if (!g_block_at) g_bmask = g_bwant; } dm_fault_hook_register(on_fault); dm_guest_write_prep_register(prep_write); }
     atomic_fetch_add(&g_adds_total, 1);
     pthread_mutex_lock(&g_slot_mu);
     int n = atomic_load(&g_nr);
@@ -151,15 +180,16 @@ void nvn_dirty_add_range(const void *mem, size_t size) {
     size_t np = (end - base) >> g_shift;
     _Atomic uint8_t *state = r->state;
     _Atomic uint64_t *gen = r->gen;
+    uint8_t *ever = r->ever;
     if (r->cap < np) {
-        state = calloc(np, 1); gen = calloc(np, sizeof *gen);
-        if (!state || !gen) die("dirty-page table allocation failed (%zu pages)", np);
+        state = calloc(np, 1); gen = calloc(np, sizeof *gen); ever = calloc(np, 1);
+        if (!state || !gen || !ever) die("dirty-page table allocation failed (%zu pages)", np);
         // The old array is not freed: the signal handler may still have a very brief stale reader; leak = 9 bytes per page.
         r->cap = np;
     } else {
-        memset((void *)state, 0, np); memset((void *)gen, 0, np * sizeof *gen);
+        memset((void *)state, 0, np); memset((void *)gen, 0, np * sizeof *gen); memset(ever, 0, np);
     }
-    r->base = base; r->end = end; r->mem = (uintptr_t)mem; r->state = state; r->gen = gen;
+    r->base = base; r->end = end; r->mem = (uintptr_t)mem; r->state = state; r->gen = gen; r->ever = ever;
     if (slot == n) atomic_store(&g_nr, n + 1);
     atomic_store_explicit(&r->live, 1, memory_order_release);
     pthread_mutex_unlock(&g_slot_mu);
@@ -185,14 +215,17 @@ void nvn_dirty_protect(const void *addr, size_t len) {
     range_t *r = len ? find_span((uintptr_t)addr, len) : NULL;
     if (!r) { pthread_mutex_unlock(&g_slot_mu); return; }
     uintptr_t a = (uintptr_t)addr, p = (a - r->base) >> g_shift, q = (a + len - 1 - r->base) >> g_shift;
+    if (g_bmask) block_bounds(r, &p, &q);
     // Consecutive pages are merged into one mprotect (per-page calls reach thousands per frame on the first upload of large textures; character select page startup frame 5: 4888 calls).
     // Pages already PROT / BUSY break the consecutive run: do not protect again, and do not touch pages another thread is changing.
     // A BUSY page is waited out (the run so far is protected first, so none of ours is BUSY meanwhile) and looked at again: an unprotect in progress leaves the page writable
     // with a generation the caller's stamp may cover, so skipped, its later writes never faulted and the texture stayed stale (MacNativeGames a166602)
-    uintptr_t run = 0; int open = 0;
+    uintptr_t run = 0; int open = 0, fresh = 0;
     for (uintptr_t i = p; i <= q + 1; i++) {
         uint8_t st = PG_NONE;
         int took = i <= q && atomic_compare_exchange_strong(&r->state[i], &st, PG_BUSY);
+        if (took && !r->ever[i]) { r->ever[i] = 1; if (!fresh) { fresh = 1; if (++g_ever == g_block_at && g_bwant) { g_bmask = g_bwant; LOG("dirty-page tracking: %llu regions protected so far, from now on in blocks of %zu KiB", (unsigned long long)g_ever, (size_t)((g_bwant + 1) >> 10)); } } }
+        else fresh = 0;
         if (took && !open) { run = i; open = 1; }
         if (!took && open) { mp(r->base + (run << g_shift), (i - run) << g_shift, PROT_READ); for (uintptr_t k = run; k < i; k++) atomic_store(&r->state[k], PG_PROT); open = 0; }
         if (!took && i <= q && st == PG_BUSY && busy_wait(r, i)) i--;   // this page again
