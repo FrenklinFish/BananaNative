@@ -38,9 +38,8 @@ final class GameSettings {
         Ui.Setting ret = new Ui.Setting(a, "⏸️", "Pause on return", null).toggle(a, Prefs.pauseOnReturn(a, id), (b, on) -> Prefs.pauseOnReturn(a, id, on));
         ret.value("Coming back from the background, the game waits paused for a tap");
         Ui.add(box, ret.view, 0);
-        Ui.add(box, new Ui.Setting(a, "🅰️", "Xbox button label swap", v -> new AlertDialog.Builder(a).setTitle("Xbox button label swap · " + g.name)
-                .setSingleChoiceItems(Prefs.XBOX_NAMES, Prefs.xboxButtons(a, id), (d2, w) -> { Prefs.xboxButtons(a, id, w); d2.dismiss(); again.run(); })
-                .setNegativeButton("Cancel", null).show()).value(Prefs.xboxLabel(Prefs.xboxButtons(a, id))).chevron(a).view, 0);
+        Ui.add(box, new Ui.Setting(a, "🅰️", "Xbox button label swap", v -> xbox(a, g, again))
+                .value((Prefs.ownXboxButtons(a, id) ? "" : "Default · ") + Prefs.xboxLabel(Prefs.xboxButtons(a, id))).chevron(a).view, 0);
         String env = Prefs.gameEnv(a, id);
         Ui.add(box, new Ui.Setting(a, "🧪", "Extra environment", v -> env(a, g, again))
                 .value(env.isEmpty() ? "None (KEY=VALUE lines for the host, after env.txt)" : env.split("\n").length + " line(s): " + env.replace('\n', ' ')).chevron(a).view, 0);
@@ -113,6 +112,18 @@ final class GameSettings {
         int checked = Prefs.ownWindow(a, g.titleId) ? 1 + Math.max(0, Arrays.asList(Prefs.WINDOWS).indexOf(Prefs.gameWindow(a, g.titleId))) : 0;
         new AlertDialog.Builder(a).setTitle("Game resolution · " + g.name).setSingleChoiceItems(labels, checked, (x, w) -> {
             Prefs.gameWindow(a, g.titleId, w == 0 ? null : Prefs.WINDOWS[w - 1]);
+            x.dismiss();
+            done.run();
+        }).setNegativeButton("Cancel", null).show();
+    }
+
+    private static void xbox(MainActivity a, Game g, Runnable done) {   // Default first: the game follows Settings again
+        String[] labels = new String[Prefs.XBOX_NAMES.length + 1];
+        labels[0] = "Default (Settings: " + Prefs.xboxLabel(Prefs.xboxButtons(a)) + ")";
+        System.arraycopy(Prefs.XBOX_NAMES, 0, labels, 1, Prefs.XBOX_NAMES.length);
+        int checked = Prefs.ownXboxButtons(a, g.titleId) ? Prefs.xboxButtons(a, g.titleId) + 1 : 0;
+        new AlertDialog.Builder(a).setTitle("Xbox button label swap · " + g.name).setSingleChoiceItems(labels, checked, (x, w) -> {
+            Prefs.xboxButtons(a, g.titleId, w == 0 ? null : w - 1);
             x.dismiss();
             done.run();
         }).setNegativeButton("Cancel", null).show();

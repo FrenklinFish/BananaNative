@@ -47,7 +47,11 @@ final class Prefs {
     static int xboxButtons(Context c) { int v = of(c).getInt("xbox_buttons", 0); return v >= 0 && v < XBOX_NAMES.length ? v : 0; }
     static void xboxButtonsDefault(Context c, int v) { of(c).edit().putInt("xbox_buttons", v).commit(); }
     static int xboxButtons(Context c, String titleId) { int v = of(c).getInt(gameKey("xbox_buttons", titleId), xboxButtons(c)); return v >= 0 && v < XBOX_NAMES.length ? v : 0; }
-    static void xboxButtons(Context c, String titleId, int v) { of(c).edit().putInt(gameKey("xbox_buttons", titleId), v).commit(); }
+    static boolean ownXboxButtons(Context c, String titleId) { return of(c).contains(gameKey("xbox_buttons", titleId)); }
+    /** null: back to Default (follows Settings) */
+    static void xboxButtons(Context c, String titleId, Integer v) {
+        if (v == null) of(c).edit().remove(gameKey("xbox_buttons", titleId)).commit(); else of(c).edit().putInt(gameKey("xbox_buttons", titleId), v).commit();
+    }
     static String xboxLabel(int v) { return XBOX_NAMES[v]; }
 
     /** The game's window size: its own choice, else the default (defaultWindow) */
