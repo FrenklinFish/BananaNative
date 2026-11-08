@@ -135,4 +135,6 @@ final class Native {
     static native int pinThreads();
     /** The frame limit while the game runs (games whose speed follows the measured rate: Prefs.paced); 0 = none */
     static native void fpsLimitSet(int fps);
+    /** Donkey Kong Bananza's dynamic resolution range while it runs, % of the window (probe.c nxhost_drs_set); 100, 100 = off (the native size) */
+    static native void drsSet(int minPct, int maxPct);
 }

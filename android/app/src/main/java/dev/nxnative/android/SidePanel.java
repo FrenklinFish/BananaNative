@@ -21,7 +21,7 @@ import android.widget.TextView;
 
 /**
  * The in-game panel: slides in from the right over the running game, which goes on behind it. It holds the frame rate cap (Native.fpsCapSet), frame generation
- * (Lsfg.rows, Native.frameGenSet), FSR 1 upscaling (Fsr.rows), the picture (Fit / Stretch, its size and position: GameActivity.picture, TouchControls.positionRows),
+ * (Lsfg.rows, Native.frameGenSet), the Upscaler and the dynamic resolution (GameUpscaler.rows, DrsSlider), the picture (Fit / Stretch, its size and position: GameActivity.picture, TouchControls.positionRows),
  * the overlay's items (Overlay.rows), the on-screen controls' rows (TouchControls.controlRows), the panel's own size and text size (PanelLook), a shortcut to this
  * game's Button mapping (which applies at the next start) and Stop. Every other change applies at once, without going back to the launcher, and is
  * kept for the next start. Opened by Back (the phone's button or its edge swipe), a long press on the on-screen controls'
@@ -201,10 +201,14 @@ final class SidePanel extends FrameLayout {
         }
         box.addView(caps);
         fpsNow = note("");
+        GameUpscaler.rows(act, game(), box);   // right under the frame rate cap: the Upscaler (the game's own upscaler and the window's scaling to the screen
+        if (Prefs.drsGame(game())) {
+            TextView drsHead = head("Dynamic resolution");   // the render size's range (Prefs.DRS), applied at each step; the heading shows it
+            box.addView(DrsSlider.view(act, Prefs.drs(act, game()), drsHead::setText, i -> { Prefs.drs(act, game(), i); Native.drsSet(Prefs.DRS[i][0], Prefs.DRS[i][1]); }));
+        }
 
         lsfgNow = Lsfg.rows(act, box, "", () -> { Lsfg.push(act); refresh(); });
 
-        Fsr.rows(act, box);
 
         picture();
 

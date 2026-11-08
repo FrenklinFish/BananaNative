@@ -185,7 +185,7 @@ static void rot_copy(VkCommandBuffer cb, unsigned k, uint32_t idx, vka_img *im, 
     };
     VkImageView view = ok ? vka_view(im, raw_unorm_twin(im->f.vk), VK_IMAGE_VIEW_TYPE_2D, VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1, vka_swap_rb() ? &swz_rb : NULL) : VK_NULL_HANDLE;
     if (view) {
-        VkDescriptorImageInfo ii = {g_rot.samp[linear], view, VK_IMAGE_LAYOUT_GENERAL};
+        VkDescriptorImageInfo ii = {g_rot.samp[linear && !VKA_ENV("DM_VK_PRESENT_NEAREST", 0)], view, VK_IMAGE_LAYOUT_GENERAL};   // DM_VK_PRESENT_NEAREST: the launcher's Upscaler, nearest neighbor
         VkWriteDescriptorSet w = {VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, .dstSet = g_rot.set[k], .descriptorCount = 1, .descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, .pImageInfo = &ii};
         vk.vkUpdateDescriptorSets(V.dev, 1, &w, 0, NULL);
         float W = (float)g_ext.width, H = (float)g_ext.height;   // the image; the display is H x W for a quarter turn
@@ -217,7 +217,7 @@ static void rot_copy(VkCommandBuffer cb, unsigned k, uint32_t idx, vka_img *im, 
 // ---------- FSR 1 upscale: EASU into an intermediate image, then RCAS into the swapchain image (vka_present_fsr.h) ----------
 // DM_VK_FSR=1 replaces the bilinear blit, or the rotated copy, when the picture is scaled up; DM_VK_FSR_SHARP is RCAS's sharpness in stops (0 = the most,
 // each stop halves it; AMD's default 0.25). Both are live. The intermediate image has the picture's size on the window, one per frame in flight
-static struct { int state; VkFormat fmt; VkPipeline easu, rcas; VkPipelineLayout lay; VkDescriptorSetLayout dsl; VkDescriptorPool pool; VkDescriptorSet set[NFRAME][2]; VkSampler samp;
+static struct { int state; VkFormat fmt; VkPipeline easu, rcas, easu_sc; VkPipelineLayout lay; VkDescriptorSetLayout dsl; VkDescriptorPool pool; VkDescriptorSet set[NFRAME][2]; VkSampler samp;
                 VkImage mid[NFRAME]; VkDeviceMemory mem[NFRAME]; VkImageView view[NFRAME]; uint32_t mw[NFRAME], mh[NFRAME]; } g_fsr;
 static int fsr_wanted(void) { return VKA_ENV("DM_VK_FSR", 0) != 0; }
 static VkPipeline fsr_pipe(const uint32_t *frag, size_t fsize, VkFormat fmt) {
@@ -270,7 +270,9 @@ static int fsr_ready(VkFormat fmt) {
         if (!(g_fsr.easu = fsr_pipe(vka_fsr_easu_frag, sizeof vka_fsr_easu_frag, VK_FORMAT_R8G8B8A8_UNORM))) { g_fsr.state = -1; return 0; }
     }
     if (g_fsr.rcas) { vka_queue_idle(); rk.vkDestroyPipeline(V.dev, g_fsr.rcas, NULL); g_fsr.rcas = VK_NULL_HANDLE; }   // a new swapchain format: no pass in flight
+    if (g_fsr.easu_sc) { rk.vkDestroyPipeline(V.dev, g_fsr.easu_sc, NULL); g_fsr.easu_sc = VK_NULL_HANDLE; }
     if (!(g_fsr.rcas = fsr_pipe(vka_fsr_rcas_frag, sizeof vka_fsr_rcas_frag, fmt))) { g_fsr.state = -1; return 0; }
+    g_fsr.easu_sc = fsr_pipe(vka_fsr_easu_frag, sizeof vka_fsr_easu_frag, fmt);   // EASU straight into the swapchain image (sharpness off, no turn); NULL: through RCAS as before
     g_fsr.state = 1; g_fsr.fmt = fmt;
     VLOG("FSR 1 upscale on (RCAS sharpness %.2f stops)", VKA_ENVF("DM_VK_FSR_SHARP", 0.25));
     return 1;
@@ -318,6 +320,26 @@ static int fsr_copy(VkCommandBuffer cb, unsigned k, uint32_t idx, vka_img *im, i
     if (vka_origin_ll()) { easu[1] = -sy; easu[3] = cy + ch - 0.5f * sy - 0.5f; }
     uint32_t pc[16];
     for (int i = 0; i < 16; i++) pc[i] = fsr_bits(easu[i]);
+    // Sharpening off (DM_VK_FSR_SHARP below 0) and no turn: EASU draws straight into the letterbox of the swapchain image, no intermediate image and no RCAS pass. Its fragment
+    // coordinates then start at the letterbox corner, so the constants' offsets move by (dx, dy) in output pixels
+    if (VKA_ENVF("DM_VK_FSR_SHARP", 0.25) < 0 && g_fsr.easu_sc && (g_pre == VK_SURFACE_TRANSFORM_IDENTITY_BIT_KHR || !g_pre)) {
+        float e2 = easu[2] - dx * easu[0], e3 = easu[3] - dy * easu[1]; pc[2] = fsr_bits(e2); pc[3] = fsr_bits(e3);
+        VkViewport vd = {(float)dx, (float)dy, (float)dw, (float)dh, 0, 1}; VkRect2D sd = {{0, 0}, g_ext};
+        vka_img_barrier(cb, g_simg[idx], VK_IMAGE_ASPECT_COLOR_BIT, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL);
+        VkRenderingAttachmentInfo cd = {VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO, .imageView = g_sview[idx], .imageLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+            .loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR, .storeOp = VK_ATTACHMENT_STORE_OP_STORE, .clearValue = {.color = {{0, 0, 0, 1}}}};   // the bars
+        VkRenderingInfo rd = {VK_STRUCTURE_TYPE_RENDERING_INFO, .renderArea = sd, .layerCount = 1, .colorAttachmentCount = 1, .pColorAttachments = &cd};
+        vk.vkCmdBeginRendering(cb, &rd);
+        rk.vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, g_fsr.easu_sc);
+        rk.vkCmdBindDescriptorSets(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, g_fsr.lay, 0, 1, &g_fsr.set[k][0], 0, NULL);
+        rk.vkCmdPushConstants(cb, g_fsr.lay, VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof pc, pc);
+        rk.vkCmdSetViewport(cb, 0, 1, &vd);
+        rk.vkCmdSetScissor(cb, 0, 1, &sd);
+        rk.vkCmdDraw(cb, 3, 1, 0, 0);
+        vk.vkCmdEndRendering(cb);
+        vka_img_barrier(cb, g_simg[idx], VK_IMAGE_ASPECT_COLOR_BIT, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, VK_IMAGE_LAYOUT_PRESENT_SRC_KHR);
+        return 1;
+    }
     VkViewport v = {0, 0, (float)dw, (float)dh, 0, 1}; VkRect2D sc = {{0, 0}, {(uint32_t)dw, (uint32_t)dh}};
     vka_img_barrier(cb, g_fsr.mid[k], VK_IMAGE_ASPECT_COLOR_BIT, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL);
     VkRenderingAttachmentInfo ca = {VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO, .imageView = g_fsr.view[k], .imageLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
@@ -342,7 +364,8 @@ static int fsr_copy(VkCommandBuffer cb, unsigned k, uint32_t idx, vka_img *im, i
     default:                                      v = (VkViewport){(float)dx, (float)dy, (float)dw, (float)dh, 0, 1}; memcpy(m, (int[6]){1, 0, 0, 1, -dx, -dy}, sizeof m); break;
     }
     memset(pc, 0, sizeof pc);
-    pc[0] = fsr_bits(exp2f(-(float)VKA_ENVF("DM_VK_FSR_SHARP", 0.25)));
+    { float st = (float)VKA_ENVF("DM_VK_FSR_SHARP", 0.25);   // below 0: no sharpening at all (RCAS's strength 0 leaves every pixel as EASU made it; the pass still places and turns it)
+      pc[0] = fsr_bits(st < 0 ? 0.0f : exp2f(-st)); }
     memcpy(&pc[4], m, sizeof m);
     sc = (VkRect2D){{0, 0}, g_ext};
     vka_img_barrier(cb, g_simg[idx], VK_IMAGE_ASPECT_COLOR_BIT, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL);
@@ -718,6 +741,8 @@ static int present_one(const pq_item *it) {
     // A view that failed on a swapchain made for FSR is not asked for again: each present would make a new swapchain (a queue idle) and fail the same way
     int fsr = blit > 0 && fsr_wanted() && (dw > cw || dh > ch) && (im->usage & VK_IMAGE_USAGE_SAMPLED_BIT)
               && (fp.optimalTilingFeatures & VK_FORMAT_FEATURE_SAMPLED_IMAGE_FILTER_LINEAR_BIT);
+    if (!fsr && fsr_wanted() && im) { static int told; if (!told++) VLOG("FSR wanted but not used: blit %d, picture %dx%d -> %dx%d, usage %#x, linear filter %d", blit, cw, ch, dw, dh,
+                                                                   (unsigned)im->usage, (fp.optimalTilingFeatures & VK_FORMAT_FEATURE_SAMPLED_IMAGE_FILTER_LINEAR_BIT) != 0); }
     if (fsr && !g_sview[idx]) {
         if (!g_sview_fsr) g_recreate = 1;
         else VRED_ONCE("FSR: swapchain image %u has no attachment view: blitted", idx);
@@ -743,7 +768,7 @@ static int present_one(const pq_item *it) {
         int y0 = cy, y1 = cy + ch; if (vka_origin_ll()) { y0 = cy + ch; y1 = cy; }   // lower-left origin: the window texture is stored bottom-up
         VkImageBlit b = {{VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1}, {{cx, y0, 0}, {cx + cw, y1, 1}}, {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1}, {{dx, dy, 0}, {dx + dw, dy + dh, 1}}};
         vk.vkCmdBlitImage(cb, im->img, VK_IMAGE_LAYOUT_GENERAL, g_simg[idx], VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &b,
-                          fp.optimalTilingFeatures & VK_FORMAT_FEATURE_SAMPLED_IMAGE_FILTER_LINEAR_BIT ? VK_FILTER_LINEAR : VK_FILTER_NEAREST);
+                          (fp.optimalTilingFeatures & VK_FORMAT_FEATURE_SAMPLED_IMAGE_FILTER_LINEAR_BIT) && !VKA_ENV("DM_VK_PRESENT_NEAREST", 0) ? VK_FILTER_LINEAR : VK_FILTER_NEAREST);
     } else if (im && !blit) VRED_ONCE("window texture serial %llu (format %#x) cannot be blitted to the swapchain: presented black", (unsigned long long)im->serial, im->d.format);
     if (blit >= 0) vka_img_barrier(cb, g_simg[idx], VK_IMAGE_ASPECT_COLOR_BIT, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_PRESENT_SRC_KHR);
     ovl_draw(cb, k, idx);   // the launcher's overlay over the picture (generated frames too)
