@@ -179,6 +179,7 @@ In the order they block. Line numbers are those of `dm/gfx/vk_android/vka_tex.c`
 
 ## Found on this game
 
+- [Write tracking of small textures fills the process's memory maps](../../../docs/reference/memory.md#write-tracking-of-small-textures-fills-the-processs-memory-maps-android): about 32,000 tracked textures of one page each, 66,004 mappings at the abort, after about five minutes of play.
 - ["Pack from other tools" on a pack the app made itself](../../../docs/reference/packing.md#pack-from-other-tools-on-a-pack-the-app-made-itself): its `graphics_scale` rows made the 1.8.0 pack stale (resolved).
 - [Prepare is not offered for a game whose supported build is its base game](../../../docs/reference/packing.md#prepare-is-not-offered-for-a-game-whose-supported-build-is-its-base-game): its 1.8.0 dump has no update; the phone could not prepare it (resolved, Mac simulation).
 - [The phone's shaders step fails on a shader that does not build on the Mac either](../../../docs/reference/packing.md#the-phones-shaders-step-fails-on-a-shader-that-does-not-build-on-the-mac-either): compute `078997bf631992c5`, 11,603 of 11,604 by design (resolved, Mac simulation).
