@@ -149,6 +149,7 @@ final class Ondevice {
         boolean bound, resumed;
         long resumedAt;
         Job job;
+        private String placedFor;   // which job (dump and pack) the list was last built for
         boolean jobAlive;   // the service said its worker runs this job
 
         Panel(MainActivity a) {
@@ -304,9 +305,13 @@ final class Ondevice {
             // A finished job: its game goes into the list with its pack (once), and the card goes: Play is on the game's card
             if (ready && !alive && !addedKey(job).equals(Prefs.open(a, "ondevice").getString("added", ""))) addGame(job);
             boolean was = view.getVisibility() == View.VISIBLE;
-            if (job == null || ready && listed(job)) { keepScreen(false); view.setVisibility(View.GONE); if (was) a.refresh(); return; }
+            if (job == null || ready && listed(job)) { keepScreen(false); view.setVisibility(View.GONE); placedFor = null; if (was) a.refresh(); return; }
             view.setVisibility(View.VISIBLE);
-            if (!was) a.refresh();   // the games' empty card hides while this one shows
+            // The list puts this card where its game's card would be. When the card switches to another game's job, the list has to be rebuilt too.
+            // That happens after an APK update: the card first shows another game's finished job, then a background shader update takes it over,
+            // and without a rebuild the card stays in the first game's spot, hiding that game's card while the updated game shows twice
+            String key = job.dump().getPath() + "\n" + job.pack().getPath();
+            if (!was || !key.equals(placedFor)) { placedFor = key; a.refresh(); }   // this also hides the "no games yet" card while this one shows
             String st = job.state();
             String sim = "fake".equals(BuildConfig.NX_PACK_ENGINE) ? "  (simulated engine)" : "";
             head.setText(job.name());
