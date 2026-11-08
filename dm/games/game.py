@@ -169,6 +169,11 @@ def header(g):
         if len(r) != 2 or not re.fullmatch(r'[0-9a-f]{32}', r[0]) or not re.fullmatch(r'0x[0-9a-fA-F]+', r[1]):
             sys.exit(f"{g.id}: fps_decouple takes <main build ID (32 hex)> <offset of the frame-rate controller's sdiv>: {r}")
         fdc.append('{' + q(r[0]) + f', {r[1]}' + '}')
+    drs = []   # the dynamic resolution controller's places, one row per main build: <main build ID> <params probe> <pick> <budget load> <preset flag> (probe.c drs_install)
+    for r in g.values('drs_ctl') if g.get('drs_ctl', '') else []:
+        if len(r) != 5 or not re.fullmatch(r'[0-9a-f]{32}', r[0]) or not all(re.fullmatch(r'0x[0-9a-fA-F]+', x) for x in r[1:]):
+            sys.exit(f"{g.id}: drs_ctl takes <main build ID (32 hex)> <parameter object probe> <pick> <budget load> <preset flag> (offsets): {r}")
+        drs.append('{' + q(r[0]) + ', ' + ', '.join(r[1:]) + '}')
     # Game resolution by the Switch 2 graphics scale (the Android launcher, build.gradle resolutionOf; the host reads DM_GRAPHICS_SCALE and DM_OPMODE, nothing is generated):
     # <the launcher's choice: WxH or original> <scale 0|1|2> <console|handheld>, for a game that sizes its scenes by the scale rather than its window
     if g.get('graphics_scale', ''):
@@ -241,6 +246,7 @@ def header(g):
          f'#define DM_GAME_ROMFS_SUBST {q(rsub)}',
          f'#define DM_GAME_WINDOW_FN {{{", ".join(wfn) or "{\"\", 0, 0, 0, 0}"}}}', f'#define DM_GAME_NWINDOW_FN {len(wfn)}',
          f'#define DM_GAME_FPS_DECOUPLE {{{", ".join(fdc) or "{\"\", 0}"}}}', f'#define DM_GAME_NFPS_DECOUPLE {len(fdc)}',
+         f'#define DM_GAME_DRS_CTL {{{", ".join(drs) or "{\"\", 0, 0, 0, 0}"}}}', f'#define DM_GAME_NDRS_CTL {len(drs)}',
          '#define DM_GAME_RES_LEVELS {' + (', '.join(rlv) or '{"", 0, 0, 0, {{0, 0}}}') + '}', f'#define DM_GAME_NRES_LEVELS {len(rlv)}',
          *([f'#define DM_GAME_NVN_API_MAJOR {api.split(".")[0]}', f'#define DM_GAME_NVN_API_MINOR {api.split(".")[1]}'] if g.get('device_api', '') else []),   # without the key: by the SDK version (hle_nvn.c nvn_api)
          '']

@@ -1,0 +1,23 @@
+#version 450
+#extension GL_GOOGLE_include_directive : require
+// FSR 1 EASU in place of a game's neural upscaler dispatch (vka_draw.c, DM_VK_NDSR=2): the game's input texture scaled to its output image (or, with RCAS on,
+// to the replay's intermediate image), one output pixel per invocation. Both are the game's B10G11R11 float images
+layout(local_size_x = 8, local_size_y = 8) in;
+layout(set = 0, binding = 0) uniform sampler2D tex;
+layout(set = 0, binding = 1, r11f_g11f_b10f) uniform writeonly image2D dst;
+layout(push_constant) uniform P { uvec4 con0, con1, con2, con3; uvec2 size; } pc;
+#define A_GPU 1
+#define A_GLSL 1
+#include "ffx_a.h"
+#define FSR_EASU_F 1
+AF4 FsrEasuRF(AF2 p) { return textureGather(tex, p, 0); }
+AF4 FsrEasuGF(AF2 p) { return textureGather(tex, p, 1); }
+AF4 FsrEasuBF(AF2 p) { return textureGather(tex, p, 2); }
+#include "ffx_fsr1.h"
+void main() {
+    uvec2 p = gl_GlobalInvocationID.xy;
+    if (any(greaterThanEqual(p, pc.size))) return;
+    AF3 c;
+    FsrEasuF(c, p, pc.con0, pc.con1, pc.con2, pc.con3);
+    imageStore(dst, ivec2(p), vec4(c, 1.0));
+}

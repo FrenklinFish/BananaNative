@@ -94,6 +94,28 @@ final class Prefs {
     static String paceLabel(int v) { return (v <= 0 ? 60 : v) + " fps"; }   // 0 is 60: the game's own fastest rate, where the decoupling's rate is clamped
     /** A paced game's cap as saved, without capOf (which turns 45 and 40 into 30 for the other games): its own, else the default, as one of PACE_CAPS */
     static int paceCap(Context c, String titleId) { return paceOf(of(c).getInt(gameKey("fps_cap", titleId), of(c).getInt("fps_cap", -1))); }
+    /** Game settings › Reset to defaults: every choice of the game's own back to the main screen's default (Extra environment's lines stay) */
+    static final String[] GAME_SETTINGS = {"window", "fps_cap", "gpu_driver", "gpu_ts", "pause_return", "ndsr_choice2", "ndsr_sharp", "drs2"};
+    static void resetGame(Context c, String titleId) {
+        SharedPreferences.Editor e = of(c).edit();
+        for (String k : GAME_SETTINGS) e.remove(gameKey(k, titleId));
+        e.commit();
+    }
+
+    /** Dynamic resolution, for games whose profile has drs_ctl rows (the host steers them: probe.c drs_install): the range the render size moves in, as % of the window,
+     *  always up to 100 %; {100, 100} is off: the full size and no upscaling. Stored as an index into DRS, the main screen's default then each game's own */
+    static boolean drsGame(String titleId) { Profile p = Profile.of(titleId); return p != null && p.drs; }
+    static final int[][] DRS = {{100, 100}, {80, 100}, {70, 100}, {60, 100}, {50, 100}, {40, 100}, {30, 100}};   // 30 %: the game's rate table stops at 3x (640x360 at 1080p)
+    static final String[] DRS_NAMES = {"Off", "80%", "70%", "60%", "50%", "40%", "30%"};   // the lowest render size, as % of the window (always up to 100 %)
+    static final int DRS_DEFAULT = 5;   // 40-100 %
+    static int drs(Context c) { int v = of(c).getInt("drs2", DRS_DEFAULT); return v >= 0 && v < DRS.length ? v : DRS_DEFAULT; }
+    static void drsDefault(Context c, int v) { of(c).edit().putInt("drs2", v).commit(); }
+    static boolean ownDrs(Context c, String titleId) { return of(c).contains(gameKey("drs2", titleId)); }
+    static int drs(Context c, String titleId) { int v = of(c).getInt(gameKey("drs2", titleId), drs(c)); return v >= 0 && v < DRS.length ? v : drs(c); }
+    /** null removes the game's own choice */
+    static void drs(Context c, String titleId, Integer v) {
+        if (v == null) of(c).edit().remove(gameKey("drs2", titleId)).commit(); else of(c).edit().putInt(gameKey("drs2", titleId), v).commit();
+    }
 
     /** The game's window size: its own choice, else the default (defaultWindow) */
     static String gameWindow(Context c, String titleId) { return of(c).getString(gameKey("window", titleId), defaultWindow(c, titleId)); }

@@ -15,7 +15,7 @@ void crash_set_trap_hook(int (*fn)(ucontext_t *uc));
 // The trampoline borrows x16: place probes only at function entries or at points where x16 is dead; the original instruction must not be PC-relative (adr/adrp/b/bl/ldr literal/cbz...).
 #define MAX_PROBE 64
 typedef void (*probe_fn)(ucontext_t *uc);
-static struct { uint64_t at; uint32_t *slot; unsigned hits, seen; char name[40]; long dump, dpost; probe_fn fn; int freg; long foff; uint64_t fval; int hreg; } g_probe[MAX_PROBE];   // dpost: @*xN+off+dpost
+static struct { uint64_t at; uint32_t *slot; unsigned hits, seen; char name[40]; long dump, dpost; probe_fn fn; int freg; long foff; uint64_t fval; int hreg; int once; } g_probe[MAX_PROBE];   // once: removed after its callback's first hit   // dpost: @*xN+off+dpost
 
 // !xN: treat xN as a sead::ExpHeap and print its free and used blocks (block size at block +0x18, alignment pad at +0x12). Settings (docs/agents/05-debugging.md):
 // DM_PROBE_HEAP=<name>,<start>,<size>,<free list>,<used list> layout by sead version (hex; node offset at list +0x14), default SMBW 0,28,30,b0,c8 (no name), BotW 28,38,40,e0,f8;
@@ -104,7 +104,13 @@ static int probe_hit(ucontext_t *uc) {   // Registered by probe_install with the
     uint64_t pc = PLAT_UC_PC(uc);
     int n = __atomic_load_n(&g_nprobe, __ATOMIC_ACQUIRE);   // probe_add publishes an entry before its brk is written
     for (int i = 0; i < n; i++) if (g_probe[i].at == pc) {
-        if (g_probe[i].fn) { g_probe[i].hits++; g_probe[i].fn(uc); PLAT_UC_PC(uc) = (uint64_t)g_probe[i].slot; return 1; }
+        if (g_probe[i].fn) { g_probe[i].hits++; g_probe[i].fn(uc); PLAT_UC_PC(uc) = (uint64_t)g_probe[i].slot;
+            if (g_probe[i].once) {   // the original instruction back in place (this hit still resumes through the slot)
+                uint32_t *w = (uint32_t *)(uintptr_t)g_probe[i].at; uint64_t ps = (uint64_t)getpagesize(), pg = g_probe[i].at & ~(ps - 1);
+                if (!mprotect((void *)pg, ps, PROT_READ | PROT_WRITE)) { *w = g_probe[i].slot[0]; mprotect((void *)pg, ps, PROT_READ | PROT_EXEC); plat_icache_invalidate(w, 4); }
+                g_probe[i].at = 0;
+            }
+            return 1; }
         uint64_t frame = dm_guest_frame();
         if (g_probe_every && frame >= g_probe_frame_first && frame <= g_probe_frame_last && ++g_probe[i].seen % g_probe_every) { PLAT_UC_PC(uc) = (uint64_t)g_probe[i].slot; return 1; }
         if (frame < g_probe_frame_first || frame > g_probe_frame_last || (g_probe_limit && g_probe[i].hits >= g_probe_limit)) {
@@ -430,7 +436,138 @@ static void devtools_start(void) {
 }
 #endif
 
+#if PLAT_ANDROID   // the launcher's Dynamic resolution setting; the Mac and iOS builds leave the game's own range
+// ---------- A game's dynamic resolution range (the profile's drs_ctl rows: Donkey Kong Bananza) ----------
+// The game picks its render size between NdsrUpscaleMinRate and NdsrUpscaleMaxRate below its upscaler's target (ProjectGraphicsParam; the level's 1.375 and 2.0: 73 % to
+// 50 % of the target on each side), holding the GPU near MaintainGpuPercentage. Its controller reads both from their parameter objects on every decision (update
+// at main+0x38e0f0: [params+0x5d0]+0x64 the max rate, main+0x38dd00: [params+0x5c8]+0x64 the min rate, params = [controller+0x10]), so a store there applies at once.
+// The parameter object is found by a probe at main+0x38e100 (ldr x8, [x10, #0x5d0]: x10 is it), removed after its first hit. DM_DRS=<min %>,<max %> of the target at
+// start (100,100: always the full target, the upscaler a 1:1 copy), live nxhost_drs_set; unset or 0: the game's own range. The addresses below are Bananza's main e25c90c1; each build's come from its drs_ctl row
+static uint64_t g_drs_pick, g_drs_budget, g_drs_preset;   // the drs_ctl row's places for the controller's pick, its GPU budget load and the preset's automatic flag
+static _Atomic uint64_t g_drs_params; static _Atomic uint32_t g_drs_want; static float g_drs_orig[2]; static int g_drs_have_orig;
+static void drs_apply(void) {
+    uint64_t p = atomic_load(&g_drs_params), pmin, pmax; if (!p) return;
+    if (plat_mem_read(p + 0x5c8, &pmin, 8) || plat_mem_read(p + 0x5d0, &pmax, 8) || !pmin || !pmax) return;
+    float *fmin = (float *)(uintptr_t)(pmin + 0x64), *fmax = (float *)(uintptr_t)(pmax + 0x64);
+    if (!g_drs_have_orig) { g_drs_orig[0] = *fmin; g_drs_orig[1] = *fmax; g_drs_have_orig = 1; }
+    uint32_t w = atomic_load(&g_drs_want), lo = w >> 16, hi = w & 0xffff;
+    if (!w) { *fmin = g_drs_orig[0]; *fmax = g_drs_orig[1]; LOG("dynamic resolution: the game's own range (rates %.3f-%.3f)", g_drs_orig[0], g_drs_orig[1]); return; }
+    *fmin = 100.0f / (float)hi; *fmax = 100.0f / (float)lo;   // (the smaller rate is the larger size)
+    LOG("dynamic resolution: %u-%u %% of the upscaler's target (rates %.3f-%.3f)", lo, hi, *fmin, *fmax);
+}
+// The controller's own paths do not all honor the range: when the frame rate falls below 30 (and when a caller hands it a rate, [x1+0x2c]) it picks a rate of its own,
+// the level's 2.0 at 1080p, so with the range at 100 % the picture still dropped to half size for a stretch about every 0.6 s (blurred, with a hitch at each switch;
+// 2026-11-05). Every path meets at main+0x38de2c (ldr x9, [x19, #0xf0]) with its pick in s8, before it is snapped to the rate steps and stored: a second probe there
+// (kept: one trap a decision, a frame) clamps s8 into the range chosen, or the game's own range when none is: it is installed at start
+#if defined(__linux__) && defined(__aarch64__)
+#include <asm/sigcontext.h>
+static float *uc_sreg(ucontext_t *uc, int n) {   // the low lane of vector register n in the signal frame (written back at the signal's return)
+    struct _aarch64_ctx *h = (struct _aarch64_ctx *)(void *)uc->uc_mcontext.__reserved;
+    for (int k = 0; k < 32 && h->magic && h->size; k++) { if (h->magic == FPSIMD_MAGIC) return (float *)(void *)&((struct fpsimd_context *)(void *)h)->vregs[n]; h = (struct _aarch64_ctx *)(void *)((char *)h + h->size); }
+    return NULL;
+}
+#else
+static float *uc_sreg(ucontext_t *uc, int n) { (void)uc; (void)n; return NULL; }
+#endif
+static module_t *g_drs_mod;
+extern _Atomic uint32_t vka_env_gen __attribute__((weak));   // the live control's generation (vka_ctl.c): DM_DRS changed while the game runs is taken at the next decision
+int nxhost_fps(float *out, int n) __attribute__((weak));   // the measured frame rate (vka_fps.c)
+int nxhost_fps_limit_get(void) __attribute__((weak));   // a frame limiter's cap where the host has one
+static int drs_cap(void) {   // the frame rate the dynamic resolution aims at: the limiter's cap, else the frame rate cap (DM_FPS_TARGET; 0 or unset: the game's 60)
+    int c = &nxhost_fps_limit_get ? nxhost_fps_limit_get() : 0;
+    if (c <= 0) { const char *e = getenv("DM_FPS_LIMIT"); if (!e || atoi(e) <= 0) e = getenv("DM_FPS_TARGET"); c = e ? atoi(e) : 0; }
+    return c > 0 && c <= 60 ? c : 60;
+}
+static void drs_clamp(ucontext_t *uc) {
+    if (&vka_env_gen) { static uint32_t gen; uint32_t g = atomic_load_explicit(&vka_env_gen, memory_order_relaxed);
+        if (g != gen) { gen = g; const char *e = getenv("DM_DRS"); int a = 0, b = 0; if (e) sscanf(e, "%d,%d", &a, &b);
+            if (a < 10 || b < a) a = b = 0; if (b > 100) b = 100; uint32_t w = a > 0 ? (uint32_t)a << 16 | (uint32_t)b : 0;
+            if (e && w != atomic_load(&g_drs_want)) atomic_store(&g_drs_want, w); } }   // the range chosen, else the game's own (its picks went to rate 1.0 for 0.6 s every few seconds: full size the GPU could not hold)
+    uint32_t w = atomic_load(&g_drs_want); float lo, hi;
+    if (w) { lo = 100.0f / (float)(w & 0xffff); hi = 100.0f / (float)(w >> 16); }   // rates: lo the full size end
+    else if (g_drs_have_orig) { lo = g_drs_orig[0]; hi = g_drs_orig[1]; }
+    else return;
+    float *s8 = uc_sreg(uc, 8), *s9 = uc_sreg(uc, 9); if (!s8 || !s9) return;
+    float pick = *s8, cur = *s9, out = pick;   // s9: the rate in use (the controller loads it first, [[ctrl+0xf0]+0x270]+0xc)
+    if (out < lo) out = lo; else if (out > hi) out = hi;
+    // A step to a larger size only after a wait: every change of the rate in use cost the GPU several slow frames (Donkey Kong Bananza at 1080p, a light area: the
+    // controller flipped 2.0 / 1.833 every few frames, five frames at three times their GPU time about once a second, the hitching gone with a fixed size). A smaller size
+    // at once; a larger one only when the last step down is DM_DRS_BACKOFF (s, default 1) behind, a wait that doubles (to 30 s) each time a step up is taken back within
+    // 2 s and halves after 10 s without one. DM_DRS_BACKOFF=0: the controller's steps as they come
+    // Slack: a smaller size only once the game's measured frame rate (nxhost_fps, a 1 s window) is DM_DRS_SLACK % (default 15) under the cap chosen: at 60, below 51 fps; the
+    // game's own GPU budget alone stepped down at frame rates the player could not tell from 60 (2026-11-06)
+    {   static int slack = -1; if (slack < 0) { const char *e = getenv("DM_DRS_SLACK"); slack = e ? atoi(e) : 15; }
+        float v[1]; int cap = drs_cap();
+        if (slack > 0 && out > cur + 0.001f && &nxhost_fps && nxhost_fps(v, 1) && v[0] >= cap * (100 - slack) / 100.0f) out = cur;
+    }
+    static float base = -1, wait_s; static double last_down, last_up, calm_since;
+    if (base < 0) { const char *e = getenv("DM_DRS_BACKOFF"); base = e ? (float)atof(e) : 1.0f; wait_s = base; }
+    struct timespec ts; clock_gettime(CLOCK_MONOTONIC, &ts); double now = (double)ts.tv_sec + ts.tv_nsec / 1e9;
+    if (base > 0 && cur >= lo && cur <= hi + 0.001f) {
+        if (out > cur + 0.001f) {   // smaller: at once; a step up taken back soon doubles the wait
+            if (now - last_up < 2.0) { wait_s = wait_s * 2 > 30 ? 30 : wait_s * 2; calm_since = now; }
+            last_down = now;
+        } else if (out < cur - 0.001f) {   // larger: only after the wait
+            if (now - last_down < wait_s) out = cur; else last_up = now;
+        }
+        if (now - calm_since > 10 && wait_s > base) { wait_s = wait_s / 2 < base ? base : wait_s / 2; calm_since = now; }
+    }
+    *s8 = out;
+    static float last_out; static _Atomic int nlog;
+    if (out != last_out && atomic_fetch_add(&nlog, 1) < 300)
+        { float v[1] = {0}; if (&nxhost_fps) nxhost_fps(v, 1);
+          LOG("dynamic resolution: rate %.3f at %.2f s (controller picked %.3f, in use %.3f, range %.3f-%.3f, step-up wait %.0f s, %.1f fps)", out, now, pick, cur, lo, hi, wait_s, v[0]); }
+    last_out = out;
+}
+// The controller holds the GPU time under a budget, [x1+8] minus a margin [ctrl+0xe8] (main+0x38dcb8: ldr s1, [x20, #8]), the game's 60 fps frame whatever the frame
+// limiter allows; with a cap of 30 it still shrank the picture to fit 16.7 ms. A third probe, on the next instruction (main+0x38dcbc, ldr s2, [x19, #0xe8]: s1 is loaded,
+// x16 unused here), sets s1 to the frame time of the cap the player chose (drs_cap), in the unit the game's own value is in
+static void drs_budget(ucontext_t *uc) {
+    float *s1 = uc_sreg(uc, 1); if (!s1) return;
+    static _Atomic int noted; if (!atomic_exchange(&noted, 1)) LOG("dynamic resolution: the game's GPU budget %.1f %% of its frame", *s1);
+    int cap = drs_cap();
+    *s1 *= 60.0f / (float)cap;   // the budget is a share of the game's 60 fps frame (the frame-rate controller is held at 1 interval): a cap of 30 allows twice the GPU time
+    static int last; if (cap != last) { last = cap; LOG("dynamic resolution: aimed at %d fps (budget %.1f %% of a 60 fps frame)", cap, *s1); }
+}
+// Some areas' presets turn the dynamic resolution off ([preset+0x29] = 0: a fixed rate, [preset+0x2c], 1.5 in the Wild level's battle stages): with a range chosen the flag
+// is set before the controller reads it (main+0x38dbc8, ldrb w8, [x20, #0x29]), so every area adapts within the range
+static void drs_auto(ucontext_t *uc) {
+    if (!atomic_load(&g_drs_want)) return;
+    uint8_t *f = (uint8_t *)(uintptr_t)(PLAT_UC_X(uc, 20) + 0x29);
+    if (!*f) { *f = 1; static _Atomic int n; if (atomic_fetch_add(&n, 1) < 20) LOG("dynamic resolution: preset %#llx made automatic (its fixed rate %.3f)", (unsigned long long)PLAT_UC_X(uc, 20), *(float *)(void *)(f + 3)); }
+}
+static _Atomic int g_drs_clamp_on;
+static void drs_hit(ucontext_t *uc) { if (!atomic_load(&g_drs_params)) { atomic_store(&g_drs_params, PLAT_UC_X(uc, 10)); drs_apply(); } }
+__attribute__((visibility("default"))) void nxhost_drs_set(int min_pct, int max_pct) {
+    if (min_pct < 10) min_pct = 0; if (max_pct > 100) max_pct = 100; if (min_pct > max_pct) min_pct = max_pct;
+    atomic_store(&g_drs_want, min_pct > 0 ? (uint32_t)min_pct << 16 | (uint32_t)max_pct : 0); drs_apply();
+    if (g_drs_mod && !atomic_exchange(&g_drs_clamp_on, 1)) {
+        // each place is checked for the instruction it must hold (the profile row could be for another build): a mismatch leaves that part out, with a red line
+        if (*(uint32_t *)(g_drs_mod->base + g_drs_pick) == 0xf9407a69u) { probe_add(g_drs_mod, g_drs_pick, -1, drs_clamp); LOG("dynamic resolution: the controller's own picks clamped into the range too"); }
+        else LOG("[RED] dynamic resolution: main+%#llx (drs_ctl) is not ldr x9, [x19, #0xf0], the controller's meeting point: its own picks stay", (unsigned long long)g_drs_pick);
+        if (*(uint32_t *)(g_drs_mod->base + g_drs_budget) == 0xbd40ea62u) probe_add(g_drs_mod, g_drs_budget, -1, drs_budget);
+        else LOG("[RED] dynamic resolution: main+%#llx (drs_ctl) is not ldr s2, [x19, #0xe8], the budget load: it aims at the game's own frame rate", (unsigned long long)g_drs_budget);
+        if (*(uint32_t *)(g_drs_mod->base + g_drs_preset) == 0x3940a688u) probe_add(g_drs_mod, g_drs_preset, -1, drs_auto);
+        else LOG("[RED] dynamic resolution: main+%#llx (drs_ctl) is not ldrb w8, [x20, #0x29], the preset's automatic flag: fixed-rate areas stay fixed", (unsigned long long)g_drs_preset);
+    }
+}
+static void drs_install(void) {
+    module_t *m = NULL; for (int i = 0; i < g_nmod; i++) if (!strcmp(g_mod[i].name, "main")) m = &g_mod[i];
+    static const struct { const char *build; uint64_t params, pick, budget, preset; } rows[] = DM_GAME_DRS_CTL;
+    int r = -1; for (int k = 0; m && k < DM_GAME_NDRS_CTL; k++) if (!strcmp(rows[k].build, m->build_id)) r = k;
+    if (r < 0) return;   // no drs_ctl row for this main: the game keeps its own range
+    if (*(uint32_t *)(m->base + rows[r].params) != 0xf942e948u) { LOG("[RED] dynamic resolution: main+%#llx (drs_ctl) is not ldr x8, [x10, #0x5d0]: the game keeps its own range", (unsigned long long)rows[r].params); return; }
+    probe_add(m, rows[r].params, -1, drs_hit); g_probe[g_nprobe - 1].once = 1;
+    g_drs_pick = rows[r].pick; g_drs_budget = rows[r].budget; g_drs_preset = rows[r].preset;
+    g_drs_mod = m;
+    const char *e = getenv("DM_DRS"); int lo = 0, hi = 0; if (e) sscanf(e, "%d,%d", &lo, &hi);
+    nxhost_drs_set(lo, hi);   // (also the game's own: its range clamps the controller's own picks)
+}
+#endif
 void probe_install(void) {
+#if PLAT_ANDROID
+    drs_install();
+#endif
 #if !PLAT_IOS
     crash_set_trap_hook(probe_hit);
     const char *frames = getenv("DM_PROBE_FRAMES");

@@ -24,6 +24,10 @@ final class GameSettings {
         Runnable again = () -> { d[0].dismiss(); dialog(a, g); };
         String id = g.titleId;
         box.addView(Ui.small(a, "For this game only, from its next start. Default follows Settings."));
+        Ui.add(box, new Ui.Setting(a, "↩️", "Reset to defaults", v -> new AlertDialog.Builder(a).setTitle("Reset to defaults · " + g.name)
+                .setMessage("The game will follow global settings. Extra environment lines are kept.")
+                .setPositiveButton("Reset", (x, w) -> { Prefs.resetGame(a, id); again.run(); }).setNegativeButton("Cancel", null).show())
+                .value("The game will follow global settings.").chevron(a).view, 8);
         Profile prof = Profile.of(id);
         if (prof != null && prof.hasResolution())   // only where it does something: a profile with window_fn or graphics_scale rows
             Ui.add(box, new Ui.Setting(a, "🖼️", "Game resolution", v -> resolution(a, g, again)).value(windowLabel(a, id)).chevron(a).view, 8);
@@ -34,6 +38,11 @@ final class GameSettings {
             Ui.add(box, fixed.view, 0);
         } else Ui.add(box, new Ui.Setting(a, "⏱️", "Frame rate cap", v -> cap(a, g, again)).value(capLabel(a, id)).chevron(a).view, 0);
         Ui.add(box, new Ui.Setting(a, "📐", "Display", v -> display(a, g, again)).value(Prefs.DISPLAY_NAMES[Prefs.stretch(a, id) ? 1 : 0]).chevron(a).view, 0);
+        Ui.add(box, new Ui.Setting(a, "🔍", "Upscaler", v -> upscaler(a, g, again)).value(dflt(GameUpscaler.ownMode(a, id), GameUpscaler.MODES[GameUpscaler.mode(a, id)])).chevron(a).view, 0);
+        if (GameUpscaler.mode(a, id) == GameUpscaler.MODE_FSR)   // only with FSR 1 chosen
+            Ui.add(box, new Ui.Setting(a, "✨", "FSR sharpness", v -> sharpness(a, g, again)).value(dflt(GameUpscaler.ownSharp(a, id), GameUpscaler.sharpName(a, id))).chevron(a).view, 0);
+        if (Prefs.drsGame(id))
+            Ui.add(box, new Ui.Setting(a, "📐", "Dynamic resolution", v -> drs(a, g, again)).value(dflt(Prefs.ownDrs(a, id), Prefs.DRS_NAMES[Prefs.drs(a, id)])).chevron(a).view, 0);
         Ui.add(box, new Ui.Setting(a, "🎮", "GPU driver", v -> driver(a, g, again)).value(driverLabel(a, id)).chevron(a).view, 0);
         Ui.add(box, new Ui.Setting(a, "⏲️", "GPU timing", v -> gpuTiming(a, g, again)).value(gpuTsLabel(a, id)).chevron(a).view, 0);
         Ui.add(box, new Ui.Setting(a, "🌐", "Game language", v -> language(a, g, again)).value(GameLanguage.label(Prefs.gameLang(a, id), phoneTag())).chevron(a).view, 0);
@@ -238,5 +247,30 @@ final class GameSettings {
         Ui.add(box, t, 8);
         Ui.sheet(a, "Extra environment · " + g.name, box).setPositiveButton("Save", (x, w) -> { Prefs.gameEnv(a, g.titleId, t.getText().toString()); done.run(); })
                 .setNeutralButton("Clear", (x, w) -> { Prefs.gameEnv(a, g.titleId, null); done.run(); }).setNegativeButton("Cancel", null).show();
+    }
+
+    static String dflt(boolean own, String v) { return own ? v : "Default · " + v; }
+
+    /** A choice with "Default (Settings: ...)" first: picking it removes the game's own value (set(null)) */
+    private static void choose(MainActivity a, String title, String[] items, String settingsValue, boolean own, int cur, java.util.function.Consumer<Integer> set, Runnable done) {
+        String[] labels = new String[items.length + 1];
+        labels[0] = "Default (Settings: " + settingsValue + ")";
+        System.arraycopy(items, 0, labels, 1, items.length);
+        new AlertDialog.Builder(a).setTitle(title).setSingleChoiceItems(labels, own ? cur + 1 : 0, (x, w) -> { set.accept(w == 0 ? null : w - 1); x.dismiss(); done.run(); })
+                .setNegativeButton("Cancel", null).show();
+    }
+
+    private static void upscaler(MainActivity a, Game g, Runnable done) {   // the Upscaler (GameUpscaler: DM_VK_NDSR and the present's scaling); the in-game panel changes it live
+        choose(a, "Upscaler · " + g.name, GameUpscaler.MODES, GameUpscaler.MODES[GameUpscaler.mode(a)], GameUpscaler.ownMode(a, g.titleId), GameUpscaler.mode(a, g.titleId),
+               v -> GameUpscaler.mode(a, g.titleId, v), done);
+    }
+
+    private static void sharpness(MainActivity a, Game g, Runnable done) {   // FSR's RCAS sharpening (GameUpscaler, DM_VK_NDSR_SHARP)
+        choose(a, "FSR sharpness · " + g.name, GameUpscaler.SHARP_NAMES, GameUpscaler.sharpName(GameUpscaler.sharp(a)), GameUpscaler.ownSharp(a, g.titleId),
+               GameUpscaler.sharpIndex(GameUpscaler.sharp(a, g.titleId)), v -> GameUpscaler.sharp(a, g.titleId, v == null ? null : GameUpscaler.SHARPS[v]), done);
+    }
+
+    private static void drs(MainActivity a, Game g, Runnable done) {   // the render size's range (Prefs.DRS), from the next start; the in-game panel changes it live
+        DrsSlider.dialog(a, " · " + g.name, Prefs.drs(a, g.titleId), Prefs.DRS_NAMES[Prefs.drs(a)], Prefs.ownDrs(a, g.titleId), v -> Prefs.drs(a, g.titleId, v), done);
     }
 }

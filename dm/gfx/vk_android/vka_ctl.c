@@ -20,6 +20,9 @@
 #include <sys/stat.h>
 
 _Atomic uint32_t vka_env_gen = 1;   // 1: call sites' zeroed caches read their switch on the first call
+// The launcher's environment set (nxlaunch.c, after its setenv lines): a switch read before it (the present thread starts with the window, before the game's environment:
+// DM_VK_FSR was read as unset and FSR stayed off until a live change) is read again at its next call
+__attribute__((visibility("default"))) void nxhost_env_changed(void) { atomic_fetch_add(&vka_env_gen, 1); }
 
 // ---------- Switches ----------
 enum { NOVR = 64 };
