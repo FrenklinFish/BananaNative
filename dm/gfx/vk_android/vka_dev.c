@@ -3,10 +3,38 @@
 #if defined(__ANDROID__)
 #include "vka.h"
 #include <dlfcn.h>
+#include <sys/mman.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
+
+// One placed map of a 64 KiB host-visible allocation at an address reserved for it (vka_dev.c, unadvertised placed maps): 1 when the driver maps it exactly there and
+// the memory reads back what was written through it
+static int vka_placed_probe(void) {
+    VkPhysicalDeviceMemoryProperties mp; vk.vkGetPhysicalDeviceMemoryProperties(V.pd, &mp);
+    uint32_t type = ~0u;
+    for (uint32_t i = 0; i < mp.memoryTypeCount && type == ~0u; i++)
+        if ((mp.memoryTypes[i].propertyFlags & (VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT)) == (VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT)) type = i;
+    if (type == ~0u) return 0;
+    const VkDeviceSize n = 64 << 10;
+    VkMemoryAllocateInfo mai = {VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO, .allocationSize = n, .memoryTypeIndex = type};
+    VkDeviceMemory mem; if (vk.vkAllocateMemory(V.dev, &mai, NULL, &mem)) return 0;
+    void *at = mmap(NULL, n, PROT_NONE, MAP_PRIVATE | MAP_ANONYMOUS | MAP_NORESERVE, -1, 0);
+    int ok = 0; void *q = NULL; VkResult r = VK_ERROR_UNKNOWN;
+    if (at != MAP_FAILED) {
+        VkMemoryMapPlacedInfoEXT pi = {VK_STRUCTURE_TYPE_MEMORY_MAP_PLACED_INFO_EXT, .pPlacedAddress = at};
+        VkMemoryMapInfoKHR mi = {VK_STRUCTURE_TYPE_MEMORY_MAP_INFO_KHR, .pNext = &pi, .flags = VK_MEMORY_MAP_PLACED_BIT_EXT, .memory = mem, .offset = 0, .size = VK_WHOLE_SIZE};
+        r = vk.vkMapMemory2KHR(V.dev, &mi, &q);
+        if (!r && q == at) { volatile uint32_t *w = q; w[0] = 0x5eed1234u; w[n / 4 - 1] = 0xc0ffee00u; ok = w[0] == 0x5eed1234u && w[n / 4 - 1] == 0xc0ffee00u; }
+        if (!r) { VkMemoryUnmapInfoKHR ui = {VK_STRUCTURE_TYPE_MEMORY_UNMAP_INFO_KHR, .memory = mem}; vk.vkUnmapMemory2KHR(V.dev, &ui); }
+        munmap(at, n);
+    }
+    vk.vkFreeMemory(V.dev, mem, NULL);
+    VLOG("placed maps: not advertised by the driver; a placed map %s (vkMapMemory2 %d, asked %p, got %p)%s", ok ? "works" : "does not work", r, at, q,
+         ok ? ": used without the extension (DM_VK_PLACED_PROBE=0: off)" : "");
+    return ok;
+}
 
 vka_fns vk;
 vka_dev V = {.qmu = PTHREAD_MUTEX_INITIALIZER};
@@ -145,6 +173,13 @@ static int init_once(void) {
     if (!vk.vkMapMemory2KHR) vk.vkMapMemory2KHR = (PFN_vkMapMemory2KHR)vk.vkGetDeviceProcAddr(V.dev, "vkMapMemory2");   // core in 1.4
     if (!vk.vkUnmapMemory2KHR) vk.vkUnmapMemory2KHR = (PFN_vkUnmapMemory2KHR)vk.vkGetDeviceProcAddr(V.dev, "vkUnmapMemory2");
     if (!vk.vkMapMemory2KHR || !vk.vkUnmapMemory2KHR) V.placed = V.placed_range = 0;
+    // A driver that has the placed map but does not advertise it (Qualcomm 512.863 on the Adreno 740: the strings and vkMapMemory2 are in the driver, the extension is
+    // not reported and cannot be enabled): try one placed map of a small allocation at a reserved address; when it lands there, use placed maps without enabling the
+    // extension (whole allocations only, no unmap-reserve). DM_VK_PLACED_PROBE=0 turns the try off
+    if (!V.placed && vk.vkMapMemory2KHR && vk.vkUnmapMemory2KHR) {
+        const char *e = getenv("DM_VK_PLACED_PROBE");
+        if (!e || strcmp(e, "0")) V.placed = vka_placed_probe();
+    }
     vk.vkGetDeviceQueue(V.dev, V.qf, 0, &V.q);
     if (x_ph && fph.queuePerfHint) V.perf_hint = (void *)vk.vkGetDeviceProcAddr(V.dev, "vkQueueSetPerfHintQCOM");
     VLOG("GPU clock floor (VK_QCOM_queue_perf_hint): %s", V.perf_hint ? "available (DM_VK_GPU_FLOOR)" : x_ph ? "extension without the feature" : "not on this device");
