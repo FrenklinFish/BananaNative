@@ -250,11 +250,21 @@ static void alias_query(uint64_t addr, uint64_t *base, uint64_t *size, int *mapp
 // out of phys_footprint, and madvise(MADV_FREE) does nothing to pages that are not writable, though it returns 0 (1 GiB on the Mac: 1,024 MiB still resident and dirty; this: 0).
 // A memory pool's no-copy buffer over the range keeps the old pages for the GPU work still using it until the buffer goes. Returns 1 when the range now holds zero pages;
 // on failure the range is only inaccessible, with its old bytes
+// A memory call on guest memory failed with ENOMEM: on Linux that is also the answer when the change would take the process past vm.max_map_count, so the count goes to
+// the log before the caller stops (a diagnostic: docs/reference/memory.md, write tracking fills the process's memory maps)
+static void maps_red(const char *what, uintptr_t a, size_t n, int err) {
+    if (err != ENOMEM) return;
+    int mx = 0, c = plat_maps_count(&mx);
+    if (c >= 0) LOG("[RED] %s %#lx+%#zx: ENOMEM with %d memory maps in the process (vm.max_map_count %d)%s", what, (unsigned long)a, n, c, mx,
+                    c >= mx - 64 ? ": at the limit, a change that splits a mapping fails" : "");
+}
 static int guest_release(uintptr_t lo, uintptr_t hi) {
     if (dm_gfx_guest_release(lo, hi)) return 1;
-    if (mmap((void *)lo, hi - lo, PROT_NONE, MAP_PRIVATE | MAP_ANON | MAP_FIXED, -1, 0) != MAP_FAILED) return 1;
-    static _Atomic int nred; if (atomic_fetch_add(&nred, 1) < 8) LOG("[RED] guest memory %#lx+%#lx not given back (errno %d): it stays resident", (unsigned long)lo, (unsigned long)(hi - lo), errno);
-    if (mprotect((void *)lo, hi - lo, PROT_NONE)) die("guest_release mprotect %#lx+%#lx errno=%d", (unsigned long)lo, (unsigned long)(hi - lo), errno);
+    if (mmap((void *)lo, hi - lo, PROT_NONE, MAP_PRIVATE | MAP_ANON | MAP_FIXED, -1, 0) != MAP_FAILED) { plat_mem_name_guest((void *)lo, hi - lo); return 1; }   // (named: it merges with its neighbours again)
+    int err = errno;
+    static _Atomic int nred; if (atomic_fetch_add(&nred, 1) < 8) LOG("[RED] guest memory %#lx+%#lx not given back (errno %d): it stays resident", (unsigned long)lo, (unsigned long)(hi - lo), err);
+    maps_red("guest_release mmap", lo, hi - lo, err);
+    if (mprotect((void *)lo, hi - lo, PROT_NONE)) { err = errno; maps_red("guest_release mprotect", lo, hi - lo, err); die("guest_release mprotect %#lx+%#lx errno=%d", (unsigned long)lo, (unsigned long)(hi - lo), err); }
     return 0;
 }
 // Initialize holes using the OLD commit bitmap. Fresh anonymous host pages stay
@@ -544,7 +554,7 @@ uint64_t svc_dispatch(int num, uint64_t *regs, uint64_t orig_addr) {
         int rc = 0;
         if (size > g_heap_cur) { dm_gfx_guest_open(g_heap + g_heap_cur, size - g_heap_cur); rc = mprotect(g_heap + g_heap_cur, size - g_heap_cur, PROT_READ | PROT_WRITE); }
         else if (size < g_heap_cur) (void)guest_release((uintptr_t)g_heap + size, (uintptr_t)g_heap + g_heap_cur);
-        if (rc) die("SetHeapSize mprotect failed: req=%#zx errno=%d", size, errno);
+        if (rc) { int err = errno; maps_red("SetHeapSize mprotect", (uintptr_t)g_heap + g_heap_cur, size - g_heap_cur, err); die("SetHeapSize mprotect failed: req=%#zx errno=%d", size, err); }
         if (g_flag.svc) LOG("SetHeapSize %#zx -> base %p mprotect=%d errno=%d", size, g_heap, rc, errno);
         else if (size > g_heap_cur) LOG("[mem] heap %.2f GB (heap region %.2f GB)", size / 1073741824.0, g_heap_cap / 1073741824.0);
         g_heap_cur = size;
@@ -705,8 +715,10 @@ uint64_t svc_dispatch(int num, uint64_t *regs, uint64_t orig_addr) {
         if (changed && mhi > mlo) {
             if (commit) {
                 dm_gfx_guest_open((void *)mlo, mhi - mlo);
-                if (mprotect((void *)mlo, mhi - mlo, PROT_READ | PROT_WRITE))
-                    die("SVC %#x mprotect %p+%#zx errno=%d", num, (void *)a, size, errno);
+                if (mprotect((void *)mlo, mhi - mlo, PROT_READ | PROT_WRITE)) {
+                    int err = errno; maps_red("MapPhysicalMemory mprotect", mlo, mhi - mlo, err);
+                    die("SVC %#x mprotect %p+%#zx errno=%d", num, (void *)a, size, err);
+                }
                 dm_guest_write_prepare((void *)mlo, mhi - mlo);
             } else {
                 // the bits go first: a host reader (dm_guest_read_mapped) that finds a page mapped must not find it inaccessible

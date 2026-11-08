@@ -224,7 +224,7 @@ void nvn_dirty_protect(const void *addr, size_t len) {
     for (uintptr_t i = p; i <= q + 1; i++) {
         uint8_t st = PG_NONE;
         int took = i <= q && atomic_compare_exchange_strong(&r->state[i], &st, PG_BUSY);
-        if (took && !r->ever[i]) { r->ever[i] = 1; if (!fresh) { fresh = 1; if (++g_ever == g_block_at && g_bwant) { g_bmask = g_bwant; LOG("dirty-page tracking: %llu regions protected so far, from now on in blocks of %zu KiB", (unsigned long long)g_ever, (size_t)((g_bwant + 1) >> 10)); } } }
+        if (took && !r->ever[i]) { r->ever[i] = 1; if (!fresh) { fresh = 1; if (++g_ever == g_block_at && g_bwant && g_bmask != g_bwant) { g_bmask = g_bwant; LOG("dirty-page tracking: %llu regions protected so far, from now on in blocks of %zu KiB", (unsigned long long)g_ever, (size_t)((g_bwant + 1) >> 10)); } } }
         else fresh = 0;
         if (took && !open) { run = i; open = 1; }
         if (!took && open) { mp(r->base + (run << g_shift), (i - run) << g_shift, PROT_READ); for (uintptr_t k = run; k < i; k++) atomic_store(&r->state[k], PG_PROT); open = 0; }
@@ -237,6 +237,21 @@ void nvn_dirty_protect(const void *addr, size_t len) {
 // its state (read-only and NONE: a writer spins forever; writable and PROT: its writes are missed). So the swap holds the tracker: every protected page of the range is
 // released first, as a host write would (stamped: its textures upload again), and g_slot_mu stays held, so nvn_dirty_protect waits until the swap ends. With no page of
 // the range protected, the fault and pre-write paths change nothing there. The holder must not wait for anything that waits on nvn_dirty_protect's callers
+// Coarser blocks from now on (the Vulkan replay's memory maps budget, vka_mem.c maps_tick): a power of two of at least a page; the block size only grows. Blocks start at
+// once whatever DM_DIRTY_BLOCK_AT says. A boundary of the coarser block is also one of every finer block, so no split made before lies where the new blocks would not
+// have made one: from here on new splits land only on the coarse boundaries. Pages already protected stay as they are; the next protection or release of a block takes
+// the whole coarse block. Returns the block size in force (0 = by the page: the tracker has not started)
+size_t nvn_dirty_block_at_least(size_t bytes) {
+    pthread_mutex_lock(&g_slot_mu);
+    size_t cur = g_bmask ? (size_t)g_bmask + 1 : 0;
+    if (g_pg && bytes > cur && bytes > g_pg && !(bytes & (bytes - 1))) {
+        g_bwant = bytes - 1; atomic_store(&g_bmask, (uintptr_t)(bytes - 1)); cur = bytes;
+        LOG("dirty-page tracking: in blocks of %zu KiB from now on (%llu regions protected so far)", bytes >> 10, (unsigned long long)g_ever);
+    }
+    pthread_mutex_unlock(&g_slot_mu);
+    return cur;
+}
+size_t nvn_dirty_block_bytes(void) { uintptr_t m = atomic_load(&g_bmask); return m ? (size_t)m + 1 : 0; }
 void nvn_dirty_hold(const void *addr, size_t len) { pthread_mutex_lock(&g_slot_mu); if (g_pg) prep_write((void *)addr, len); }
 void nvn_dirty_unhold(void) { pthread_mutex_unlock(&g_slot_mu); }
 uint64_t nvn_dirty_now(void) { return atomic_load(&g_now); }

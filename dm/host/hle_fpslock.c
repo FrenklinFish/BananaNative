@@ -404,13 +404,8 @@ static void fps_limit_wait(void) {
                    if (lim) LOG("main: frame limit %d fps (DM_FPS_LIMIT)", lim); }
     static uint64_t next;
     if (!lim) { next = 0; return; }
-    struct timespec ts; clock_gettime(CLOCK_MONOTONIC, &ts);
-    uint64_t now = (uint64_t)ts.tv_sec * 1000000000ull + (uint64_t)ts.tv_nsec, period = 1000000000ull / (uint64_t)lim;
-    if (next > now && next - now <= period) {
-        struct timespec until = {(time_t)(next / 1000000000ull), (long)(next % 1000000000ull)};
-        while (clock_nanosleep(CLOCK_MONOTONIC, TIMER_ABSTIME, &until, NULL) == EINTR) {}
-        now = next;
-    }
+    uint64_t now = plat_abs_time(), period = 1000000000ull / (uint64_t)lim;   // the platform's monotonic clock and sleep (plat.h): clock_nanosleep is Linux only
+    if (next > now && next - now <= period) { plat_wait_until(next); now = next; }
     next = (next > now || (next && now - next < period / 2) ? next : now) + period;   // keep the phase through small lateness, restart after a long frame
 }
 

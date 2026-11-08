@@ -10,6 +10,7 @@
 #include "../nvn/nvn_mtl.h"
 #include "../../host/plat/plat.h"
 #include "vka_gml.h"
+#include "game_profile.h"
 #include <math.h>
 #include <stdio.h>
 #include <stddef.h>
@@ -292,6 +293,7 @@ void vka_rp_zstats(char *b, size_t n) {
 void vka_rp_note_ts(void) { if (R.on && R.df) g_zs.nts++; if (g_zlog_pass && zlog_room()) VLOG("zlog timestamp inside pass %llu", (unsigned long long)vka_n_rp); }
 // Game barriers (OP_BARRIER) that came with a pass open: taken inside it (DM_VK_BAR_KEEP), ended it at once, ended it later at a draw that needed it (bar_hazard)
 static uint64_t g_bar_in, g_bar_kept, g_bar_late;
+int vka_rp_on(void) { return R.on; }
 void vka_rp_end(void) {
     if (PC.n) pc_flush();
     if (!R.on) return;
@@ -683,6 +685,8 @@ static int cpu_read(uint64_t addr, void *out, size_t n) {   // guest bytes as th
     return !plat_mem_read(addr, out, n);
 }
 static int rd_cb(void *ctx, uint64_t addr, void *out, size_t n) { (void)ctx; return cpu_read(addr, out, n); }
+int vka_cpu_read(uint64_t addr, void *out, size_t n) { return cpu_read(addr, out, n); }
+int vka_mesh_on(void) { return V.mesh; }
 // A uniform buffer: bound in place when Vulkan's offset alignment allows, else a copy of what the CPU sees now (a GPU write earlier in this submission is missed: logged)
 static int ubo_desc(uint64_t addr, uint64_t size, VkDescriptorBufferInfo *bi) {
     if (!size || size > V.ub_range) size = size ? V.ub_range : 65536 < V.ub_range ? 65536 : V.ub_range;
@@ -1627,6 +1631,27 @@ void vka_draw(vka_dstate *d, const p_set_rt *rt, int has_rt, const p_scissor *sc
     draw_body(d, rt, has_rt, sc, has_sc, dw, di);
     g_pt_tot += cntvct() - t0; g_pt_n++; g_prof = g_prof_all;
 }
+// Profile mesh_prepass_cut (<prepass mesh shader key> <colour pass mesh shader key> pairs). A WORKAROUND, cause open (docs/reference/rendering.md "Depth-only mesh prepass
+// drawn as spikes on Qualcomm's driver"): on Qualcomm's driver the depth-only prepass mesh draws of Ocarina of Time's foliage draw some primitives from vertex slots never
+// written (white spikes converging on the screen centre), while the colour pass's own mesh modules draw the same instances right; believed to be the driver's compiler on
+// the prepass modules, not proven. So a depth-only draw (depth test and write on, no colour channel written) of a listed prepass mesh shader is skipped (-1), and a draw of
+// its colour pass's mesh shader tests LEQUAL where the game asked for EQUAL (1): the colour pass then draws against the depth without the foliage. Cost: the foliage writes
+// no depth (its colour pass writes none), so later passes that read the depth (fog, shadows) may differ where it is. On Qualcomm's driver (driverID) by default;
+// DM_VK_MESH_PREPASS_SKIP=0 off, =1 on every driver
+static int mesh_cut(const vka_dstate *d, const p_set_rt *rt, int has_rt, uint64_t key) {
+    static const uint64_t cut[][2] = DM_GAME_MESH_PREPASS_CUT;
+    if (!DM_GAME_NMESH_PREPASS_CUT) return 0;
+    int m = VKA_ENV("DM_VK_MESH_PREPASS_SKIP", -1);
+    if (m < 0 ? V.driver_id != VK_DRIVER_ID_QUALCOMM_PROPRIETARY : !m) return 0;
+    for (int i = 0; i < DM_GAME_NMESH_PREPASS_CUT; i++) {
+        if (key == cut[i][1]) return 1;
+        if (key != cut[i][0]) continue;
+        if (!d->ds.dt || !d->ds.dw) return 0;
+        for (int c = 0; has_rt && rt && c < rt->n && c < 8; c++) if (rt->color[c] && (d->chmask.mask >> 4 * c & 0xf)) return 0;
+        return -1;
+    }
+    return 0;
+}
 static void draw_body(vka_dstate *d, const p_set_rt *rt, int has_rt, const p_scissor *sc, int has_sc, const p_draw *dw, const p_draw_idx *di) {
     if (!g_cb || !draws_on() || !statics()) { g_skipped++; return; }
     if (RUN.open && RUN.fast && di && !dw && g_inst_on && inst_fast(d, rt, has_rt, sc, has_sc, di)) return;   // DM_VK_INSTANCE: the run's next object, no walk
@@ -1640,6 +1665,7 @@ static void draw_body(vka_dstate *d, const p_set_rt *rt, int has_rt, const p_sci
     // An NVN2 mesh draw (nvnCommandBufferDrawMeshTasks, hle_nvn.c): the task (optional) and mesh shaders of one program, the fragment stage's shader, in a mesh pipeline
     // (vka_pso.c pstate_fill) drawn with vkCmdDrawMeshTasksEXT: no vertex input, primitive type or index buffer
     const int mesh = dw && dw->prim == NVN_PRIM_MESH;
+    int eq_relax = 0;   // mesh_cut: EQUAL drawn as LEQUAL
     if (mesh) {
         if (!V.mesh) SKIP("mesh draw (nvnCommandBufferDrawMeshTasks) on a device without VK_EXT_mesh_shader (or DM_VK_MESH=0): skipped");
         // The program whose task and mesh shaders run: the fragment stage's when it has a mesh shader (a program's stages are bound together), else the one bound at the
@@ -1658,6 +1684,7 @@ static void draw_body(vka_dstate *d, const p_set_rt *rt, int has_rt, const p_sci
                      dw->ind ? "indirect" : "direct", dw->count, (sh[7]->e->flags & DMSH_VK_F_MESH_PRIM) ? ", per-primitive outputs" : ""); } }
         { const char *sk = getenv("DM_VK_MESH_SKIP"); char hex[17]; snprintf(hex, sizeof hex, "%016llx", (unsigned long long)sh[7]->key);
           if (sk && *sk && strstr(sk, hex)) { g_skipped++; return; } }
+        { int c = mesh_cut(d, rt, has_rt, sh[7]->key); if (c < 0) { g_skipped++; return; } eq_relax = c > 0; }   // profile mesh_prepass_cut (a workaround)
         if (d->bst[6] && d->bst[6] != mp) VRED_ONCE("mesh draw: a program bound at the task stage bit apart from the mesh program; drawn with the mesh program's own task shader, if any");
         // A pixel shader with per-primitive inputs reads what its mesh shader writes per primitive (Vulkan matches only equally decorated interfaces). The other way round
         // (a mesh shader with per-primitive outputs, a pixel shader without the decoration: vk_android_build.py leaves a pixel shader also drawn with vertex shaders per
@@ -1877,7 +1904,8 @@ static void draw_body(vka_dstate *d, const p_set_rt *rt, int has_rt, const p_sci
     int hd = R.df != VK_FORMAT_UNDEFINED, hs = R.sf != VK_FORMAT_UNDEFINED;
     DY_SET1(dt, (uint32_t)(hd && d->ds.dt), vk.vkCmdSetDepthTestEnable(g_cb, DY.dt));
     DY_SET1(dw, (uint32_t)(hd && d->ds.dt && d->ds.dw), vk.vkCmdSetDepthWriteEnable(g_cb, DY.dw));
-    DY_SET1(dc, (uint32_t)(d->ds.df >= 1 && d->ds.df <= 8 ? (VkCompareOp)(d->ds.df - 1) : VK_COMPARE_OP_ALWAYS), vk.vkCmdSetDepthCompareOp(g_cb, DY.dc));
+    uint32_t dfv = eq_relax && d->ds.df == NVN_DEPTH_FUNC_EQUAL ? NVN_DEPTH_FUNC_LEQUAL : d->ds.df;   // mesh_cut
+    DY_SET1(dc, (uint32_t)(dfv >= 1 && dfv <= 8 ? (VkCompareOp)(dfv - 1) : VK_COMPARE_OP_ALWAYS), vk.vkCmdSetDepthCompareOp(g_cb, DY.dc));
     DY_SET1(dbt, (uint32_t)(VK_FALSE), vk.vkCmdSetDepthBoundsTestEnable(g_cb, DY.dbt));
     DY_SET1(stt, (uint32_t)(hs && d->ds.st), vk.vkCmdSetStencilTestEnable(g_cb, DY.stt));
     #define SOP(x) ((x) >= 1 && (x) <= 8 ? (VkStencilOp)((x) - 1) : VK_STENCIL_OP_KEEP)
@@ -1921,7 +1949,7 @@ static void draw_body(vka_dstate *d, const p_set_rt *rt, int has_rt, const p_sci
     if (mesh) {   // count workgroups of the task shader, or of the mesh shader without one (the device's limit per dimension: maxTaskWorkGroupCount / maxMeshWorkGroupCount, 65535 on the Adreno 840)
         if (ind) {
             VkBuffer b; VkDeviceSize o;
-            if (!vka_addr(ind, 12, &b, &o, NULL) || (o & 3)) SKIP("indirect mesh draw arguments at %#llx are not in placed guest RAM: skipped", (unsigned long long)ind);
+            if (!vka_mdx_args(ind, &b, &o)) SKIP("indirect mesh draw record at %#llx not in placed guest RAM, or its {count, 1, 1} copy not made: skipped", (unsigned long long)ind);
             if (vk.vkCmdDrawMeshTasksIndirectEXT) vk.vkCmdDrawMeshTasksIndirectEXT(g_cb, b, o, 1, 12);
             else SKIP("vkCmdDrawMeshTasksIndirectEXT not available: skipped");
         } else {

@@ -33,6 +33,8 @@
 #include <stdarg.h>
 #include <unistd.h>
 #include <time.h>
+#include <fcntl.h>
+#include "vka_mapbudget.h"
 
 typedef struct { uintptr_t lo, hi; VkDeviceMemory mem; VkBuffer buf; VkDeviceAddress bda; int refs; } seg_t;
 static seg_t *g_sg; static int g_nsg, g_sgcap;   // sorted by lo, disjoint
@@ -49,6 +51,7 @@ void vka_mem_waits(uint64_t *place_ns, uint64_t *place_bytes, uint64_t *place_n,
     *wait_rec_ns = atomic_load(&g_lkw_rec_ns); *wait_other_ns = atomic_load(&g_lkw_oth_ns);
 }
 static uint64_t g_placed_bytes, g_placed_peak, g_placed_logged;
+static _Atomic int g_maps_n = -1, g_maps_max;   // the process's memory maps at the last count (maps_tick, below) and vm.max_map_count
 
 static int placed_on(void) { static int v = -1; if (v < 0) { const char *e = getenv("DM_VK_PLACED"); v = !(e && !strcmp(e, "0")); if (!v) VLOG("DM_VK_PLACED=0: memory pools stay anonymous memory (the GPU sees none)"); } return v; }
 static uintptr_t pg_align(void) { return V.placed_align > 4096 ? (uintptr_t)V.placed_align : 4096; }
@@ -140,7 +143,7 @@ static void prot_mark(uintptr_t a, size_t n) {   // async-signal-safe (the dirty
 // marks its range at its end
 static int g_sw_fail;
 static long sw_mprotect(uintptr_t a, size_t n, int prot) { long r = syscall(__NR_mprotect, a, n, prot); if (r) g_sw_fail = 1; return r; }
-static void *sw_mmap_fixed(uintptr_t a, size_t n) { long r = syscall(__NR_mmap, a, n, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS | MAP_FIXED, -1, 0); if (r == -1 || r != (long)a) { g_sw_fail = 1; return MAP_FAILED; } return (void *)r; }
+static void *sw_mmap_fixed(uintptr_t a, size_t n) { long r = syscall(__NR_mmap, a, n, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS | MAP_FIXED, -1, 0); if (r == -1 || r != (long)a) { g_sw_fail = 1; return MAP_FAILED; } plat_mem_name_guest((void *)r, n); return (void *)r; }   // (named as the guest block: it merges with its neighbours)
 static void *sw_mremap_to(void *from, size_t n, uintptr_t to) { long r = syscall(__NR_mremap, from, n, n, MREMAP_MAYMOVE | MREMAP_FIXED, to); if (r == -1) { g_sw_fail = 1; return MAP_FAILED; } return (void *)r; }
 static int prot_runs_text(uintptr_t lo, uintptr_t hi, prun *out, int max);
 #ifndef MAP_FIXED_NOREPLACE
@@ -448,8 +451,8 @@ static int place(uintptr_t lo, uintptr_t hi, VkDeviceSize *grow) {
     if (ok && pf) prefault_line();
     p5 = mono_ns();
     g_ph[3] += p3 - p2; g_ph[4] += p4 - p3; g_ph[5] += p5 - p4;
-    if (!(++g_ph_n & 255)) VLOG("placed memory: %llu placements: allocation %.0f ms, protections read %.0f ms (%.0f lines of /proc/self/maps a read), copy %.0f ms, maps %.0f ms, prefault %.0f ms, protections back %.0f ms",
-                               (unsigned long long)g_ph_n, g_ph[0] / 1e6, g_ph[1] / 1e6, (double)g_maps_lines / g_ph_n, g_ph[2] / 1e6, g_ph[3] / 1e6, g_ph[4] / 1e6, g_ph[5] / 1e6);
+    if (!(++g_ph_n & 255)) VLOG("placed memory: %llu placements: allocation %.0f ms, protections read %.0f ms (%.0f lines of /proc/self/maps a read), copy %.0f ms, maps %.0f ms, prefault %.0f ms, protections back %.0f ms; %d memory maps of %d at the last count",
+                               (unsigned long long)g_ph_n, g_ph[0] / 1e6, g_ph[1] / 1e6, (double)g_maps_lines / g_ph_n, g_ph[2] / 1e6, g_ph[3] / 1e6, g_ph[4] / 1e6, g_ph[5] / 1e6, atomic_load(&g_maps_n), atomic_load(&g_maps_max));
     if (!ok) { VRED("pool memory %#lx+%#llx: placed map %d at %p", (unsigned long)lo, (unsigned long long)n, r, p); vk.vkDestroyBuffer(V.dev, s.buf, NULL); vk.vkFreeMemory(V.dev, s.mem, NULL); return 0; }
     if (V.bda) { VkBufferDeviceAddressInfo bai = {VK_STRUCTURE_TYPE_BUFFER_DEVICE_ADDRESS_INFO, .buffer = s.buf}; s.bda = vk.vkGetBufferDeviceAddress(V.dev, &bai); }
     if (!lock_whole()) pthread_rwlock_wrlock(&g_rw);
@@ -543,7 +546,7 @@ static void unplace(const seg_t *sp) {
         VRED_ONCE("giving back pool memory %#lx+%#zx: no anonymous pages with its bytes (errno %d): they are lost", (unsigned long)s.lo, n, errno);
         if (t != MAP_FAILED) munmap(t, n);
         sw_mmap_fixed(s.lo, n);
-    }
+    } else plat_mem_name_guest((void *)s.lo, n);   // (its name in the maps; moved pages keep their own offset, so these do not merge with neighbours until the range is given back to the system)
     if (elsewhere) {
         vk.vkUnmapMemory(V.dev, s.mem); seg_free(&s, waited, fence);
         if (msync((void *)s.lo, n, MS_ASYNC)) {   // the free took the range down after all: the bytes are lost
@@ -772,8 +775,9 @@ static void placed_line(uint64_t tot) {
     pthread_mutex_unlock(&g_pmu);
     VLOG("%.2f GiB of memory pools is placed Vulkan memory (%d pools whole, %d by parts; %d pools, %.2f GiB not placed: no GPU address taken in them yet)", tot / 1073741824.0, n - nl, np, nl, lb / 1073741824.0);
 }
+static void maps_start(void);
 void mtl_pool_add(const void *mem, uint64_t size) {
-    vka_init(); swap_hooks();
+    vka_init(); swap_hooks(); maps_start();
     int placed = 0, lg = 0, lazy = 0, part = 0; uint64_t t0 = mono_ns(), tot = 0; seglist l = {0};
     if (can_place(size) && lazy_on()) { lazy = 1; part = vkp_by_parts(size, part_min(), part_gran()); }
     else if (can_place(size)) { pthread_mutex_lock(&g_pl); placed = place_pool((uintptr_t)mem, size, &l, &lg, &tot, NULL); pthread_mutex_unlock(&g_pl); }
@@ -915,6 +919,130 @@ int mtl_addr(uint64_t addr, uint64_t len, void **buf, uint64_t *off) {
 }
 uint64_t vka_mem_placed_nolock(void) { return g_placed_bytes; }
 uint64_t vka_mem_placed_bytes(uint64_t *peak) { pthread_rwlock_rdlock(&g_rw); uint64_t n = g_placed_bytes; if (peak) *peak = g_placed_peak; pthread_rwlock_unlock(&g_rw); return n; }
+
+// ---------- The process's memory maps ----------
+// Linux lets a process have vm.max_map_count mappings (65,530); past it every mmap, mprotect or munmap that needs one more fails with ENOMEM, in any thread: the alias
+// region's MapPhysicalMemory (hle_svc.c: FATAL SVC 0x2c mprotect … errno=12), scudo, the garbage collector. The dirty-page tracker's write protections split placed
+// memory, and the GPU driver's mappings (kgsl) never merge again: each split stays until the segment goes. Blocks (nvn_dirty.c, DM_DIRTY_BLOCK_KB) bound the splits
+// to a placed pool's bytes / 64 KiB, which is still more than the limit for a game with gigabytes of placed texture pools that it writes over a long session (Mario Kart
+// World: 34-36k maps at its title, the limit after about seven minutes of racing). So a thread reads the count every DM_VK_MAPS_PERIOD_S seconds (5), with the pieces of
+// each placed segment (vka_mapbudget.h vkmb_line), and
+// - makes the tracker coarser as the count climbs (vkmb_block: blocks from 40 % of the limit, 4 times larger at 50, 60 and 70 %): new splits land on fewer boundaries;
+// - past DM_VK_MAPS_BUDGET percent (75) makes the CPU map of the segments with the most pieces again in one piece (compact), down to 55 %. That is a swap like a
+//   placement's: the tracker is held over the segment (its protected pages released and stamped: their textures upload again), the CPU map is taken down and the
+//   same memory mapped placed again at the same address, faulted in before any protection splits it (see prefault), the range's other protections put back. The
+//   memory, its buffer and its GPU address stay: the GPU does not see it. Threads that touch the range meanwhile wait in the swap's fault hook. At most every 20 s
+//   and DM_VK_MAPS_COMPACT_N segments (8) a round. DM_VK_MAPS_COMPACT=0 turns it off; DM_VK_MAPS=0 the whole thread.
+// Open: between the unmap and the placed map (microseconds) a system call that reads or writes the range (not through the host's pre-write hook) fails with EFAULT
+// instead of waiting, as during a give-back (unplace)
+typedef struct { long total, guest, placed, out_kgsl; } mscan;
+static uint64_t *g_ms_lo, *g_ms_hi; static int *g_ms_pc, g_ms_cap;   // the segments as the scan saw them, their pieces (the maps thread's own)
+static int maps_scan(mscan *o, int nseg, uintptr_t glo, uintptr_t ghi) {
+    memset(o, 0, sizeof *o); if (nseg) memset(g_ms_pc, 0, (size_t)nseg * sizeof *g_ms_pc);
+    int fd = open("/proc/self/maps", O_RDONLY | O_CLOEXEC); if (fd < 0) return 0;
+    static char b[131072]; size_t have = 0; ssize_t k = 0;
+    for (;;) {
+        if (have == sizeof b) { k = -1; break; }   // a line longer than the buffer: not the maps' text
+        if ((k = read(fd, b + have, sizeof b - have)) <= 0) break;
+        have += (size_t)k; size_t s = 0;
+        for (size_t i = 0; i < have; i++) if (b[i] == '\n') {
+            uint64_t a; int kg;
+            if (vkmb_line(b + s, i - s, &a, &kg)) {
+                o->total++;
+                if (a >= glo && a < ghi) { o->guest++; int g = vkmb_seg(g_ms_lo, g_ms_hi, nseg, a); if (g >= 0) { o->placed++; g_ms_pc[g]++; } }
+                else o->out_kgsl += kg;
+            }
+            s = i + 1;
+        }
+        memmove(b, b + s, have - s); have -= s;
+    }
+    close(fd);
+    return k == 0;
+}
+// One segment's CPU map made again in one piece (see above). Caller holds g_pl. 1 = done, 0 = the segment is no longer there as the scan saw it
+static int compact(uintptr_t lo, uintptr_t hi) {
+    int k = sg_find(lo); if (k < 0 || g_sg[k].lo != lo || g_sg[k].hi != hi) return 0;   // given back (or placed again) since the scan
+    VkDeviceMemory mem = g_sg[k].mem; size_t n = hi - lo;
+    nvn_dirty_hold((const void *)lo, n);   // (as place: no protection of the tracker's in the range until the swap ends)
+    prun pr[MAXRUN]; int npr = prot_runs(lo, hi, pr, MAXRUN), exact = prot_known(pr, &npr, lo, hi);
+    swap_begin(lo, hi);
+    unmap_placed(mem);   // (the bytes stay in the memory: nothing to copy, and a write before this is not lost)
+    sw_hole_check(lo, n, 0, "compacting pool memory");
+    int ok = 0; VkResult r = VK_SUCCESS;
+    for (int t = 0; t < 2 && !ok; t++) {
+        VkMemoryMapPlacedInfoEXT pi = {VK_STRUCTURE_TYPE_MEMORY_MAP_PLACED_INFO_EXT, .pPlacedAddress = (void *)lo};
+        VkMemoryMapInfoKHR mi = {VK_STRUCTURE_TYPE_MEMORY_MAP_INFO_KHR, .pNext = &pi, .flags = VK_MEMORY_MAP_PLACED_BIT_EXT, .memory = mem, .offset = 0, .size = V.placed_range ? n : VK_WHOLE_SIZE};
+        void *q = NULL;
+        if (!(r = vk.vkMapMemory2KHR(V.dev, &mi, &q)) && q == (void *)lo) ok = 1;
+        else if (!r) unmap_placed(mem);
+    }
+    // The memory was mapped at this address before; without its map the GPU and the CPU would see different bytes (the segment's lookups still name it)
+    if (!ok) die("compacting pool memory %#lx+%#zx: the placed map at the same address failed (%d)", (unsigned long)lo, n, r);
+    prefault(lo, hi);   // before any protection splits it (see prefault)
+    prot_apply(pr, npr);
+    swap_end_ok(exact);
+    swap_end();
+    nvn_dirty_unhold();
+    return 1;
+}
+static void maps_tick(int *line_due) {
+    static uint64_t last_compact_ns, last_line_ns; static int last_step = -1, nred_read, nred_cover;
+    int mx = 0; plat_maps_count(&mx);   // (vm.max_map_count, read once)
+    uint8_t *gb; size_t gs; void svc_guest_range(uint8_t **base, size_t *size); svc_guest_range(&gb, &gs);
+    pthread_rwlock_rdlock(&g_rw);
+    int nseg = g_nsg;
+    if (nseg > g_ms_cap) { int c = nseg + nseg / 2 + 64; g_ms_lo = realloc(g_ms_lo, (size_t)c * 8); g_ms_hi = realloc(g_ms_hi, (size_t)c * 8); g_ms_pc = realloc(g_ms_pc, (size_t)c * sizeof *g_ms_pc); g_ms_cap = c; }
+    for (int i = 0; i < nseg; i++) { g_ms_lo[i] = g_sg[i].lo; g_ms_hi[i] = g_sg[i].hi; }
+    pthread_rwlock_unlock(&g_rw);
+    mscan m; uint64_t t0 = mono_ns();
+    if (!maps_scan(&m, nseg, (uintptr_t)gb, (uintptr_t)gb + gs) || !m.total) { if (!nred_read++) VRED("memory maps: /proc/self/maps could not be read: the maps budget is off"); return; }
+    double scan_ms = (mono_ns() - t0) / 1e6;
+    atomic_store(&g_maps_n, (int)m.total); atomic_store(&g_maps_max, mx);
+    int pct = (int)(m.total * 100 / mx), step = pct / 10, act = 0;
+    size_t want = vkmb_block(m.total, mx, 64 << 10), had = nvn_dirty_block_bytes();
+    if (want > had) { nvn_dirty_block_at_least(want); act = 1; }
+    long shed = vkmb_shed(m.total, mx, VKA_ENV("DM_VK_MAPS_BUDGET", VKMB_BUDGET_PCT), VKMB_TARGET_PCT);
+    int npieced = 0; long inseg = 0; for (int i = 0; i < nseg; i++) if (g_ms_pc[i] > 1) { npieced++; inseg += g_ms_pc[i] - 1; }
+    if (shed > 0 && VKA_ENV("DM_VK_MAPS_COMPACT", 1) && mono_ns() - last_compact_ns >= 20000000000ull) {
+        int maxn = VKA_ENV("DM_VK_MAPS_COMPACT_N", 8); if (maxn < 1) maxn = 1; if (maxn > 256) maxn = 256;
+        int idx[256]; long covered = 0, shed_done = 0; int k = vkmb_pick(g_ms_pc, nseg, shed, idx, maxn, &covered), done = 0;
+        uint64_t c0 = mono_ns(), bytes = 0;
+        for (int j = 0; j < k; j++) {
+            pthread_mutex_lock(&g_pl);
+            if (compact((uintptr_t)g_ms_lo[idx[j]], (uintptr_t)g_ms_hi[idx[j]])) { done++; shed_done += g_ms_pc[idx[j]] - 1; bytes += g_ms_hi[idx[j]] - g_ms_lo[idx[j]]; }
+            pthread_mutex_unlock(&g_pl);
+        }
+        last_compact_ns = mono_ns(); act = 1;
+        VLOG("memory maps: %ld of %d (%d %%), over the budget: %d placed segments (%.0f MiB) made one piece each again, about %ld maps fewer, %.1f ms (their textures upload again)",
+             m.total, mx, pct, done, bytes / 1048576.0, shed_done, (mono_ns() - c0) / 1e6);
+        if (covered < shed && nred_cover < 4) { nred_cover++;
+            VRED("memory maps: %ld of %d, %ld over the target: placed memory's pieces cover only %ld of them (%ld maps in placed memory, %ld more in the guest block, %ld outside it)",
+                 m.total, mx, shed, covered, m.placed, m.guest - m.placed, m.total - m.guest); }
+    }
+    uint64_t now = mono_ns();
+    if (*line_due || act || step != last_step || now - last_line_ns >= 60000000000ull) {
+        VLOG("memory maps: %ld of %d (vm.max_map_count, %d %%): placed memory %ld in %d segments (%d split, %ld pieces more than one each), guest block anonymous %ld, outside the guest block %ld (%ld of them kgsl); dirty tracking by %s%zu KiB; read in %.1f ms (DM_VK_MAPS)",
+             m.total, mx, pct, m.placed, nseg, npieced, inseg, m.guest - m.placed, m.total - m.guest, m.out_kgsl,
+             nvn_dirty_block_bytes() ? "blocks of " : "pages of ", nvn_dirty_block_bytes() ? nvn_dirty_block_bytes() >> 10 : (size_t)getpagesize() >> 10, scan_ms);
+        last_line_ns = now; last_step = step; *line_due = 0;
+    }
+}
+static void *maps_main(void *arg) {
+    (void)arg; pthread_setname_np(pthread_self(), "vk-maps");
+    int line_due = 1;
+    for (;;) {
+        int s = VKA_ENV("DM_VK_MAPS_PERIOD_S", 5); if (s < 1) s = 1;
+        sleep((unsigned)s);
+        maps_tick(&line_due);
+    }
+    return NULL;
+}
+static void maps_start_once(void) {
+    if (!VKA_ENV("DM_VK_MAPS", 1)) { VLOG("DM_VK_MAPS=0: the memory maps are not counted (no budget for the dirty tracker, no compaction)"); return; }
+    pthread_t th; if (pthread_create(&th, NULL, maps_main, NULL)) { VRED("memory maps: the counting thread did not start"); return; }
+    pthread_detach(th);
+}
+static void maps_start(void) { static pthread_once_t o = PTHREAD_ONCE_INIT; pthread_once(&o, maps_start_once); }
 
 // The hook hle_svc.c calls when it gives guest memory back (weak no-op there for the Apple builds; its region and open hooks stay the weak no-ops)
 int dm_gfx_guest_release(uintptr_t lo, uintptr_t hi) { return vka_mem_release(lo, hi); }

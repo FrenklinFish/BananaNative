@@ -48,3 +48,15 @@ draw_barriers	game
 # As Tears of the Kingdom: the terrain's height, blend and hole maps are written by the CPU into textures after they are created. Without these keys they stay zero: holes in the ground and the wrong materials
 tex_flush_upload	on
 tex_dirty_upload	on
+# Foliage (Android, Qualcomm's driver): the depth-only prepass mesh draws come out as white spikes; skipped, and their colour pass's EQUAL relaxed to LEQUAL. A workaround, cause open
+# (README.md "Open"; docs/reference/rendering.md "Depth-only mesh prepass drawn as spikes on Qualcomm's driver"). Cost: foliage writes no depth. <prepass mesh> <colour mesh>, paired by indirect record
+mesh_prepass_cut	0c1ffecd02018fb0	eed1add7c89f5d34
+mesh_prepass_cut	25c4a740753e7d7a	73dc0b90c4082e43
+mesh_prepass_cut	101ecb327aafe9b1	17c8ab6419068d4b
+mesh_prepass_cut	65a079a285d693a0	eb021183bf9b0092
+mesh_prepass_cut	5b737961ae3e1b10	ecead5cd0569091f
+mesh_prepass_cut	a934ed1af79131cc	edeefae4c37b0257
+mesh_prepass_cut	eebdb9347d09b344	604134a5262ff670
+mesh_prepass_cut	d98076e4148db34f	fed302d791a4ba43
+mesh_prepass_cut	a667b8bba94befa2	3fa631a86435d3e8
+mesh_prepass_cut	839241636fce850a	4c7d6be5a7717c8d
