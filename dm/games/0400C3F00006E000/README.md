@@ -180,6 +180,7 @@ In the order they block. Line numbers are those of `dm/gfx/vk_android/vka_tex.c`
 
 ## Found on this game
 
+- [A game with several registered builds (Android)](../../../docs/reference/packing.md#a-game-with-several-registered-builds-android): 1.0.0 and 1.8.0 have another module set (1.8.0 has a `subsdk1`) and a few other shaders; the packer takes the modules of the build row a dump matches and a split may lack the keys of `shader_optional.tsv` (the library build does not read `_absent.tsv` yet: open).
 - [Zero-sharing capped at 32 MiB leaves out the large targets it was made for](../../../docs/reference/memory.md#zero-sharing-capped-at-32-mib-leaves-out-the-large-targets-it-was-made-for-android): its four 16384² R8 terrain targets (about 1 GB saved by sharing, 0465aa1d) get memory of their own again since a319e773 (open, not measured).
 - [Texture cache thrash at a fixed image limit](../../../docs/reference/memory.md#texture-cache-thrash-at-a-fixed-image-limit-android): 1.8.0 at the 1,536 MiB default evicted and uploaded again about 840 textures a frame, 2 fps (phone, 2026-11-07); the limit is now measured from the device.
 - A RomFS of another build under 1.8.0's code (GitHub #27 / #44) crashed at boot; the profile's `romfs_check` row now refuses it ([What it needs](#what-it-needs)).
