@@ -1,6 +1,7 @@
 """The Android launcher's in-app updater (Updater, android/README.md "Updates"): UpdateCheck.java's decisions on the JVM with android/app/src/jvmtest's
 UpdateCheckJvmTest (version numbers, the release it picks, the asset digest, the release notes' Markdown: ReleaseNotes.java, also on the real v0.1.3
-body), and the manifest's install permission. Skipped without a JDK."""
+body; the release sources: GitHub and git.eden-emu.dev, both APIs' JSON with Json.java, also on a recorded Forgejo answer, the newest across sources,
+a source that fails, the asset host allow-list), and the manifest's install permission. Skipped without a JDK."""
 import shutil
 import subprocess
 import tempfile
@@ -11,6 +12,7 @@ REPO = Path(__file__).resolve().parents[3]
 SRC = REPO / 'android/app/src/main/java/dev/nxnative/android'
 TEST = REPO / 'android/app/src/jvmtest/java/dev/nxnative/android/UpdateCheckJvmTest.java'
 BODY = REPO / 'android/app/src/jvmtest/release-v0.1.3.md'   # gh release view v0.1.3 -R moceure/BananaNative --json body
+FORGEJO = REPO / 'android/app/src/jvmtest/forgejo-releases-v0.2.0.json'   # GET https://git.eden-emu.dev/api/v1/repos/moceure/BananaNative/releases, body and author trimmed
 MANIFEST = REPO / 'android/app/src/main/AndroidManifest.xml'
 
 
@@ -19,7 +21,7 @@ class UpdateCheckJvm(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         cls.tmp = tempfile.TemporaryDirectory()
-        subprocess.run(['javac', '-Xlint:all', '-Werror', '-encoding', 'UTF-8', '-d', cls.tmp.name, str(SRC / 'UpdateCheck.java'), str(SRC / 'ReleaseNotes.java'), str(TEST)],
+        subprocess.run(['javac', '-Xlint:all', '-Werror', '-encoding', 'UTF-8', '-d', cls.tmp.name, str(SRC / 'UpdateCheck.java'), str(SRC / 'Json.java'), str(SRC / 'ReleaseNotes.java'), str(TEST)],
                        check=True, capture_output=True, text=True)
 
     @classmethod
@@ -32,6 +34,9 @@ class UpdateCheckJvm(unittest.TestCase):
 
     def test_decisions(self):
         self.assertTrue(self.java().startswith('ok '))
+
+    def test_sources(self):
+        self.assertTrue(self.java('sources', str(FORGEJO)).startswith('ok '))
 
     def test_real_notes(self):
         text, rest = self.java('notes', str(BODY)).split('\n--\n')
@@ -50,10 +55,17 @@ class UpdaterSource(unittest.TestCase):
 
     def test_list_not_latest(self):
         """Every release is a pre-release, which /releases/latest skips: the updater reads the list"""
-        src = (SRC / 'Updater.java').read_text()
+        src = (SRC / 'UpdateCheck.java').read_text() + (SRC / 'Updater.java').read_text()
         self.assertIn('/releases?per_page=10', src)
+        self.assertIn('/api/v1/repos/', src)
         self.assertNotIn('/releases/latest"', src)   # in a string, not the comment that says why
         self.assertIn('browser_download_url', src)
+
+    def test_install_checks(self):
+        """The download is checked against its source's hosts; the install session is limited to this package (Android checks the signer)"""
+        src = (SRC / 'Updater.java').read_text()
+        self.assertIn('UpdateCheck.allowedAsset(u.apk.url, u.release.source)', src)
+        self.assertIn('sp.setAppPackageName(', src)
 
 
 if __name__ == '__main__':

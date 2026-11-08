@@ -1,0 +1,41 @@
+[
+ {
+  "id": 14838,
+  "tag_name": "v0.2.0",
+  "target_commitish": "",
+  "name": "v0.2.0",
+  "body": "> This is the temporary home of Banana Native while the GitHub repository is unavailable. The APK is the same signed v0.2.0 build as on GitHub; installing it over an earlier version keeps your games, packs and saves.\n\n## Before you update\n\n**Your shaders will be rebuilt.**",
+  "url": "https://git.eden-emu.dev/api/v1/repos/moceure/BananaNative/releases/14838",
+  "html_url": "https://git.eden-emu.dev/moceure/BananaNative/releases/tag/v0.2.0",
+  "tarball_url": "https://git.eden-emu.dev/moceure/BananaNative/archive/v0.2.0.tar.gz",
+  "zipball_url": "https://git.eden-emu.dev/moceure/BananaNative/archive/v0.2.0.zip",
+  "hide_archive_links": false,
+  "upload_url": "https://git.eden-emu.dev/api/v1/repos/moceure/BananaNative/releases/14838/assets",
+  "draft": false,
+  "prerelease": false,
+  "created_at": "2026-11-08T09:11:46+01:00",
+  "published_at": "2026-11-08T09:11:46+01:00",
+  "author": {
+   "id": 492,
+   "login": "moceure",
+   "html_url": "https://git.eden-emu.dev/moceure",
+   "username": "moceure"
+  },
+  "assets": [
+   {
+    "id": 7375,
+    "name": "banana-native-v0.2.0.apk",
+    "size": 44791088,
+    "download_count": 2,
+    "created_at": "2026-11-08T10:12:19+01:00",
+    "uuid": "71a91739-84fe-4a02-a665-6ba27522ec60",
+    "browser_download_url": "https://git.eden-emu.dev/moceure/BananaNative/releases/download/v0.2.0/banana-native-v0.2.0.apk",
+    "type": "attachment"
+   }
+  ],
+  "archive_download_count": {
+   "zip": 0,
+   "tar_gz": 0
+  }
+ }
+]
