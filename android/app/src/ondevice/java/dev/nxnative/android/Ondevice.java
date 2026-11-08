@@ -3,6 +3,7 @@ package dev.nxnative.android;
 import android.Manifest;
 import android.app.AlertDialog;
 import android.content.ComponentName;
+import android.content.Context;
 import android.content.Intent;
 import android.content.ServiceConnection;
 import android.content.pm.PackageManager;
@@ -76,6 +77,43 @@ final class Ondevice {
     static void autoUpdate(MainActivity a, File dump, File packDir, String titleId) {
         if (panel == null || panel.a != a || panel.alive() || deltaShaders(packDir, titleId) < 0 || !autoTried.add(dump.getPath())) return;
         panel.picked(dump, true, packDir, false, true);
+    }
+
+    /**
+     * A code update the user need not ask for: when the pack is this app's own (ownPack) and its code key no longer matches because the app's tools changed
+     * (a profile's patches.py, the rewriter), its code is rewritten in the background, as Prepare again would, keeping the shaders. Only with the dump there
+     * (the card's check found no problem with it), its build one the profile knows (checked by picked: a build mismatch stops it), and no game or other job
+     * running; once per dump per app process. The rewrite goes through the job's staging and swap, so a stopped update never leaves new code beside old tables
+     */
+    static boolean autoCodeUpdate(MainActivity a, File dump, File packDir) {
+        if (panel == null || panel.a != a || panel.alive() || gameRunning(a) || !autoTried.add("code:" + dump.getPath())) return false;
+        panel.picked(dump, true, packDir, true, true);
+        return true;
+    }
+
+    /**
+     * Whether this app made the pack, so the launcher may update its code by itself: its pack.tsv's made_by row (written by the phone's pack step), else, for a pack
+     * made before that row, the job beside the dump that says it made this pack folder (job.json own_pack). Without either, the pack is treated as other tools'.
+     * Reads files: call it off the main thread
+     */
+    static boolean ownPack(File dump, File packDir, String titleId) {
+        try {
+            if (Pack.read(packDir).madeByApp()) return true;
+            File jf = Job.fileOf(DumpCheck.workOf(dump, titleId));
+            if (!jf.isFile()) return false;
+            Job j = Job.read(jf);
+            return j.ownsPack() && GameList.samePath(j.pack().getPath(), packDir.getPath());
+        } catch (IOException | RuntimeException e) {
+            return false;
+        }
+    }
+
+    /** Whether a game runs now (the :game process): the background code update waits for it, as the pack's code must not change under a running game */
+    private static boolean gameRunning(Context c) {
+        android.app.ActivityManager am = (android.app.ActivityManager) c.getSystemService(Context.ACTIVITY_SERVICE);
+        List<android.app.ActivityManager.RunningAppProcessInfo> ps = am == null ? null : am.getRunningAppProcesses();
+        if (ps != null) for (android.app.ActivityManager.RunningAppProcessInfo p : ps) if (p.processName.endsWith(":game")) return true;
+        return false;
     }
 
     /** Whether a job (any game's) runs now, so a background shader update of another card waits for it (autoUpdate starts none while one is alive) */
