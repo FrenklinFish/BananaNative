@@ -167,6 +167,9 @@ static class SwshXlate
         public (int Slice, int Workgroup)? SharedSpill;   // the res.json's "shared_spill": {"bytes": a workgroup's slice, "workgroup": bytes left in workgroup memory}
         public void RecordSharedSpill(int sliceBytes, int workgroupBytes) => SharedSpill = (sliceBytes, workgroupBytes);
         public int QueryHostSubgroupSize() => _job["subgroup_size"] is JsonNode sg ? (int)sg : 32;
+        // Job "gather_bias" (the Android build, vk_android_build.py gather_bias: 8 on an Adreno): bits of the host's gather coordinate precision; the translator moves gather
+        // coordinates by 1 / (size x 2^(bits + 1)) off the texel edge, where Adreno rounds to the neighbouring footprint. 0 (the Apple jobs, other GPUs): none
+        public int QueryHostGatherBiasPrecision() => _job["gather_bias"] is JsonNode gb ? (int)gb : 0;
         // Job ssbo_align: the device's storage buffer offset alignment. Set, the host binds each storage buffer at its address rounded down to it, and the shader adds the
         // difference (GlobalToStorage: offset = address − (base & −align)); unset, a storage buffer starts exactly at its c0 address
         public bool QueryHasUnalignedStorageBuffer() => _job["ssbo_align"] != null;

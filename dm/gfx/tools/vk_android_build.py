@@ -736,7 +736,18 @@ def write_library(results):
 # ---- the build
 # The device answers only this build gives the translator (Program.cs; dmsh_abi_vk.h): Adreno's 64-lane subgroups, storage buffers bound at an aligned-down address, and
 # geometry passthrough the shader does itself (no SPV_NV_geometry_shader_passthrough). The Apple jobs carry none of these keys, so their translations stay as they were
-ANSWERS = {'subgroup_size': VK['SUBGROUP_SIZE'], 'ssbo_align': VK['SSBO_ALIGN'], 'gs_passthrough': False, 'shared_max': VK['SHARED_MAX']}
+def gather_bias():
+    """Bits of the gather coordinate bias (Program.cs QueryHostGatherBiasPrecision): 8 on an Adreno, whose texture gathers round a coordinate on a texel edge to the
+    neighbouring footprint (dark tile boxes; Eden #4565, nx2android 44eca7e), so the translator moves gather coordinates by 1 / 512 texel; 0 elsewhere. The library is
+    built on the phone it runs on: Qualcomm's kernel driver names the GPU. DMSH_VK_GATHER_BIAS=<bits> overrides it"""
+    e = os.environ.get('DMSH_VK_GATHER_BIAS')
+    if e is not None: return int(e)
+    try:
+        with open('/sys/class/kgsl/kgsl-3d0/gpu_model') as f: return 8 if f.read().strip().startswith('Adreno') else 0
+    except OSError: return 0
+
+
+ANSWERS = {'subgroup_size': VK['SUBGROUP_SIZE'], 'ssbo_align': VK['SSBO_ALIGN'], 'gs_passthrough': False, 'shared_max': VK['SHARED_MAX'], 'gather_bias': gather_bias()}
 keys = NS['build_keys'](want, loc, PAIRS) if want else sorted(loc)
 NJ = int(os.environ.get('J', '8')); BATCH = max(1, int(os.environ.get('DMSH_VK_BATCH', '64')))
 STAGE_OF = {k: loc[k][0][:2] for k in keys}   # the package file's name gives the stage (dmsh_build.py job_for)
@@ -1021,7 +1032,8 @@ fl = collections.Counter(n for x in okr for n, v in VK.items() if n.startswith('
 print('flags: ' + ', '.join(f'{n[2:].lower()} {fl[n]}' for n in sorted(fl)))
 _vn = {v: n[4:].lower() for n, v in VK.items() if n.startswith('MOD_')}
 print('modules by variant: ' + ', '.join(f'{_vn.get(v, v)} {n}' for v, n in sorted(collections.Counter(v for x in okr for v in x['variants']).items())) +
-      f'; translator answers: subgroup size {ANSWERS["subgroup_size"]}, storage buffer alignment {ANSWERS["ssbo_align"]}, geometry passthrough by the shader')
+      f'; translator answers: subgroup size {ANSWERS["subgroup_size"]}, storage buffer alignment {ANSWERS["ssbo_align"]}, geometry passthrough by the shader, '
+      f'gather bias {ANSWERS["gather_bias"]} bits')
 print('capabilities: ' + ', '.join(f'{c} {n}' for c, n in collections.Counter(c for x in okr for c in x['caps']).most_common()))
 print('extensions: ' + (', '.join(f'{c} {n}' for c, n in collections.Counter(c for x in okr for c in x['exts']).most_common()) or 'none'))
 kinds = collections.Counter(KIND[b['kind']] + (('+' + KIND[b['skind']]) if b.get('skind') else '') for x in okr for b in x['bindings'])
