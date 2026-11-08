@@ -66,7 +66,7 @@ static uint64_t mono_ns(void) { struct timespec t; clock_gettime(CLOCK_MONOTONIC
 // returns only at the kernel's event stream tick (10 kHz), so a count of wakes is a count of 100 us ticks. A thread on WFE still runs: it counts as CPU time, keeps its core
 // out of idle and looks busy to the frequency governor
 static _Atomic uint64_t g_spin_ns = 200000;
-static inline int spin_over(uint64_t t0) { return mono_ns() - t0 > atomic_load_explicit(&g_spin_ns, memory_order_relaxed); }
+static inline int spin_over(uint64_t t0) { return mono_ns() - t0 >= atomic_load_explicit(&g_spin_ns, memory_order_relaxed); }   // checked before each wait: 0 goes straight to the futex
 
 // The producer waits until the consumer's tail reaches at least `want` (spinning a little, then on the futex)
 static inline void flush_pub(void);
@@ -74,8 +74,8 @@ static void wait_tail(uint64_t want) {
     flush_pub();   // what it waits for must be handed over
     for (uint64_t t0_ = mono_ns();;) {   // the encoder is usually close behind: wait on its tail for a short while
         uint64_t t = atomic_load_explicit(&g_tail, memory_order_acquire); if (t >= want) return;
-        wait_change(&g_tail, t);
         if (spin_over(t0_)) break;
+        wait_change(&g_tail, t);
     }
     g_n_waits++; uint64_t t0 = mono_ns();
     // An event count: the sequence is read before the flag is set, so an encoder that sees the flag (and a tail at or past want) bumps it after that read and the futex
@@ -393,8 +393,8 @@ static void *enc_main(void *arg) {
             // Empty: spin while the replay thread is recording (its next call comes within microseconds), then sleep until a call comes
             for (uint64_t t0 = mono_ns();;) {
                 h = atomic_load_explicit(&g_head, memory_order_acquire); if (h != t) break;
-                wait_change(&g_head, t);
                 if (spin_over(t0)) break;
+                wait_change(&g_head, t);
             }
             if (h == t) {
                 uint32_t s = atomic_load(&g_cseq);   // (an event count, as wait_tail's)
