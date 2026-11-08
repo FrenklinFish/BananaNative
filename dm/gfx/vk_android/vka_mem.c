@@ -35,8 +35,9 @@
 #include <time.h>
 #include <fcntl.h>
 #include "vka_mapbudget.h"
+#include "vka_fd_alias.h"
 
-typedef struct { uintptr_t lo, hi; VkDeviceMemory mem; VkBuffer buf; VkDeviceAddress bda; int refs; } seg_t;
+typedef struct { uintptr_t lo, hi; VkDeviceMemory mem; VkBuffer buf; VkDeviceAddress bda; int refs, fd_alias; } seg_t;
 static seg_t *g_sg; static int g_nsg, g_sgcap;   // sorted by lo, disjoint
 // Bumped (under g_rw for writing) whenever a segment comes or goes: the replay's per-thread lookup cache (vka_addr, vka_addr_run) holds while it stands
 static _Atomic uint64_t g_sg_gen = 1;
@@ -403,20 +404,27 @@ static uint64_t g_ph[6], g_ph_n;
 static __thread uint64_t t_place_bytes, t_pend_ns;   // this thread's bytes placed and time in pend_wait (mtl_pool_add's attribution: other threads place while it waits)
 static int place(uintptr_t lo, uintptr_t hi, VkDeviceSize *grow) {
     VkDeviceSize n = hi - lo; seg_t s = {lo, hi, .refs = 1}; VkResult r; uint64_t p0 = mono_ns(), p1, p2, p3, p4, p5;
-    if (!(s.buf = seg_buffer(n))) { VRED("pool memory %#lx+%#llx: vkCreateBuffer failed", (unsigned long)lo, (unsigned long long)n); return 0; }
-    VkMemoryRequirements mr; vk.vkGetBufferMemoryRequirements(V.dev, s.buf, &mr);
-    if (V.guest_type == UINT32_MAX || !(mr.memoryTypeBits >> V.guest_type & 1)) {
-        VRED("pool memory %#lx+%#llx: the buffer takes types %#x, not the guest type %u", (unsigned long)lo, (unsigned long long)n, mr.memoryTypeBits, V.guest_type);
-        vk.vkDestroyBuffer(V.dev, s.buf, NULL); return 0;
+    vka_fd_memory exported = {.fd = -1};
+    if (V.fd_alias) {
+        r = vka_fd_create(&vk, V.pd, V.dev, &V.memp, n, V.bda, &exported);
+        if (r) { VRED("pool memory %#lx+%#llx: exported allocation %d", (unsigned long)lo, (unsigned long long)n, r); return 0; }
+        s.buf = exported.buf; s.mem = exported.mem; s.fd_alias = 1;
+    } else {
+        if (!(s.buf = seg_buffer(n))) { VRED("pool memory %#lx+%#llx: vkCreateBuffer failed", (unsigned long)lo, (unsigned long long)n); return 0; }
+        VkMemoryRequirements mr; vk.vkGetBufferMemoryRequirements(V.dev, s.buf, &mr);
+        if (V.guest_type == UINT32_MAX || !(mr.memoryTypeBits >> V.guest_type & 1)) {
+            VRED("pool memory %#lx+%#llx: the buffer takes types %#x, not the guest type %u", (unsigned long)lo, (unsigned long long)n, mr.memoryTypeBits, V.guest_type);
+            vk.vkDestroyBuffer(V.dev, s.buf, NULL); return 0;
+        }
+        if (mr.size > n && !V.placed_range) { if (grow) *grow = mr.size; vk.vkDestroyBuffer(V.dev, s.buf, NULL); return 0; }   // a whole-memory map would cover bytes past the range
+        VkMemoryAllocateFlagsInfo af = {VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_FLAGS_INFO, .flags = VK_MEMORY_ALLOCATE_DEVICE_ADDRESS_BIT};
+        VkMemoryAllocateInfo ai = {VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO, .pNext = V.bda ? &af : NULL, .allocationSize = mr.size, .memoryTypeIndex = V.guest_type};
+        if ((r = vk.vkAllocateMemory(V.dev, &ai, NULL, &s.mem))) {
+            if (n <= V.max_alloc || !V.max_alloc) VRED("pool memory %#lx+%#llx: vkAllocateMemory %d (%.2f GiB placed so far)", (unsigned long)lo, (unsigned long long)n, r, g_placed_bytes / 1073741824.0);
+            vk.vkDestroyBuffer(V.dev, s.buf, NULL); return 0;
+        }
+        vk.vkBindBufferMemory(V.dev, s.buf, s.mem, 0);
     }
-    if (mr.size > n && !V.placed_range) { if (grow) *grow = mr.size; vk.vkDestroyBuffer(V.dev, s.buf, NULL); return 0; }   // a whole-memory map would cover bytes past the range
-    VkMemoryAllocateFlagsInfo af = {VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_FLAGS_INFO, .flags = VK_MEMORY_ALLOCATE_DEVICE_ADDRESS_BIT};
-    VkMemoryAllocateInfo ai = {VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO, .pNext = V.bda ? &af : NULL, .allocationSize = mr.size, .memoryTypeIndex = V.guest_type};
-    if ((r = vk.vkAllocateMemory(V.dev, &ai, NULL, &s.mem))) {
-        if (n <= V.max_alloc || !V.max_alloc) VRED("pool memory %#lx+%#llx: vkAllocateMemory %d (%.2f GiB placed so far)", (unsigned long)lo, (unsigned long long)n, r, g_placed_bytes / 1073741824.0);
-        vk.vkDestroyBuffer(V.dev, s.buf, NULL); return 0;
-    }
-    vk.vkBindBufferMemory(V.dev, s.buf, s.mem, 0);
     p1 = mono_ns(); g_ph[0] += p1 - p0;
     nvn_dirty_hold((const void *)lo, n);   // (see the note above prot_known; released after swap_end)
     prun pr[MAXRUN]; int npr = prot_runs(lo, hi, pr, MAXRUN), exact = prot_known(pr, &npr, lo, hi);
@@ -424,21 +432,28 @@ static int place(uintptr_t lo, uintptr_t hi, VkDeviceSize *grow) {
     void *p = NULL; int ok = 0;
     swap_begin(lo, hi);
     prot_readonly(pr, npr);   // writers wait in the fault hook from here
-    if (!vk.vkMapMemory(V.dev, s.mem, 0, VK_WHOLE_SIZE, 0, &p) && p) {
+    if ((s.fd_alias ? (p = exported.mapped, 0) : vk.vkMapMemory(V.dev, s.mem, 0, VK_WHOLE_SIZE, 0, &p)) == 0 && p) {
         copy_readable(p, lo, pr, npr);
         p3 = mono_ns(); g_ph[2] += p3 - p2; p2 = p3;
-        vk.vkUnmapMemory(V.dev, s.mem);
-        VkMemoryMapPlacedInfoEXT pi = {VK_STRUCTURE_TYPE_MEMORY_MAP_PLACED_INFO_EXT, .pPlacedAddress = (void *)lo};
-        VkMemoryMapInfoKHR mi = {VK_STRUCTURE_TYPE_MEMORY_MAP_INFO_KHR, .pNext = &pi, .flags = VK_MEMORY_MAP_PLACED_BIT_EXT, .memory = s.mem, .offset = 0, .size = V.placed_range ? n : VK_WHOLE_SIZE};
-        void *q = NULL;
-        if (!(r = vk.vkMapMemory2KHR(V.dev, &mi, &q)) && q == (void *)lo) ok = 1;   // (the driver's own mmap: not marked, see swap_end_ok below)
-        else {   // the range may be gone now: put anonymous pages back with the bytes, which the memory still holds
-            if (!r) unmap_placed(s.mem);
-            sw_hole_check(lo, n, 0, "pool memory");
-            void *a = sw_mmap_fixed(lo, n);
-            if (a != MAP_FAILED && !vk.vkMapMemory(V.dev, s.mem, 0, VK_WHOLE_SIZE, 0, &p)) { memcpy((void *)lo, p, n); vk.vkUnmapMemory(V.dev, s.mem); }
+        if (s.fd_alias) {
+            void *q = (void *)syscall(__NR_mmap, lo, (size_t)n, PROT_READ | PROT_WRITE, MAP_SHARED | MAP_FIXED, exported.fd, 0);
+            ok = q == (void *)lo; r = ok ? VK_SUCCESS : VK_ERROR_MEMORY_MAP_FAILED;
+            if (!ok) { sw_hole_check(lo, n, 0, "exported pool memory"); if (sw_mmap_fixed(lo, n) != MAP_FAILED) memcpy((void *)lo, p, n); }
+        } else {
+            vk.vkUnmapMemory(V.dev, s.mem);
+            VkMemoryMapPlacedInfoEXT pi = {VK_STRUCTURE_TYPE_MEMORY_MAP_PLACED_INFO_EXT, .pPlacedAddress = (void *)lo};
+            VkMemoryMapInfoKHR mi = {VK_STRUCTURE_TYPE_MEMORY_MAP_INFO_KHR, .pNext = &pi, .flags = VK_MEMORY_MAP_PLACED_BIT_EXT, .memory = s.mem, .offset = 0, .size = V.placed_range ? n : VK_WHOLE_SIZE};
+            void *q = NULL;
+            if (!(r = vk.vkMapMemory2KHR(V.dev, &mi, &q)) && q == (void *)lo) ok = 1;   // (the driver's own mmap: not marked, see swap_end_ok below)
+            else {   // the range may be gone now: put anonymous pages back with the bytes, which the memory still holds
+                if (!r) unmap_placed(s.mem);
+                sw_hole_check(lo, n, 0, "pool memory");
+                void *a = sw_mmap_fixed(lo, n);
+                if (a != MAP_FAILED && !vk.vkMapMemory(V.dev, s.mem, 0, VK_WHOLE_SIZE, 0, &p)) { memcpy((void *)lo, p, n); vk.vkUnmapMemory(V.dev, s.mem); }
+            }
         }
     }
+    if (exported.fd >= 0) close(exported.fd);
     static int pf = -1; if (pf < 0) { const char *e = getenv("DM_VK_PREFAULT"); pf = !(e && !strcmp(e, "0")); if (!pf) VLOG("DM_VK_PREFAULT=0: placed maps are not faulted in (a diagnostic: DM_VK_NANSCAN's placed memory test shows whether the driver needs it)"); }
     p3 = mono_ns();
     if (ok && pf) prefault(lo, hi);   // before any mprotect splits the mapping (see prefault)
@@ -453,7 +468,7 @@ static int place(uintptr_t lo, uintptr_t hi, VkDeviceSize *grow) {
     g_ph[3] += p3 - p2; g_ph[4] += p4 - p3; g_ph[5] += p5 - p4;
     if (!(++g_ph_n & 255)) VLOG("placed memory: %llu placements: allocation %.0f ms, protections read %.0f ms (%.0f lines of /proc/self/maps a read), copy %.0f ms, maps %.0f ms, prefault %.0f ms, protections back %.0f ms; %d memory maps of %d at the last count",
                                (unsigned long long)g_ph_n, g_ph[0] / 1e6, g_ph[1] / 1e6, (double)g_maps_lines / g_ph_n, g_ph[2] / 1e6, g_ph[3] / 1e6, g_ph[4] / 1e6, g_ph[5] / 1e6, atomic_load(&g_maps_n), atomic_load(&g_maps_max));
-    if (!ok) { VRED("pool memory %#lx+%#llx: placed map %d at %p", (unsigned long)lo, (unsigned long long)n, r, p); vk.vkDestroyBuffer(V.dev, s.buf, NULL); vk.vkFreeMemory(V.dev, s.mem, NULL); return 0; }
+    if (!ok) { VRED("pool memory %#lx+%#llx: placed map %d at %p", (unsigned long)lo, (unsigned long long)n, r, p); if (s.fd_alias) vk.vkUnmapMemory(V.dev, s.mem); vk.vkDestroyBuffer(V.dev, s.buf, NULL); vk.vkFreeMemory(V.dev, s.mem, NULL); return 0; }
     if (V.bda) { VkBufferDeviceAddressInfo bai = {VK_STRUCTURE_TYPE_BUFFER_DEVICE_ADDRESS_INFO, .buffer = s.buf}; s.bda = vk.vkGetBufferDeviceAddress(V.dev, &bai); }
     if (!lock_whole()) pthread_rwlock_wrlock(&g_rw);
     sg_insert(&s);
@@ -509,7 +524,7 @@ static void detach(int i, segvec *v) {   // caller holds g_pl, and g_rw for writ
 // Memory the GPU is not known to be done with (the wait ran into the hang time, or a GPU hang was declared) is never freed: it stays allocated (leaked) behind the anonymous pages,
 // since a free under work the GPU still runs faults the GPU (freed anyway after 2 s before, on the way to a system restart on the phone)
 static void seg_free(const seg_t *s, int waited, uint64_t fence) {
-    if (waited) { vk.vkDestroyBuffer(V.dev, s->buf, NULL); vk.vkFreeMemory(V.dev, s->mem, NULL); return; }
+    if (waited) { if (s->fd_alias) vk.vkUnmapMemory(V.dev, s->mem); vk.vkDestroyBuffer(V.dev, s->buf, NULL); vk.vkFreeMemory(V.dev, s->mem, NULL); return; }
     static _Atomic int nk; if (atomic_fetch_add(&nk, 1) < 8) VRED("giving back pool memory %#lx+%#zx: the GPU is not known to be done with it (fence %llu%s): its Vulkan memory is kept, not freed",
                                                                (unsigned long)s->lo, (size_t)(s->hi - s->lo), (unsigned long long)fence, vka_hung() ? ", GPU hang" : " not reached in the hang time");
 }
@@ -529,24 +544,25 @@ static void unplace(const seg_t *sp) {
                 if (o) memcpy(t + (a - s.lo), (const void *)a, 4096);
             }
         }
-    unmap_placed(s.mem);   // the CPU mapping only: the GPU's stays with the allocation
+    if (!s.fd_alias) unmap_placed(s.mem);   // the exported alias is replaced below before its independent driver map is freed
     // DM_VK_UNPLACE_REMAP=1 (experiment, off): map the memory again where the driver likes, so that the address the driver keeps is outside the guest range, then move the
     // pages in before the free (no hole, if the driver's free takes down only its last map). Checked after the free: a range the free took down anyway is [RED]
     void *elsewhere = NULL;
-    if (waited && t != MAP_FAILED && VKA_ENV("DM_VK_UNPLACE_REMAP", 0) && (vk.vkMapMemory(V.dev, s.mem, 0, VK_WHOLE_SIZE, 0, &elsewhere) || !elsewhere)) elsewhere = NULL;
-    if (!elsewhere) seg_free(&s, waited, fence);
+    if (!s.fd_alias && waited && t != MAP_FAILED && VKA_ENV("DM_VK_UNPLACE_REMAP", 0) && (vk.vkMapMemory(V.dev, s.mem, 0, VK_WHOLE_SIZE, 0, &elsewhere) || !elsewhere)) elsewhere = NULL;
+    if (!s.fd_alias && !elsewhere) seg_free(&s, waited, fence);
     // Open: from the driver's vkFreeMemory, which takes the range down (above), to this mremap the guest range has a hole, and another thread's mmap(NULL) (the driver's,
     // libc's malloc: calls this library does not see) could be given part of it. The window is the few microseconds between the two calls, and it cannot be closed here:
     // anything mapped into the range before the free (a reservation, these pages) is taken down by the free, and the free cannot wait until after (the bug above). What
     // is done: sw_hole_check reserves the range and says so ([RED]) when another mapping took part of it, which the mremap then replaces. A driver that keeps the range
     // reserved after an unmap with VK_MEMORY_UNMAP_RESERVE_BIT_EXT, as the extension specifies (the application owns the range from the unmap on), has no hole: the
     // mremap replaces that reservation. DM_VK_UNPLACE_REMAP is the experiment for a driver that does not (not yet tried on the phone)
-    if (t != MAP_FAILED) sw_hole_check(s.lo, n, waited && !elsewhere, "giving back pool memory");
+    if (!s.fd_alias && t != MAP_FAILED) sw_hole_check(s.lo, n, waited && !elsewhere, "giving back pool memory");
     if (t == MAP_FAILED || sw_mremap_to(t, n, s.lo) == MAP_FAILED) {
         VRED_ONCE("giving back pool memory %#lx+%#zx: no anonymous pages with its bytes (errno %d): they are lost", (unsigned long)s.lo, n, errno);
         if (t != MAP_FAILED) munmap(t, n);
         sw_mmap_fixed(s.lo, n);
     } else plat_mem_name_guest((void *)s.lo, n);   // (its name in the maps; moved pages keep their own offset, so these do not merge with neighbours until the range is given back to the system)
+    if (s.fd_alias) seg_free(&s, waited, fence);
     if (elsewhere) {
         vk.vkUnmapMemory(V.dev, s.mem); seg_free(&s, waited, fence);
         if (msync((void *)s.lo, n, MS_ASYNC)) {   // the free took the range down after all: the bytes are lost
@@ -751,7 +767,7 @@ static uint64_t part_gran(void) {
     if (v < 0) { int64_t m = VKA_ENV("DM_VK_PLACE_GRANULE_MB", 16); if (m < 1) m = 1; v = m << 20; uintptr_t al = pg_align(); v = (v + (int64_t)al - 1) & ~(int64_t)(al - 1); }
     return (uint64_t)v;
 }
-static int can_place(uint64_t size) { return size && vka_ok() && placed_on() && V.placed; }
+static int can_place(uint64_t size) { return size && vka_ok() && placed_on() && (V.placed || V.fd_alias); }
 // Place [mem, mem+size) (page aligned out): its segments into *l (which may list some already: they take no second reference). Caller holds g_pl. *lg: the placed total
 // crossed a 256 MiB step since the last line (*tot). *mine: the bytes this call placed
 static int place_pool(uintptr_t mem, uint64_t size, seglist *l, int *lg, uint64_t *tot, uint64_t *mine_out) {

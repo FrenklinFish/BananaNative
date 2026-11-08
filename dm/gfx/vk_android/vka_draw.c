@@ -32,7 +32,7 @@ static int g_force_draws;
 void vka_draw_force(int on) { g_force_draws = on; }
 static int draws_on(void) {
     int env = VKA_ENV("DM_VK_DRAW", -1); if (env > 0) env = 1;
-    int on = g_force_draws || (env >= 0 ? env : V.placed);
+    int on = g_force_draws || (env >= 0 ? env : (V.placed || V.fd_alias));
     if (!on) VRED_ONCE("draws and dispatches are off (%s): their records are skipped; events, counters and fences still signal", env == 0 ? "DM_VK_DRAW=0" : "no placed guest memory, so the GPU would see no pool; DM_VK_DRAW=1 turns them on");
     return on;
 }
