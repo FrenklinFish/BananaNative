@@ -960,6 +960,121 @@ fail:
 #undef FAIL
 }
 
+// vka_spv_gs_fill: a geometry shader that may end without emitting anything is made to emit one degenerate primitive instead (its vertices all at (0, 0, 0, -1), outside
+// the clip volume), so every input primitive has the same output count. Adreno renders in tiles: a binning pass runs the vertex and geometry stages to sort the primitives
+// into screen tiles, and the rendering pass runs them again. A geometry shader that decides by a float test whether to emit (Donkey Kong Bananza's terrain culling
+// shader 5d537f7630ec3671 emits only front-facing, on-screen triangles that cover a pixel) can decide differently in the two passes for a triangle on the edge; with the
+// camera inside the ground there are many, and Qualcomm's driver then draws stray triangles and stops the GPU for good (kgsl "possible gpu syncpoint deadlock", a fence never
+// reached). The same shader emitting every triangle, or deciding by an exact test, does not; with a degenerate primitive in place of none it does not either (2026-11-08,
+// Odin 2 Portal, Adreno 740). Taken: one Geometry entry point, a strip or point output whose OutputVertices holds one primitive, every OpEmitVertex / OpEndPrimitive in the
+// entry function (no streams), gl_Position as member 0 of an Output block or a BuiltIn Position Output variable, a vec4 of 32-bit floats. A Private flag cleared at the
+// start of the entry function and set after each OpEmitVertex; before each OpReturn of the entry function, when it is still clear, the degenerate primitive is emitted
+// (the other outputs as they are: the primitive covers nothing). NULL with err empty: nothing to do (not such a shader); with err: not rewritten
+uint32_t *vka_spv_gs_fill(const uint32_t *w, size_t nw, size_t *out_nw, char *err, size_t errn) {
+#define FAIL(...) do { snprintf(err, errn, __VA_ARGS__); goto fail; } while (0)
+    enum { ModeOutputVertices = 26, ModeOutputPoints = 27, ModeOutputLineStrip = 28, ModeOutputTriangleStrip = 29, ExecGeometry = 3,
+           OpEndPrimitiveF = 219, OpEndStreamPrimitiveF = 221, OpLineF = 8, OpNoLineF = 317 };
+    spvmod_t G; vec_t o = {0}, decl = {0}; uint8_t *posblk = NULL;
+    err[0] = 0;
+    if (!smod_open(&G, w, nw)) FAIL("not SPIR-V");
+    uint32_t ep = 0, ep_at = 0, neps = 0, nv = 0, maxv = 0, first_fn = 0, t_bool = 0, posvar_direct = 0;
+    if (!(posblk = calloc(G.bound, 1))) FAIL("out of memory");   // 1: a struct whose member 0 is BuiltIn Position; 2: a variable decorated BuiltIn Position
+    for (size_t i = 5; i < nw;) {
+        uint32_t op = w[i] & 0xffff, len = w[i] >> 16;
+        if (op == OpFunction) { first_fn = (uint32_t)i; break; }
+        if (op == OpEntryPoint && len >= 3) { neps++; if (w[i + 1] == ExecGeometry) { ep = w[i + 2]; ep_at = (uint32_t)i; } }
+        if (op == OpExecutionMode && len >= 3 && w[i + 1] == ep) {
+            uint32_t m = w[i + 2];
+            if (m == ModeOutputVertices && len >= 4) maxv = w[i + 3];
+            else if (m == ModeOutputPoints) nv = 1; else if (m == ModeOutputLineStrip) nv = 2; else if (m == ModeOutputTriangleStrip) nv = 3;
+        }
+        if (op == OpMemberDecorateL && len >= 5 && w[i + 2] == 0 && w[i + 3] == DecBuiltIn && w[i + 4] == BIPositionL && w[i + 1] < G.bound) posblk[w[i + 1]] = 1;
+        if (op == OpDecorate && len >= 4 && w[i + 2] == DecBuiltIn && w[i + 3] == BIPositionL && w[i + 1] < G.bound) posblk[w[i + 1]] = 2;
+        if (op == OpTypeBool && len >= 2) t_bool = w[i + 1];
+        i += len;
+    }
+    if (!ep || neps != 1 || !nv || maxv < nv || !first_fn) goto none;
+    // The emits: all in the entry function, none to a stream
+    uint32_t fn = 0, nemit = 0;
+    for (size_t i = first_fn; i < nw;) {
+        uint32_t op = w[i] & 0xffff, len = w[i] >> 16;
+        if (!len || i + len > nw) FAIL("bad instruction length");
+        if (op == OpFunction && len >= 3) fn = w[i + 2];
+        if (op == OpEmitStreamVertexL || op == OpEndStreamPrimitiveF) goto none;
+        if (op == OpEmitVertexL || op == OpEndPrimitiveF) { if (fn != ep) goto none; nemit += op == OpEmitVertexL; }
+        i += len;
+    }
+    if (!nemit) goto none;
+    // gl_Position: an Output variable of a block with member 0 Position (a chain to member 0), or one decorated Position itself
+    uint32_t posvar = 0, v4 = 0;
+    for (uint32_t v = 1; v < G.bound && !posvar; v++) {
+        if (G.op[v] != OpVariable || G.a2[v] != SCOutput || G.a1[v] >= G.bound) continue;
+        uint32_t t = G.a2[G.a1[v]];
+        if (t < G.bound && G.op[t] == OpTypeStruct && posblk[t] == 1) { posvar = v; v4 = G.a1[t]; }
+        else if (posblk[v] == 2) { posvar = v; posvar_direct = 1; v4 = t; }
+    }
+    if (!posvar || v4 >= G.bound || G.op[v4] != OpTypeVector || G.a2[v4] != 4) goto none;
+    uint32_t t_f = G.a1[v4];
+    if (t_f >= G.bound || G.op[t_f] != OpTypeFloat || G.a1[t_f] != 32) goto none;
+    // Declarations (types reused when the module has them: a second scalar, vector or pointer type of the same kind is invalid), before the first function
+    uint32_t nb = G.bound;
+    #define FIND(cond) ({ uint32_t _r = 0; for (uint32_t _t = 1; _t < G.bound && !_r; _t++) if (cond) _r = _t; _r; })
+    uint32_t t_u = FIND(G.op[_t] == OpTypeInt && G.a1[_t] == 32 && G.a2[_t] == 0);
+    if (!t_u) { t_u = nb++; uint32_t x[4] = {4u << 16 | OpTypeInt, t_u, 32, 0}; if (!put_n(&decl, x, 4)) FAIL("out of memory"); }
+    if (!t_bool) { t_bool = nb++; uint32_t x[2] = {2u << 16 | OpTypeBool, t_bool}; if (!put_n(&decl, x, 2)) FAIL("out of memory"); }
+    uint32_t p_priv = FIND(G.op[_t] == OpTypePointer && G.a1[_t] == SCPrivate && G.a2[_t] == t_u);
+    if (!p_priv) { p_priv = nb++; uint32_t x[4] = {4u << 16 | OpTypePointer, p_priv, SCPrivate, t_u}; if (!put_n(&decl, x, 4)) FAIL("out of memory"); }
+    uint32_t p_out = 0;
+    if (!posvar_direct) { p_out = FIND(G.op[_t] == OpTypePointer && G.a1[_t] == SCOutput && G.a2[_t] == v4);
+                          if (!p_out) { p_out = nb++; uint32_t x[4] = {4u << 16 | OpTypePointer, p_out, SCOutput, v4}; if (!put_n(&decl, x, 4)) FAIL("out of memory"); } }
+    #undef FIND
+    uint32_t u0 = nb++, u1 = nb++, f0 = nb++, fm1 = nb++, dead = nb++, flag = nb++;
+    { uint32_t x[] = {4u << 16 | OpConstant, t_u, u0, 0, 4u << 16 | OpConstant, t_u, u1, 1, 4u << 16 | OpConstant, t_f, f0, 0, 4u << 16 | OpConstant, t_f, fm1, 0xbf800000u,
+                      7u << 16 | OpConstantComposite, v4, dead, f0, f0, f0, fm1, 4u << 16 | OpVariable, p_priv, flag, SCPrivate};
+      if (!put_n(&decl, x, sizeof x / 4)) FAIL("out of memory"); }
+    // Copy: the flag in the entry point's interface from SPIR-V 1.4 (every global there), the declarations before the first function, the entry function rewritten
+    if (!put_n(&o, w, 5)) FAIL("out of memory");
+    int in_ep = 0, cleared = 0, nret = 0;
+    for (size_t i = 5; i < nw;) {
+        uint32_t op = w[i] & 0xffff, len = w[i] >> 16; const uint32_t *in = w + i;
+        if (i == first_fn && !put_n(&o, decl.w, decl.n)) FAIL("out of memory");
+        if (i == ep_at && w[1] >= 0x10400) {
+            size_t at = o.n; if (!put_n(&o, in, len) || !put(&o, flag)) FAIL("out of memory");
+            o.w[at] = (uint32_t)(o.n - at) << 16 | OpEntryPoint; i += len; continue;
+        }
+        if (op == OpFunction && len >= 3) { in_ep = w[i + 2] == ep; cleared = 0; }
+        if (in_ep && !cleared && op != OpFunction && op != OpFunctionParameter && op != OpLabel && op != OpVariable && op != OpLineF && op != OpNoLineF) {
+            uint32_t x[3] = {3u << 16 | OpStore, flag, u0}; if (!put_n(&o, x, 3)) FAIL("out of memory"); cleared = 1;
+        }
+        if (in_ep && op == OpReturn) {
+            uint32_t ld = nb++, z = nb++, fill = nb++, merge = nb++;
+            uint32_t x[] = {4u << 16 | OpLoad, t_u, ld, flag, 5u << 16 | OpIEqual, t_bool, z, ld, u0, 3u << 16 | OpSelectionMerge, merge, 0,
+                            4u << 16 | OpBranchConditional, z, fill, merge, 2u << 16 | OpLabel, fill};
+            if (!put_n(&o, x, sizeof x / 4)) FAIL("out of memory");
+            for (uint32_t k = 0; k < nv; k++) {
+                uint32_t dst = posvar;
+                if (!posvar_direct) { dst = nb++; uint32_t c[5] = {5u << 16 | OpAccessChain, p_out, dst, posvar, u0}; if (!put_n(&o, c, 5)) FAIL("out of memory"); }
+                uint32_t st[4] = {3u << 16 | OpStore, dst, dead, 1u << 16 | OpEmitVertexL}; if (!put_n(&o, st, 4)) FAIL("out of memory");
+            }
+            uint32_t y[] = {1u << 16 | OpEndPrimitiveF, 2u << 16 | OpBranch, merge, 2u << 16 | OpLabel, merge};
+            if (!put_n(&o, y, sizeof y / 4)) FAIL("out of memory");
+            nret++;
+        }
+        if (!put_n(&o, in, len)) FAIL("out of memory");
+        if (in_ep && op == OpEmitVertexL) { uint32_t x[3] = {3u << 16 | OpStore, flag, u1}; if (!put_n(&o, x, 3)) FAIL("out of memory"); }
+        i += len;
+    }
+    if (!nret) FAIL("no OpReturn in the entry function");
+    o.w[3] = nb;
+    smod_close(&G); free(decl.w); free(posblk);
+    *out_nw = o.n; return o.w;
+none:
+fail:
+    smod_close(&G); free(decl.w); free(posblk); free(o.w);
+    return NULL;
+#undef FAIL
+}
+
 // A pixel shader's colour outputs by location: the components it can write (bit c of comp[loc], loc < 8), for the colour write mask (vka_draw.c). A whole-variable store
 // writes all of the variable's components, a chain with a constant index its component, any other use of the variable (a chain with a variable index, a copy, a call) all
 // of them; a component the variable does not have (a vec3 output at an RGBA target) is never written. 0 = done; -1 when the module is not read (outputs split by Component
