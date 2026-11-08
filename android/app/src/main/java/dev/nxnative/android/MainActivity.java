@@ -476,6 +476,8 @@ public final class MainActivity extends Activity {
         if (noProfile != null) Ui.add(box, Ui.small(this, noProfile), 0);
         // Saves: backups in <Switch2>/save-backups/<id>/, verified; a restore backs up the current save first (SaveUi, SaveStore)
         if (noProfile == null) Ui.add(box, new Ui.Setting(this, "⚙️", "Game settings", v -> { d[0].dismiss(); GameSettings.dialog(this, g); }).chevron(this).view, 0);
+        if (noProfile == null && Shortcuts.supported(this))
+            Ui.add(box, new Ui.Setting(this, "🏠", "Add to home screen", v -> { d[0].dismiss(); Shortcuts.pin(this, g); }).value("A shortcut that starts this game").chevron(this).view, 0);
         Ui.add(box, new Ui.Setting(this, "📁", "Folders", v -> { d[0].dismiss(); Folders.dialog(this, g); }).chevron(this).view, 0);
         Ui.add(box, new Ui.Setting(this, "💾", "Back up saves", v -> { d[0].dismiss(); SaveUi.backup(this, g); }).value("To " + SaveUi.backups(g)).chevron(this).view, 0);
         Ui.add(box, new Ui.Setting(this, "↩️", "Restore saves", v -> { d[0].dismiss(); SaveUi.restoreList(this, g); }).chevron(this).view, 0);
