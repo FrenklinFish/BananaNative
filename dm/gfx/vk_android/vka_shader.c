@@ -227,12 +227,11 @@ static void single_lane(uint64_t key, int stage, uint32_t **w, size_t *nb) {
     free(*w); *w = o; *nb = on * 4;
 }
 // A geometry shader that may emit nothing for a primitive emits a degenerate one instead (vka_spv_gs_fill: Qualcomm's driver stops the GPU when the binning and rendering
-// passes of Adreno's tiled rendering disagree on what such a shader emitted). DM_VK_GS_FILL: 1 on Adreno drivers (Qualcomm's, Turnip), 0 elsewhere; 0 / 1 to choose. Logged
+// passes of Adreno's tiled rendering disagree on what such a shader emitted). DM_VK_GS_FILL: 1 on Qualcomm's driver, 0 elsewhere (Turnip untested); 0 / 1 to choose. Logged
 // once per shader for the first few
 static void gs_fill(uint64_t key, int stage, uint32_t **w, size_t *nb) {
     if (stage != DMSH_VK_STAGE_GS) return;
-    int adreno = V.driver_id == VK_DRIVER_ID_QUALCOMM_PROPRIETARY || V.driver_id == VK_DRIVER_ID_MESA_TURNIP;
-    if (!VKA_ENV("DM_VK_GS_FILL", adreno)) return;
+    if (!VKA_ENV("DM_VK_GS_FILL", V.driver_id == VK_DRIVER_ID_QUALCOMM_PROPRIETARY)) return;
     size_t on = 0; char e[256] = ""; uint32_t *o = vka_spv_gs_fill(*w, *nb / 4, &on, e, sizeof e);
     if (!o) { if (e[0]) { static _Atomic int n; if (atomic_fetch_add(&n, 1) < 8) VRED("geometry shader %016llx: not made to emit a primitive when it emits none: %s", (unsigned long long)key, e); } return; }
     static _Atomic int n; if (atomic_fetch_add(&n, 1) < 8) VLOG("geometry shader %016llx: emits a degenerate primitive where it would emit none (DM_VK_GS_FILL)", (unsigned long long)key);
