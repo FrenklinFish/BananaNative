@@ -741,7 +741,9 @@ static uint8_t *slurp(const char *path, size_t *n) {
 // valid. The cold PAC instructions stay in crash.c's SIGILL path -- the register
 // forms as NOPs, PACGA computed, since it produces a value and has no
 // single-instruction stand-in.
+int dm_host_has_pac(void);   // crash.c
 static void pac_patch_text(module_t *m) {
+    if (dm_host_has_pac()) return;   // the CPU signs return addresses for real: RETAB must stay RETAB
     uint32_t *w = (uint32_t *)m->base;
     const size_t n = (size_t)(m->text_end / 4);
     size_t cnt = 0;

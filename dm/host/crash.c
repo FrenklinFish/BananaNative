@@ -132,6 +132,15 @@ static void crash_gate(int sig) {
 #if PLAT_ANDROID
 static struct sigaction crash_prev[NSIG];   // the handlers before ours (crash_install), for the tombstone
 #endif
+// Whether this CPU has pointer authentication (FEAT_PAuth). The emulation below and loader.c's return rewrite are only for CPUs without it: where it exists,
+// PACIBSP really signs the return address, so a plain RET would jump to a signed address, and a SIGILL at RETAB is a real authentication failure (FPAC)
+#if PLAT_ANDROID
+#include <sys/auxv.h>
+int dm_host_has_pac(void) { static int v = -1; if (v < 0) v = (getauxval(AT_HWCAP) & (1ul << 30)) != 0; return v; }   // HWCAP_PACA
+#else
+int dm_host_has_pac(void) { return 1; }   // the Apple builds keep what they did before
+#endif
+
 static void on_crash(int sig, siginfo_t *si, void *uc_) {
     ucontext_t *uc = uc_;
     if (sig == SIGTRAP && g_trap_hook && g_trap_hook(uc)) return;
@@ -144,7 +153,7 @@ static void on_crash(int sig, siginfo_t *si, void *uc_) {
     // and the register D/I forms fault the same way. Emulate what a core
     // without PAC does: a return branches to the (unsigned) x30, and a
     // sign/strip is a NOP. Hosts that implement PAC never reach this.
-    if (sig == SIGILL) {
+    if (sig == SIGILL && !dm_host_has_pac()) {
         uint32_t insn = 0;
         if (!plat_mem_read(PLAT_UC_PC(uc), &insn, sizeof insn)) {
             if (insn == 0xD65F0FFFu || insn == 0xD65F0BFFu) {          // RETAB / RETAA (fallback: loader.c rewrites these to RET)
