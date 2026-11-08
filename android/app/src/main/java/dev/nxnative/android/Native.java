@@ -114,4 +114,13 @@ final class Native {
 
     /** nxhost_vk_selftest(window, frames): blocks for about frames / 60 s. 0 = passed, -1 = not in this host. */
     static native int selftest(Surface surface, int frames);
+
+    /** The player a gamepad drives (0..7), -1 when it has none (yet). */
+    static native int devicePlayer(int device);
+
+    /** Rumble (Rumble.java): the listener's onRumble(player, intensity, sharpness) gets every change of a player's vibration; set once, before start. False without rumble in this host. */
+    static native boolean setRumbleListener(Object listener);
+
+    /** Whether a player has a vibrator: the host sends that player's vibration only while it has one. */
+    static native void rumbleRoute(int player, boolean on);
 }

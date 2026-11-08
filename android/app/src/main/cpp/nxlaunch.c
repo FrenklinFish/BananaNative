@@ -48,6 +48,9 @@ int nxhost_main(int argc, char **argv);
 #pragma weak nxhost_picture_place
 #pragma weak nxhost_fps_cap_set
 #pragma weak nxhost_fps_cap_status
+#pragma weak nxhost_input_device_player
+#pragma weak nxhost_rumble_callback
+#pragma weak nxhost_rumble_route
 #pragma weak nxhost_text_input_callback
 
 // ---- Log: the host's stdout and stderr go straight into the log file (nothing is lost when the process dies), and a thread copies new lines to logcat ----
@@ -305,4 +308,36 @@ JNIEXPORT jint JNICALL Java_dev_nxnative_android_Native_selftest(JNIEnv *env, jc
     fprintf(stderr, "[nxlaunch] graphics selftest returned %d: %s\n", r, r ? "FAIL" : "PASS");
     if (w) ANativeWindow_release(w);   // the replay holds its own reference
     return r;
+}
+
+JNIEXPORT jint JNICALL Java_dev_nxnative_android_Native_devicePlayer(JNIEnv *env, jclass cls, jint device) {
+    (void)env; (void)cls; return nxhost_input_device_player ? nxhost_input_device_player(device) : -1;
+}
+
+// ---- Rumble: the host calls rumble() on its rumble thread for each change of a player's vibration; it goes to listener.onRumble(player, intensity, sharpness) (Rumble.java),
+// which drives the controller's or the phone's vibrator. The thread is attached to the VM on its first call and stays attached for the process's life ----
+static JavaVM *g_vm;
+static jobject g_rumble;   // a global reference to the listener
+static jmethodID g_on_rumble;
+static void rumble(void *ctx, int player, float intensity, float sharpness) {
+    (void)ctx;
+    static __thread JNIEnv *env;
+    if (!env && (*g_vm)->AttachCurrentThread(g_vm, &env, NULL) != JNI_OK) { env = NULL; return; }
+    (*env)->CallVoidMethod(env, g_rumble, g_on_rumble, (jint)player, (jfloat)intensity, (jfloat)sharpness);
+    if ((*env)->ExceptionCheck(env)) (*env)->ExceptionClear(env);
+}
+// Once, before Native.start: the host starts its rumble thread when the callback is set. false when this host has no rumble
+JNIEXPORT jboolean JNICALL Java_dev_nxnative_android_Native_setRumbleListener(JNIEnv *env, jclass cls, jobject listener) {
+    (void)cls; if (!nxhost_rumble_callback || !listener || g_rumble) return JNI_FALSE;
+    jmethodID m = (*env)->GetMethodID(env, (*env)->GetObjectClass(env, listener), "onRumble", "(IFF)V");
+    if (!m) { (*env)->ExceptionClear(env); return JNI_FALSE; }
+    (*env)->GetJavaVM(env, &g_vm);
+    g_on_rumble = m;
+    g_rumble = (*env)->NewGlobalRef(env, listener);
+    nxhost_rumble_callback(rumble, NULL);
+    return JNI_TRUE;
+}
+// Whether a player has a vibrator: the host sends that player's vibration only while it has one
+JNIEXPORT void JNICALL Java_dev_nxnative_android_Native_rumbleRoute(JNIEnv *env, jclass cls, jint player, jboolean on) {
+    (void)env; (void)cls; if (nxhost_rumble_route) nxhost_rumble_route(player, on);
 }

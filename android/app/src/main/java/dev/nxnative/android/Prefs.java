@@ -41,6 +41,11 @@ final class Prefs {
     // ---- A game's own settings (its Manage sheet › Game settings, the in-game panel), stored per title ID as "<key>@<title ID>"; a game without its own value
     // takes the default (the main screen's Settings, global). DKB with nothing of its own set runs exactly as before ----
     static String gameKey(String key, String titleId) { return key + "@" + titleId; }
+    /** Rumble (Rumble.java): the main screen's default (on), then each game's own */
+    static boolean rumble(Context c) { return of(c).getBoolean("rumble", true); }
+    static void rumbleDefault(Context c, boolean on) { of(c).edit().putBoolean("rumble", on).commit(); }
+    static boolean rumble(Context c, String titleId) { return of(c).getBoolean(gameKey("rumble", titleId), rumble(c)); }
+    static void rumble(Context c, String titleId, boolean on) { of(c).edit().putBoolean(gameKey("rumble", titleId), on).commit(); }
 
     /** The game's window size: its own choice, else the default (defaultWindow) */
     static String gameWindow(Context c, String titleId) { return of(c).getString(gameKey("window", titleId), defaultWindow(c, titleId)); }

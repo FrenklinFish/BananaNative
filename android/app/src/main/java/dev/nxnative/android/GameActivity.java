@@ -62,6 +62,7 @@ public final class GameActivity extends Activity implements SurfaceHolder.Callba
     private final HashSet<Integer> pads = new HashSet<>();   // the gamepads connected: the on-screen controls hide while there is one
     private File log;
     private final Handler ui = new Handler(Looper.getMainLooper());
+    private volatile Rumble rumble;   // the game's vibration on the controller's or the phone's vibrator
     private boolean input, started;
     private InputManager inputManager;
     private AudioManager audio;
@@ -444,6 +445,9 @@ public final class GameActivity extends Activity implements SurfaceHolder.Callba
             String[] args = {"nxhost", packDir.getPath()};
             int r = Native.start(args, env.toArray(new String[0]), log.getPath(), files.getPath());
             if (r != 0) throw new IOException("the host did not start (" + r + (r == -1 ? ": a start was already tried in this process" : "") + ")");
+            // Rumble (Game settings, Settings) once the host has its environment and the log (Native.start): its DM_RUMBLE / DM_RUMBLE_GAIN are read then, and the
+            // setup lines reach the game's log. Pads registered before get their vibrator now
+            if (Prefs.rumble(this, id)) { rumble = new Rumble(this); if (!rumble.start()) rumble = null; else for (int p : pads) rumble.route(p); }
             // Whether this game picks its own frame rate (the host's cap status: no rate it can hold), remembered for its Game settings, which then offer no cap.
             // Read once the game has run a while (the host finds the game's limiter after it starts); the in-game panel updates it too
             ui.postDelayed(this::noteOwnRate, 30000);
@@ -528,6 +532,7 @@ public final class GameActivity extends Activity implements SurfaceHolder.Callba
     @Override protected void onDestroy() {
         TextInput.gone(this);
         ui.removeCallbacksAndMessages(null);
+        if (rumble != null) rumble.stopAll();
         if (inputManager != null) inputManager.unregisterInputDeviceListener(this);
         if (audio != null) {
             if (focus != null) audio.abandonAudioFocusRequest(focus);
@@ -684,6 +689,7 @@ public final class GameActivity extends Activity implements SurfaceHolder.Callba
         paused = true;
         Native.lifecycle(4);
         Native.motionStop();
+        if (rumble != null) rumble.stopAll();
         pausedView.setVisibility(View.VISIBLE);
     }
 
@@ -753,7 +759,11 @@ public final class GameActivity extends Activity implements SurfaceHolder.Callba
         Native.deviceRemoved(id); deviceAxes.remove(id);
         if (pads.remove(id)) controls.setGamepad(!pads.isEmpty());
     }
-    private void padConnected(int id) { if (pads.add(id)) controls.setGamepad(true); }
+    private void padConnected(int id) {
+        if (!pads.add(id)) return;
+        controls.setGamepad(true);
+        if (rumble != null) rumble.route(id);
+    }
     @Override public void onInputDeviceChanged(int id) { deviceAxes.remove(id); }
 
     @Override public boolean dispatchKeyEvent(KeyEvent e) {
