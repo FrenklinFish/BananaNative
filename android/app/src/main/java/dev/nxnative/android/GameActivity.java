@@ -337,6 +337,13 @@ public final class GameActivity extends Activity implements SurfaceHolder.Callba
      * FSR, the frame rate cap, the GPU driver, GPU timing, the button labels, the two Vulkan options and the game language. start() and the readiness check (readinessHold) both take it.
      * Returns the GPU driver's line for the log
      */
+    /** The display's refresh rate in whole Hz (60, 90, 120...), 60 when it can't be read */
+    private int displayHz() {
+        android.view.Display d = getDisplay();
+        int hz = d == null ? 60 : Math.round(d.getRefreshRate());
+        return hz >= 30 && hz <= 240 ? hz : 60;
+    }
+
     private String settingsEnv(String id, List<String> env) {
         // Game resolution: the game's own setting, else the main screen's: the window size the host gives the game (window_fn), or the graphics scale and operation
         // mode that give that size (graphics_scale rows), as its profile says (Profile.resolutionEnv); nothing for a game with neither
@@ -345,7 +352,10 @@ public final class GameActivity extends Activity implements SurfaceHolder.Callba
         Lsfg.env(this, env);   // frame generation: the user's Lossless.dll and the settings
         Fsr.env(this, env);   // FSR 1 upscaling (the in-game panel)
         int cap = Prefs.fpsCap(this, id);   // the game's own frame rate cap (its in-game panel, its Game settings), else the main screen's (unset: the profile's fps_target)
-        if (cap >= 0) env.add("DM_FPS_TARGET=" + cap);
+        if (Prefs.paced(id)) {   // speed follows the measured rate: presents on the host's own tick at the display's refresh rate, no interval locking, and a frame limit (Prefs.PACE_CAPS)
+            int pace = Prefs.paceCap(this, id);
+            env.add("DM_PRESENT_INTERVAL=display"); env.add("DM_PRESENT_HZ=" + displayHz()); env.add("DM_FPS_TARGET=0"); env.add("DM_FPS_LIMIT=" + (pace > 0 ? pace : 60));
+        } else if (cap >= 0) env.add("DM_FPS_TARGET=" + cap);
         String gpuNote = GpuDriver.env(this, id, env);   // the game's GPU driver, else the main screen's (DM_VK_DRIVER)
         String ts = Prefs.gpuTs(this, id);   // Game settings › GPU timing; unset: the profile's gpu_timestamps (a DM_NVN_GPU_TS line of env.txt or the game's own lines comes later and wins)
         if (ts != null) env.add("DM_NVN_GPU_TS=" + ts);

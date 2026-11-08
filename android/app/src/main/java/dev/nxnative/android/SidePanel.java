@@ -168,21 +168,37 @@ final class SidePanel extends FrameLayout {
 
         head("Frame rate cap");   // the game's own frame rate; frame generation (below, its own heading) adds frames on top
         caps = new RadioGroup(act);
-        int live = Integer.parseInt(Native.fpsCapStatus().split(" ")[0]), cur = live >= 0 ? live : Prefs.fpsCap(act, game());   // the cap in effect (env.txt or DM_CTL may have set another)
-        for (int i = 0; i < Prefs.FPS_CAPS.length; i++) {
-            int v = Prefs.FPS_CAPS[i];
-            RadioButton b = new RadioButton(act);
-            b.setId(2000 + i);
-            b.setText(v == 0 ? "The game's own" : v + " fps");
-            if (v == cur || v == 0 && cur < 0) b.setChecked(true);   // a cap the launcher does not offer (40, 45 from env.txt or DM_CTL): none checked, the line below says it
-            caps.addView(b);
+        if (Prefs.paced(game())) {   // a frame limit, no locking (Prefs.PACE_CAPS)
+            int cur = Prefs.paceCap(act, game());
+            for (int i = 0; i < Prefs.PACE_CAPS.length; i++) {
+                RadioButton b = new RadioButton(act);
+                b.setId(3000 + i); b.setText(Prefs.paceLabel(Prefs.PACE_CAPS[i]));
+                if (Prefs.PACE_CAPS[i] == cur) b.setChecked(true);
+                caps.addView(b);
+            }
+            caps.setOnCheckedChangeListener((g, id) -> {
+                int v = Prefs.PACE_CAPS[id - 3000];
+                Prefs.fpsCap(act, game(), v);
+                Native.fpsLimitSet(v > 0 ? v : 60);
+                refresh();
+            });
+        } else {
+            int live = Integer.parseInt(Native.fpsCapStatus().split(" ")[0]), cur = live >= 0 ? live : Prefs.fpsCap(act, game());   // the cap in effect (env.txt or DM_CTL may have set another)
+            for (int i = 0; i < Prefs.FPS_CAPS.length; i++) {
+                int v = Prefs.FPS_CAPS[i];
+                RadioButton b = new RadioButton(act);
+                b.setId(2000 + i);
+                b.setText(v == 0 ? "The game's own" : v + " fps");
+                if (v == cur || v == 0 && cur < 0) b.setChecked(true);   // a cap the launcher does not offer (40, 45 from env.txt or DM_CTL): none checked, the line below says it
+                caps.addView(b);
+            }
+            caps.setOnCheckedChangeListener((g, id) -> {
+                int v = Prefs.FPS_CAPS[id - 2000];
+                Prefs.fpsCap(act, game(), v);   // the running game's own cap from now on (the main screen's stays the default of the others)
+                Native.fpsCapSet(v);
+                refresh();
+            });
         }
-        caps.setOnCheckedChangeListener((g, id) -> {
-            int v = Prefs.FPS_CAPS[id - 2000];
-            Prefs.fpsCap(act, game(), v);   // the running game's own cap from now on (the main screen's stays the default of the others)
-            Native.fpsCapSet(v);
-            refresh();
-        });
         box.addView(caps);
         fpsNow = note("");
 
@@ -328,20 +344,24 @@ final class SidePanel extends FrameLayout {
         if (!open) return;
         String[] f = Native.fpsCapStatus().split(" ");
         int cap = Integer.parseInt(f[0]), rates = Integer.parseInt(f[1]), now = Integer.parseInt(f[2]);
-        for (int i = 0; i < Prefs.FPS_CAPS.length; i++) {
-            int v = Prefs.FPS_CAPS[i], bit = v == 15 ? 0 : v == 20 ? 1 : v == 30 ? 2 : 5;   // the host's bits: 15, 20, 30, (40, 45,) 60
-            caps.getChildAt(i).setEnabled(v == 0 || cap >= 0 && (rates & 1 << bit) != 0);
+        if (Prefs.paced(game())) {   // the frame limiter's caps are always available
+            fpsNow.setVisibility(GONE);   // the overlay shows the frame rate, the cap is checked above
+        } else {
+            for (int i = 0; i < Prefs.FPS_CAPS.length; i++) {
+                int v = Prefs.FPS_CAPS[i], bit = v == 15 ? 0 : v == 20 ? 1 : v == 30 ? 2 : 5;   // the host's bits: 15, 20, 30, (40, 45,) 60
+                caps.getChildAt(i).setEnabled(v == 0 || cap >= 0 && (rates & 1 << bit) != 0);
+            }
+            // No cap in this build, or a game that picks its own frame rate: no choices (they would do nothing), one line instead
+            // (rates is 0 too until the game's main is loaded: only a game that presents, now > 0, is known to pick its own)
+            boolean own = cap >= 0 && rates == 0 && now > 0, none = cap < 0 || own;
+            caps.setVisibility(none ? GONE : VISIBLE);
+            if (cap >= 0 && now > 0) Prefs.ownRate(act, game(), own);   // its Game settings hide the cap too
+            String s = cap < 0 ? "This build has no frame rate cap."
+                    : now <= 0 ? "Starting…"
+                    : own ? "This game picks its own frame rate."
+                    : "Now " + now + " fps" + (cap > 0 ? ", capped at " + cap : ", the game's own") + ".";
+            fpsNow.setText(s);
         }
-        // No cap in this build, or a game that picks its own frame rate: no choices (they would do nothing), one line instead
-        // (rates is 0 too until the game's main is loaded: only a game that presents, now > 0, is known to pick its own)
-        boolean own = cap >= 0 && rates == 0 && now > 0, none = cap < 0 || own;
-        caps.setVisibility(none ? GONE : VISIBLE);
-        if (cap >= 0 && now > 0) Prefs.ownRate(act, game(), own);   // its Game settings hide the cap too
-        String s = cap < 0 ? "This build has no frame rate cap."
-                : now <= 0 ? "Starting…"
-                : own ? "This game picks its own frame rate."
-                : "Now " + now + " fps" + (cap > 0 ? ", capped at " + cap : ", the game's own") + ".";
-        fpsNow.setText(s);
         if (lsfgNow != null) { String st = Native.frameGenStatus(); int sp = st.indexOf(' '); lsfgNow.setText("Now: " + (sp > 0 ? st.substring(sp + 1) : st)); }
         removeCallbacks(tick);   // a change calls refresh too: one loop, not one more per change
         postDelayed(tick, 500);

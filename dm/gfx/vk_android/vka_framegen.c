@@ -179,6 +179,8 @@ int vka_fg_frame(uint64_t serial, const int *crop, double period, uint64_t fence
     if (!F.chain || F.ext.width != e.width || F.ext.height != e.height || F.flow != flow) {
         if (!rebuild(e, flow)) { vka_tex_drop(im); unavailable("%s", "the frame generation chain could not be made (see the [RED] lines)"); vka_fps_fg(-1, 1); return 0; }
     }
+    { int nxhost_fps_limit_get(void) __attribute__((weak)); F.pacer.decoupled = &nxhost_fps_limit_get && nxhost_fps_limit_get() > 0;
+      F.pacer.min_base = (float)VKA_ENV("DM_LSFG_MIN_FPS", 30); }   // decoupled: hle_fpslock.c's limiter runs; the floor (live)
     lsfg_plan plan = lsfg_pacer_plan(&F.pacer, LSFG_MAX_GENERATIONS, mult, target, mono_s());
     uint64_t count = F.count++;
     int warm = plan.warm && count + 1 >= 2;
@@ -192,7 +194,13 @@ int vka_fg_frame(uint64_t serial, const int *crop, double period, uint64_t fence
     // DM_VK_FG_REFRESH_CAP=0: no cap (a driver whose display timing reports a refresh the panel does not run at)
     uint64_t rns = VKA_ENV("DM_VK_FG_REFRESH_CAP", 1) ? vka_refresh_ns() : 0; int capped = 0;
     if (ng && rns && period > 0) {
-        double n = period * 1e9 / (double)rns;   // refreshes in a game frame (60 fps on 120.46 Hz: 2.01; on 60.00 Hz: 1.00)
+        // The game's frame period: the present's, or the measured one when longer. With DM_PRESENT_INTERVAL=display (Donkey Kong Bananza's uncapped mode) every present
+        // declares the host's tick (8.3 ms at 120 Hz) whatever the game's own rate, which left no refresh for a generated frame and generation never started
+        double gp = F.pacer.smoothed_interval > period ? F.pacer.smoothed_interval : period;
+        // ... and never shorter than the host's frame limit allows: a game held at 60 on a 120 Hz panel has two refreshes a frame, but its presents ride the tick, so
+        // the measured interval came out at 15.3-15.5 ms (1.85 refreshes, under the 1.9 below) and the one generated frame that fits was refused
+        { int nxhost_fps_limit_get(void) __attribute__((weak)); int lim = &nxhost_fps_limit_get ? nxhost_fps_limit_get() : 0; if (lim > 0 && gp < 1.0 / lim) gp = 1.0 / lim; }
+        double n = gp * 1e9 / (double)rns;   // refreshes in a game frame (60 fps on 120.46 Hz: 2.01; on 60.00 Hz: 1.00)
         size_t fit = n < 1.9 ? 0 : (size_t)(n + 0.1) - 1;
         if (ng > fit) { ng = fit; capped = 1; F.pacer.issued = ng; }   // the pacer counts what was generated (its unloaded rate is measured on frames without)
     }
@@ -233,7 +241,7 @@ int vka_fg_frame(uint64_t serial, const int *crop, double period, uint64_t fence
     if (atomic_exchange(&g_state, st2) != st2 || (st2 == 2 && capped != was_capped)) {
         char why[96]; snprintf(why, sizeof why, "on, the display runs at %.0f Hz: no refresh left for a generated frame", rns ? 1e9 / (double)rns : 0.0);
         reason("%s", st2 == 1 ? "generating" : capped ? why : "on, waiting for a steady frame rate");
-        static int ncap; if (st2 == 2 && capped && ncap++ < 4) VLOG("frame generation: not generating, %s (game frame period %.1f ms)", why + 4, period * 1e3);
+        static int ncap; if (st2 == 2 && capped && ncap++ < 4) VLOG("frame generation: not generating, %s (game frame period %.1f ms, measured %.1f ms)", why + 4, period * 1e3, F.pacer.smoothed_interval * 1e3);
         static int logged; if (st2 == 1 && !logged) { logged = 1; VLOG("frame generation: first %zu generated frame(s), game frame interval %.1f ms", ng, interval * 1e3); }
     }
     was_capped = st2 == 2 && capped;

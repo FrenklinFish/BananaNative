@@ -50,7 +50,11 @@ static void update_limit(lsfg_pacer *p, double now, float base_rate, float targe
         float current_output = fmin_(target_rate, base_rate * (float)(p->limit + 1));
         int throughput_regressed = current_output < previous_output * PROBE_THROUGHPUT_TOLERANCE;
         int collapsed_for_marginal_gain = base_rate < p->probe_base_rate * PROBE_BASE_COLLAPSE_RATIO && current_output < previous_output * PROBE_MARGINAL_GAIN;
-        int emulation_slowed = p->unloaded_base_rate > 0 && base_rate < p->unloaded_base_rate * UNLOADED_BASE_RETENTION;
+        // A base slowed by the generation's own GPU work is a loss where the game locks to 60 / 30 (or would run slower). A decoupled game keeps its speed at any
+        // rate and uses the whole GPU, so any generation slows it: there the probe is kept while the game stays at min_base or more (DM_LSFG_MIN_FPS) (its controls
+        // answer at the base rate) and shows more frames (the two checks above)
+        int emulation_slowed = p->decoupled ? base_rate < p->min_base
+                                            : p->unloaded_base_rate > 0 && base_rate < p->unloaded_base_rate * UNLOADED_BASE_RETENTION;
         if (throughput_regressed || collapsed_for_marginal_gain || emulation_slowed) {
             p->limit = p->probe_previous_limit;
             p->probe_failures = p->probe_failures + 1 < MAX_PROBE_FAILURES ? p->probe_failures + 1 : MAX_PROBE_FAILURES;
@@ -61,6 +65,18 @@ static void update_limit(lsfg_pacer *p, double now, float base_rate, float targe
         p->probe_failures = 0;
         p->next_probe = now + PROBE_STEP_DELAY;
     }
+    // Decoupled: a scene that grows heavier after a probe was kept (a menu at 60 fps, then the level) can push the base under the floor with the generations in place;
+    // probes only ever add, so a generation is taken back once the base stayed under it for DEFICIT_DURATION, and the next probe waits as after a failed one
+    if (p->decoupled && p->limit > 0 && base_rate < p->min_base) {
+        if (!p->below_since) p->below_since = now;
+        else if (now - p->below_since >= DEFICIT_DURATION) {
+            p->limit--; p->below_since = 0; p->deficit_since = 0; p->output_credit = 0;
+            p->probe_failures = p->probe_failures + 1 < MAX_PROBE_FAILURES ? p->probe_failures + 1 : MAX_PROBE_FAILURES;
+            p->next_probe = now + probe_backoff(p->probe_failures);
+        }
+        return;
+    }
+    p->below_since = 0;
     if (base_rate * (float)(p->limit + 1) >= target_rate * TARGET_SATISFIED_RATIO || p->limit >= ceiling) { p->deficit_since = 0; return; }
     if (!p->deficit_since) { p->deficit_since = now; return; }
     if (now - p->deficit_since < DEFICIT_DURATION) return;

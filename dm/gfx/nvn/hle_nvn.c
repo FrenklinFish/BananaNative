@@ -1748,6 +1748,7 @@ static void power_line(uint64_t frame) {
     pt = t; pe = e; pcpu = cpu; pp = p; piw = iw; ppw = idw; pg = g; pf = frame; mtl_bw(&pld, &pst, &pfu); pudc = mtl_udc_saved_bytes();
 #endif
 }
+int nxhost_fps_limit_get(void) __attribute__((weak));   // the host's frame limit (hle_fpslock.c), 0 without one
 static void tsummary(uint64_t frame) {
     char line[1024]; size_t o = 0;
     for (int k = 0; k < 6; k++) {
@@ -1763,6 +1764,12 @@ static void tsummary(uint64_t frame) {
         LOG("[nvn] frame interval up to frame %llu: >%.1fms %u / %u frames, p99 %.2f ms", frame, tgt, over, n, v[(n * 99) / 100 < n ? (n * 99) / 100 : n - 1]); } }
     { unsigned n = g_presn < TWIN ? g_presn : TWIN, k = 0, drop = 0, discard = 0; double v[TWIN];   // on-screen present: dropped frame = on screen longer than its hold × 1.5 (pres_expect_ms) or discarded
       for (unsigned i = 0; i < n; i++) { double x = g_pres_iv[i]; if (x < 0) { drop++; discard++; } else if (x > 0) { v[k++] = x; drop += x > g_pres_exp[i] * 1.5; } }
+      // Paced by the host's frame limiter (hle_fpslock.c; presents on the display's own tick): a frame is held as long as the game takes, so the hold of one present
+      // interval (pres_expect_ms) would call every frame under 60 fps dropped. There a frame counts as dropped when it took 1.5 times the limiter's period or this
+      // window's median, whichever is longer: the hitches, not a steady 36 fps (pres_expect_ms itself stays: the frame step reads it)
+      { int lim = &nxhost_fps_limit_get ? nxhost_fps_limit_get() : 0;
+        if (lim > 0 && k) { double m[TWIN]; memcpy(m, v, k * sizeof *m); qsort(m, k, sizeof *m, dcmp); double e = m[k / 2] > 1000.0 / lim ? m[k / 2] : 1000.0 / lim;
+          drop = discard; for (unsigned i = 0; i < k; i++) drop += v[i] > e * 1.5; } }
       int64_t foot = plat_footprint_bytes(); double fp = foot >= 0 ? foot / 1048576.0 : -1;
       double br = dm_brightness_now();   // footprint / brightness are carried on the on-screen present row: does not depend on the tick-entry observation gate (camp runs have it too)
       if (k) { qsort(v, k, sizeof *v, dcmp); LOG("[nvn] on-screen up to frame %llu: %u frames, dropped %u (discarded %u), p99 %.2f ms; footprint %.0f MiB; brightness %.2f; thermal %d", frame, k + discard, drop, discard, v[(k * 99) / 100 < k ? (k * 99) / 100 : k - 1], fp, br, dm_thermal_now()); }
