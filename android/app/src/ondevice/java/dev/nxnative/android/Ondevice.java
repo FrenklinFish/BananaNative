@@ -388,7 +388,10 @@ final class Ondevice {
             String picked = Folders.pickedPack(a, g.titleId);
             if (picked != null && !picked.equals(g.packDir)) Folders.pickedPack(a, g.titleId, g.packDir);
             a.refresh();
-            android.widget.Toast.makeText(a, g.name + " is ready to play.", android.widget.Toast.LENGTH_LONG).show();
+            long[] miss = j.shadersMissing();   // Try anyway on a game version the profile was not made from: say briefly what it lacks and which version has it all
+            Profile prof = Profile.of(j.titleId());
+            android.widget.Toast.makeText(a, g.name + " is ready to play." + (miss[0] > 0 && prof != null ? " " + PrepareText.missingShadersText(miss[0], miss[1], prof.supportedShort()) : ""),
+                    android.widget.Toast.LENGTH_LONG).show();
         }
 
         /** Play needs the pack (Pack.read: pack.tsv and its modules) and its shader library of this APK's version */

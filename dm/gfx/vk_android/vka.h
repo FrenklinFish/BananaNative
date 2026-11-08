@@ -373,23 +373,13 @@ int vka_shlib_check_all(const vka_shlib *L);   // every module and compute pipel
 int vka_static(VkDeviceSize n, VkDeviceSize align, vka_span *out);   // host-visible memory for the process's life (c1 bytes, the support and zero buffers)
 
 // ---------- Pipelines (vka_pso.c) ----------
-typedef struct {   // what a graphics pipeline is made from beyond its shaders and layout: zero-filled, then compared bytewise
-    uint32_t cfmt[8], dfmt, sfmt;     // attachment formats (VK_FORMAT_UNDEFINED = none)
-    uint8_t ncolor, samples, topo, poly_mode, depth_clamp, a2c, logic_en, logic_op, gl_depth, fs_variant, alpha_func, gs_fx;   // fs_variant: DMSH_VK_MOD_*; alpha_func: NVN_ALPHA_FUNC_* or 0; gs_fx: 1 = the geometry module with the claim (vka_shader_gs_module)
-    uint32_t vin_u, vin_s;            // float vertex inputs fed UINT / SINT formats: retyped in the vertex module (vka_spvpatch.c), by location
-    uint64_t tex_u[5], tex_s[5];      // float textures and images bound to UINT / SINT texture views: retyped in their stage's module (vka_shader_tex_module), by binding range
-                                      // (DMSH_VK_STAGE_BINDINGS each: vertex or mesh, tess control or task, tess evaluation, geometry, fragment) and binding in it
-    struct { uint8_t en, src, dst, op, srca, dsta, opa, mask; } att[8];
-    uint32_t vin_static;              // no vertex input dynamic state: the attributes and bindings below are part of the pipeline
-    struct { uint32_t fmt, offset; uint8_t binding, used, pad[2]; } va[32];   // by location
-    struct { uint32_t stride, divisor; uint8_t used, pad[3]; } vb[33];         // by binding (stream; 32 = the zero buffer of inputs no attribute feeds)
-} vka_gkey;
+#include "vka_gkey.h"   // vka_gkey: what a graphics pipeline is made from beyond its shaders and layout (Vulkan-free: the prewarm list's unit test reads it)
 typedef struct { VkPipelineLayout layout; VkDescriptorSetLayout set0; int push; uint32_t ndesc; } vka_layout;
 int vka_layout_of(vka_shader *const sh[VKA_NSTAGE], int compute, vka_layout *out);   // the set-0 layout of these stages' records with the pools' set 1
 VkPipeline vka_gfx_pipeline(vka_shader *const sh[VKA_NSTAGE], const vka_layout *lay, const vka_gkey *k);
 VkPipeline vka_cs_pipeline(vka_shader *cs, const vka_layout *lay);
 VkPipeline vka_cs_pipeline_img(vka_shader *cs, const vka_layout *lay, uint64_t umask, uint64_t smask);   // with vka_shader_img_module's module; VK_NULL_HANDLE = none (then the base one)
-void vka_pso_save(int force);         // the VkPipelineCache and the prewarm list to the app's files (DM_TEMP): due DM_VK_PCACHE_SAVE_S after the last save, on the saver thread; force = now, on the caller's
+void vka_pso_save(int force);         // the VkPipelineCache and the prewarm list to the app's files (DM_TEMP): due DM_VK_PCACHE_SAVE_S after the last save, on the saver thread; force 1 = now, on the caller's; 2 = after a slow pipeline (due DM_VK_PCACHE_SAVE_SLOW_S)
 void vka_pso_waits(uint64_t *save_ns, uint64_t *pw_wait_ns);   // cumulative: time saving the cache (saver thread), the frame path's waits for a prewarm thread making the same pipeline
 double vka_gpu_span_ms(uint64_t f);   // frame f's submissions from first part's start to last part's end (vka_exec.c); -1 = not in yet
 

@@ -39,7 +39,7 @@ frame rate, and ships so that people can test it and help. Ocarina of Time: only
 Each game is prepared once into a **pack** (its code rewritten for Android, its shaders translated for Vulkan). A
 computer does this much faster than the phone.
 
-First install the APK from [Releases](https://github.com/moceure/BananaNative/releases) and allow **All files access**.
+First install the APK from [Releases](https://github.com/moceure/BananaNative/releases) (or the mirror on [git.eden-emu.dev](https://git.eden-emu.dev/moceure/BananaNative/releases)) and allow **All files access**.
 
 **PC (Windows) or Mac** ([guide](../docs/guides/pc-mac-packing.md)). Mac: tested. Windows: new and not yet tested on a
 real PC — please report how it goes.
@@ -63,9 +63,9 @@ computer is recommended for Mario Kart World (`0400C3F00006E000`).
   [Discussions](https://github.com/moceure/BananaNative/discussions). More: [Troubleshooting](../docs/guides/troubleshooting.md).
 
 > [!IMPORTANT]
-> This GitHub repository is the only official place for Banana Native: download the APK only from
-> [Releases](https://github.com/moceure/BananaNative/releases). Nobody from the project will ask you for money, keys or
-> game files.
+> The official places for Banana Native are this GitHub repository and its mirror on
+> [git.eden-emu.dev](https://git.eden-emu.dev/moceure/BananaNative): download the APK only from their releases. Nobody
+> from the project will ask you for money, keys or game files.
 
 ## Guides
 

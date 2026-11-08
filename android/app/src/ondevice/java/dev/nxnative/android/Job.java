@@ -2,6 +2,7 @@ package dev.nxnative.android;
 
 import android.content.Context;
 
+import org.json.JSONArray;
 import org.json.JSONException;
 import org.json.JSONObject;
 
@@ -234,6 +235,20 @@ final class Job {
         }
     }
 
+    /** Try anyway: {shaders the dump's game version lacks, shaders to build} from the shaders step (PrepareText.missingShaders), {0, 0} when none */
+    synchronized long[] shadersMissing() {
+        JSONArray a = o.optJSONArray("shaders_missing");
+        return a == null ? new long[] {0, 0} : new long[] {a.optLong(0), a.optLong(1)};
+    }
+
+    synchronized void shadersMissing(long n, long of) {
+        try {
+            o.put("shaders_missing", new JSONArray().put(n).put(of));
+        } catch (JSONException e) {
+            throw new IllegalStateException(e);
+        }
+    }
+
     /** What the service read when it paused by itself (PackPolicy.readings), and whether Go on anyway lifts this pause; cleared by the next state */
     synchronized void reasonDetail(String readings, boolean goOn) {
         try {
@@ -394,8 +409,9 @@ final class Job {
         }
         long d = stepDone(i), t = stepTotal(i);
         String part = step(STEPS[i]).optString("stage");   // shader_split.py's "progress: <done>/<total> <n>%" inside a large file
-        return STEP_TEXT[i] + (t > 1 ? String.format(Locale.getDefault(), " %,d / %,d", d, t) : t == 1 || d == 0 ? "" : String.format(Locale.getDefault(), " %,d", d))
-                + (part.matches("\\d+%") ? " (" + part.replace("%", " %") + " of a large file)" : "");
+        // the rewrite's "progress <n> 1000 code" (pack_android.py --in-process: the step's share of each module's rewrite): a percentage, not a count
+        if (part.equals("code") && t > 0) return STEP_TEXT[i] + String.format(Locale.getDefault(), " (%d %%)", Math.min(100, d * 100 / t));
+        return PrepareText.stepCountText(STEP_TEXT[i], STEPS[i].equals("split"), d, t, part);   // the split counts files: "Finding the shaders: 1,203 of 1,890 files"
     }
 
     /** One line for the screen and the notification: what the job is doing or why it stopped */

@@ -311,6 +311,31 @@ final class Pack {
      * NUP.md), for each aoc row: the game's own .nup when it has that addon, else the .nup the row names (relative to the folder holding the game) when it is
      * there, else the game's own
      */
+    /** Makes a symbolic link (GameActivity: Os.symlink, its errno in the message; the JVM tests: Files.createSymbolicLink) */
+    interface Linker { void link(String target, String path) throws IOException; }
+
+    /**
+     * Makes the links of aocLinks in dir, after removing what an earlier run left there. Each target goes through target (a .nup used where it is: fd:&lt;n&gt;/&lt;name&gt;).
+     * Returns one line for each link that could not be made (the game then runs without that DLC): the launcher logs each one as a [RED] line
+     */
+    static List<String> makeAocLinks(File dir, Map<String, String> links, java.util.function.UnaryOperator<String> target, Linker linker) {
+        List<String> failed = new ArrayList<>();
+        File[] old = dir.listFiles();
+        if (old != null) for (File f : old) if (!f.delete()) failed.add("cannot remove " + f + " (left from an earlier run)");
+        for (Map.Entry<String, String> e : links.entrySet()) {
+            String to = target.apply(e.getValue()), at = new File(dir, e.getKey()).getPath();
+            try { linker.link(to, at); } catch (IOException ex) { failed.add("cannot link " + at + " -> " + to + ": " + ex.getMessage()); }
+        }
+        return failed;
+    }
+
+    /** Removes a folder of links (its entries, never what they point to; it holds no subfolders), then the folder; nothing when it is not there */
+    static void removeDir(File dir) {
+        File[] l = dir.listFiles();
+        if (l != null) for (File f : l) f.delete();
+        dir.delete();
+    }
+
     Map<String, String> aocLinks(File game) {
         Map<String, String> out = new LinkedHashMap<>();
         boolean nup = Nup.isNup(game);

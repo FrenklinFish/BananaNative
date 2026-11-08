@@ -80,7 +80,12 @@ function(nxhost_add tgt game)
     COMMAND ${Python3_EXECUTABLE} ${ROOT}/dm/games/game.py header ${game} ${GAME_H}
     DEPENDS ${ROOT}/dm/games/${game}/game.tsv ${ROOT}/dm/games/game.py
     COMMENT "game profile ${game}")
-  add_library(${tgt} SHARED ${HOST_C} ${GFX_C} ${ASM_OUT} ${GAME_H})
+  # The profile's prewarm seed list (vk_prewarm.bin, when it has one) as bytes for the Vulkan replay (vka_pso.c pw_load; dm/gfx/vk_android/vka_pwlist.h). A target that runs at
+  # every build (a seed file added after CMake configured would not be seen by a DEPENDS list); game.py writes the header only when it changes
+  set(SEED_H ${GEN}/${game}/vk_prewarm_seed.h)
+  add_custom_target(${tgt}_seed COMMAND ${Python3_EXECUTABLE} ${ROOT}/dm/games/game.py seed ${game} ${SEED_H} BYPRODUCTS ${SEED_H} COMMENT "prewarm seed ${game}")
+  add_library(${tgt} SHARED ${HOST_C} ${GFX_C} ${ASM_OUT} ${GAME_H} ${SEED_H})
+  add_dependencies(${tgt} ${tgt}_seed)
   target_include_directories(${tgt} PRIVATE ${GEN}/${game} ${GFX}/nvn/include ${TP}/vulkan-headers/include ${TP}/libvpx ${TP}/libvpx/config ${TP}/dav1d/include ${TP}/stb_vorbis ${HOST})
   # DM_NUP_ZSTD: compressed files of a NUP container are decompressed with zstddec (dm/host/nup_image.h)
   target_compile_definitions(${tgt} PRIVATE _GNU_SOURCE DM_NUP_ZSTD $<$<BOOL:${NX_LSFG}>:NX_LSFG>)

@@ -1,6 +1,6 @@
-# The packer for the Android app (scripts/pack_android.py, scripts/pack_gui.py) on macOS and Windows: Python 3.14 (zstd) with Tk for the window, Capstone 5 and lz4
-# for the rewriter, SPIRV-Tools' spirv-val and the .NET 10 runtime for the shader build. scripts/bananative.command (macOS) and scripts/bananative.bat (Windows) make it
-# on first use; by hand, on the dump drive:
+# The packer for the Android app (scripts/pack_android.py, scripts/pack_gui.py) on macOS and Windows: Python 3.14 (zstd) with Tk for the window, Capstone 5, lz4 and
+# zbic (the ZBIC segments of system 22.0.0+ modules; PyPI has wheels for macOS and Windows) for the rewriter, SPIRV-Tools' spirv-val and the .NET 10 runtime for the
+# shader build. scripts/bananative.command (macOS) and scripts/bananative.bat (Windows) make it on first use; by hand, on the dump drive:
 #   micromamba create -p <dump drive>/bananative-env -f android/environment.yml
 name: bananative
 channels: [conda-forge]
@@ -12,3 +12,4 @@ dependencies:
   - pip:
       - capstone>=5,<6
       - lz4
+      - zbic==1.0.1.post1

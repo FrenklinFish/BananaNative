@@ -170,19 +170,47 @@ def upgrade_keys(srcs, out, g):
             print(f'  {m}: key brought to the current formula (same rewrite)')
 
 
+def nso_text_size(path):   # the module's code segment, decompressed (NSO header +0x18): what the rewriter's time follows
+    with open(path, 'rb') as f: b = f.read(0x20)
+    return int.from_bytes(b[0x18:0x1C], 'little') if b[:4] == b'NSO0' else 0
+
+
 def nso_build_id(path):   # the module's build ID (NSO header +0x40), as the profile's build rows name it
     b = path.read_bytes()[:0x60]
     if b[:4] != b'NSO0': raise Error(f'{path}: not an NSO')
     return b[0x40:0x50].hex()
 
 
-def run_in_process(script, args, env, log):
+def nso_zbic(path):   # whether the module's segments are ZBIC (NSO flag bit 7, system 22.0.0 on), which nso.py needs a decoder for (nso.zbic_decoder)
+    b = path.read_bytes()[:0x10]   # read_bytes: a module inside a .nup is a path of its own kind, as in nso_build_id
+    return b[:4] == b'NSO0' and bool(int.from_bytes(b[0xc:0x10], 'little') & 0x80)
+
+
+class ProgressTee:
+    """A tool's output stream in run_in_process: everything to the file f; its "progress <done> <total> ..." lines also to out (this script's own output, the
+    step log Prepare reads), as "progress <n> 1000 code" with the tool's fraction placed in [base, base + width) of the step's 1000"""
+    def __init__(self, f, out, base, width): self.f, self.out, self.base, self.width, self.part = f, out, base, width, ''
+    def write(self, s):
+        self.f.write(s)
+        self.part += s
+        while '\n' in self.part:
+            line, self.part = self.part.split('\n', 1)
+            w = line.split()
+            if len(w) >= 3 and w[0] == 'progress' and w[1].isdigit() and w[2].isdigit() and int(w[2]):
+                print(f'progress {self.base + self.width * min(int(w[1]), int(w[2])) // int(w[2])} 1000 code', file=self.out, flush=True)
+        return len(s)
+    def flush(self): self.f.flush()
+    def isatty(self): return False
+
+
+def run_in_process(script, args, env, log, progress=None):
     """script run as `python3 script args` would run it, in this process: its sys.argv, env added to os.environ, stdout and stderr to the file log;
-    everything put back after it (the modules it imported from outside the standard library are dropped, so the next run starts afresh). → its exit code"""
+    everything put back after it (the modules it imported from outside the standard library are dropped, so the next run starts afresh). → its exit code.
+    progress: (base, width) to pass the tool's progress lines on to this script's output (ProgressTee)"""
     saved = (sys.argv, list(sys.path), dict(os.environ), set(sys.modules), sys.stdout, sys.stderr, os.getcwd())
     code = 0
     with open(log, 'w', buffering=1, encoding='utf-8', errors='backslashreplace') as f:
-        sys.stdout = sys.stderr = f
+        sys.stdout = sys.stderr = ProgressTee(f, saved[4], *progress) if progress else f
         try:
             os.environ.update(env); sys.argv = [str(script)] + [str(a) for a in args]; sys.path.insert(0, str(Path(script).parent))
             runpy.run_path(str(script), run_name='__main__')
@@ -239,17 +267,25 @@ def rewrite(py, srcs, out, jobs, g, in_process=False):
         todo[m] = (src, key)
     for m in todo: (out / f'{m}.android.key').unlink(missing_ok=True)   # every module to rewrite is unfinished from here on: no mix of old and new modules passes
     if in_process:
+        # Prepare's bar (the phone's rewrite step): each module a share of the step's 1000 by the size of its code, the rewriter's progress lines placed in it
+        files = {m: rewriter_src(src, out, m) for m, (src, key) in todo.items()}
+        size = {m: max(1, nso_text_size(f)) for m, f in files.items()}
+        base, total = 0, sum(size.values())
+        if todo: print('progress 0 1000 code', flush=True)
         for m, (src, key) in todo.items():
             kf = out / f'{m}.android.key'; kf.unlink(missing_ok=True)
             shutil.rmtree(staging(out, m), ignore_errors=True)
             print(f'  {m}: rewriting {src} (in process)', flush=True)
             t0 = time.monotonic()
-            rc = run_in_process(REPO / 'dm/tools/patch_nso.py', [str(rewriter_src(src, out, m)), staging(out, m), m, '--target', 'android'], {'DM_GAME': g.id, 'DM_REWRITE_J': '1'}, out / f'rewrite_{m}.log')
+            width = 1000 * size[m] // total
+            rc = run_in_process(REPO / 'dm/tools/patch_nso.py', [str(files[m]), staging(out, m), m, '--target', 'android'], {'DM_GAME': g.id, 'DM_REWRITE_J': '1'}, out / f'rewrite_{m}.log', (base, width))
             if rc:
                 tail = (out / f'rewrite_{m}.log').read_text(errors='replace').splitlines()[-20:]
                 raise Error(f'patch_nso.py exit code {rc} on {m}:\n' + '\n'.join(tail))
             swap_in(out, m, key)
+            base += width
             print(f'  {m}: done ({time.monotonic() - t0:.1f} s)', flush=True)
+        if todo: print('progress 1000 1000 code', flush=True)
         return
     procs = {}
     try:
@@ -333,7 +369,7 @@ def split_shaders(a, g, vdir, pkg, parts=None):   # parts: the version's (romfs,
     py = shader_python(a.shader_python, split=True)
     tmp = pkg.with_name(pkg.name + '.tmp'); shutil.rmtree(tmp, ignore_errors=True); tmp.mkdir(parents=True)
     print(f'shaders: splitting the shaders out of {rd} into {pkg} with {py} (a few minutes)', flush=True)
-    env = child_env(DM_GAME=g.id)
+    env = child_env(DM_GAME=g.id, DM_SPLIT_TARGETED='1')   # as the phone: only the files the profile's map names, when the build is the profile's and the tables come out the same
     r = subprocess.run([py, str(SPLIT), str(rd), str(ed / 'main'), str(tmp / 'pkg'),
                         *[str(tmp / f) for f in ('shader_map.tsv', 'shader_facts.tsv', 'shader_pairs.tsv', 'pso_pairs.tsv')]], env=env)
     if r.returncode: raise Error(f'shader_split.py exit code {r.returncode}')
@@ -424,6 +460,11 @@ def main():
         mods = g.words('modules')
         srcs = {m: exe / m for m in mods}
         if missing := [m for m in mods if not srcs[m].is_file()]: raise Error(f'{exe}: no {", ".join(missing)} (the profile\'s modules are {" ".join(mods)})')
+        if not a.keep_code and (zb := [m for m in mods if nso_zbic(srcs[m])]):
+            sys.path.insert(0, str(REPO / 'dm/tools')); import nso   # its ZBIC decoder, checked here so a missing one fails before any work
+            try: ok = nso.zbic_decoder()
+            except nso.Error as e: raise Error(f'{" ".join(zb)}: ZBIC-compressed (system 22.0.0+): {e}') from None
+            if not ok: raise Error(f'{" ".join(zb)}: ZBIC-compressed (system 22.0.0+), and {sys.executable} has no decoder: {nso.ZBIC_MISSING} (android/README.md)')
         out = (a.out or folder.parent / f'{app:016X}-work' / 'android-pack').resolve()
         try: out.relative_to(REPO); raise Error(f'{out} is inside the repository: packs never go there')
         except ValueError: pass

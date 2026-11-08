@@ -56,6 +56,12 @@
 #   A RomFS or main may be in a NUP file (android/NUP.md): `game.nup:update/458752/romfs` and `game.nup:update/458752/exefs/main`, read in place through romfs.py; a RomFS given
 #   as `game.nup` or `game.nup:<selector>` is that package's romfs (the highest update's, else the base's, for a bare file)
 #   Environment DM_SPLIT_RESUME=<dir>: the scan resumes by file (ScanCache): a split stopped part way (the phone's thermal or battery pauses, a kill, a reboot) scans again only the files it had not finished
+#   Environment DM_SPLIT_TARGETED=1 (the phone's split, PackService; pack_android.py's): when each main's build is one of the profile's build rows, only the RomFS files its
+#   shader_map.tsv names (a member's source: the RomFS file it is in) and its shader_files.tsv lists are scanned, and that result is kept only when its tables are the profile's
+#   byte for byte; otherwise, or when the profile has no map, every file is scanned, with a 'targeted split: not taken, <why>' line (profile_files, profile_differs). The
+#   outputs are the full scan's either way. With DM_SPLIT_RESUME the two scans keep their results apart (<dir>/targeted, <dir>/full), and a targeted scan that differed is
+#   not tried again on the same inputs (<dir>/targeted.failed)
+#   Environment DM_SPLIT_FILES=<file>: also write the RomFS files any shader was found in, first appearances or not (a profile's shader_files.tsv, from a full split)
 #   Environment DM_SPLIT_SELECTED=1 (the phone's split of a profile with a selected set, PackService): the package keeps the code of only the profile's shader_seen.tsv keys and the pixel
 #   shaders paired with them (what vk_android_build.py builds from a key list); every other shader's record is empty (KEEP, Shaders). The tables (shader_map.tsv ...) are those of a full split
 # Memory: the shaders are deduplicated by key as they are found (Shaders), and a large compressed container is inflated into a temporary file rather than memory (idrk_shaders); a file of
@@ -297,8 +303,9 @@ def sead_prim_shaders(d, label):
 
 def ndsr_shaders(d, label):
     """agl's NDSR pack (Lib/agl/agl_resource.*.sarc.zs agl_ndsr.pck, Donkey Kong Bananza: the dynamic super-resolution upscaler that writes the frame's output): 'NDSR', then from +0x10
-    16-byte records up to a zero one: u32 control section offset, u32 (control length << 4 | type), u32 code area offset, u32 (code length / 16 << 8 | type). Records whose first word
-    is an NVN2 control section are shaders (types 0 / 3 graphics, 6 compute; a vertex record is followed by its pixel record); the others (type 0xb, 0x50c) hold constant data.
+    8-byte entries up to a zero one: u32 offset, u32 (length << 4 | type). A shader is an entry that points at an NVN2 control section (types 0 / 3 graphics, 6 compute; a vertex
+    shader is followed by its pixel shader) followed by its code area's entry (code length / 16 << 8 | type); the others (types 9-0xe) hold constant data. Data entries come
+    alone as well as in pairs: Ocarina of Time's agl_ndsr_vr*.pck have one between two compute shaders, so a walk in 16-byte records lost the shader after it (d17eefaff4f0bc23).
     The control section's stage byte (+0x56) and its code length (+0x44) decide the stage and the code area, as for BNSH.
     The records start at +0x14 in Splatoon Raiders' pack, whose header has another word and other values (+4 0x40100, against 0x300 in Bananza's), so the start is the one whose first
     records point at control sections. Read from +0x10 the same pack gave no shader, the upscaler's draws were skipped and every 3D frame reached the window black"""
@@ -307,11 +314,12 @@ def ndsr_shaders(d, label):
         count = min(16, (len(d) - o) // 16)   # complete records only: the two starts leave different remainders in a short pack (from upstream seedds/nxnative ff33639c)
         return sum(1 for c, _, _, _ in struct.iter_unpack('<4I', d[o:o + 16 * count]) if c + 0x48 <= len(d) and nvn2_ctl(d[c:c + 0x48]))
     out = []; o = max((0x10, 0x14), key=records_from); prog = None
-    while o + 16 <= len(d):
-        c, cl, k, _ = struct.unpack_from('<4I', d, o)
+    while o + 8 <= len(d):
+        c, cl = struct.unpack_from('<2I', d, o)
         if not c and not cl: break
-        o += 16
-        if not (c + 0x48 <= len(d) and nvn2_ctl(d[c:c + 0x48])): continue
+        o += 8
+        if not (c + 0x48 <= len(d) and nvn2_ctl(d[c:c + 0x48])) or o + 8 > len(d): continue
+        k = struct.unpack_from('<I', d, o)[0]; o += 8   # the code area's entry
         ctl = d[c:c + max(cl >> 4, 0x48)]
         code = d[k:k + struct.unpack_from('<I', ctl, 0x44)[0]]
         st = nvn2_stage(ctl, code)
@@ -3126,9 +3134,94 @@ def main():
         tag = 'aoc/' + (name.removesuffix('.img') if is_image(romfs) else name)
         files += sorted(((os.path.join(dp, f), tag + '/' + posix_rel(os.path.join(dp, f), romfs)) for dp, _, fs in os.walk(romfs) for f in fs), key=lambda t: t[1])   # by the '/' path: the same order on every system
     zdicts = {k: v for r in romfs_v + dlc_v for k, v in zs_dicts(r).items()}   # Tears of the Kingdom's zstd dictionaries (zs_dicts)
-    keys = {}
-    # First pass: every file; Unity bundles carry type trees, and the Shader trees are collected on the way. Second pass: Unity serialized files without type trees are scanned again with the borrowed trees
     J = int(os.environ.get('J', '8'))
+    rd = os.environ.get('DM_SPLIT_RESUME')   # the phone's split (PackService): kept results from a stopped run
+    inputs = sys.argv[1:3] + sys.argv[8:]   # the inputs only (RomFS, main and DLC; not the output paths), and main's size and time with the jobs: main gives Unity's common strings to every scan
+    mains = [(m, 'main') for m in main_v]
+    targeted = os.environ.get('DM_SPLIT_TARGETED') == '1'
+    out = None
+    if targeted:
+        want, why = profile_files(files, main_v)
+        if rd:   # the targeted and the full scan keep their results apart, so a full scan the targeted one fell back to resumes as the full scan
+            os.makedirs(rd, exist_ok=True)
+            for f in os.listdir(rd):
+                if f not in ('targeted', 'full', 'targeted.failed'): _remove(os.path.join(rd, f))   # an older split's results, kept in the folder itself
+        if want is not None:
+            big, todo = scan_jobs(files, want)
+            dg = scan_digest(inputs, big + todo + mains)
+            failed = os.path.join(rd, 'targeted.failed') if rd else None
+            if failed and os.path.isfile(failed) and open(failed).read().strip() == dg: why = 'an earlier run on these inputs found the targeted scan\'s tables differ from the profile\'s'
+            else:
+                print(f'targeted split: {len(want):,} of {len(files):,} RomFS files hold the shaders of the profile\'s shader_map.tsv (main build {", ".join(build_id(m) for m in main_v)}); only these are scanned', flush=True)
+                try:
+                    out = split_tables(list(results), big, todo, dumps, J, common, zdicts, ScanCache(os.path.join(rd, 'targeted'), dg) if rd else None, targeted=True)
+                    why = profile_differs(out, pairsout, psopairsout)
+                except Fallback as e: why = str(e)
+                if why:
+                    out = None; why = 'the targeted scan ' + why
+                    if failed:
+                        with open(failed, 'w') as f: f.write(dg + '\n')
+                else: print('targeted split: its tables are the profile\'s, byte for byte', flush=True)
+        if out is None: print(f'targeted split: not taken, {why}: every file is scanned', flush=True)
+    if out is None:
+        big, todo = scan_jobs(files)
+        cd = (os.path.join(rd, 'full') if targeted else rd) if rd else None
+        out = split_tables(list(results), big, todo, dumps, J, common, zdicts, ScanCache(cd, scan_digest(inputs, big + todo + mains)) if cd else None)
+    write_outputs(out, pkg, mapout, factsout, pairsout, psopairsout)
+
+class Fallback(Exception): pass   # the targeted scan cannot give the full scan's outputs (split_tables)
+
+def build_id(path):
+    """An NSO's build ID as game.tsv's build rows write it: the first 16 of the 32 bytes at header +0x40, in hex; None when it is not an NSO"""
+    with open(path, 'rb') as f: h = f.read(0x60)
+    return h[0x40:0x50].hex() if len(h) >= 0x60 and h[:4] == b'NSO0' else None
+
+NOT_ROMFS = ('/glslc_capture/', '/ue_shaders/', '/nvn_shdump')   # map sources that are no RomFS file (main's have no leading '/'): main() reads them on every run
+
+def profile_files(files, main_v):
+    """DM_SPLIT_TARGETED=1 (the phone's split, pack_android.py's): the RomFS files that hold the shaders of the profile's shader_map.tsv, when each main's build is one
+    of the profile's build rows. A map row's source names where its key first appears: a RomFS file, or a member inside one ('/Lib/agl/agl_resource.sarc.zs/agl_technique_pfx.sharcb#BAHS@...'
+    is in the RomFS file Lib/agl/agl_resource.sarc.zs), with the scan's version tags (v327680/..., aoc/...). Its file is the prefix of the source, ending at a '/' or '#'
+    or the end, that is a file of the dump. With them the files of the profile's shader_files.tsv, when it has one. → ({relative path}, None), or (None, why the
+    targeted scan is not taken)"""
+    m = GAME.table('shader_map.tsv')
+    if not os.path.isfile(m): return None, 'the profile has no shader_map.tsv'
+    builds = {b.get('main') for b in GAME.builds().values()} - {None}
+    for p in main_v:
+        b = build_id(p)
+        if b not in builds: return None, f'main\'s build {b} is not one the profile was made from ({", ".join(sorted(builds)) or "it has no build rows"})'
+    srcs = set()
+    with open(m, encoding='utf-8') as f:
+        for ln in f:
+            c = ln.rstrip('\n').split('\t')
+            if len(c) > 4 and c[0].endswith('.bin') and c[4].startswith('/') and not c[4].startswith(NOT_ROMFS): srcs.add(c[4][1:])
+    rels, want = {r for _, r in files}, set()
+    for s in srcs:
+        r = next((s[:i] for i in [i for i, ch in enumerate(s) if ch in '/#'] + [len(s)] if s[:i] in rels), None)
+        if r is None: return None, f'the profile\'s shader_map.tsv names /{s}, and the dump has no such file'
+        want.add(r)
+    # the files that hold only copies of shaders found earlier name no row's source, but their variations can pair them anew (Donkey Kong Bananza: 42 of its 15,576
+    # pairs): the profile's shader_files.tsv (a full split's, DM_SPLIT_FILES) lists every file a shader was found in. One it names that the dump lacks is passed over:
+    # the comparison with the profile's tables decides
+    fl = GAME.table('shader_files.tsv')
+    if os.path.isfile(fl):
+        with open(fl, encoding='utf-8') as f: want |= {r for ln in f if not ln.startswith('#') and (r := ln.rstrip('\n')) in rels}
+    return want, None
+
+def profile_differs(t, pairsout, psopairsout):
+    """None when each table the targeted scan made is the profile's byte for byte (the profile's tables are a full scan's of the same build), else which is not.
+    A file that holds only shaders found earlier is named in no row's source, but its variations can still pair them (var_pairs, mesh_facts): unless the profile's
+    shader_files.tsv lists it, the targeted scan leaves it out, and this comparison sends such a dump to the full scan. A table the profile does not have is not compared"""
+    for name, text in (('shader_map.tsv', t['map']), ('shader_facts.tsv', t['facts']), ('shader_pairs.tsv', t['pairs'] if pairsout else None), ('pso_pairs.tsv', t['pso'] if psopairsout else None)):
+        p = GAME.table(name)
+        if text is None or not os.path.isfile(p): continue
+        with open(p, 'rb') as f:
+            if f.read() != text.encode(): return f'made a {name} that differs from the profile\'s'
+    return None
+
+def scan_jobs(files, want=None):
+    """The scan's jobs: (archive ranges, the other files). Each archive kind's index sees every file (a PAK's newest copy of a path, an index beside its data); with
+    want, only the jobs of those files are kept, in the full scan's order"""
     big = [j for p, r in files for j in (linkdata_jobs(p, r) or [])]   # Three Houses' 6.9 GB DATA1.bin: one job per range of entries, not one read of the whole file
     pak_jobs, paks = kpka_jobs(files)   # Monster Hunter Rise's PAKs: the newest copy of each path, in ranges of entries
     tr_jobs, trp = trpfs_jobs(files)   # Pokémon Legends: Z-A's Trinity packs (data.trpfs and its index data.trpfd), decoded by the game's own Oodle in the Mac host
@@ -3142,9 +3235,14 @@ def main():
     fb_jobs, fbs = frostbite_jobs(files)   # EA SPORTS FC 27's Frostbite bundles, Oodle Leviathan decoded by the game's own decoder in the Mac host
     big += pak_jobs + tr_jobs + ue_jobs + bd_jobs + arc_jobs + pz_jobs + ck_jobs + zp_jobs + ah_jobs + fb_jobs
     files = [(p, r) for p, r in files if not linkdata_jobs(p, r) and p not in paks and p not in trp and p not in uep and p not in bdts and p not in arcs and p not in pkzs and p not in cpks and p not in zips and p not in arhs and p not in fbs]
-    rd = os.environ.get('DM_SPLIT_RESUME')   # the phone's split (PackService): kept results from a stopped run
-    # the inputs only (RomFS, main and DLC; not the output paths), and main's size and time with the jobs: main gives Unity's common strings to every scan
-    cache = ScanCache(rd, scan_digest(sys.argv[1:3] + sys.argv[8:], big + files + [(m, 'main') for m in main_v])) if rd else None
+    if want is not None: big, files = [j for j in big if j[1] in want], [f for f in files if f[1] in want]
+    return big, files
+
+def split_tables(results, big, files, dumps, J, common, zdicts, cache, targeted=False):
+    """Scans the jobs (results: main's, which come first) → the split's outputs, the tables as text: {'keys', 'order', 'rows', 'map', 'facts', 'pairs', 'pso', 'files', 'npairs', 'bad', 'summary'}.
+    targeted: Fallback when a Unity serialized file wants a type tree, which a bundle the scan left out may lend"""
+    keys = {}
+    # First pass: every file; Unity bundles carry type trees, and the Shader trees are collected on the way. Second pass: Unity serialized files without type trees are scanned again with the borrowed trees
     with pool(J, common, {}, zdicts) as ex:
         n = len(big) + len(files)
         results += pooled(ex, big, n, cache=cache) + pooled(ex, files, n, len(big), chunk=16, cache=cache)
@@ -3152,6 +3250,7 @@ def main():
     for rel, uniq, pr, extra in results:
         if extra == 'defer': defer.append(rel)
         elif isinstance(extra, dict): trees.update(extra)
+    if defer and targeted: raise Fallback(f'found Unity serialized files without type trees ({defer[0]}), whose trees may come from files it left out')
     if defer:
         # a hash no bundle supplied takes the layout unityfs.py has for it (KNOWN_TREES); only here, so files a bundle lends a tree to keep their place in the tables (Ace Attorney's built-ins)
         import unityfs
@@ -3166,8 +3265,8 @@ def main():
         dumps = [d for d in dumps if skey(d[2], d[3]) not in have]
         results.append(('nvn_shdump', last_entries(dumps), var_pairs(dumps), {}))
     bad = [extra[1] for *_, extra in results if isinstance(extra, tuple)]
-    if bad: print(f'[RED] {len(bad)} file(s) could not be read, their shaders are left out (first: {bad[0]})', flush=True)   # build_ipa_from_nsp.py reads this line
-    for why in bad: print(f'unreadable: {why}', flush=True)   # each one, also those a resumed split kept: the phone's shaders step says why the map differs (PackService.splitMatchesProfile)
+    scanned = {r for _, r, *_ in big + files}
+    holding = list(dict.fromkeys(rel for rel, uniq, pr, _ in results if (uniq or pr) and rel in scanned))   # the files any shader was found in (DM_SPLIT_FILES), in scan order
     per_src = collections.Counter(); pairs = set()
     for rel, uniq, pr, _ in results:
         pairs |= pr
@@ -3176,67 +3275,79 @@ def main():
                 if keys[key][4][0] != v[4][0]: red(f'key {key} is the same but the control section or code area differs ({v[0]} / {keys[key][0]})')
                 continue
             keys[key] = v; per_src[group(v[0])] += 1
+    del results
     mesh_pairs = {x for x in pairs if x[2:] in (('mesh',), ('task',))}; pairs -= mesh_pairs
     prog = {(a, b) for a, b, *t in pairs if t} - pairs; pairs = {x for x in pairs if len(x) == 2}
     sp, cover = separable_pairs(keys); pairs |= sp
     if cover: print(f'single-stage programs: {len({v for v, _ in sp}):,} vertex shaders are paired with a cover of {len(cover)} pixel shader(s) ({" ".join(cover)})')
-    os.makedirs(pkg, exist_ok=True)
-    for f in os.listdir(pkg):
-        if f.endswith('.bin'): os.unlink(os.path.join(pkg, f))
     order = sorted(keys, key=lambda k: (group(keys[k][0]), keys[k][0], k))   # the same input gives byte-identical output
     for key in order:
         if keys[key][4][1]: red(f'key {key}: {keys[key][4][1]}')
-    recs = collections.Counter(); outs = {}; rows = []; facts = {}; stat = collections.Counter(); kept = 0
+    recs = collections.Counter(); rows = []; facts = {}; stat = collections.Counter()
+    for key in order:
+        where, st, ctl, code, _ = keys[key]
+        name = f'{st}_{group(where)}.bin'
+        rows.append((name, recs[name], STAGE_NAME[st], key, where)); recs[name] += 1; stat[st] += 1
+        if st == 'cs':
+            # NVN2: the thread group at +0x58 (32 1 1 in Donkey Kong Bananza's effects); shared memory taken from +0x64, not yet seen nonzero (unverified)
+            at = (0x58, 0x64) if nvn2_ctl(ctl) else (0x748, 0x754)
+            x, y, z = struct.unpack_from('<3I', ctl, at[0]); sh = struct.unpack_from('<I', ctl, at[1])[0]
+            if not x * y * z: red(f'compute shader {key}: control +{at[0]:#x} thread group is 0 ({where})')
+            facts[key] = {'local': [x, y, z], 'shared': (sh + 15) // 16 * 16}
+        if st in ('ts', 'ms'): facts[key] = mesh_facts(key, st, ctl, code, keys, mesh_pairs)
+    kinds = ' / '.join(k for k, hit in (('BNSH / BAHS', any('#BNSH@' in r[4] or '#BAHS@' in r[4] for r in rows)), ('Unity Shader', any('#var' in r[4] and '#BNSH@' not in r[4] and '#MSHD#' not in r[4] and '#SDF#' not in r[4] and '#GLSLC@' not in r[4] and '#SNVN@' not in r[4] for r in rows)),
+                                        ('Retro Studios SNVN', any('#SNVN@' in r[4] for r in rows)),
+                                        ('MSHD', any('#MSHD#' in r[4] for r in rows)), ('GLSLC', any('#GLSLC@' in r[4] for r in rows)), ('RE Engine SDF', any('#SDF#' in r[4] for r in rows)),
+                                        ('MT Framework SPK', any('#MTSPK@' in r[4] for r in rows)), ('MonoGame MGFX', any('#MGFX@' in r[4] for r in rows)),
+                                        ('PlatinumGames shader objects', any('#PGSO' in r[4] for r in rows)),
+                                        ('Snowdrop shader objects', any('#SNOWDROP@' in r[4] for r in rows)),
+                                        ('Unreal Engine shader code archives', any('#UE' in r[4] for r in rows))) if hit)
+    tmap = (f'# kind: evidence  {NOTE} ({kinds} in RomFS + main) → control section + code area keys (dm/gfx/tools/shader_split.py)\n'
+            '# column 5 records where each key first appears; no PC shader pairing supplied\n'
+            'package\tindex\tstage\tdm_ctl_sha16\tsource\n' + ''.join('\t'.join(map(str, r)) + '\n' for r in rows))
+    # Hand-written facts the machine code cannot give (the profile's shader_facts_manual.tsv, same row format) are merged over the generated ones, so the table stays reproducible
+    manual = GAME.table('shader_facts_manual.tsv')
+    if os.path.exists(manual):
+        for ln in open(manual):
+            if ln.strip() and not ln.startswith('#'): k, v = ln.rstrip('\n').split('\t', 1); facts[k] = {**facts.get(k, {}), **json.loads(v)}
+    tfacts = ('# Answer table for translation queries (generated by dm/gfx/tools/shader_split.py, do not edit): key <TAB> fact JSON. No PC shader pairing supplied: only the thread group / shared memory of compute shaders (taken from the control section); other queries get the translator defaults\n'
+              + ''.join(k + '\t' + json.dumps(facts[k], sort_keys=True, separators=(',', ':')) + '\n' for k in sorted(facts)))
+    tpairs = ('# kind: evidence  vertex / pixel shader pairs within BNSH variations (generated by dm/gfx/tools/shader_split.py, do not edit): vertex key <TAB> pixel key\n'
+              + ''.join(f'{a}\t{b}\n' for a, b in sorted(pairs)))
+    tpso = ('# kind: evidence  supplemental vertex / pixel shader pairs (BAHS program variations and legacy Unity pass-input covers) for vertex output padding and the pipeline prebuild (generated by dm/gfx/tools/shader_split.py, do not edit): vertex key <TAB> pixel key\n'
+            + ''.join(f'{a}\t{b}\n' for a, b in sorted(prog - pairs)))
+    summary = (f'shaders: {len(rows)} (' + ', '.join(f'{STAGE_NAME[s]} {n}' for s, n in sorted(stat.items())) + '); sources ' + ', '.join(f'{g} {n}' for g, n in per_src.most_common())
+               + f'; compute shader answers {len(facts)} rows')
+    tfiles = ('# kind: evidence  the RomFS files the split found shaders in, first appearances or not (generated by dm/gfx/tools/shader_split.py with DM_SPLIT_FILES, do not edit): '
+              'the targeted split reads these and the files shader_map.tsv names\n' + ''.join(r + '\n' for r in holding))
+    return {'keys': keys, 'order': order, 'rows': rows, 'map': tmap, 'facts': tfacts, 'pairs': tpairs, 'pso': tpso, 'files': tfiles, 'npairs': len(pairs), 'bad': bad, 'summary': summary}
+
+def write_outputs(t, pkg, mapout, factsout, pairsout, psopairsout):
+    """The package (each record written as it is made: the package is never in memory whole) and the tables of split_tables"""
+    bad = t['bad']
+    if bad: print(f'[RED] {len(bad)} file(s) could not be read, their shaders are left out (first: {bad[0]})', flush=True)   # build_ipa_from_nsp.py reads this line
+    for why in bad: print(f'unreadable: {why}', flush=True)   # each one, also those a resumed split kept: the phone's shaders step says why the map differs (PackService.splitMatchesProfile)
+    keys = t['keys']
+    os.makedirs(pkg, exist_ok=True)
+    for f in os.listdir(pkg):
+        if f.endswith('.bin'): os.unlink(os.path.join(pkg, f))
+    outs = {}; kept = 0
     try:
-        for key in order:   # each record written as it is made: the package is never in memory whole
-            where, st, ctl, code, (_, _, whole) = keys[key]
-            name = f'{st}_{group(where)}.bin'
+        for (name, *_), key in zip(t['rows'], t['order']):
+            _, _, ctl, code, (_, _, whole) = keys[key]
             if name not in outs: outs[name] = open(os.path.join(pkg, name), 'wb')
             outs[name].write(package_record(ctl, code) if whole else EMPTY_RECORD); kept += whole
-            rows.append((name, recs[name], STAGE_NAME[st], key, where)); recs[name] += 1; stat[st] += 1
-            if st == 'cs':
-                # NVN2: the thread group at +0x58 (32 1 1 in Donkey Kong Bananza's effects); shared memory taken from +0x64, not yet seen nonzero (unverified)
-                at = (0x58, 0x64) if nvn2_ctl(ctl) else (0x748, 0x754)
-                x, y, z = struct.unpack_from('<3I', ctl, at[0]); sh = struct.unpack_from('<I', ctl, at[1])[0]
-                if not x * y * z: red(f'compute shader {key}: control +{at[0]:#x} thread group is 0 ({where})')
-                facts[key] = {'local': [x, y, z], 'shared': (sh + 15) // 16 * 16}
-            if st in ('ts', 'ms'): facts[key] = mesh_facts(key, st, ctl, code, keys, mesh_pairs)
     finally:
         for f in outs.values(): f.close()
     sel = os.path.join(pkg, 'selected.txt')   # the keys whose code the package holds (DM_SPLIT_SELECTED): the phone's shaders step splits again when its selection needs others
     if KEEP is not None:
         with open(sel, 'w', encoding='utf-8', newline='\n') as f: f.write(''.join(k + '\n' for k in sorted(KEEP)))
     elif os.path.exists(sel): os.unlink(sel)
-    if KEEP is not None: print(f'package: the code of {kept:,} of {len(rows):,} shaders (DM_SPLIT_SELECTED: the profile\'s shader_seen.tsv and their pixel shaders); the others are empty records', flush=True)
-    with open(mapout, 'w', encoding='utf-8', newline='\n') as f:   # the same bytes on every system (Windows: no CR LF, no cp1252)
-        kinds = ' / '.join(k for k, hit in (('BNSH / BAHS', any('#BNSH@' in r[4] or '#BAHS@' in r[4] for r in rows)), ('Unity Shader', any('#var' in r[4] and '#BNSH@' not in r[4] and '#MSHD#' not in r[4] and '#SDF#' not in r[4] and '#GLSLC@' not in r[4] and '#SNVN@' not in r[4] for r in rows)),
-                                            ('Retro Studios SNVN', any('#SNVN@' in r[4] for r in rows)),
-                                            ('MSHD', any('#MSHD#' in r[4] for r in rows)), ('GLSLC', any('#GLSLC@' in r[4] for r in rows)), ('RE Engine SDF', any('#SDF#' in r[4] for r in rows)),
-                                            ('MT Framework SPK', any('#MTSPK@' in r[4] for r in rows)), ('MonoGame MGFX', any('#MGFX@' in r[4] for r in rows)),
-                                            ('PlatinumGames shader objects', any('#PGSO' in r[4] for r in rows)),
-                                            ('Snowdrop shader objects', any('#SNOWDROP@' in r[4] for r in rows)),
-                                            ('Unreal Engine shader code archives', any('#UE' in r[4] for r in rows))) if hit)
-        f.write(f'# kind: evidence  {NOTE} ({kinds} in RomFS + main) → control section + code area keys (dm/gfx/tools/shader_split.py)\n')
-        f.write('# column 5 records where each key first appears; no PC shader pairing supplied\n')
-        f.write('package\tindex\tstage\tdm_ctl_sha16\tsource\n')
-        for r in rows: f.write('\t'.join(map(str, r)) + '\n')
-    # Hand-written facts the machine code cannot give (the profile's shader_facts_manual.tsv, same row format) are merged over the generated ones, so the table stays reproducible
-    manual = GAME.table('shader_facts_manual.tsv')
-    if os.path.exists(manual):
-        for ln in open(manual):
-            if ln.strip() and not ln.startswith('#'): k, v = ln.rstrip('\n').split('\t', 1); facts[k] = {**facts.get(k, {}), **json.loads(v)}
-    with open(factsout, 'w', encoding='utf-8', newline='\n') as f:
-        f.write('# Answer table for translation queries (generated by dm/gfx/tools/shader_split.py, do not edit): key <TAB> fact JSON. No PC shader pairing supplied: only the thread group / shared memory of compute shaders (taken from the control section); other queries get the translator defaults\n')
-        for k in sorted(facts): f.write(k + '\t' + json.dumps(facts[k], sort_keys=True, separators=(',', ':')) + '\n')
-    if pairsout:
-        with open(pairsout, 'w', encoding='utf-8', newline='\n') as f:
-            f.write('# kind: evidence  vertex / pixel shader pairs within BNSH variations (generated by dm/gfx/tools/shader_split.py, do not edit): vertex key <TAB> pixel key\n')
-            for a, b in sorted(pairs): f.write(f'{a}\t{b}\n')
-    if psopairsout:
-        with open(psopairsout, 'w', encoding='utf-8', newline='\n') as f:
-            f.write('# kind: evidence  supplemental vertex / pixel shader pairs (BAHS program variations and legacy Unity pass-input covers) for vertex output padding and the pipeline prebuild (generated by dm/gfx/tools/shader_split.py, do not edit): vertex key <TAB> pixel key\n')
-            for a, b in sorted(prog - pairs): f.write(f'{a}\t{b}\n')
-    print(f'shaders: {len(rows)} (' + ', '.join(f'{STAGE_NAME[s]} {n}' for s, n in sorted(stat.items())) + '); sources ' + ', '.join(f'{g} {n}' for g, n in per_src.most_common()) + f'; compute shader answers {len(facts)} rows' + (f'; variation pairs {len(pairs)}' if pairsout else ''))
+    if KEEP is not None: print(f'package: the code of {kept:,} of {len(t["rows"]):,} shaders (DM_SPLIT_SELECTED: the profile\'s shader_seen.tsv and their pixel shaders); the others are empty records', flush=True)
+    for path, text in ((mapout, t['map']), (factsout, t['facts']), (pairsout, t['pairs']), (psopairsout, t['pso']), (os.environ.get('DM_SPLIT_FILES'), t['files'])):
+        if path:
+            with open(path, 'w', encoding='utf-8', newline='\n') as f: f.write(text)   # the same bytes on every system (Windows: no CR LF, no cp1252)
+    print(t['summary'] + (f'; variation pairs {t["npairs"]}' if pairsout else ''))
 
 if __name__ == '__main__':
     import nso

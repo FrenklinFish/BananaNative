@@ -27,6 +27,15 @@ atomics in `AstOptimizer.cs`, of else-ifs for SPIR-V and of TMML's negative LOD,
 [LICENSE](../LICENSE)), with the TMML finding from yuzu #10234 (no yuzu code); the changes are listed in
 [dm/third_party/ryujinx/README.md](../dm/third_party/ryujinx/README.md). Thanks to them.
 
+The on-device packer's Python home (`assets/pack/python.zip`) carries, besides the [CPython](https://www.python.org/) Android build (PSF License),
+[Capstone](https://www.capstone-engine.org/) 5.0.7 (BSD-3-Clause) and [python-lz4](https://github.com/python-lz4/python-lz4) 4.4.5 (BSD-3-Clause, with LZ4's BSD-2-Clause
+sources). Since 0.2.2 the APK also carries `lib/arm64-v8a/libzbicdec.so`, which decodes the ZBIC segments of system 22.0.0+ modules for the packer's
+`dm/tools/nso.py`: [Zstandard](https://github.com/facebook/zstd) 1.5.7's decoder by Meta (BSD; zstd is BSD or GPL-2.0, the BSD terms are taken), unmodified, with
+an independent reader of ZBIC's entropy tables and the ZBIC frame magic (MIT, Banana Native), written from a description of the format with no code from any other
+ZBIC implementation ([dm/third_party/zstd-zbic](../dm/third_party/zstd-zbic/README.md), zstd's licence in its `LICENSE`). Thanks to
+[Atmosphère](https://github.com/Atmosphere-NX/Atmosphere) and Yannik Marchand's [zbic](https://github.com/kinnay/zbic) for discovering and documenting the format.
+On a PC or Mac the packer may instead use the zbic package from PyPI (GPL-2.0), which the user installs (`android/environment.yml` lists it); it is not in the APK.
+
 `Lossless.dll` belongs to Lossless Scaling (proprietary, sold separately). It is never in this repository or in an APK: the user supplies their own copy, which the
 launcher finds on the phone or lets the user pick, and copies into the app's private files.
 

@@ -37,6 +37,15 @@ public final class PrepareTextJvmTest {
         plain(f.text, "not in the package");
         check(f.fix.equals(PrepareText.FIX_RETRY) && f.text.contains("dumped the game again"), "a dump of other shaders: dump again: " + f.text);
 
+        // Try anyway on another game version: vk_android_build.py open_packs' line (DMSH_VK_REQUIRE_ALL=0), and the stop without it is not taken for it
+        long[] miss = PrepareText.missingShaders("[RED] 120 of the 8161 shaders to build are not in the package /x/pkg (a game version the profile's shader_map.tsv was not made from): "
+                + "the library is written without them (DMSH_VK_REQUIRE_ALL=0). abc: not in the package");
+        check(miss != null && miss[0] == 120 && miss[1] == 8161, "missing shaders counted");
+        check(PrepareText.missingShaders("[RED] 3 of the 8157 shaders to build are not in the package /x/pkg: it is not a split") == null, "the stop is not a count");
+        String mt = PrepareText.missingShadersText(120, 8161, "update 655360");
+        plain(mt, "missing shaders");
+        check(mt.contains("120 of its 8,161") && mt.endsWith("All of them are in update 655360."), "missing shaders text: " + mt);
+
         f = PrepareText.toolStopped("Rewriting the game code", 2, null, log);
         plain(f.text, "any other stop");
         check(f.fix.equals(PrepareText.FIX_RETRY) && f.text.startsWith("Rewriting the game code stopped.") && f.detail.endsWith("Log: " + log), "any other stop: Retry, Details has the log: " + f.detail);
@@ -75,6 +84,14 @@ public final class PrepareTextJvmTest {
         check(PrepareText.progressLine(37, true, 1304, 22852, "about 35 min left", 70).equals("37 %  ·  21,548 shaders left  ·  about 35 min left  ·  70 unchanged kept"),
                 PrepareText.progressLine(37, true, 1304, 22852, "about 35 min left", 70));
         check(PrepareText.progressLine(40, false, 1234, 22852, "about 1 min left", 0).equals("40 %  ·  1,234 of 22,852 shaders"), "outside the step: no time left");
+
+        // The split's count is of files, not shaders (the card read "Finding the shaders 186,583" while the game has 42,898 shaders); the other steps keep theirs
+        check(PrepareText.stepCountText("Finding the shaders", true, 1203, 1890, "").equals("Finding the shaders: 1,203 of 1,890 files"), PrepareText.stepCountText("Finding the shaders", true, 1203, 1890, ""));
+        check(PrepareText.stepCountText("Finding the shaders", true, 0, 1, "").equals("Finding the shaders: 0 of 1 file"), "one file");
+        check(PrepareText.stepCountText("Finding the shaders", true, 0, 0, "").equals("Finding the shaders"), "no count yet: no 0 of 0");
+        check(PrepareText.stepCountText("Finding the shaders", true, 2, 5, "40%").equals("Finding the shaders: 2 of 5 files (40 % of a large file)"), PrepareText.stepCountText("Finding the shaders", true, 2, 5, "40%"));
+        check(PrepareText.stepCountText("Rewriting the game code", false, 3, 12, "").equals("Rewriting the game code 3 / 12"), "other steps as before");
+        check(PrepareText.stepCountText("Checking the dump", false, 1, 1, "identify").equals("Checking the dump"), "a step of one");
 
         // Needs preparing says why
         check(PrepareText.needsPreparing(false, false, true).contains("Continue"), "a stopped Prepare continues");

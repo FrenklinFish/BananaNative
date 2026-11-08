@@ -384,9 +384,28 @@ public final class NupJvmTest {
         check(p.romfsPath(g).equals(new File(g, "updates/458752/romfs").getPath()) && p.romfsPath(g).equals(p.romfs(g).getPath()), "folder DM_ROMFS " + p.romfsPath(g));
         Map<String, String> l = p.aocLinks(g);
         check(l.size() == 1 && l.get("1").equals(new File(g, "dlc/" + AOC + "/0/romfs").getPath()), "folder aoc links: " + l);
+        aocLinkDir(t, l);
         // a pack made from a .nup, used with the folder: the folder's own RomFS (Pack.romfs falls back), no aoc link
         p = Pack.read(packDir(t, "pack-fold2", "game.nup:update/458752/romfs", "1\tgame.nup:addon/" + AOC + "/romfs"));
         check(p.romfsPath(g).equals(new File(g, "updates/458752/romfs").getPath()) && p.aocLinks(g).isEmpty(), "a .nup pack with a folder: " + p.romfsPath(g));
+    }
+
+    /** Pack.makeAocLinks: an earlier run's entries go, each link is made (the target mapped), a link that cannot be made is a line, never dropped */
+    static void aocLinkDir(File t, Map<String, String> l) throws IOException {
+        File dir = new File(t, "aoc-links");
+        Pack.removeDir(dir);
+        dir.mkdirs();
+        write(new File(dir, "7"), new byte[1]);   // left from an earlier run
+        Pack.Linker real = (target, path) -> Files.createSymbolicLink(new File(path).toPath(), new File(target).toPath());
+        List<String> bad = Pack.makeAocLinks(dir, l, x -> x, real);
+        File one = new File(dir, "1");
+        check(bad.isEmpty() && !new File(dir, "7").exists() && Files.isSymbolicLink(one.toPath()) && one.isDirectory(), "aoc link 1 → the DLC folder: " + bad);
+        bad = Pack.makeAocLinks(dir, Map.of("1.nup", "x.nup"), x -> "fd:9/" + x, real);
+        check(bad.isEmpty() && Files.readSymbolicLink(new File(dir, "1.nup").toPath()).toString().equals("fd:9/x.nup") && !one.exists(), "a mapped target (fd:<n>/<name>) and the old link gone");
+        bad = Pack.makeAocLinks(dir, Map.of("1", "/x", "2", "/y"), x -> x, (target, path) -> { throw new IOException("EPERM (symlink failed)"); });
+        check(bad.size() == 2 && bad.get(0).contains("EPERM") && bad.get(0).contains(" -> /"), "each refused link is a line: " + bad);
+        Pack.removeDir(dir);
+        check(!dir.exists(), "removeDir");
     }
 
     // ---- A real .nup ----

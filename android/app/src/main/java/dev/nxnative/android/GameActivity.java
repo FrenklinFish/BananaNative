@@ -522,7 +522,10 @@ public final class GameActivity extends Activity implements SurfaceHolder.Callba
             user.addAll(guard(envLines(Prefs.gameEnv(this, id)), "the game's settings", false));   // the game's own lines (its Game settings): after env.txt, so they win for this game
             user.addAll(guard(userEnv(new File(files, "env-" + id + ".txt")), "env-" + id + ".txt", testApp()));   // and env-<title ID>.txt (adb), the same for one game
             File save = saveDir(files, game, id), temp = mkdirs(new File(files, "temp/" + id)), root = mkdirs(new File(files, "root"));
-            File aoc = aocLinks(mkdirs(new File(files, "aoc/" + id)), game, pack, nupFd);
+            // The DLC links live in internal app storage: the external files folder is shared storage (FUSE), which refuses symbolic links (errno not yet confirmed on a phone; a refused link is now a [RED] line), so
+            // every link failed there and no game saw its DLC (docs/reference/packing.md "DLC links in shared storage"). Their targets stay where they are
+            File aoc = aocLinks(mkdirs(new File(getFilesDir(), "aoc/" + id)), game, pack, nupFd);
+            Pack.removeDir(new File(files, "aoc/" + id));   // the folder earlier builds used (empty, or links on a device that took them)
             log = new File(LogProvider.dir(this), id + "-" + new SimpleDateFormat("yyyyMMdd-HHmmss", Locale.ROOT).format(new Date()) + ".log");
             pruneLogs(id);
             ExitWatch.log(log);
@@ -569,6 +572,8 @@ public final class GameActivity extends Activity implements SurfaceHolder.Callba
             Native.note("device " + Build.MANUFACTURER + " " + Build.MODEL + ", Android " + Build.VERSION.RELEASE + " (SDK " + Build.VERSION.SDK_INT + "), " + Build.SUPPORTED_ABIS[0]
                     + "; game " + game + "; pack " + packDir);
             if (envProblem != null) Native.note("[RED] env.txt: " + envProblem);
+            if (aocLine != null) Native.note(aocLine);
+            for (String n : aocProblems) Native.note(n);
             if (readinessEnv > 0) Native.note("[nxlaunch] readiness check: ran with the game's " + readinessEnv + " environment lines (all but the paths), set before the GPU driver's first device");
             for (String n : unknownNotes) Native.note(n);
             if (!unknownNotes.isEmpty()) android.widget.Toast.makeText(this, unknownNotes.get(0).replace("[RED] ", ""), android.widget.Toast.LENGTH_LONG).show();
@@ -759,17 +764,19 @@ public final class GameActivity extends Activity implements SurfaceHolder.Callba
 
     /**
      * DM_AOC_DIR/<index> → each DLC's RomFS folder in the game folder, or DM_AOC_DIR/<index>.nup → the .nup (hle_fs.c aoc_dir; Pack.aocLinks), as symbolic links in
-     * app storage. A .nup used where it is (nupFd ≥ 0): the link's target is fd:<n>/<name>, which the host reads with readlink (nothing is at that path)
+     * app storage. A .nup used where it is (nupFd ≥ 0): the link's target is fd:<n>/<name>, which the host reads with readlink (nothing is at that path).
+     * A link that cannot be made is a [RED] line in the run's log (aocProblems): the game runs without that DLC
      */
-    private static File aocLinks(File dir, File game, Pack pack, int nupFd) {
-        File[] old = dir.listFiles();
-        if (old != null) for (File f : old) f.delete();
-        for (Map.Entry<String, String> e : pack.aocLinks(game).entrySet()) {
-            String target = nupFd >= 0 ? PickedPath.forHost(e.getValue(), game, nupFd) : e.getValue();
-            try { Os.symlink(target, new File(dir, e.getKey()).getPath()); } catch (ErrnoException ignored) { /* the game then runs without that DLC */ }
-        }
+    private File aocLinks(File dir, File game, Pack pack, int nupFd) {
+        Map<String, String> links = pack.aocLinks(game);
+        for (String p : Pack.makeAocLinks(dir, links, t -> nupFd >= 0 ? PickedPath.forHost(t, game, nupFd) : t, (target, path) -> {
+            try { Os.symlink(target, path); } catch (ErrnoException e) { throw new IOException(android.system.OsConstants.errnoName(e.errno) + " (" + e.getMessage() + ")"); }
+        })) aocProblems.add("[RED] [nxlaunch] DLC: " + p);
+        aocLine = "[nxlaunch] DLC: " + links.size() + " link" + (links.size() == 1 ? "" : "s") + " in DM_AOC_DIR " + dir + (links.isEmpty() ? "" : " " + links.keySet());
         return dir;
     }
+    private final List<String> aocProblems = new ArrayList<>();
+    private String aocLine;
 
     // A file `adb shell` writes here belongs to the shell user with mode 0660 and group ext_data_rw, which the app is not in: it exists but cannot be read
     // (TESTING.md, Diagnostic switches: chmod 666 after writing it). The run goes on without the switches and the log says why

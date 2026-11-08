@@ -8,6 +8,7 @@ import sys
 import tempfile
 import tracemalloc
 import unittest
+from unittest import mock
 
 import lz4.block
 
@@ -21,12 +22,12 @@ TEXT, RO, DATA = bytes(range(256)) * 20, b'read-only ' * 300, b'\x01\x02' * 0x90
 def page(x): return (x + 0xfff) & ~0xfff
 
 
-def make_nso(segs=(TEXT, RO, DATA), compress=(1, 0, 1), bss=0x5000):
-    """An NSO of the three segments, back to back on pages from 0 with their hashes, as Nintendo's tools write them"""
+def make_nso(segs=(TEXT, RO, DATA), compress=(1, 0, 1), bss=0x5000, pack=lambda s: lz4.block.compress(s, store_size=False)):
+    """An NSO of the three segments, back to back on pages from 0 with their hashes, as Nintendo's tools write them (pack compresses a segment: LZ4, or ZBIC with flag bit 7)"""
     hdr, body, mo = bytearray(0x100), b'', 0
     hdr[:4] = b'NSO0'; hdr[0x40:0x60] = bytes(range(0x20))
     for i, s in enumerate(segs):
-        stored = lz4.block.compress(s, store_size=False) if compress[i] else s
+        stored = pack(s) if compress[i] else s
         struct.pack_into('<III', hdr, 0x10 + i * 0x10, 0x100 + len(body), mo, len(s)); struct.pack_into('<I', hdr, 0x60 + 4 * i, len(stored))
         hdr[0xa0 + 0x20 * i:0xc0 + 0x20 * i] = hashlib.sha256(s).digest()
         body += stored; mo = page(mo + len(s))
@@ -132,6 +133,91 @@ class Load(unittest.TestCase):
         # flag bit 7 makes every compressed segment ZBIC (system 22.0.0 on): these segments are LZ4, so the Error names ZBIC, whether zbic is installed or not
         self.error(flags(make_nso(), set_=0x80), 'ZBIC')
         d, _ = make_nro(); struct.pack_into('<I', d, 0x1c, 2); self.error(d, 'compressed NRO')
+
+    def test_zbic(self):   # system 22.0.0+ (The Legend of Zelda: Ocarina of Time's modules): flag bit 7, every compressed segment ZBIC, with each decoder there is
+        try: import zbic   # pyright: ignore[reportMissingImports]
+        except ImportError: self.skipTest('no zbic (android/environment.yml)')
+        for name, env in decoders():
+            with self.subTest(name), mock.patch.dict(os.environ, env):
+                d = flags(make_nso(pack=zbic.compress), set_=0x80)
+                self.assertEqual(nso.load(d).image, nso.load(make_nso()).image)
+                fo, _, sz = struct.unpack_from('<III', d, 0x10); c = struct.unpack_from('<I', d, 0x60)[0]
+                bad = bytearray(d); bad[fo + c // 2] ^= 0xff
+                self.error(bytes(bad), 'text segment')   # a damaged stream: the decoder's own error or the hash check, never a wrong image
+                d2 = flags(make_nso(pack=lambda s: zbic.compress(s[:-1])), set_=0x80)
+                self.error(d2, 'text segment', 'ZBIC decompresses to')   # a stream of the wrong length
+
+    def test_zbic_vector(self):   # a committed ZBIC stream (zbic.compress of synthetic text, chosen so that its tables include low-probability counts): libzbicdec
+        lib = zbicdec()
+        if not lib: self.skipTest('no C compiler for libzbicdec')
+        text, z = synthetic(24000, 3), (Path(__file__).parent / 'zbic_synthetic.zbic').read_bytes()
+        try: import zbic   # pyright: ignore[reportMissingImports]
+        except ImportError: pass
+        else: self.assertEqual(zbic.decompress(z), text)
+        d = flags(make_nso(segs=(text, RO, DATA), pack=lambda s: z if s == text else lz4.block.compress(s, store_size=False), compress=(1, 0, 0)), set_=0x80)
+        with mock.patch.dict(os.environ, {nso.ZBIC_LIB_ENV: lib}):
+            self.assertEqual(bytes(nso.load(d).image[:len(text)]), text)
+            fo = struct.unpack_from('<I', d, 0x10)[0]
+            for at in (5, 40, len(z) // 2, len(z) - 3):   # damaged in a table description, the literals, the sequences, the end
+                bad = bytearray(d); bad[fo + at] ^= 0x5a
+                self.error(bad, 'text segment')
+            self.error(seg(bytearray(d), 0, sz=len(text) - 0x10), 'text segment', 'more than the')   # the header claims less than the stream holds
+            self.error(seg(bytearray(d), 0, sz=len(text) + 0x10), 'text segment', 'ZBIC decompresses to')
+
+    def test_zbicdec_equals_zbic(self):   # libzbicdec and PyPI's zbic decode zbic.compress's streams alike: sizes, levels, kinds of data
+        try: import zbic   # pyright: ignore[reportMissingImports]
+        except ImportError: self.skipTest('no zbic (android/environment.yml)')
+        if not (lib := zbicdec()): self.skipTest('no C compiler for libzbicdec')
+        with mock.patch.dict(os.environ, {nso.ZBIC_LIB_ENV: lib}):
+            decode = nso.zbic_decoder()
+            for n, seed in ((0, 1), (1, 1), (100, 2), (5000, 3), (24000, 3), (200000, 4)):
+                for data in (synthetic(n, seed), bytes(range(256)) * (n // 256), os.urandom(n)):
+                    for lv in (1, 3, 9, 19):
+                        c = zbic.compress(data, lv)
+                        out, err = decode(c, len(data))
+                        self.assertIsNone(err); self.assertEqual(bytes(out), data); self.assertEqual(zbic.decompress(c), data)
+
+    def test_zbic_missing_is_named(self):   # with neither decoder: the Error names both (the packer's message on a PC that lacks them)
+        d = flags(make_nso(), set_=0x80)
+        env = {k: v for k, v in os.environ.items() if k != nso.ZBIC_LIB_ENV}
+        with mock.patch.dict(sys.modules, {'zbic': None}), mock.patch.dict(os.environ, env, clear=True), mock.patch.object(sys, 'platform', 'darwin'):
+            self.error(d, 'text segment', 'libzbicdec', nso.ZBIC_LIB_ENV, 'pip install zbic')
+        with mock.patch.dict(os.environ, {nso.ZBIC_LIB_ENV: '/nonexistent/libzbicdec.so'}):   # a library named but not there: no silent fallback
+            self.error(d, nso.ZBIC_LIB_ENV, 'does not load')
+
+
+def synthetic(n, seed):
+    """Text-like bytes from a fixed generator (words, line ends, now and then a stray byte): the input of zbic_synthetic.zbic is synthetic(24000, 3)"""
+    words = [b'the', b'zbic', b'frame', b'table', b'count', b'segment', b'module', b'banana', b'native', b'x', b'qq', b'lorem', b'ipsum']
+    x, out = seed, bytearray()
+    while len(out) < n:
+        x = (x * 6364136223846793005 + 1442695040888963407) & (2**64 - 1)
+        out += words[(x >> 33) % len(words)] + (b' ' if (x >> 20) & 7 else b'\n') + (bytes([(x >> 40) & 0xff]) if (x >> 13) & 31 == 0 else b'')
+    return bytes(out[:n])
+
+
+_zbicdec = []
+
+
+def zbicdec():
+    """A build of libzbicdec (dm/third_party/zstd-zbic/build.sh with this machine's cc) in a temporary folder, made once; None without a compiler"""
+    if not _zbicdec:
+        import atexit, shutil
+        lib = None
+        if shutil.which('cc'):
+            tmp = tempfile.mkdtemp(); atexit.register(shutil.rmtree, tmp, True)
+            lib = os.path.join(tmp, 'libzbicdec.dylib' if sys.platform == 'darwin' else 'libzbicdec.so')
+            r = subprocess.run(['sh', str(REPO / 'dm/third_party/zstd-zbic/build.sh'), lib, 'cc', '-Wall', '-Werror'], capture_output=True, text=True)
+            if r.returncode: raise AssertionError(f'libzbicdec does not build:\n{r.stdout}{r.stderr}')
+        _zbicdec.append(lib)
+    return _zbicdec[0]
+
+
+def decoders():
+    """(name, environment) of each ZBIC decoder here: libzbicdec when it builds, and the zbic package (no DM_ZBIC_LIB)"""
+    out = [('zbic package', {nso.ZBIC_LIB_ENV: ''})]
+    if lib := zbicdec(): out.insert(0, ('libzbicdec', {nso.ZBIC_LIB_ENV: lib}))
+    return out
 
 
 class Tools(unittest.TestCase):

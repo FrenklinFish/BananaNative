@@ -39,6 +39,10 @@ def check():
         out.append(('lz4', True, ''))
     except ImportError: out.append(('lz4', False, 'missing'))
     try:
+        import zbic  # pyright: ignore[reportMissingImports]  # noqa: F401  (nso.py: the ZBIC segments of system 22.0.0+ modules)
+        out.append(('zbic', True, ''))
+    except ImportError: out.append(('zbic', False, 'missing (python -m pip install zbic==1.0.1.post1)'))
+    try:
         try: from compression import zstd  # noqa: F401
         except ImportError: from backports import zstd  # noqa: F401
         out.append(('zstd', True, ''))

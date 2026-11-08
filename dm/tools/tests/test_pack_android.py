@@ -31,5 +31,31 @@ class Swap(unittest.TestCase):
             self.assertFalse(st.exists())
 
 
+
+class Progress(unittest.TestCase):
+    """The phone's rewrite step: a tool run in process passes its progress lines on, placed in the module's share of the step's 1000 (Prepare's bar)"""
+    def test_run_in_process_passes_progress_on_in_the_module_share(self):
+        import io
+        with tempfile.TemporaryDirectory() as d:
+            tool = Path(d) / 'tool.py'
+            tool.write_text("print('working')\nprint('progress 0 1000 load')\nprint('progress 500 1000 x18', flush=True)\nprint('progress 1000 1000 write')\n")
+            out, real = io.StringIO(), sys.stdout
+            sys.stdout = out
+            try: rc = pack_android.run_in_process(tool, [], {}, Path(d) / 'tool.log', (200, 600))
+            finally: sys.stdout = real
+            self.assertEqual(rc, 0)
+            self.assertEqual(out.getvalue().splitlines(), ['progress 200 1000 code', 'progress 500 1000 code', 'progress 800 1000 code'])
+            self.assertIn('working', (Path(d) / 'tool.log').read_text())
+            self.assertIn('progress 500 1000 x18', (Path(d) / 'tool.log').read_text(), 'the tool\'s own log keeps its lines')
+
+    def test_nso_text_size(self):
+        with tempfile.TemporaryDirectory() as d:
+            f = Path(d) / 'main'
+            f.write_bytes(b'NSO0' + bytes(0x14) + (0x123400).to_bytes(4, 'little') + bytes(0x80))
+            self.assertEqual(pack_android.nso_text_size(f), 0x123400)
+            f.write_bytes(b'NOPE' + bytes(0x40))
+            self.assertEqual(pack_android.nso_text_size(f), 0)
+
+
 if __name__ == '__main__':
     unittest.main()

@@ -1,6 +1,8 @@
 package dev.nxnative.android;
 
 import java.util.Locale;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 
 /**
  * The words of Prepare (the on-device job's card and Home's game cards) for the player: what happened and what to do, in one or two short sentences, with the
@@ -96,6 +98,17 @@ final class PrepareText {
     }
 
     /**
+     * A step and its count from the tool's progress lines (Job.stepText; not the shaders step's, which counts shaders). The split counts the dump's files it
+     * reads, not shaders (shader_split.py's "progress: <files done>/<files>"), so its count says so: "Finding the shaders: 1,203 of 1,890 files". part: the
+     * tool's "<n>%" inside a large file, added as "(40 % of a large file)"
+     */
+    static String stepCountText(String step, boolean files, long done, long total, String part) {
+        String count = files ? (total > 0 ? String.format(Locale.getDefault(), ": %,d of %,d %s", done, total, total == 1 ? "file" : "files") : "")
+                : total > 1 ? String.format(Locale.getDefault(), " %,d / %,d", done, total) : total == 1 || done == 0 ? "" : String.format(Locale.getDefault(), " %,d", done);
+        return step + count + (part != null && part.matches("\\d+%") ? " (" + part.replace("%", " %") + " of a large file)" : "");
+    }
+
+    /**
      * Why a game card needs preparing, in a few words for the card (the full reason goes to its Details): no pack yet, a pack that cannot be read, a pack whose code
      * was left unfinished, or a Prepare that stopped part way (a job beside the dump that is not done)
      */
@@ -104,5 +117,19 @@ final class PrepareText {
         if (unfinished) return "The pack's game code was left unfinished. Prepare finishes it.";
         if (packThere) return "The pack cannot be read. Prepare makes it again.";
         return "No pack yet. Prepare makes one from your dump.";
+    }
+
+    /** vk_android_build.py open_packs under Try anyway (DMSH_VK_REQUIRE_ALL=0): "[RED] <n> of the <m> shaders to build are not in the package …" */
+    private static final Pattern MISSING = Pattern.compile("^\\[RED\\] (\\d+) of the (\\d+) shaders to build are not in the package .*library is written without them");
+
+    /** {n, m} from the shaders step's line naming the shaders this game version lacks (Try anyway), else null */
+    static long[] missingShaders(String line) {
+        Matcher m = MISSING.matcher(line);
+        return m.find() ? new long[] {Long.parseLong(m.group(1)), Long.parseLong(m.group(2))} : null;
+    }
+
+    /** One sentence for the player after a Try anyway whose game version lacks some of the profile's shaders; supported: Profile.supportedShort */
+    static String missingShadersText(long n, long of, String supported) {
+        return String.format(Locale.US, "%,d of its %,d shaders are not in this game version, so some things may not draw. All of them are in %s.", n, of, supported);
     }
 }

@@ -27,6 +27,6 @@ omit = ["*/tests/*"]
 patch = ["subprocess"]
 
 # What the tools need beyond the standard library to rewrite and pack a game (scripts/pack_android.py, dm/tools/patch_nso.py): Capstone 5 (the rewriter uses its 5.x names)
-# and lz4 (NSO segments). android/README.md has the environment.
+# lz4 and zbic (NSO segments: zbic for the ZBIC ones of system 22.0.0+ modules). android/README.md has the environment.
 [dependency-groups]
-android-pack = ["capstone>=5,<6", "lz4"]
+android-pack = ["capstone>=5,<6", "lz4", "zbic==1.0.1.post1"]

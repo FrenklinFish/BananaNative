@@ -73,6 +73,7 @@ run: $(B)/t_language $(B)/t_motion $(B)/t_heap_size $(B)/t_touch $(B)/t_gesture 
 	$(B)/t_android_zshare
 	$(B)/t_android_texlimit
 	$(B)/t_android_pckeep
+	$(B)/t_android_pwlist
 	$(B)/t_android_fmtlist
 	$(B)/t_android_place
 	$(B)/t_android_ovl
@@ -356,7 +357,7 @@ coverage:
 	LLVM_PROFILE_FILE="$(call cov_profile,$(B)/cov)" $(MAKE) -i B=$(B)/cov SAN="$(COV_FLAGS)" run
 	@$(call cov_export,$(B)/cov)
 # The Android host's pure parts (dm/host/android): resampler, channel map, SPS size, MediaCodec picture layouts; gamepad / touch / sensor mapping
-run: $(B)/t_android_av $(B)/t_android_input $(B)/t_android_shlib $(B)/t_android_spvpatch $(B)/t_android_imgmem $(B)/t_android_zshare $(B)/t_android_texlimit $(B)/t_android_pckeep $(B)/t_android_fmtlist $(B)/t_android_place $(B)/t_android_ovl $(B)/t_android_pace $(B)/t_android_gmem
+run: $(B)/t_android_av $(B)/t_android_input $(B)/t_android_shlib $(B)/t_android_spvpatch $(B)/t_android_imgmem $(B)/t_android_zshare $(B)/t_android_texlimit $(B)/t_android_pckeep $(B)/t_android_pwlist $(B)/t_android_fmtlist $(B)/t_android_place $(B)/t_android_ovl $(B)/t_android_pace $(B)/t_android_gmem
 $(B)/t_android_av: t_android_av.c ../android/av_android.h | $(B)
 	$(CLANG) -O1 -g -Wall -Werror -Wno-unused-function -fsanitize=address,undefined -I.. $(WEAK_HOST) -o $@ t_android_av.c
 $(B)/t_android_input: t_android_input.c ../android/input_map.c ../android/input_map.h ../../gfx/vk_android/vka_present_fit.h ../motion_fusion.h ../dm_input.h | $(B)
@@ -379,6 +380,9 @@ $(B)/t_android_texlimit: t_android_texlimit.c $(VKA)/vka_texlimit.h | $(B)
 # The pipeline cache stamp: which file a run reads after a shader library update (vka_pckeep.h; vka_pso.c pc_open_once)
 $(B)/t_android_pckeep: t_android_pckeep.c $(VKA)/vka_pckeep.h | $(B)
 	$(CLANG) -O1 -g -Wall -Werror -Wno-unused-function -fsanitize=address,undefined -I.. -o $@ t_android_pckeep.c
+# The prewarm list's records and the profiles' seed lists (vka_pwlist.h; vka_pso.c pw_*): a seed of another key layout fails here, not silently on the phone
+$(B)/t_android_pwlist: t_android_pwlist.c $(VKA)/vka_pwlist.h $(VKA)/vka_gkey.h $(wildcard ../../games/*/vk_prewarm.bin) | $(B)
+	$(CLANG) -O1 -g -Wall -Werror -Wno-unused-function -fsanitize=address,undefined -I.. -DGAMES_DIR='"$(abspath ../../games)"' -o $@ t_android_pwlist.c
 # An image's format list (vka_fmtlist.h; vka_tex.c img_create, img_lists, img_storage_upgrade)
 $(B)/t_android_fmtlist: t_android_fmtlist.c $(VKA)/vka_fmtlist.h | $(B)
 	$(CLANG) -O1 -g -Wall -Werror -Wno-unused-function -fsanitize=address,undefined -I.. -o $@ t_android_fmtlist.c

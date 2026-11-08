@@ -21,7 +21,8 @@
 #   DMSH_VK_RESULTS the result folder (default <output>/v-<V>/results), DMSH_VK_BATCH shaders per translator call (default 64), DMSH_VK_PROGRESS a file the progress is also
 #   written to (JSON, replaced by rename), DMSH_VK_KEEP=0 deletes the result folder once the library is written, DMSH_VK_XLATE_J translator calls at once (default 1
 #   for the library form, J for the program), DMSH_VK_REQUIRE_ALL=1 writes no library unless every shader built (exit 1; a key list's build too) but
-#   those the profile's manifest of this version (vk_delta.tsv, a full Mac build) has as "-": every shader the Mac's build holds
+#   those the profile's manifest of this version (vk_delta.tsv, a full Mac build) has as "-": every shader the Mac's build holds. A shader the package does not hold stops
+#   the build (another game version's split) unless DMSH_VK_REQUIRE_ALL=0 (the phone's Try anyway): then it is left out and counted in one [RED] line (open_packs)
 # Resumable: each shader's result (its modules, compressed, and its reflection) is one file <results>/<key>.r, written to a temporary name and renamed, stamped with
 #   the tools digest, the profile inputs digest, the validator's version and the key; a rerun skips every key with a valid result (a killed build resumes; a later build of the same version is a cache hit)
 #   and the library is written from the result files. Pixel shaders go first; the vertex shaders' padding reads their inputs from the pixel shaders' results.
@@ -214,10 +215,11 @@ def borrow_key(key_skip):
 
 def record_key(rec, skey):
     """The key of one package record ('BTCDBTCD', +0x28 control length, +0x2c code length, from +0x38 the code area then the control section: shader_split.py), or None
-    when the record is not one"""
+    when the record is not one, or holds no shader: a selected split's empty record (shader_split.py EMPTY_RECORD, DM_SPLIT_SELECTED) has no control section, and a
+    section shorter than 0x24 bytes does not hold its own length (+0x20), which the key reads"""
     if len(rec) < 0x38 or rec[:8] != b'BTCDBTCD': return None
     tl, cl = struct.unpack_from('<2I', rec, 0x28)
-    if 0x38 + cl + tl > len(rec): return None
+    if tl < 0x24 or 0x38 + cl + tl > len(rec): return None
     return skey(rec[0x38 + cl:0x38 + cl + tl], rec[0x38:0x38 + cl])
 
 
@@ -857,19 +859,28 @@ def index_packs():
 def _rec(name, k):
     fd, offs = packs[name]
     return os.pread(fd, offs[k + 1] - offs[k], offs[k])
+MISSING = set()   # keys the package does not hold, left out of this build (DMSH_VK_REQUIRE_ALL=0: open_packs)
 def open_packs(ks):
     """The shader package opened (once) and the records of the shaders ks found: each record checked against its key, and found by it when the package is not the one
-    the map was made from (locate)"""
+    the map was made from (locate). → the keys of ks found. A key the package does not hold stops the build, except with DMSH_VK_REQUIRE_ALL=0 (the phone's Try anyway:
+    a game version the profile's map was not made from, which the player was warned may not draw everything): it is left out of this build, as a shader that did not
+    build is left out of the library, and counted in one [RED] line"""
     index_packs()
     _files = {n: [(lambda n=n, j=j: _rec(n, j)) for j in range(len(offs) - 1)] for n, (_, offs) in packs.items()}
     _found, _bad = locate(ks, loc, _files, borrow_key(tuple(int(x, 0) for x in GAME.get('shader_key_skip', '0+0').split('+'))))
-    if _bad:
+    if _bad and os.environ.get('DMSH_VK_REQUIRE_ALL') != '0':
         close_packs()
         sys.exit(f'[RED] {len(_bad)} of the {len(ks)} shaders to build are not in the package {dm_dir}: it is not a split of the game version the profile\'s shader_map.tsv was made from '
                  '(split the dump again: pack_android.py does it when the package is missing). ' + '; '.join(_bad[:5]))
-    _moved = sum(1 for k in ks if _found[k] != loc[k])
+    if _bad:
+        _gone = {k for k in ks if k not in _found}
+        MISSING.update(_gone); ORDER[:] = [k for k in ORDER if k not in MISSING]; TOTAL[0] -= len(_gone)
+        print(f'[RED] {len(_gone)} of the {len(ks)} shaders to build are not in the package {dm_dir} (a game version the profile\'s shader_map.tsv was not made from): '
+              'the library is written without them (DMSH_VK_REQUIRE_ALL=0). ' + '; '.join(_bad[:5]), flush=True)
+    _moved = sum(1 for k in _found if _found[k] != loc[k])
     if _moved: print(f'{_moved} of the {len(ks)} shaders are at other places in this package than in the profile\'s shader_map.tsv (another split of the game): each is read from where its key is', flush=True)
     loc.update(_found)
+    return [k for k in ks if k in _found]
 
 
 def close_packs():
@@ -1208,7 +1219,9 @@ def translate_keys(ks, count=True):
                         try: _r = read_result(k)[3]
                         except ResultCut:   # cut since the check: translated here, which gives its inputs (finish)
                             print(f'[RED] {result_path(k)} is cut short: translated again', flush=True)
-                            os.unlink(result_path(k)); open_packs([k]); run_batch([k], False); continue
+                            os.unlink(result_path(k))
+                            if open_packs([k]): run_batch([k], False)
+                            continue
                         _b = next(m for m in _r[1] if m[0] == VK['MOD_BASE'])
                         PS_INPUTS[k] = set(spv.Module(delta.spirv(stored_bytes(_b[2]), _b[3], zstd)).io(spv.SC_INPUT))
         batches = [_phase[i:i + BATCH] for i in range(0, len(_phase), BATCH)]
@@ -1231,12 +1244,12 @@ def read_all():
 
 
 try:   # the package descriptors are closed however the translation ends (the phone runs this in a long-lived interpreter)
-    if todo: open_packs(todo); translate_keys(todo)
+    if todo: translate_keys(open_packs(todo))
     results, _cut = read_all()
     if _cut:   # a result file cut after the check at the start (#82): translated again, not a stop
         print(f'[RED] {len(_cut)} result files are cut short (from {_cut[0]}): translated again', flush=True)
         for k in _cut: os.unlink(result_path(k))
-        open_packs(_cut); translate_keys(_cut, False)
+        translate_keys(open_packs(_cut), False)
         results, _cut = read_all()
         if _cut: sys.exit(f'[RED] {len(_cut)} result files are still cut short after translating them again (from {result_path(_cut[0])}): the storage does not keep whole files')
 finally:
@@ -1278,12 +1291,14 @@ os.replace(os.path.join(out, delta.MANIFEST + '.tmp'), os.path.join(out, delta.M
 if MANIFEST:
     _, _, _diff = delta.check(MANIFEST, keys, _hashes)
     for k, want_h, got_h in _diff:
+        if k in MISSING: continue   # not in the package: counted once below (open_packs said so)
         how = 'kept from an older library' if k in REUSED else 'translated here'
         if got_h is None: print(f'[RED] delta check: {k}: not in the library ({_status.get(k)}: {next((r[2] for r in results if r[0] == k), "")[:100]}), the manifest has {want_h}', flush=True)
         elif want_h == '-': print(f'[RED] delta check: {k}: in the library ({how}), the manifest has it as not built', flush=True)
         else: print(f'[RED] delta check: {k}: library entry {got_h} ({how}), the manifest has {want_h}', flush=True)
     print(f'delta check: {len(_in_m) - len(_diff)} of {len(_in_m)} shaders as the manifest has them ({len(REUSED)} kept, {len(keys) - len(REUSED)} translated)'
-          + (f', {len(_diff)} differ' if _diff else '') + (f'; {len(_out_m)} not in the manifest, not checked' if _out_m else ''), flush=True)
+          + (f', {len(_diff)} differ' if _diff else '') + (f' ({_gone} of them not in the package)' if (_gone := sum(1 for d in _diff if d[0] in MISSING)) else '')
+          + (f'; {len(_out_m)} not in the manifest, not checked' if _out_m else ''), flush=True)
 if not want:
     dmsh_chain.write_stamp(out, GAME.id, INPUTS)
 if os.environ.get('DMSH_VK_KEEP') == '0': shutil.rmtree(RES, ignore_errors=True)

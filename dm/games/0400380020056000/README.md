@@ -77,11 +77,13 @@ The work folder's `run/drive.sh <name> <secs> "<sec> <control line>"…` boots i
 
 ## Found on this game
 
+- [Prepare stays at 1 % while it rewrites the code](../../../docs/reference/packing.md#prepare-stays-at-1--while-it-rewrites-the-code): resolved, the rewriter's progress lines; its `main` (41 MB, one worker) measured the phases' shares.
 - [Naming the shaders of a GPU fault](https://github.com/seedds/nxnative/blob/main/docs/reference/rendering.md#naming-the-shaders-of-a-gpu-fault): added for the address fault above, which names no pass.
 - [Compatible views for a mismatched declared texture type](../../../docs/reference/rendering.md#compatible-views-for-a-mismatched-declared-texture-type): resolved, a cube in a cube array slot. `d0ce73e71074df85_b` (NigoProc, layer index a literal 0) read texture ID 428 as `texture type mismatch … declares slot 0 as Metal type 6, … is type 5`, 180 binds at frame 0 and none after. With the view the count is 0. The opening looks the same, though the two runs are not frame-aligned, so no pixel comparison was possible.
 - [The split shader tables differ from a game profile's](https://github.com/seedds/nxnative/blob/main/docs/reference/packing.md#the-split-shader-tables-differ-from-a-game-profiles): NigoProc's `800215a0f8d0c44d` is a mesh shader, and every pack stopped until its row was split again ([issue #1263](https://github.com/seedds/nxnative/issues/1263)).
 - [Storage words read one by one](https://github.com/seedds/nxnative/blob/main/docs/reference/shaders.md#storage-words-read-one-by-one): the lit pass on an M1, 70 → 16 ms.
 - [A blocked audio device start freezes the game](https://github.com/seedds/nxnative/blob/main/docs/reference/audio.md#a-blocked-audio-device-start-freezes-the-game) when the selected HDMI device refuses to play.
+- [Prepare reads every RomFS file to find the shaders](../../../docs/reference/packing.md#prepare-reads-every-romfs-file-to-find-the-shaders): 5 of the 15,288 pairs come from files that hold only shaders found earlier (`shader_files.tsv`, 571 of 46,354 files); the targeted split's outputs are the full split's byte for byte (current: not yet run on the phone).
 
 - [Gathered HMMA tiles kept through a long block spill registers on Adreno](../../../docs/reference/shaders.md#gathered-hmma-tiles-kept-through-a-long-block-spill-registers-on-adreno): the opening cutscene at 2 fps on Turnip; the limit lowered to 2.
 - [A full Vulkan library build that takes 16 GB on one compute module](../../../docs/reference/shaders.md#a-full-vulkan-library-build-that-takes-16-gb-on-one-compute-module): the first library build at 0.75 shaders a second.

@@ -10,8 +10,9 @@ truncated file raises Error (a ValueError):
   · NRO, as nn::ro (Atmosphere's ro_service_impl.cpp, ValidateNro): sizes in whole pages, text at 0, ro and data right after, data ending at the module's size (40 of 40 surveyed).
   · Beyond Horizon, so a small file cannot claim gigabytes: a compressed segment can be no more than LZ4 produces from its stored bytes (255 bytes per byte; zstd has no such
     bound, so a ZBIC segment is held only to its own size), and the image, gaps included, no more than that of the whole file.
-  · Compression: LZ4, and ZBIC (NSO flag bit 7, system 22.0.0 on: Nintendo's zstd variant, its own magic and entropy-table coding, which stock zstd cannot read) through the zbic
-    package, as lz4.block is used. A compressed NRO (system 23.0.0+) is an Error naming it, never a wrong image.
+  · Compression: LZ4, and ZBIC (NSO flag bit 7, system 22.0.0 on: Nintendo's zstd variant, its own magic and entropy-table coding, which stock zstd cannot read) through
+    libzbicdec (dm/third_party/zstd-zbic, in the APK) or else the zbic package (PC / Mac), as lz4.block is used: zbic_decoder. A compressed NRO (system 23.0.0+) is an
+    Error naming it, never a wrong image.
 bss is only a size: the image never includes it (patch_nso.py lays it out; this script's output file gets it as a sparse tail).
 Usage on its own: nso.py <module> <out.bin> (the whole memory image, bss included, for nso_fnmap.py and analysis)"""
 import hashlib, struct, sys
@@ -28,17 +29,60 @@ class Error(ValueError):
     pass
 
 
-def zstd_segment(raw, size, what):
-    """A ZBIC segment (NSO flag bit 7, system 22.0.0 on) decompressed to size: zbic.decompress decodes Nintendo's zstd variant, and its own
-    checks catch a damaged stream, so its messages are passed on; a wrong length still gets this loader's own Error, as a short LZ4 stream does"""
+ZBIC_LIB_ENV = 'DM_ZBIC_LIB'   # the path (or a bare name the dynamic linker finds) of libzbicdec, dm/third_party/zstd-zbic
+ZBIC_MISSING = ('ZBIC (zstd) segments need libzbicdec (the APK carries it; elsewhere ' + ZBIC_LIB_ENV + '=<a build of dm/third_party/zstd-zbic>) '
+                'or the zbic package (python3 -m pip install zbic==1.0.1.post1)')
+_zbic_libs = {}   # path → decode, each library loaded once
+
+
+def zbic_decoder():
+    """The ZBIC decoder, decode(raw, size) → (bytes or bytearray, None) or (None, the error), or None when there is none: libzbicdec through ctypes
+    ($DM_ZBIC_LIB, else libzbicdec.so on Android, where the APK's lib/ has it), else the zbic package (PC / Mac, which the user installs from PyPI). A
+    $DM_ZBIC_LIB that does not load is an Error, not a fallback, so a test or the phone never decodes with something else unnoticed"""
+    import os
+    path = os.environ.get(ZBIC_LIB_ENV) or ('libzbicdec.so' if sys.platform == 'android' else '')
+    if path:
+        if path not in _zbic_libs: _zbic_libs[path] = _zbic_lib(path)
+        return _zbic_libs[path]
     try:
-        import zbic   # pyright: ignore[reportMissingImports]  # an optional package, only a system 22.0.0+ module's ZBIC segments need it
+        import zbic   # pyright: ignore[reportMissingImports]  # PyPI's (GPL-2.0), installed by the user on a PC or Mac; never in the APK
     except ImportError:
-        raise Error(f'{what}: ZBIC (zstd) segments need the zbic package (python3 -m pip install zbic)') from None
-    try:
-        out = zbic.decompress(bytes(raw))   # bytes: a caller may hand over the bytearray it built the module in
-    except Exception as e:
-        raise Error(f'{what}: ZBIC does not decompress ({e})') from None
+        return None
+
+    def decode(raw, size):
+        try: return zbic.decompress(bytes(raw)), None   # bytes: a caller may hand over the bytearray it built the module in
+        except Exception as e: return None, str(e)
+    return decode
+
+
+def _zbic_lib(path):
+    import ctypes
+    try: lib = ctypes.CDLL(path)
+    except OSError as e: raise Error(f'{ZBIC_LIB_ENV}: {path} does not load ({e})') from None
+    lib.zbic_decompress.argtypes = [ctypes.c_void_p, ctypes.c_size_t, ctypes.c_void_p, ctypes.c_size_t]
+    lib.zbic_decompress.restype = ctypes.c_long
+    lib.zbic_error_name.argtypes, lib.zbic_error_name.restype = [ctypes.c_long], ctypes.c_char_p
+
+    def decode(raw, size):
+        out, src = bytearray(size), bytes(raw)   # out filled in place: no second copy of a segment (text can be 60 MB)
+        dst = (ctypes.c_char * size).from_buffer(out) if size else None
+        n = lib.zbic_decompress(dst, size, src, len(src))
+        del dst   # the buffer export ends before out is resized
+        if n < 0: return None, lib.zbic_error_name(n).decode(errors='replace')
+        del out[n:]
+        return out, None
+    return decode
+
+
+def zstd_segment(raw, size, what):
+    """A ZBIC segment (NSO flag bit 7, system 22.0.0 on) decompressed to size by zbic_decoder(): a damaged stream is the decoder's own error, passed on; a
+    wrong length still gets this loader's own Error, as a short LZ4 stream does"""
+    try: decode = zbic_decoder()
+    except Error as e: raise Error(f'{what}: {e}') from None
+    if not decode: raise Error(f'{what}: {ZBIC_MISSING}')
+    out, err = decode(raw, size)
+    if err and 'too small' in err: raise Error(f'{what}: ZBIC decompresses to more than the {size:#x} bytes of the header: the file is damaged')
+    if err: raise Error(f'{what}: ZBIC does not decompress ({err})')
     if len(out) != size: raise Error(f'{what}: ZBIC decompresses to {len(out):#x} bytes, not the {size:#x} of the header: the file is damaged')
     return out
 

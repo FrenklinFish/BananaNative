@@ -32,6 +32,16 @@ NS = vk_functions('borrow_key', 'record_key', 'locate')
 SKEY = NS['borrow_key']((0, 0))
 
 
+def split_empty_record():
+    """shader_split.py's EMPTY_RECORD: the record DM_SPLIT_SELECTED writes for a shader whose code the package does not keep (no code area, no control section)"""
+    tree = ast.parse((TOOLS / 'shader_split.py').read_text())
+    node = next(n for n in tree.body if isinstance(n, ast.Assign) and any(isinstance(t, ast.Name) and t.id == 'EMPTY_RECORD' for t in n.targets))
+    return eval(compile(ast.Expression(node.value), 'shader_split.py', 'eval'), {'bytes': bytes})
+
+
+EMPTY = split_empty_record()
+
+
 def nvn2_ctl(tag):   # an NVN2 control section (version 0xc9), its own length at +0x30, which the key hashes as zero
     c = bytearray(0x60); c[:4] = bytes.fromhex('34127698'); c[4:8] = b'\xc9\0\0\0'; struct.pack_into('<I', c, 0x30, 0xd8); c[0x50:0x58] = tag.ljust(8, b'.')
     return bytes(c)
@@ -50,6 +60,13 @@ class Keys(unittest.TestCase):
         self.assertEqual(NS['record_key'](rec, SKEY), key)
         self.assertIsNone(NS['record_key'](b'not a record' * 8, SKEY))
         self.assertIsNone(NS['record_key'](rec[:0x50], SKEY), 'a cut record has no key')
+
+    def test_an_empty_record_has_no_key(self):
+        # a selected split's record of a shader whose code it does not keep: hashing it read control +0x20 of an empty section (struct.error, Pokopia on update 327680)
+        self.assertEqual(len(EMPTY), 0x38)
+        self.assertIsNone(NS['record_key'](EMPTY, SKEY))
+        rec = bytearray(EMPTY); struct.pack_into('<2I', rec, 0x28, 0x10, 4); rec += bytes(0x14)
+        self.assertIsNone(NS['record_key'](bytes(rec), SKEY), 'a control section too short to hold its own length (+0x20) has no key')
 
 
 class Locate(unittest.TestCase):
@@ -77,6 +94,15 @@ class Locate(unittest.TestCase):
         found, bad = NS['locate'](list(loc), loc, files, SKEY)
         self.assertEqual(found, {}); self.assertEqual(len(bad), 1); self.assertIn(self.k[b'a'], bad[0])
 
+    def test_a_selected_split_of_another_build(self):
+        # DM_SPLIT_SELECTED on a build the map was not made from (Pokopia 327680, map of 655360): the records are numbered otherwise, the shaders not kept are empty
+        # records, and one key of the map is not in this build at all. The index of the whole package skips the empty records instead of hashing them
+        files = {'ps_x.bin': [EMPTY, self.r[b'd'][0], EMPTY, self.r[b'b'][0]], 'ps_y.bin': [EMPTY, self.r[b'a'][0]]}
+        loc = {self.k[b'a']: ('ps_x.bin', 0), self.k[b'b']: ('ps_x.bin', 1), self.k[b'c']: ('ps_x.bin', 2)}
+        found, bad = NS['locate'](list(loc), loc, files, SKEY)
+        self.assertEqual(found, {self.k[b'a']: ('ps_y.bin', 1), self.k[b'b']: ('ps_x.bin', 3)})
+        self.assertEqual(len(bad), 1); self.assertIn(self.k[b'c'], bad[0])
+
     def test_records_read_lazily(self):
         reads = []
         def lazy(rec):
@@ -86,6 +112,38 @@ class Locate(unittest.TestCase):
         loc = {self.k[b'b']: ('ps_x.bin', 1)}
         found, bad = NS['locate'](list(loc), loc, files, SKEY)
         self.assertEqual((found, bad, len(reads)), (loc, [], 1), 'a record at its place is the only one read')
+
+
+class OpenPacks(unittest.TestCase):
+    """open_packs on a package that lacks keys of the map: it stops the build, except with DMSH_VK_REQUIRE_ALL=0 (the phone's Try anyway), which leaves them out"""
+    def setUp(self):
+        self.r = {t: record(t) for t in (b'a', b'b', b'c')}
+        self.k = {t: v[1] for t, v in self.r.items()}
+        ns = vk_functions('borrow_key', 'record_key', 'locate', 'open_packs')
+        recs = {'ps_x.bin': [EMPTY, self.r[b'b'][0], self.r[b'a'][0]]}   # a selected split of another build: c is not in it
+        ns.update(packs={'ps_x.bin': (None, list(range(4)))}, index_packs=lambda: None, close_packs=lambda: None, _rec=lambda n, j: recs[n][j],
+                  GAME={}, dm_dir='pkg', MISSING=set(), TOTAL=[3], ORDER=[self.k[b'a'], self.k[b'b'], self.k[b'c']],
+                  loc={self.k[b'a']: ('ps_x.bin', 0), self.k[b'b']: ('ps_x.bin', 1), self.k[b'c']: ('ps_x.bin', 2)})
+        self.ns = ns
+        self.env = os.environ.get('DMSH_VK_REQUIRE_ALL')
+
+    def tearDown(self):
+        if self.env is None: os.environ.pop('DMSH_VK_REQUIRE_ALL', None)
+        else: os.environ['DMSH_VK_REQUIRE_ALL'] = self.env
+
+    def test_stops_by_default_and_with_require_all(self):
+        for v in (None, '1'):
+            if v is None: os.environ.pop('DMSH_VK_REQUIRE_ALL', None)
+            else: os.environ['DMSH_VK_REQUIRE_ALL'] = v
+            with self.assertRaises(SystemExit) as e: self.ns['open_packs'](list(self.ns['ORDER']))
+            self.assertIn('1 of the 3 shaders to build are not in the package', str(e.exception.code))
+
+    def test_try_anyway_builds_without_them(self):
+        os.environ['DMSH_VK_REQUIRE_ALL'] = '0'
+        a, b, c = self.k[b'a'], self.k[b'b'], self.k[b'c']
+        self.assertEqual(self.ns['open_packs']([a, b, c]), [a, b])
+        self.assertEqual((self.ns['MISSING'], self.ns['ORDER'], self.ns['TOTAL']), ({c}, [a, b], [2]))
+        self.assertEqual((self.ns['loc'][a], self.ns['loc'][b]), (('ps_x.bin', 2), ('ps_x.bin', 1)))
 
 
 class SplitCheck(unittest.TestCase):

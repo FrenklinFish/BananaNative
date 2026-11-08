@@ -30,6 +30,21 @@ try: WORKERS = int(os.environ.get('DM_REWRITE_J') or os.cpu_count() or 1)
 except ValueError: sys.exit('[RED] DM_REWRITE_J must be a positive integer')
 if WORKERS < 1: sys.exit('[RED] DM_REWRITE_J must be a positive integer')
 
+# Progress: "progress <done> 1000 <phase>" lines, the module's rewrite in thousandths, which pack_android.py --in-process (the phone's rewrite step) passes on to
+# Prepare's bar. Each phase has a fixed share of the 1000 (PHASES: start, width), measured with one worker on large modules (docs/reference/packing.md
+# "Prepare stays at 1 % while it rewrites the code"); a phase reports its own count inside its share. At most one line a second, plus each phase's start.
+import time
+PHASES = {'load': (0, 30), 'x18': (30, 250), 'scan': (280, 80), 'functions': (360, 125), 'sites': (485, 15), 'spin': (500, 490), 'write': (990, 10)}
+_progress_at = [0.0, -1]
+def progress(phase, done=0, total=1):
+    start, width = PHASES[phase]
+    v = start + width * min(done, total) // max(total, 1)
+    now = time.monotonic()
+    if v == _progress_at[1] or (done and now - _progress_at[0] < 1.0): return
+    _progress_at[:] = [now, v]
+    print(f'progress {v} 1000 {phase}', flush=True)
+progress('load')
+
 # Targets: where the rewritten code finds this thread's slots. apple (the default, the output as it always was): tpidrro_el0 is the pthread TSD array and a slot is
 # tpidrro_el0 + key page entry (the key number × 8). android: Linux keeps tpidrro_el0 at 0 for arm64 tasks and tpidr_el0 is Bionic's thread pointer, whose TCB word 2
 # (TLS_SLOT_APP, left to applications) holds the host's slot block (dm/host/plat/plat_android.c); a slot is [tpidr_el0 + 0x10] + key page entry (the slot's offset in the block).
@@ -622,13 +637,20 @@ def x18_words(lo, hi):
         a = last + 4 if last + 4 >= end else last + 8   # the chunk is done, or the word after the last decoded one is no instruction
     return out
 # The x18 scan and the spin wait search only read the original image, so they can run in worker processes.
-def in_parallel(fn, jobs):
-    """Returns [fn(*job) for job in jobs], computed in forked worker processes.
+def in_serial(fn, jobs, phase=None):
+    out = []
+    for i, job in enumerate(jobs):
+        out.append(fn(*job))
+        if phase: progress(phase, i + 1, len(jobs))
+    return out
+
+def in_parallel(fn, jobs, phase=None):
+    """Returns [fn(*job) for job in jobs], computed in forked worker processes (in this process, with progress lines for phase, with one worker or no fork).
     The workers are forked on each call, so they see the module's state as it is at that point."""
     if WORKERS < 2 or len(jobs) < 2:
-        return [fn(*job) for job in jobs]
+        return in_serial(fn, jobs, phase)
     if 'fork' not in multiprocessing.get_all_start_methods():   # Windows: a spawned worker would import this script, which is the rewrite itself, not a module
-        return [fn(*job) for job in jobs]                          # of functions; the same results, one piece after the other
+        return in_serial(fn, jobs, phase)                          # of functions; the same results, one piece after the other
     with multiprocessing.get_context('fork').Pool(min(WORKERS, len(jobs))) as pool:
         return pool.starmap(fn, jobs)
 
@@ -639,16 +661,20 @@ def find_x18_words():
         for lo in range(start, end, 0x100000):
             pieces.append((lo, min(lo + 0x100000, end)))
     words = set()
-    for found in in_parallel(x18_words, pieces):
+    for found in in_parallel(x18_words, pieces, 'x18'):
         words |= found
     return words
 
+progress('x18')
 x18 = find_x18_words()
 kinds = {}
 # Spin wait candidates (see "Spin waits" below): backward direct branches (b, b.cond, cbz / cbnz, tbz / tbnz) at most SPIN_WIN bytes back, by target
 SPIN_WIN, SPIN_TOPS = 512, {0x16, 0x17, 0x54, 0x34, 0x35, 0xB4, 0xB5, 0x36, 0x37, 0xB6, 0xB7}
 spin_cand = {}
-for o in (o for s, e in CODE_RANGES for o in range(s, e, 4)):
+progress('scan')
+SCAN_WORDS = sum(e - s for s, e in CODE_RANGES) // 4 or 1
+for n_scan, o in enumerate(o for s, e in CODE_RANGES for o in range(s, e, 4)):
+    if not n_scan & 0xFFFFF: progress('scan', n_scan, SCAN_WORDS)
     w = struct.unpack_from('<I', IMG, o)[0]
     if w >> 24 in SPIN_TOPS:
         t = w >> 24
@@ -1208,7 +1234,9 @@ if any(fb - fa > BIG_FN for fa, fb in funcs):
         split += [(p, q) for p, q in ps if bisect.bisect_left(sites18, p) < bisect.bisect_left(sites18, q)]   # the pieces that hold x18 sites
         print(f'function {fa:#x}..{fb:#x} ({(fb - fa) / 2**20:.2f} MB, no unwind entries) analysed in {len(ps)} pieces')
     funcs = split
-for fa, fb in funcs:
+progress('functions')
+for n_fn, (fa, fb) in enumerate(funcs):
+    progress('functions', n_fn, len(funcs))
     insl = disasm_fn(fa, fb)
     ws = find_windows(insl)
     for wseg in ws:
@@ -1270,7 +1298,9 @@ for wseg in windows:
     use_area(wseg[0].address); st, lo, hi = site_window(wseg); stat('window'); put_branch(lo, st)
 for parts in retries:
     use_area(parts[0][0][0].address); st = site_retry_window(parts); stat('retry_window'); put_branch(parts[0][0][0].address, st)
-for a in sorted(kinds):
+progress('sites')
+for n_site, a in enumerate(sorted(kinds)):
+    if not n_site & 0x3FFF: progress('sites', n_site, len(kinds))
     if a in done: continue
     use_area(a)
     k, arg = kinds[a]
@@ -1687,18 +1717,20 @@ def find_spin_regions():
     """spin_region for every candidate head that has one, in address order. Each job takes every nth head, so the slow stretches
     of code are spread across the workers. A region holds capstone objects, which can't be sent back from a worker, so the workers
     only say which heads have one and the regions are built again here."""
-    step = min(8 * WORKERS, len(spin_heads))
+    step = min(8 * WORKERS if WORKERS > 1 else 64, len(spin_heads))   # one worker: 64 jobs only for finer progress lines (the regions are sorted below either way)
     heads = []
-    for found in in_parallel(spin_heads_with_region, [(first, step) for first in range(step)]):
+    for found in in_parallel(spin_heads_with_region, [(first, step) for first in range(step)], 'spin'):
         heads += found
     return [spin_region(T, spin_cand[T]) for T in sorted(heads)]
 
+progress('spin')
 spin_regions = find_spin_regions()   # all found on the unchanged image first: emitting patches back-edges
 spin_sites = [(g['T'], sorted(g['valid']), sum(len(g['nodes'][a]['ins']) for a in g['R'])) for g in spin_regions]
 for g in spin_regions: spin_emit(g)
 if os.environ.get('DM_SPIN_LIST'):
     for T, bes, n in spin_sites: print(f'{NAME} spin wait {T:#x} ({n} instructions), back-edges ' + ' '.join(f'{b:#x}' for b in bes))
 
+progress('write')
 os.makedirs(outdir, exist_ok=True)
 P = lambda ext: os.path.join(outdir, f'{NAME}.{ext}')
 patch = patch_front

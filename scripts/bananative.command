@@ -1,6 +1,6 @@
 #!/bin/sh
 # Banana Native's packer on macOS, ready to use: double-click this file in Finder for the window (scripts/pack_gui.py), or run it in a terminal.
-# On first use it finds a working environment (android/environment.yml: Python 3.14 with Tk, Capstone 5, lz4, spirv-val, the .NET 10 runtime) or makes one:
+# On first use it finds a working environment (android/environment.yml: Python 3.14 with Tk, Capstone 5, lz4, zbic, spirv-val, the .NET 10 runtime) or makes one:
 # it downloads micromamba (github.com/mamba-org/micromamba-releases) when there is none on PATH, and the packages from conda-forge, about 400 MB in all,
 # into <folder>/bananative/ (asked once; the drive with your dumps is a good place). The environment's path is remembered in .bananative-env in the repository
 # (not committed). Usage:

@@ -1,5 +1,5 @@
 # Banana Native's packer on Windows: scripts\bananative.bat runs this. The same commands as scripts/bananative.command on macOS:
-# on first use it finds a working environment (android/environment.yml: Python 3.14 with Tk, Capstone 5, lz4, spirv-val, the .NET 10 runtime) or makes one:
+# on first use it finds a working environment (android/environment.yml: Python 3.14 with Tk, Capstone 5, lz4, zbic, spirv-val, the .NET 10 runtime) or makes one:
 # it downloads micromamba (github.com/mamba-org/micromamba-releases) when there is none on PATH, and the packages from conda-forge, about 400 MB in all,
 # into <folder>\bananative\ (asked once). The environment's path is remembered in .bananative-env in the repository (not committed). Usage:
 #   scripts\bananative.bat                       the window

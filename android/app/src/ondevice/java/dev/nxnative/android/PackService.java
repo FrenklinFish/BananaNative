@@ -474,7 +474,8 @@ public final class PackService extends Service {
                     j.stepState("split", "pending");
                     return "interrupted";
                 }
-                // Try anyway: the split need not be the profile's list byte for byte; vk_android_build.py still finds each shader by its key and stops when one is missing
+                // Try anyway: the split need not be the profile's list byte for byte; vk_android_build.py still finds each shader by its key, and with DMSH_VK_REQUIRE_ALL=0 (below)
+                // writes the library without the shaders this build of the game lacks, counted in one [RED] line of shaders.log
                 String bad = j.tryAnyway() ? null : splitMatchesProfile(j, split);
                 if (bad != null) return bad;
                 tool = "dm/gfx/tools/vk_android_build.py";
@@ -524,6 +525,9 @@ public final class PackService extends Service {
         // a profile with a selected set: the split keeps the code of only those shaders (and their pixel shaders), as the shaders step builds only them; a full
         // package of Pokopia held 4.3 GB and its scan ran out of memory (docs/reference/memory.md, A shader split that keeps every shader's code in memory)
         PackEngine.setenv("DM_SPLIT_SELECTED", s.equals("split") && selection(j) != null ? "1" : "0");
+        // the split reads only the files the profile's shader_map.tsv names when the dump's build is the profile's, and keeps that result only when its tables are the
+        // profile's; otherwise it scans every file (android/SHADERS.md, Targeted split)
+        PackEngine.setenv("DM_SPLIT_TARGETED", "1");
         PackEngine.setenv("DM_PACKER_COMMIT", BuildConfig.NX_COMMIT);   // pack.tsv's packer: no repository on the phone to ask
         PackEngine.setenv("NX_PACK_WORK", od.getPath());
         PackEngine.setenv("NX_PACK_VERSION", v);
@@ -559,6 +563,7 @@ public final class PackService extends Service {
             int eq = l.indexOf('=');
             if (eq > 0 && !l.startsWith("#")) { PackEngine.setenv(l.substring(0, eq).trim(), l.substring(eq + 1).trim()); Files.write(log.toPath(), ("[env.txt] " + l.trim() + "\n").getBytes(StandardCharsets.UTF_8), java.nio.file.StandardOpenOption.APPEND); }
         }
+        if (s.equals("shaders")) j.shadersMissing(0, 0);   // the step's own count (Tail), not an earlier run's
         Tail tail = new Tail(j, s, log);
         tail.start();
         int code;
@@ -719,7 +724,11 @@ public final class PackService extends Service {
                 if (m.find()) {
                     j.stepProgress(step, Long.parseLong(m.group(1)), Long.parseLong(m.group(2)), m.group(3));
                     changed = true;
-                } else if (line.startsWith("[RED] ")) lastRed = line.substring(6);
+                } else if (line.startsWith("[RED] ")) {
+                    lastRed = line.substring(6);
+                    long[] miss = PrepareText.missingShaders(line);   // Try anyway: shaders this game version lacks, said once the game is ready (Ondevice.addGame)
+                    if (miss != null) { j.shadersMissing(miss[0], miss[1]); changed = true; }
+                }
             }
             if (changed) save(j, false);
         }

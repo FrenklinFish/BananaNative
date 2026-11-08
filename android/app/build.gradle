@@ -190,6 +190,7 @@ tasks.register('apk', Copy) {
 // -PnxPackStage=<that stage> (or the environment's NX_PACK_STAGE) names it. Into the APK go:
 //   lib/arm64-v8a/libpython3.14.so, libnxpack.so      (jniLibs: loaded by PackNative in the :pack process only)
 //   lib/arm64-v8a/libdmsh_xlate.so, libSPIRV-Tools-shared.so   the translator and the validator, which vk_android_build.py loads through ctypes in that process
+//   lib/arm64-v8a/libzbicdec.so   the ZBIC decoder (dm/third_party/zstd-zbic), which nso.py loads through ctypes for the segments of system 22.0.0+ modules
 //   assets/pack/python.zip   the Python home (lib/python3.14 with lib-dynload, capstone, lz4), unpacked to filesDir by PackNative
 //   assets/pack/tools.zip    the repository's tools the job runs (scripts, dm/tools, dm/games/<game>, dm/gfx/tools without the Mac binaries, and the other sources DMSH_CHAIN
 //                            hashes), likewise
@@ -199,14 +200,17 @@ if (nxPackEngine == 'native') {
     if (!stageProp) throw new GradleException('The APK carries the on-device packer: pass -PnxPackStage=<android/ondevice/build.sh work dir>/stage (or set NX_PACK_STAGE); -PnxPackEngine=fake builds a simulated one instead')
     def stage = file(stageProp)
     def nxPack = layout.buildDirectory.dir('nxpack')
-    def need = ['lib/libpython3.14.so', 'lib/libnxpack.so', 'lib/libdmsh_xlate.so', 'lib/libSPIRV-Tools-shared.so', 'python/lib/python3.14/os.py']
+    def need = ['lib/libpython3.14.so', 'lib/libnxpack.so', 'lib/libzbicdec.so', 'lib/libdmsh_xlate.so', 'lib/libSPIRV-Tools-shared.so', 'python/lib/python3.14/os.py']
     need.each { if (!new File(stage, it).isFile()) throw new GradleException("$stage has no $it: run android/ondevice/build.sh <work dir> (it makes <work dir>/stage)") }
     def jni = tasks.register('nxPackJni', Sync) {
-        from(new File(stage, 'lib')) { include 'libpython3.14.so', 'libnxpack.so', 'libdmsh_xlate.so', 'libSPIRV-Tools-shared.so' }
+        from(new File(stage, 'lib')) { include 'libpython3.14.so', 'libnxpack.so', 'libzbicdec.so', 'libdmsh_xlate.so', 'libSPIRV-Tools-shared.so' }
         into nxPack.map { it.dir('jni/arm64-v8a') }
     }
     def pyZip = tasks.register('nxPackPython', Zip) {
-        from(new File(stage, 'python')) { exclude '**/__pycache__/**' }
+        from(new File(stage, 'python')) {
+            exclude '**/__pycache__/**'
+            exclude '**/site-packages/zbic.*', '**/site-packages/zbic-*/**'   // PyPI's zbic (GPL-2.0) from a stage made by 0.2.2's first build.sh: the APK carries libzbicdec.so instead
+        }
         archiveFileName = 'python.zip'
         destinationDirectory = nxPack.map { it.dir('zips') }
         preserveFileTimestamps = false

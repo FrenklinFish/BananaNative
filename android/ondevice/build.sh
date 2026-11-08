@@ -1,17 +1,17 @@
 #!/bin/zsh
 # Builds the on-device packer's native side (android/ONDEVICE.md) on the Mac, the stage the APK takes (build.gradle -PnxPackStage=<work dir>/stage):
-#   python: the official CPython 3.14 Android build, Capstone 5 and python-lz4 built with the NDK, and libnxpack.so (dm_pack.c)
+#   python: the official CPython 3.14 Android build, Capstone 5 and python-lz4 built with the NDK, libnxpack.so (dm_pack.c) and libzbicdec.so (dm/third_party/zstd-zbic)
 #   tools:  the translator (dm/gfx/tools/dmsh_xlate_android/build.sh lib: libdmsh_xlate.so, NativeAOT, .NET 10 SDK) and SPIRV-Tools' validator
 #           (build_spirv_tools.sh: libSPIRV-Tools-shared.so), which vk_android_build.py loads through ctypes on the phone
-# Usage: build.sh <work dir> [all|python|tools]   (default all; downloads and intermediate files go into the work dir: put it on the dump drive, not in the home folder)
+# Usage: build.sh <work dir> [all|python|tools|zbic]   (default all; zbic adds only libzbicdec.so to an existing stage; downloads and intermediate files go into the work dir: put it on the dump drive, not in the home folder)
 # → <work dir>/stage/
-#     lib/libpython3.14.so, libnxpack.so, libdmsh_xlate.so, libSPIRV-Tools-shared.so   the app's jniLibs (arm64-v8a)
+#     lib/libpython3.14.so, libnxpack.so, libzbicdec.so, libdmsh_xlate.so, libSPIRV-Tools-shared.so   the app's jniLibs (arm64-v8a)
 #     python/lib/python3.14/                   the Python home: the standard library with lib-dynload/, site-packages/capstone (+ lib/libcapstone.so), site-packages/lz4
 #     bin/dm_pack_cli                          the adb shell test runner (dm_pack_cli.c)
 # The sources are pinned by version and SHA-256 (below; SPIRV-Tools by its Vulkan SDK tag); a mismatch stops the build. "python" makes the stage afresh, so run
 # "tools" after it (all does both).
 set -e
-W=${1:?usage: build.sh <work dir> [all|python|tools]}; WHAT=${2:-all}; HERE=${0:A:h}
+W=${1:?usage: build.sh <work dir> [all|python|tools|zbic]}; WHAT=${2:-all}; HERE=${0:A:h}
 mkdir -p $W; W=${W:A}
 NDK=${ANDROID_NDK_HOME:-$(ls -d ~/Library/Android/sdk/ndk/* 2>/dev/null | sort -V | tail -1)}
 [ -d "$NDK/toolchains/llvm/prebuilt" ] || { echo "[RED] no Android NDK (set ANDROID_NDK_HOME)"; exit 1; }
@@ -57,6 +57,15 @@ cp $P/lib/libpython3.14.so $S/lib/
 $=CC -shared -fPIC -O2 -Wall -I$INC -o $S/lib/libnxpack.so $HERE/dm_pack.c -L$P/lib -lpython3.14 -Wl,-z,max-page-size=16384
 $=CC -O2 -Wall -o $S/bin/dm_pack_cli $HERE/dm_pack_cli.c -L$S/lib -lnxpack -lpython3.14 -Wl,-rpath,'$ORIGIN/../lib'
 find $S/python -name __pycache__ -prune -exec rm -rf {} +
+fi
+if [[ $WHAT == all || $WHAT == python || $WHAT == zbic ]]; then
+  # libzbicdec.so (dm/third_party/zstd-zbic: zstd 1.5.7's decoder, BSD, with an MIT reader of ZBIC's entropy tables): the ZBIC segments of system 22.0.0+
+  # modules, which nso.py loads through ctypes by its bare name, as vk_android_build.py does libdmsh_xlate.so. An earlier stage's GPLv2 zbic package goes.
+  [ -d $S/lib ] || { echo "[RED] $S has no lib/: run build.sh $W python first"; exit 1; }
+  rm -rf $S/python/lib/python3.14/site-packages/zbic.*(N) $S/python/lib/python3.14/site-packages/zbic-*.dist-info(N)
+  sh $HERE/../../dm/third_party/zstd-zbic/build.sh $S/lib/libzbicdec.so $=CC -Wall
+  $BIN/llvm-strip --strip-debug $S/lib/libzbicdec.so
+  if grep -qaF "$HOME" $S/lib/libzbicdec.so; then echo "[RED] $S/lib/libzbicdec.so names this machine's home folder"; exit 1; fi
 fi
 if [[ $WHAT == all || $WHAT == tools ]]; then
   [ -d $S/lib ] || { echo "[RED] $S has no lib/: run build.sh $W python first"; exit 1; }
