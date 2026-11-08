@@ -136,6 +136,10 @@ final class Prefs {
     /** Game settings › Instanced draws (DM_VK_INSTANCE): runs of draws that repeat one mesh drawn as one instanced draw. Off by default (a GPU loss on Adreno 830 with Turnip, open) */
     static boolean instancedDraws(Context c, String titleId) { return of(c).getBoolean(gameKey("vk_instance", titleId), false); }
     static void instancedDraws(Context c, String titleId, boolean on) { of(c).edit().putBoolean(gameKey("vk_instance", titleId), on).commit(); }
+    /** Game settings › Background pipelines (DM_VK_PSO_ASYNC): a pipeline the cache doesn't have yet is made on two background threads instead of on the frame,
+     *  so a cold cache gives a short pop-in instead of a freeze (Bananza's heaviest area with an empty cache: worst frame 8.1 s → 3.7 s). On by default */
+    static boolean psoAsync(Context c, String titleId) { return of(c).getBoolean(gameKey("vk_pso_async", titleId), true); }
+    static void psoAsync(Context c, String titleId, boolean on) { of(c).edit().putBoolean(gameKey("vk_pso_async", titleId), on).commit(); }
     /** Game settings › Classic render passes (DM_VK_CLASSIC_RP): VkRenderPasses with imageless framebuffers instead of dynamic rendering. Off by default (a GPU loss on Adreno 830 with Turnip, open) */
     static boolean classicPasses(Context c, String titleId) { return of(c).getBoolean(gameKey("vk_classic_rp", titleId), false); }
     static void classicPasses(Context c, String titleId, boolean on) { of(c).edit().putBoolean(gameKey("vk_classic_rp", titleId), on).commit(); }
