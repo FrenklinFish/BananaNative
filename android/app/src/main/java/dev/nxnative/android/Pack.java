@@ -24,6 +24,7 @@ final class Pack {
     final String[] modules;   // the profile's modules, rewritten in the pack
     final List<String> builds;   // "main=<build ID>" rows: the NSO builds the code was rewritten from (PackCheck.build)
     final String packer;   // the commit of the tools that made it ("" when not recorded)
+    final String madeBy;   // its made_by row: "app <version>" when this app's pack step made it, "" for a pack from other tools (or from before the row)
 
     private Pack(File dir, Map<String, List<String>> rows) throws IOException {
         this.dir = dir;
@@ -47,7 +48,12 @@ final class Pack {
         builds = rows.getOrDefault("build", List.of());
         List<String> pk = rows.get("packer");
         packer = pk == null || pk.isEmpty() ? "" : pk.get(0);
+        List<String> mb = rows.get("made_by");
+        madeBy = mb == null || mb.isEmpty() ? "" : mb.get(0);
     }
+
+    /** Whether this app made the pack (its made_by row), so its code can be updated without asking when only the tools changed */
+    boolean madeByApp() { return madeBy.startsWith("app "); }
 
     /** The shader library this APK's host loads from the pack: shaders/v-<DMSH_VK_CHAIN>/dmsh_vk.lib (vka_shader.c makes the path itself; pack.tsv's row is not read), null when missing */
     File library() { return libraryOf(dir); }

@@ -103,7 +103,8 @@ final class PackCheck {
         for (String m : p.modules) {
             File kf = new File(p.dir, m + ".android.key");
             BuildCheck.Mod nso = mod(game, p.gameVersion(game), m);
-            if (!kf.isFile() || !nso.exists()) return null;
+            if (!kf.isFile()) { android.util.Log.w("nxnative", p.titleId + ": the pack has no " + kf.getName() + ": its rewrite did not finish (or the pack is from before keys); ⋯ › Prepare again remakes it"); return null; }
+            if (!nso.exists()) return null;
             try {
                 String have = new String(Files.readAllBytes(kf.toPath()), StandardCharsets.UTF_8).trim();
                 if (!RewriteKey.keys(t, BuildConfig.NX_REWRITER.split(" "), gd, m, nso::hash, packGt).contains(have)) return false;   // this rewriter's key, an equivalent one's, an earlier formula's (RewriteKey)

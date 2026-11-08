@@ -329,6 +329,7 @@ public final class MainActivity extends Activity {
                 if (!key.equals(updateDone)) { updateDone = key; done = true; }
                 continue;
             }
+            if (j.currentStep().equals("rewrite")) { Ui.status(e.getKey(), s.equals("running") ? "Ready · updating game code" : "Ready · game code update paused", R.color.bn_leaf); continue; }   // (its progress once the rewrite step reports one)
             Ui.status(e.getKey(), ShaderLibs.updatingText(java.util.Locale.getDefault(), j.shadersDone(), j.shadersTotal(), Job.etaText(j.shadersEta()), !s.equals("running")), R.color.bn_leaf);
         }
         if (done) { refresh(); return; }   // the new library is in: the cards' states are checked again ("Ready")
@@ -539,6 +540,7 @@ public final class MainActivity extends Activity {
             Boolean ok = null;
             if (problem == null) try { ok = PackCheck.code(this, Pack.read(new File(g.packDir)), new File(g.gameDir)); } catch (IOException e) { ok = null; }
             Boolean code = ok;
+            boolean own = Boolean.FALSE.equals(ok) && Ondevice.ownPack(new File(g.gameDir), new File(g.packDir), g.titleId);   // the app's own pack, its code from older tools
             runOnUiThread(() -> {
                 if (info.getParent() == null) return;
                 // An APK update's new shaders: made in the background with no question when the pack's older library is one the delta manifest knows (Ondevice.autoUpdate)
@@ -579,6 +581,15 @@ public final class MainActivity extends Activity {
                     play.setOnClickListener(v -> { if (!needAccess(new File(g.gameDir))) Ondevice.prepare(this, new File(g.gameDir), false); });
                 }
                 if (!Boolean.FALSE.equals(code)) return;
+                // The app's own pack whose code older tools made (an APK update changed the rewriter or the profile's patches): updated in the background, no question;
+                // the card says so like a shader update. Play stays on: the new code is swapped in only when the rewrite is complete
+                if (own) {
+                    if (Ondevice.autoCodeUpdate(this, new File(g.gameDir), new File(g.packDir))) {
+                        Ui.status(st, "Ready · updating game code", R.color.bn_leaf);
+                        updating.put(st, g); updateTick();
+                    } else Ui.status(st, "Ready · game code update waits", R.color.bn_leaf);   // a game or another job runs (or it was tried this run): the next check starts it
+                    return;   // the app's own pack: no "other tools" chip
+                }
                 // A pack whose code other tools made: a small chip; its tap says what that means
                 TextView n = Ui.warnChip(this, "Pack from other tools", "Pack from other tools",
                         "This game's pack was made by other tools than this app's. It usually still runs. If the game misbehaves, ⋯ › Prepare again remakes it from your dump.");

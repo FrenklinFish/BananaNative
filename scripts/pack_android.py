@@ -401,6 +401,7 @@ def main():
     ap.add_argument('--no-shaders', action='store_true', help='make the pack without the shader library')
     ap.add_argument('--code-only', action='store_true', help='only rewrite the modules (the phone\'s rewrite step): pack.tsv, game.tsv and the shaders stay as they are')
     ap.add_argument('--keep-code', action='store_true', help='do not rewrite: the pack\'s modules must be there with their key files (the phone\'s pack step)')
+    ap.add_argument('--made-by', help='who makes this pack, written as its made_by row (the phone\'s pack step: "app <version>"; the launcher then updates the pack\'s code by itself when only the tools changed)')
     ap.add_argument('--in-process', action='store_true', help='run the rewriter in this process, no subprocesses (the phone\'s packer); the shader library must be current or left out')
     a = ap.parse_args()
     if WINDOWS:
@@ -434,8 +435,10 @@ def main():
         for m in mods:
             if known.get(m) and known[m] != ids[m]: print(f'[RED] {m} build {ids[m]} is not the profile\'s build {known[m]}: build-gated cuts do not apply')
         if a.keep_code:
-            if missing := [m for m in mods if not (out / f'{m}.patched.bin').is_file() or not (out / f'{m}.android.key').is_file()]:
-                raise Error(f'--keep-code: {out} has no complete {", ".join(missing)} (patched.bin and its key): rewrite first')
+            # each module needs its rewritten code and, written last by the rewrite, its key: a module without the key is a rewrite that did not finish (or one from before keys)
+            gaps = [f'{m} ({" and ".join(f for f in (f"{m}.patched.bin", f"{m}.android.key") if not (out / f).is_file())} missing)'
+                    for m in mods if not (out / f'{m}.patched.bin').is_file() or not (out / f'{m}.android.key').is_file()]
+            if gaps: raise Error(f'--keep-code: the rewrite step has not finished for {", ".join(gaps)} in {out}: run the rewrite step again')
             print('  modules kept as they are (--keep-code)')
         else:
             try: rewrite(sys.executable, srcs, out, max(1, a.j), g, a.in_process)
@@ -449,7 +452,7 @@ def main():
         rows = [('format', str(FORMAT)), ('title_id', f'{app:016X}'), ('name', g.get('name', '')), ('version', str(ver)), ('target', 'android'),
                 ('modules', ' '.join(mods)), *[('build', f'{m}={ids[m]}') for m in mods], ('romfs', rel(romfs)),
                 *[('aoc', f'{tid - app - 0x1000}\t{rel(p)}') for tid, p in sorted(dlc.items())],
-                *([('shaders', shaders.relative_to(out).as_posix())] if shaders else []), ('packer', commit())]
+                *([('shaders', shaders.relative_to(out).as_posix())] if shaders else []), ('packer', commit()), *([('made_by', a.made_by)] if a.made_by else [])]
         tmp = out / 'pack.tsv.partial'
         write_lf(tmp, ''.join(f'{k}\t{v}\n' for k, v in rows)); os.replace(tmp, out / 'pack.tsv')
         size = sum(f.stat().st_size for f in out.rglob('*') if f.is_file())

@@ -323,6 +323,9 @@ final class Job {
     }
 
     /** The step to show: the running one, else the next to run, else the last */
+    /** The step the job is at (or ended at): "rewrite", "shaders", "pack", ... */
+    synchronized String currentStep() { return o.optString("step"); }
+
     synchronized int current() {
         int i = java.util.Arrays.asList(STEPS).indexOf(o.optString("step"));
         int n = next();
