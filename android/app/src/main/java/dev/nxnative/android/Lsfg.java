@@ -3,6 +3,7 @@ package dev.nxnative.android;
 import android.content.Context;
 import android.content.SharedPreferences;
 import android.net.Uri;
+import android.view.View;
 import android.widget.CheckBox;
 import android.widget.LinearLayout;
 import android.widget.RadioButton;
@@ -27,7 +28,7 @@ final class Lsfg {
 
     /** The places looked in, in order; then the app's own folders */
     static final String[] KNOWN = {"/storage/emulated/0/Documents/Emulation/bios/Lossless.dll", "/storage/emulated/0/Switch2/Lossless.dll", "/storage/emulated/0/Download/Lossless.dll"};
-    static final int[] MULTS = {2, 3, 4}, TARGETS = {0, 60, 90, 120}, FLOWS = {0, 25, 50, 75, 100};
+    static final int[] MULTS = {2, 3, 4}, TARGETS = {0, 60, 90, 120}, FLOWS = {25, 50, 75, 100};
 
     static File privateCopy(Context c) { return new File(c.getFilesDir(), "lsfg/Lossless.dll"); }
 
@@ -35,7 +36,9 @@ final class Lsfg {
     static boolean on(Context c) { return prefs(c).getBoolean("lsfg", false); }
     static int multiplier(Context c) { return prefs(c).getInt("lsfg_mult", 2); }
     static int target(Context c) { return prefs(c).getInt("lsfg_target", 0); }
-    static int flow(Context c) { return prefs(c).getInt("lsfg_flow", 75); }
+    /** Motion estimation resolution, % of the picture: 50 by default (at 1280x720 on an Adreno 740, 3x at the game's own 33 fps where 100 % was not worth one
+     *  generated frame). The old Auto (0) was the full size: read as 100 */
+    static int flow(Context c) { int v = prefs(c).getInt("lsfg_flow", 50); return v <= 0 ? 100 : v; }
 
     /** Where the DLL in use came from (for the main screen and the log) */
     static String note = "";
@@ -123,25 +126,33 @@ final class Lsfg {
         head.setPadding(0, 24, 0, 0);
         box.addView(head);
         if (!BuildConfig.NX_LSFG) { TextView t = new TextView(c); t.setText("Not in this build (built with -PnxLsfg=false)."); box.addView(t); return null; }
+        // The options only where they apply: everything below the switch only with frame generation on; the frames per game frame only with a fixed rate (with a
+        // target the multiplier follows the target)
+        LinearLayout opts = new LinearLayout(c), fixed = new LinearLayout(c);
+        opts.setOrientation(LinearLayout.VERTICAL); fixed.setOrientation(LinearLayout.VERTICAL);
+        Runnable vis = () -> { opts.setVisibility(on(c) ? View.VISIBLE : View.GONE); fixed.setVisibility(target(c) == 0 ? View.VISIBLE : View.GONE); };
         CheckBox on = new CheckBox(c);
         on.setText("Frame generation (LSFG)");
         on.setChecked(on(c));
-        on.setOnCheckedChangeListener((b, v) -> { prefs(c).edit().putBoolean("lsfg", v).commit(); apply.run(); });
+        on.setOnCheckedChangeListener((b, v) -> { prefs(c).edit().putBoolean("lsfg", v).commit(); vis.run(); apply.run(); });
         box.addView(on);
         TextView st = new TextView(c);
         st.setText(status);
         st.setTextSize(12);
         box.addView(st);
-        TextView l1 = new TextView(c); l1.setText("Frames per game frame"); box.addView(l1);
-        box.addView(choice(c, MULTS, multiplier(c), new String[]{"2x", "3x", "4x"}, v -> { prefs(c).edit().putInt("lsfg_mult", v).commit(); apply.run(); }));
-        TextView l2 = new TextView(c); l2.setText("Target frame rate (the multiplier follows it)"); box.addView(l2);
-        box.addView(choice(c, TARGETS, target(c), new String[]{"Fixed", "60", "90", "120"}, v -> { prefs(c).edit().putInt("lsfg_target", v).commit(); apply.run(); }));
-        TextView l3 = new TextView(c); l3.setText("Motion estimation resolution (lower is faster; Auto = the game's own)"); box.addView(l3);
-        box.addView(choice(c, FLOWS, flow(c), new String[]{"Auto", "25%", "50%", "75%", "100%"}, v -> { prefs(c).edit().putInt("lsfg_flow", v).commit(); apply.run(); }));
+        TextView l2 = new TextView(c); l2.setText("Target frame rate"); opts.addView(l2);
+        opts.addView(choice(c, TARGETS, target(c), new String[]{"Fixed", "60", "90", "120"}, v -> { prefs(c).edit().putInt("lsfg_target", v).commit(); vis.run(); apply.run(); }));
+        TextView l1 = new TextView(c); l1.setText("Frames per game frame"); fixed.addView(l1);
+        fixed.addView(choice(c, MULTS, multiplier(c), new String[]{"2x", "3x", "4x"}, v -> { prefs(c).edit().putInt("lsfg_mult", v).commit(); apply.run(); }));
+        opts.addView(fixed);
+        TextView l3 = new TextView(c); l3.setText("Motion estimation resolution (lower is faster)"); opts.addView(l3);
+        opts.addView(choice(c, FLOWS, flow(c), new String[]{"25%", "50%", "75%", "100%"}, v -> { prefs(c).edit().putInt("lsfg_flow", v).commit(); apply.run(); }));
         TextView mode = new TextView(c);   // Eden ports only the performance shader set (lossless_dll.h PerformanceShader); the quality set would need its own chain
         mode.setText("Mode: performance (the only shader set Eden's LSFG uses)");
         mode.setTextSize(12);
-        box.addView(mode);
+        opts.addView(mode);
+        box.addView(opts);
+        vis.run();
         return st;
     }
 
