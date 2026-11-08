@@ -91,10 +91,11 @@ public final class GameActivity extends Activity implements SurfaceHolder.Callba
         // The on-screen controls take every touch and pass it to the host, which tells controls from touchscreen fingers
         controls = new TouchControls(this, Native.hasInput());
         root.addView(controls, new FrameLayout.LayoutParams(FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.MATCH_PARENT));
-        // The build tag: always shown, whatever the overlay switches say, so every screenshot and recording names its build; bold, flush in the top-left corner
+        // The build tag: an overlay item, on by default (fpsTick follows the switches); bold, flush in the top-left corner
         tag = overlayText(Gravity.TOP | Gravity.START, 1f);
         tag.setText(Prefs.buildTag(this));
         tag.setTypeface(Typeface.DEFAULT_BOLD);
+        tag.setVisibility(overlayOn() && Prefs.overlayItem(this, "tag") ? View.VISIBLE : View.GONE);
         root.addView(tag, new FrameLayout.LayoutParams(FrameLayout.LayoutParams.WRAP_CONTENT, FrameLayout.LayoutParams.WRAP_CONTENT, Gravity.TOP | Gravity.START));
         // The log block may grow at most up to the tag's bottom edge (its top margin), so a long log never runs under the tag
         tag.addOnLayoutChangeListener((v, l, t, r, b, ol, ot, or, ob) -> {
@@ -134,6 +135,9 @@ public final class GameActivity extends Activity implements SurfaceHolder.Callba
         handle.setContentDescription("Open the in-game panel");
         handle.setOnClickListener(v -> panel.open());
         root.addView(handle, root.indexOfChild(panel), new FrameLayout.LayoutParams(Math.round(22 * dp), Math.round(56 * dp), Gravity.END | Gravity.TOP));
+        // Auto with a gamepad connected, or Off: the handle goes with the controls (Back or a gamepad's Home button opens the panel)
+        controls.onSwitch = v -> handle.setVisibility(v ? View.VISIBLE : View.GONE);
+        controls.setMode(TouchControls.mode(this));
         root.addOnLayoutChangeListener((v, l, t, r, b, ol, ot, or, ob) -> handle.setTranslationY((b - t) * 0.25f - 28 * dp));
         // Paused (pause(): the in-game panel's Pause, or the screen coming back with pause-on-return on): the game is suspended until a tap, or A / Start on a gamepad.
         // Under the panel and its handle, so Stop stays reachable
@@ -185,6 +189,7 @@ public final class GameActivity extends Activity implements SurfaceHolder.Callba
         boolean on = overlayOn();
         CharSequence t = on ? stats.tick() : null;
         fps.setVisibility(t != null ? View.VISIBLE : View.GONE);
+        tag.setVisibility(on && Prefs.overlayItem(this, "tag") ? View.VISIBLE : View.GONE);
         if (t != null) fps.setText(t);
         ui.postDelayed(this::fpsTick, 500);
     }
