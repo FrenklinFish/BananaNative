@@ -28,6 +28,9 @@ typedef struct {
     double last_frame, stable_until, probe_until, next_probe, deficit_since;   // seconds (CLOCK_MONOTONIC); 0 = unset
     float smoothed_interval, output_credit, probe_base_rate, unloaded_base_rate;
     size_t issued, probe_previous_limit, limit; uint32_t probe_failures;
+    double below_since;   // decoupled: since when the base has been under min_base while generating (0 = not)
+    float min_base;   // set by the caller with decoupled: the floor (DM_LSFG_MIN_FPS, default 30; 0 = none)
+    int decoupled;   // set by the caller: the game's speed follows its measured rate (the host's frame limiter), so a slower base does not slow the game down
 } lsfg_pacer;
 typedef struct { size_t generations; int warm; } lsfg_plan;
 // multiplier 2..4 (images per game frame with target_rate 0), target_rate 0 or the output rate to hold (the multiplier then follows it)

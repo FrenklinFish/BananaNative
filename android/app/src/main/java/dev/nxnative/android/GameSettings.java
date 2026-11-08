@@ -70,7 +70,7 @@ final class GameSettings {
     }
 
     static String capLabel(MainActivity a, String id) {
-        String l = MainActivity.capLabel(Prefs.fpsCap(a, id));
+        String l = Prefs.paced(id) ? Prefs.paceLabel(Prefs.paceCap(a, id)) : MainActivity.capLabel(Prefs.fpsCap(a, id));
         return Prefs.ownFpsCap(a, id) ? l : "Default · " + l;
     }
 
@@ -172,6 +172,17 @@ final class GameSettings {
     }
 
     private static void cap(MainActivity a, Game g, Runnable done) {
+        if (Prefs.paced(g.titleId)) {   // a frame limit, no locking (Prefs.PACE_CAPS)
+            String[] labels = new String[Prefs.PACE_CAPS.length + 1];
+            labels[0] = "Default (Settings: " + Prefs.paceLabel(Prefs.paceOf(Prefs.fpsCap(a))) + ")";
+            int checked = 0, cur = Prefs.paceCap(a, g.titleId);
+            for (int k = 0; k < Prefs.PACE_CAPS.length; k++) { labels[k + 1] = Prefs.paceLabel(Prefs.PACE_CAPS[k]); if (Prefs.ownFpsCap(a, g.titleId) && Prefs.PACE_CAPS[k] == cur) checked = k + 1; }
+            new AlertDialog.Builder(a).setTitle("Frame rate cap · " + g.name).setSingleChoiceItems(labels, checked, (x, w) -> {
+                Prefs.fpsCap(a, g.titleId, w == 0 ? null : Prefs.PACE_CAPS[w - 1]);
+                x.dismiss(); done.run();
+            }).setNegativeButton("Cancel", null).show();
+            return;
+        }
         int n = Prefs.FPS_CAPS.length;
         String[] labels = new String[n + 2];
         labels[0] = "Default (Settings: " + MainActivity.capLabel(Prefs.fpsCap(a)) + ")";

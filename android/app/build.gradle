@@ -95,7 +95,9 @@ def romfsChecksOf = { String game -> tsvRows(game, 'romfs_check').findAll { it.s
 def gpuTsOf = { String game -> tsvRows(game, 'gpu_timestamps').with { rs -> rs.isEmpty() || rs[0].size() < 2 ? 'submission' : rs[0][1].trim() } }
 // The profile's default Game resolution (game.tsv android_window: one of Prefs.WINDOWS; empty without the key: the main screen's default)
 def windowOf = { String game -> tsvRows(game, 'android_window').with { rs -> rs.isEmpty() || rs[0].size() < 2 ? '' : rs[0][1].trim() } }
-def nxProfiles = nxGames.collect { g -> [g, nameOf(g).replaceAll(/[\t\n\\"]/, ' '), shaderTotalOf(g), shaderInputsOf(g), buildsOf(g), reqsOf(g), statusOf(g), deltaOf(g), stampOf(g), resolutionOf(g), romfsChecksOf(g), gpuTsOf(g), windowOf(g)].join('\\t') }.join('\\n')
+// Whether the game's speed follows its measured frame rate (game.tsv fps_decouple rows): "1", or empty. The launcher then offers a frame limit instead of 60 / 30 / 20 (Prefs.paced)
+def decoupleOf = { String game -> tsvRows(game, 'fps_decouple').isEmpty() ? '' : '1' }
+def nxProfiles = nxGames.collect { g -> [g, nameOf(g).replaceAll(/[\t\n\\"]/, ' '), shaderTotalOf(g), shaderInputsOf(g), buildsOf(g), reqsOf(g), statusOf(g), deltaOf(g), stampOf(g), resolutionOf(g), romfsChecksOf(g), gpuTsOf(g), windowOf(g), decoupleOf(g)].join('\\t') }.join('\\n')
 def lockOf = { String key -> def f = new File(repo, 'dm/gfx/tools/dmsh_chain.lock'); f.isFile() ? (f.readLines().find { it.startsWith(key + '\t') }?.split('\t')?.getAt(1) ?: 'unknown') : 'unknown' }
 
 android {
