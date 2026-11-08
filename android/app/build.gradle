@@ -4,11 +4,11 @@ plugins {
     id 'com.android.application' version '8.13.2'
 }
 
-// The games this APK runs: -PnxGames=<title ID>,<title ID>,... (default: nxGame, gradle.properties). Each has its profile (dm/games/<title ID>) compiled into a host of its
+// The games this APK runs: -PnxGames=<title ID>,<title ID>,... (default: gradle.properties' nxGames, every game supported on Android). Each has its profile (dm/games/<title ID>) compiled into a host of its
 // own, libnxhost_<title ID>.so with its libnxlaunch_<title ID>.so (src/main/cpp/CMakeLists.txt): the host has its profile compiled in, as dm/host/Makefile's GAME, so a game
 // runs only in an APK built with its profile. The first is the default (the graphics self-test loads its host)
-def nxGame = providers.gradleProperty('nxGame').get()
-def nxGames = (providers.gradleProperty('nxGames').getOrElse('') ?: nxGame).split(',').collect { it.trim() }.findAll { it }.unique()
+def nxGames = (providers.gradleProperty('nxGames').getOrElse('') ?: providers.gradleProperty('nxGame').getOrElse('')).split(',').collect { it.trim() }.findAll { it }.unique()
+if (!nxGames) throw new GradleException('nxGames: no game (gradle.properties names every supported one; -PnxGames=<title ID>,... builds fewer)')
 nxGames.each { g ->
     if (!(g ==~ /[0-9A-F]{16}/)) throw new GradleException("nxGames: each game must be a title ID (16 upper-case hex digits), not $g")
 }
@@ -52,15 +52,16 @@ def nameOf = { String game -> tsvRows(game, 'name').collect { it[1] }.find() ?: 
 def defineOf = { String path, String name -> def f = new File(repo, path); def m = f.isFile() ? (f.text =~ /#define\s+${name}\s+"([^"]*)"/) : null; (m != null && m.find()) ? m.group(1) : 'unknown' }
 // The shaders Prepare builds: every key of the profile's shader_map.tsv, or for a profile with a selected set (shader_seen.tsv; ShaderLibs.selection, android/SHADERS.md
 // "Selected shaders") the set's keys that the map has, with the pixel shaders paired with them (shader_pairs.tsv, pso_pairs.tsv: dmsh_build.py build_keys, the tool's total)
-def shaderTotalOf = { String game ->
-    def f = new File(repo, "dm/games/$game/shader_map.tsv"); if (!f.isFile()) return 0
+def shaderKeysOf = { String game ->
+    def f = new File(repo, "dm/games/$game/shader_map.tsv"); if (!f.isFile()) return [] as Set
     def map = f.readLines().findAll { it && !it.startsWith('#') && !it.startsWith('package\t') }.collect { it.split('\t') }.findAll { it.size() > 3 }.collect { it[3] } as Set
-    def seen = new File(repo, "dm/games/$game/shader_seen.tsv"); if (!seen.isFile()) return map.size()
+    def seen = new File(repo, "dm/games/$game/shader_seen.tsv"); if (!seen.isFile()) return map
     def sel = seen.readLines().findAll { it ==~ /(?s)[0-9a-f]{16}.*/ }.collect { it.substring(0, 16) }.findAll { it in map } as Set
     def keys = new HashSet(sel)
     ['shader_pairs.tsv', 'pso_pairs.tsv'].each { t -> def pf = new File(repo, "dm/games/$game/$t"); if (pf.isFile()) pf.eachLine { l -> if (l.trim() && !l.startsWith('#')) { def c = l.trim().split(/\s+/); if (c.size() == 2 && c[0] in sel && c[1] in map) keys << c[1] } } }
-    keys.size()
+    keys
 }
+def shaderTotalOf = { String game -> shaderKeysOf(game).size() }
 def nxRewriter = { def m = (new File(repo, 'scripts/pack_android.py').text =~ /(?m)^REWRITER = \(([^)]*)\)/); if (!m.find()) throw new GradleException('scripts/pack_android.py has no REWRITER tuple'); (m.group(1) =~ /'([^']+)'/).collect { it[1] }.join(' ') }()
 def shaderInputsOf = { String game -> try { def r = providers.exec { commandLine('python3', new File(repo, 'dm/gfx/tools/dmsh_chain.py').path, '--inputs'); environment('DM_GAME', game); ignoreExitValue = true }.standardOutput.asText.get().trim(); r ==~ /[0-9a-f]{12}/ ? r : 'unknown' } catch (Exception e) { 'unknown' } }
 // The games' profiles as the launcher reads them (Profile.java): one line per game, tab-separated: title ID, name, the shader count Prepare translates (shaderTotalOf:
@@ -75,11 +76,15 @@ def reqsOf = { String game -> readinessRows(game).findAll { it.size() >= 4 && it
 def statusOf = { String game -> readinessRows(game).find { it.size() >= 2 && it[0] == 'status' }?.getAt(1)?.trim() ?: '' }
 // and last the shader delta rows (the profile's vk_delta.tsv "from" rows when its version is this tree's: "version=shaders to translate", ',' between them; Prepare's
 // estimate for an update, ShaderLibs.toTranslate)
+// Both only when the manifest is of this tree's version and holds exactly the keys Prepare builds (shaderKeysOf): a profile whose selected set changed since the manifest
+// was published counts and restamps nothing from it (a phone's delta still reuses the keys the manifest has, vk_android_delta.py coverage)
+def deltaCurrent = { String game, List<String> ls -> ls.contains("version\t${defineOf('dm/gfx/nvn/dmsh_chain_vk.h', 'DMSH_VK_CHAIN')}".toString()) &&
+    (ls.findAll { it ==~ /[0-9a-f]{16}\t.*/ }.collect { it.substring(0, 16) } as Set) == shaderKeysOf(game) }
 def deltaOf = { String game -> def f = new File(repo, "dm/games/$game/vk_delta.tsv"); if (!f.isFile()) return ''; def ls = f.readLines()
-    ls.contains("version\t${defineOf('dm/gfx/nvn/dmsh_chain_vk.h', 'DMSH_VK_CHAIN')}".toString()) ? ls.findAll { it ==~ /from\t[0-9a-f]{12}\t\d+/ }.collect { def c = it.split('\t'); "${c[1]}=${c[2]}" }.join(',') : '' }
+    deltaCurrent(game, ls) ? ls.findAll { it ==~ /from\t[0-9a-f]{12}\t\d+/ }.collect { def c = it.split('\t'); "${c[1]}=${c[2]}" }.join(',') : '' }
 // and its "stamp" rows (an older library that becomes this version's by its header alone, ShaderLibs.restamp): "version:old SHA-256:new SHA-256", ';' between them
 def stampOf = { String game -> def f = new File(repo, "dm/games/$game/vk_delta.tsv"); if (!f.isFile()) return ''; def ls = f.readLines()
-    ls.contains("version\t${defineOf('dm/gfx/nvn/dmsh_chain_vk.h', 'DMSH_VK_CHAIN')}".toString()) ? ls.findAll { it ==~ /stamp\t[0-9a-f]{12}\t[0-9a-f]{64}\t[0-9a-f]{64}/ }.collect { it.split('\t').drop(1).join(':') }.join(';') : '' }
+    deltaCurrent(game, ls) ? ls.findAll { it ==~ /stamp\t[0-9a-f]{12}\t[0-9a-f]{64}\t[0-9a-f]{64}/ }.collect { it.split('\t').drop(1).join(':') }.join(';') : '' }
 // and last what Game resolution sets for it (Profile.resolutionEnv): "window" with window_fn or res_levels rows (DM_WINDOW_SIZE: the window, or a cap on a dynamic
 // resolution), "scale:<choice>=<scale>/<console|handheld>,…" with graphics_scale rows (DM_GRAPHICS_SCALE and DM_OPMODE), empty when it has none (the launcher then offers no
 // Game resolution for it)
@@ -121,7 +126,12 @@ android {
         buildConfigField 'String', 'NX_DMSH_VK_CHAIN', "\"${defineOf('dm/gfx/nvn/dmsh_chain_vk.h', 'DMSH_VK_CHAIN')}\""
         // Its ABI: a library of another version with it plays while the shader update makes this version's (ShaderLibs.playable, as vka_shader.c lib_load)
         buildConfigField 'String', 'NX_DMSH_VK_ABI', "\"${defineOf('dm/gfx/nvn/dmsh_chain_vk.h', 'DMSH_VK_ABI')}\""
+        // and the older ABIs its host also plays (dm/gfx/vk_android/vka_abi_compat.h DMSH_VK_ABI_COMPAT, space-separated), only while that table is for this ABI (VKA_ABI_COMPAT_FOR)
+        buildConfigField 'String', 'NX_DMSH_VK_ABI_COMPAT', "\"${defineOf('dm/gfx/vk_android/vka_abi_compat.h', 'VKA_ABI_COMPAT_FOR') == defineOf('dm/gfx/nvn/dmsh_chain_vk.h', 'DMSH_VK_ABI') ? defineOf('dm/gfx/vk_android/vka_abi_compat.h', 'DMSH_VK_ABI_COMPAT') : ''}\""
         buildConfigField 'String', 'NX_PACK_ENGINE', "\"$nxPackEngine\""
+        // The DM_ switches some part of this build reads (docs/env_switches.tsv, which dm/tools/env_switches.py keeps current), space-separated: a user line naming
+        // another DM_ variable gets a [RED] line in the game's log (Readiness.unknownSwitches; GitHub #40 had DM_VK_PS0_ASYNC, a zero for the O)
+        buildConfigField 'String', 'NX_ENV_SWITCHES', "\"${new File(repo, 'docs/env_switches.tsv').readLines().drop(1).collect { it.split('\t')[0].trim() }.findAll { it ==~ /DM_[A-Z0-9_]+/ }.join(' ')}\""
         buildConfigField 'String', 'NX_XLATE_SOURCE', "\"${lockOf('xlate_source')}\""
         // The rewriter's files in pack_android.py's rewrite key (its REWRITER tuple): the launcher computes the key a pack's code must have (PackCheck)
         buildConfigField 'String', 'NX_REWRITER', "\"$nxRewriter\""

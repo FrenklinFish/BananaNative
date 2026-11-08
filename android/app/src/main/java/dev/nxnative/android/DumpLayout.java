@@ -152,6 +152,9 @@ final class DumpLayout {
         long build = -1;   // the profile's build row (its version key) whose build IDs the version's modules have: another number than version when the dump keeps that code under another version
         final Map<String, String> buildIds = new LinkedHashMap<>();   // module → its NSO build ID (64 hex digits)
         int dlc;
+        boolean otherBuild;   // refused only because no version is one of the profile's builds: Try anyway (find with anyBuild) can prepare it untested
+        boolean untested;     // found with anyBuild: the newest version, of a build the profile does not list
+        String detail = "";   // the technical part of error (build IDs, what this app supports), for Details
     }
 
     /**
@@ -159,18 +162,25 @@ final class DumpLayout {
      * the version whose modules are one of the profile's builds (by their NSO build IDs, wherever the version's code is), with its main.npdm of that title and a
      * RomFS with files (its own or the base's). A dump of another build is refused with what it holds and what this app supports.
      */
-    static Found find(File dump) {
+    static Found find(File dump) { return find(dump, false); }
+
+    /**
+     * anyBuild (Try anyway, the player's choice after a warning): a dump none of whose versions is one of the profile's builds is not refused; its newest version with
+     * main.npdm and a RomFS is taken (untested), with its modules' own build IDs. The rewriter then applies only what holds for any build (build-gated cuts and the
+     * host's fixed addresses check the build ID), and the shaders are found by key
+     */
+    static Found find(File dump, boolean anyBuild) {
         Found f = new Found();
-        f.error = find(f, dump);
+        f.error = find(f, dump, anyBuild);
         return f;
     }
 
-    private static String find(Found f, File dump) {
+    private static String find(Found f, File dump, boolean anyBuild) {
         String fn = dump.getName();
         boolean nup = Nup.isNup(dump);
         if (Nup.wrongCase(dump)) return fn + ": rename it so that its name ends in \".nup\" (lower case); the tools and the game read only that name.";
         if (nup) {
-            if (!dump.isFile() || !dump.canRead()) return dump + " is not a file this app can read. Check that All files access is on.";
+            if (!Nup.picked(dump) && (!dump.isFile() || !dump.canRead())) return dump + " is not a file this app can read. Check that All files access is on.";
             try { Nup.open(dump); } catch (IOException e) { return fn + " cannot be used: " + e.getMessage(); }
         } else if (!dump.isDirectory()) return dump + " is not a folder this app can read. Check that All files access is on.";
         List<Long> have = versions(dump);
@@ -186,7 +196,7 @@ final class DumpLayout {
             return e.getMessage();
         }
         Profile prof = Profile.of(f.titleId);
-        if (prof == null) return Profile.missing(f.titleId, "This dump");
+        if (prof == null) return Profile.missing(f.titleId, null);
         Map<Long, Map<String, String>> builds = prof.buildMap();
         for (int i = have.size() - 1; i >= 0 && f.version < 0; i--) {
             long v = have.get(i);
@@ -195,10 +205,32 @@ final class DumpLayout {
                 if (ids != null) { f.version = v; f.build = row.getKey(); f.buildIds.putAll(ids); break; }
             }
         }
-        if (f.version < 0)
-            return fn + " holds " + prof.name + " " + describe(dump) + ", not a build this app supports. " + prof.supported()
-                    + " A pack is made for one exact build: another version's code and shaders differ and it has not been tested here, so Prepare does not start from it."
-                    + " Dump that version, or use a pack made for this version elsewhere (scripts/build_ipa_from_nsp.py on a Mac makes one from a profile derived for it).";
+        if (f.version < 0 && anyBuild) {   // Try anyway: the newest version that has its code, its main.npdm and a RomFS, with its modules' own build IDs
+            Map<String, String> first = builds.isEmpty() ? Map.of() : builds.values().iterator().next();
+            for (int i = have.size() - 1; i >= 0 && f.version < 0; i--) {
+                long v = have.get(i);
+                if (!exists(dump, v, "exefs/main.npdm") || !hasRomfs(dump, v)) continue;
+                Map<String, String> ids = new LinkedHashMap<>();
+                for (String m : first.keySet()) {
+                    try {
+                        BuildCheck.Mod mod = BuildCheck.mod(dump, String.valueOf(v), m);
+                        if (mod.exists()) ids.put(m, BuildCheck.nsoBuildId(mod.head(0x60), mod.label));
+                    } catch (IOException e) {
+                        // an unreadable module: the rewrite says so
+                    }
+                }
+                if (!ids.containsKey("main")) continue;
+                f.version = v;
+                f.untested = true;
+                f.buildIds.putAll(ids);
+            }
+        }
+        if (f.version < 0) {
+            f.otherBuild = true;
+            f.detail = "The dump holds " + describe(dump) + ".\n" + prof.supported();
+            return "This dump holds " + prof.name + " (" + Profile.versionName(have.get(have.size() - 1)) + "), not a build this app supports (it supports " + prof.supportedShort()
+                    + "). Dump that version, or Try anyway: it may not start or may crash.";
+        }
         long v = f.version;
         String where = nup ? fn + ":" + selector(dump, v, false) : name(v);
         if (!exists(dump, v, "exefs/main.npdm")) return where + " has no exefs/main.npdm: the dump is incomplete.";
@@ -215,7 +247,8 @@ final class DumpLayout {
             f.dlc = dlc == null ? 0 : dlc.length;
         }
         // the RomFS is this version's data (game.tsv romfs_check: a file line that differs between versions, where romfs_marker cannot tell)
-        return RomfsCheck.check(prof, path(dump, v, "romfs"), f.buildIds.get("main"), v);
+        // (Try anyway: not checked, the rows are of the builds the profile lists)
+        return f.untested ? null : RomfsCheck.check(prof, path(dump, v, "romfs"), f.buildIds.get("main"), v);
     }
 
     /**

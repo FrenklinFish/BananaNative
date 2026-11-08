@@ -80,6 +80,26 @@ int main(void) {
     CHECK(seen_index == 0 && seen_capacity == 0, "zero unsigned arguments preserved");
     CHECK(lookups == 1, "original resolved once");
     CHECK(!memcmp(standard, unrelated, sizeof standard) && !memcmp(extension, unrelated, sizeof extension), "input bytes unchanged");
+    // SDK 21's built-in font record (Splatoon Raiders): filled from the standard font, past its header, and reported loaded
+    pl_builtin_font_t bf; memset(&bf, 0xee, sizeof bf);
+    unsigned got = h_pl_BuiltInOunce(&bf, 0, 0); font_t f0 = font_get(0);
+    CHECK(got == 1 && f0.p && bf.address == f0.p + font_skip() && bf.size == f0.n - font_skip() && bf.type == 0, "built-in font record filled");
+    // With neither the switch nor the folder set, the system's own font (SYSTEM_FONT: Arial Unicode on the Mac, Roboto on Android) is the standard font
+    char tmp[] = "/tmp/t_shared_font_XXXXXX"; int fd = mkstemp(tmp);
+    CHECK(fd >= 0 && write(fd, "\0\1\0\0ttf", 7) == 7, "stand-in system font written"); if (fd >= 0) close(fd);
+    unsetenv("T_SHARED_FONT_UNSET"); unsetenv("DM_FONT_DIR");
+    font_t sys = font_first("T_SHARED_FONT_UNSET", "standard.ttf", tmp);
+    CHECK(sys.p && sys.n == 7 + 8 && !memcmp(sys.p + 8, "\0\1\0\0ttf", 7), "the system font is taken when nothing else is set");
+    CHECK(!font_variable(&sys), "a font without tables is not variable");
+    // A list of system fonts: the first that opens (Android: RobotoStatic before the variable Roboto)
+    char list[2048]; snprintf(list, sizeof list, "/nonexistent/a.ttf:%s:/nonexistent/b.ttf", tmp);
+    font_t l = font_first("T_SHARED_FONT_UNSET", "standard.ttf", list);
+    CHECK(l.p && l.n == 7 + 8, "the first font of the list that opens is taken");
+    unlink(tmp);
+    // An sfnt header with an fvar table record is a variable font
+    uint8_t vf[8 + 12 + 32] = {0}; memcpy(vf + 8, "\0\1\0\0\0\2", 6); memcpy(vf + 8 + 12, "glyf", 4); memcpy(vf + 8 + 28, "fvar", 4);
+    font_t v = {vf, sizeof vf}; CHECK(font_variable(&v), "an fvar table makes a variable font");
+    for (const char *p = SYSTEM_FONT; p; p = strchr(p, ':') ? strchr(p, ':') + 1 : NULL) CHECK(!strncmp(p + strcspn(p, ":") - 4, ".ttf", 4), "each system font is one TTF, not a collection");
     printf("shared font: %d checks, %d failed\n", checks, fails);
     return fails != 0;
 }

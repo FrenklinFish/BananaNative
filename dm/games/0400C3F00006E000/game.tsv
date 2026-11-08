@@ -23,6 +23,9 @@ shader_versions	v0
 # ---- Files ----
 modules	main subsdk0 subsdk1 sdk
 romfs_marker	System/Resource/ResourceSizeTable.Product.100.Nin_Ounce_NVN2.rsizetable.zs
+# Line 4 of System/RegionLangMask.txt is the build ID of the main its RomFS was made for (1.8.0: line 3 "180", line 4 d00e4f39...), as in Donkey Kong Bananza: a dump whose
+# RomFS is another build's data under 1.8.0's code (GitHub #27 / #44: CRASH sig=11 at main+0x8bfc0 1.7 s in) is refused at Add / Prepare and on the card
+romfs_check	System/RegionLangMask.txt	4	main
 zip_store	.zs:.bwav:.webm:.metallib
 
 # ---- Memory ----

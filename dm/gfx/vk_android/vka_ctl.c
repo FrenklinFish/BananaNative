@@ -240,18 +240,29 @@ void vka_ctl_shot_done(VkFence fence) {   // present thread, after the present's
     if (!g_rec_shot.on) return;
     g_rec_shot.on = 0;
     if (vk.vkWaitForFences(V.dev, 1, &fence, VK_TRUE, 2000000000ull)) { VLOG("ctl: screenshot: the present's copy did not finish in 2 s"); return; }
-    int w = g_rec_shot.w, h = g_rec_shot.h, fmt = g_rec_shot.fmt;
+    int w = g_rec_shot.w, h = g_rec_shot.h, fmt = g_rec_shot.fmt, swap_rb = vka_swap_rb();
     shot_job *j = calloc(1, sizeof *j); uint8_t *rgb = j ? malloc((size_t)w * h * 3) : NULL;
     if (!rgb) { free(j); return; }
     for (int y = 0; y < h; y++) {
         int sy = g_rec_shot.flip ? h - 1 - y : y; uint8_t *d = rgb + (size_t)y * w * 3;
-        if (fmt == VK_FORMAT_R16G16B16A16_SFLOAT) { const uint16_t *s = (const uint16_t *)g_smap + (size_t)sy * w * 4; for (int x = 0; x < w; x++) { d[3 * x] = half8(s[4 * x]); d[3 * x + 1] = half8(s[4 * x + 1]); d[3 * x + 2] = half8(s[4 * x + 2]); } }
-        else {
+        if (fmt == VK_FORMAT_R16G16B16A16_SFLOAT) {
+            const uint16_t *s = (const uint16_t *)g_smap + (size_t)sy * w * 4;
+            for (int x = 0; x < w; x++) {
+                uint8_t r = half8(s[4 * x]), g = half8(s[4 * x + 1]), b = half8(s[4 * x + 2]);
+                d[3 * x] = swap_rb ? b : r; d[3 * x + 1] = g; d[3 * x + 2] = swap_rb ? r : b;
+            }
+        } else {
             const uint8_t *s = (const uint8_t *)g_smap + (size_t)sy * w * 4;
             for (int x = 0; x < w; x++, s += 4) {
-                if (fmt == VK_FORMAT_A2B10G10R10_UNORM_PACK32) { uint32_t p; memcpy(&p, s, 4); d[3 * x] = (uint8_t)((p & 1023) >> 2); d[3 * x + 1] = (uint8_t)((p >> 10 & 1023) >> 2); d[3 * x + 2] = (uint8_t)((p >> 20 & 1023) >> 2); }
-                else if (fmt == VK_FORMAT_B8G8R8A8_UNORM || fmt == VK_FORMAT_B8G8R8A8_SRGB) { d[3 * x] = s[2]; d[3 * x + 1] = s[1]; d[3 * x + 2] = s[0]; }
-                else { d[3 * x] = s[0]; d[3 * x + 1] = s[1]; d[3 * x + 2] = s[2]; }
+                if (fmt == VK_FORMAT_A2B10G10R10_UNORM_PACK32) {
+                    uint32_t p; memcpy(&p, s, 4);
+                    uint8_t r = (uint8_t)((p & 1023) >> 2), g = (uint8_t)((p >> 10 & 1023) >> 2), b = (uint8_t)((p >> 20 & 1023) >> 2);
+                    d[3 * x] = swap_rb ? b : r; d[3 * x + 1] = g; d[3 * x + 2] = swap_rb ? r : b;
+                } else if (fmt == VK_FORMAT_B8G8R8A8_UNORM || fmt == VK_FORMAT_B8G8R8A8_SRGB) {
+                    d[3 * x] = swap_rb ? s[0] : s[2]; d[3 * x + 1] = s[1]; d[3 * x + 2] = swap_rb ? s[2] : s[0];
+                } else {
+                    d[3 * x] = swap_rb ? s[2] : s[0]; d[3 * x + 1] = s[1]; d[3 * x + 2] = swap_rb ? s[0] : s[2];
+                }
             }
         }
     }

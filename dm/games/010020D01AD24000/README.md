@@ -10,7 +10,7 @@ On the Mac: the opening rooms at 60 fps with movement, jumping and audio; item p
 
 | Setting | Where | Why |
 |---|---|---|
-| `romfs_marker` empty | [`game.tsv`](game.tsv) | the Program NCAs have no data section: `nx_extract --romfs-image` creates an empty RomFS image, which the empty marker checks; see [Files](#files) |
+| `romfs_marker` empty | [`game.tsv`](game.tsv) | the program has no data section: its RomFS image is empty, which the empty marker checks; see [Files](#files) |
 | 3.5 GB layout: `mem_reserve 0xe0000000`, `mem_alias 0x10000000`, `mem_stack 0x10000000`, `app_pool 0xCD500000` | `game.tsv` | the provisional layout, which holds: a 256 MB alias region, a 256 MB stack region and a 2816 MB heap region. `main` sets a heap of at most the pool − 64 MB − 536 MB of bss (counted as used memory) |
 | `sys_resource 0x0` | `game.tsv` | the NPDM declares 0 MB of system resource: `IsVirtualAddressMemoryEnabled` is false, as on Horizon |
 | `pad_layout simple` | `game.tsv` | the 2D virtual pad; B jumps |
@@ -19,7 +19,7 @@ On the Mac: the opening rooms at 60 fps with movement, jumping and audio; item p
 ## Files
 
 - Both the base and the update Program NCAs have no data section. The assets live in `main`, whose read-only segment is about 32 MB.
-- **Current:** `nx_extract --romfs-image` directly writes a 56-byte `DMROMFS1` image (one root entry), with no RomFS directory; survey mode still writes a header-only manifest. It passes the same index validator as a populated image. Since the game keeps its assets in `main` and does not mount RomFS on the tested opening route, its gameplay check cannot establish populated-image read performance; synthetic filesystem tests cover reads and overlays. See [RomFS images](../../../docs/reference/packing.md#romfs-folder-transfers-fail-or-leave-stale-game-files).
+- **Current:** the packed image is a 56-byte `DMROMFS1` image (one root entry); the survey writes a header-only manifest. It passes the same index validator as a populated image. Since the game keeps its assets in `main` and does not mount RomFS on the tested opening route, its gameplay check cannot establish populated-image read performance; synthetic filesystem tests cover reads and overlays. See [RomFS images](../../../docs/reference/packing.md#romfs-folder-transfers-fail-or-leave-stale-game-files).
 - **Direct extraction checked on 2026-10-27:** the NSP pipeline produced `AnimalWell-DirectRomFS.ipa` (54.6 MiB), with all 46 iOS shaders and exactly one `Payload/DmIOS.app/romfs.img` entry. Both the extraction and IPA contain no RomFS directory. The archive's CRC check passed. This unsigned IPA has not been tested on an iPhone here.
 - **Direct extraction regression: PASS.** The full 100-second `regress.py` route against `08b8a3c1ef1c` kept all 46 shaders and their MSL unchanged, with no new `[RED]` lines: 59.5 → 59.7 fps, p99 16.76 → 16.77 ms, peak 980 → 981 MiB. Screenshot differences were 1–3 dHash bits. Both hosts used `DM_PRESENT_LINK=0` for the window-occlusion control described below; the report is `<NSP folder>/010020D01AD24000-work/regress-direct-extraction/report.md`.
 - **Rechecked after integration with main `4f24ce6489a2`: PASS.** A fresh 100-second baseline and candidate both ran at 60.0 fps; p99 16.77 → 16.76 ms, peak 997 → 996 MiB, all 46 shaders/MSL unchanged, screenshots within tolerance (2–3 dHash bits), no new `[RED]` lines. Both used the same diagnostic control and were marked busy by the harness. The report is `<NSP folder>/010020D01AD24000-work/regress-romfs-main/report.md`. The combined host suite, 347 tool tests, 31 iOS tests, 71 graphics Python tests and the Metal graphics suite passed; the rebuilt unsigned IPA's CRC check passed too.
@@ -38,7 +38,7 @@ On the Mac: the opening rooms at 60 fps with movement, jumping and audio; item p
 
 ## Found on this game
 
-- **An empty RomFS for a program without a data section** (`nx_extract`; an empty `romfs_marker` checks the directory itself): [dm/games/README.md](../README.md).
+- **An empty RomFS for a program without a data section** (an empty `romfs_marker` checks the image itself): [dm/games/README.md](../README.md).
 - **An empty RomFS image:** [RomFS images](../../../docs/reference/packing.md#romfs-folder-transfers-fail-or-leave-stale-game-files).
 - **Resolved:** `--platform mac-app` stopped at the pipeline archive (`pso_offline: no base to build`) because the profile's `shader_pairs.tsv` holds no pair; a pair list with no pair is now nothing to build and the app is packed without an archive: [Offline pipeline archive reuse and fallback](../../../docs/reference/shaders.md#offline-pipeline-archive-reuse-and-fallback) ([GitHub issue #338](https://github.com/seedds/nxnative/issues/338)).
 
@@ -46,4 +46,4 @@ On the Mac: the opening rooms at 60 fps with movement, jumping and audio; item p
 
 - Save and reload are unverified: the test did not reach a save checkpoint.
 - The bss is 536 MB in `game.tsv`'s comment and about 537 MB in the bring-up notes ([Memory](#memory)).
-- The player-facing [README](../../../README.md) lists the games that start in the 2D layout and says the others start in 3D; ANIMAL WELL is not in that list, but its profile has `pad_layout simple` (2D).
+- The player-facing [README](../../../docs/nxnative.md) lists the games that start in the 2D layout and says the others start in 3D; ANIMAL WELL is not in that list, but its profile has `pad_layout simple` (2D).

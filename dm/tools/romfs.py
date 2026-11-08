@@ -115,7 +115,7 @@ def _resolve(path):
     if '.nup:' in p:
         found = _nup.resolve(p)
         if found: return _NupView(*found), ''
-    parts = p.split('/')
+    parts = p.replace(_os.sep, '/').split('/') if _os.sep != '/' else p.split('/')   # Windows: abspath gives '\\'; the image is opened as 'C:/…/RomFS.img'
     for i, part in enumerate(parts):
         if not part.endswith('.img'): continue
         image = '/'.join(parts[:i + 1])
@@ -137,7 +137,7 @@ _fd_ranges = {}
 
 class _File(io.RawIOBase):
     def __init__(self, image, k):
-        self.fd = _os.open(image.path, _os.O_RDONLY)
+        self.fd = _os.open(image.path, _nup.O_RDONLY)   # O_BINARY on Windows (nup.py)
         self.start, self.length = image.entry(k)[:2]
         self.pos = 0
         _fd_ranges[self.fd] = (self.start, self.length)
@@ -151,7 +151,7 @@ class _File(io.RawIOBase):
         self.pos = pos; return pos
     def readinto(self, buffer):
         size = min(len(buffer), max(0, self.length - self.pos))
-        data = _os.pread(self.fd, size, self.start + self.pos)
+        data = _nup.pread(self.fd, size, self.start + self.pos)
         buffer[:len(data)] = data; self.pos += len(data)
         return len(data)
     def close(self):

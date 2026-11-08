@@ -62,7 +62,6 @@ Game-specific findings. The general host changes they led to are listed under [F
 
 ## Files and shaders
 
-- The base game is a cartridge dump: the card header's magic `HEAD` sits at 0x100, and its root HFS0 holds the `update`, `logo`, `normal` and `secure` partitions; the game's NCAs are in `secure` (the 7 GB program NCA, control, legal information, HTML manual and the meta NCA), with their key in the key area, so there is no ticket ([01](../../../docs/agents/01-extract.md#nsp--nca--exefs--romfs)).
 - Everything sits in KPKA PAK archives: `re_chunk_000.pak` plus `re_chunk_000.pak.patch_001.pak` … `patch_016` (19.6 GB in all; KPKA v4, zstd / deflate entries, file names only as murmur hashes), later patch PAKs overriding earlier ones by path hash ([01](../../../docs/agents/01-extract.md#compressed-romfs-content)). `romfs_marker` is `re_chunk_000.pak.patch_001.pak`.
 - Shaders: 63,111 in 2,685 SDF files (30,233 vertex, 21,475 pixel, 11,271 compute, 53 geometry, 33 hull, 46 domain) and 102,345 vertex / pixel pairs, in 5 s with 12 jobs (`shader_split.py` `kpka_jobs` / `sdf_shaders`); an SDF entry's stages are one program; control sections 0x880 bytes, compute code without a header ([SDF definitions in RE Engine PAKs](../../../docs/reference/shaders.md#sdf-definitions-in-re-engine-paks)).
 

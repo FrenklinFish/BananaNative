@@ -1,5 +1,5 @@
 """NSP script: Homebrew's dotnet wrapper must supply its runtime root to standalone apphosts.
-No game files, keys or .NET installation needed."""
+No game files or .NET installation needed."""
 import importlib.util
 import json
 import os

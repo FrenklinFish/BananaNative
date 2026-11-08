@@ -4,6 +4,8 @@
 // android-shaders/lib/v-<DMSH_VK_CHAIN>/dmsh_vk.lib); without it that part is skipped. DM_VK_SHLIB_ALL=1 decompresses every module (about 1.7 GB of SPIR-V) instead of a sample
 #include "../../gfx/vk_android/vka_shlib.h"
 #include "../../gfx/vk_android/vka_bind.h"
+#include "../../gfx/vk_android/vka_abi_compat.h"
+#include "../../gfx/vk_android/vka_gml.h"
 #include "../../gfx/nvn/dmsh_chain.h"
 #include "../../gfx/nvn/dmsh_chain_vk.h"
 #include <stdio.h>
@@ -100,6 +102,34 @@ static void test_made(void) {
     e[1].c1_off_hi = 0;
     CHECK(vka_shlib_check(&L, I.p, I.n, NULL, NULL, NULL, NULL, err, sizeof err), "library refused after the high bits were cleared: %s", err);
     free(I.p);
+}
+
+// The entry hash of the pipeline cache's stamp (vka_pso.c, vka_pckeep.h): the same for an entry whose bytes are the same in another library, wherever they lie and
+// whatever its header says (a restamped library, a delta update's reused entry); another for a changed module or c1 byte
+static void test_entry_hash(void) {
+    img_t I = make_lib(); vka_shlib L; char err[256];
+    CHECK(vka_shlib_check(&L, I.p, I.n, NULL, NULL, NULL, NULL, err, sizeof err), "made library refused: %s", err);
+    uint64_t h0 = vka_shlib_entry_hash(&L, &L.ent[0]), h1 = vka_shlib_entry_hash(&L, &L.ent[1]);
+    CHECK(h0 && h1 && h0 != h1, "entry hashes %llx %llx", (unsigned long long)h0, (unsigned long long)h1);
+    // Restamped: another header (inputs, ABI), the same entries
+    img_t R = {malloc(I.n), I.n}; memcpy(R.p, I.p, I.n); dmsh_vk_header *rh = (dmsh_vk_header *)R.p; put_str(rh->inputs, "restamped"); memset(rh->abi, '7', sizeof rh->abi);
+    vka_shlib LR; CHECK(vka_shlib_check(&LR, R.p, R.n, NULL, NULL, NULL, NULL, err, sizeof err), "restamped library refused: %s", err);
+    CHECK(vka_shlib_entry_hash(&LR, &LR.ent[0]) == h0 && vka_shlib_entry_hash(&LR, &LR.ent[1]) == h1, "a restamped library changed the entry hashes");
+    // Moved: the blob's bytes 16 further on (module and c1 offsets with them)
+    const dmsh_vk_header *h = (const dmsh_vk_header *)I.p; size_t blo = (size_t)h->blob_off, blob = (size_t)h->blob_size;
+    img_t M = {calloc(1, I.n + 16), I.n + 16}; memcpy(M.p, I.p, blo); memcpy(M.p + blo + 16, I.p + blo, blob);
+    dmsh_vk_header *mh = (dmsh_vk_header *)M.p; mh->blob_size += 16;
+    dmsh_vk_module *mm = (dmsh_vk_module *)(M.p + mh->mod_off); for (uint32_t i = 0; i < mh->mod_count; i++) mm[i].off += 16;
+    dmsh_vk_entry *me = (dmsh_vk_entry *)(M.p + mh->entry_off); me[1].c1_off += 16;
+    vka_shlib LM; CHECK(vka_shlib_check(&LM, M.p, M.n, NULL, NULL, NULL, NULL, err, sizeof err), "moved library refused: %s", err);
+    CHECK(vka_shlib_entry_hash(&LM, &LM.ent[0]) == h0 && vka_shlib_entry_hash(&LM, &LM.ent[1]) == h1, "moving the blob changed the entry hashes");
+    // Changed: one byte of the pixel shader's stored module, then one of its c1 bytes; the vertex shader stays
+    size_t zo = (size_t)((const dmsh_vk_module *)(I.p + h->mod_off))[1].off;
+    R.p[blo + zo + 20] ^= 1;
+    CHECK(vka_shlib_entry_hash(&LR, &LR.ent[1]) != h1 && vka_shlib_entry_hash(&LR, &LR.ent[0]) == h0, "a changed module byte");
+    R.p[blo + zo + 20] ^= 1; R.p[blo + ((const dmsh_vk_entry *)(I.p + h->entry_off))[1].c1_off] ^= 1;
+    CHECK(vka_shlib_entry_hash(&LR, &LR.ent[1]) != h1, "a changed c1 byte");
+    free(I.p); free(R.p); free(M.p);
 }
 
 // ---------- The walker ----------
@@ -275,8 +305,82 @@ static void test_real(void) {
     vka_shlib_close(&L);
 }
 
+// ---------- Older ABIs played while the update runs (vka_abi_compat.h) ----------
+static void test_compat(void) {
+    // The table was checked against this host's ABI; when DMSH_VK_ABI moves, its rows are checked again and VKA_ABI_COMPAT_FOR raised (until then no row is used)
+    CHECK(!strcmp(VKA_ABI_COMPAT_FOR, DMSH_VK_ABI), "vka_abi_compat.h was checked against ABI %s, this tree's is %s: check its rows against the headers' diff", VKA_ABI_COMPAT_FOR, DMSH_VK_ABI);
+    // DMSH_VK_ABI_COMPAT (the launcher's list) is the table's ABIs in order, and no row is this host's own ABI
+    char list[256] = ""; size_t n = 0;
+    for (int i = 0; i < VKA_ABI_COMPAT_N; i++) {
+        CHECK(strlen(vka_abi_compat[i].abi) == 12 && strspn(vka_abi_compat[i].abi, "0123456789abcdef") == 12, "row %d: abi %s", i, vka_abi_compat[i].abi);
+        CHECK(strcmp(vka_abi_compat[i].abi, DMSH_VK_ABI), "row %d is the host's own ABI", i);
+        n += (size_t)snprintf(list + n, sizeof list - n, "%s%s", i ? " " : "", vka_abi_compat[i].abi);
+    }
+    CHECK(!strcmp(list, DMSH_VK_ABI_COMPAT), "DMSH_VK_ABI_COMPAT \"%s\", the table's rows \"%s\"", DMSH_VK_ABI_COMPAT, list);
+    CHECK(vka_abi_compat_of("674db0a4ff79") == (int)VKA_ABI_LOG_PAGES, "674db0a4ff79: differences %d", vka_abi_compat_of("674db0a4ff79"));
+    CHECK(vka_abi_compat_of(DMSH_VK_ABI) == -1 && vka_abi_compat_of("0123456789ab") == -1, "a row that is no older ABI");
+
+    // A library of another version with the older ABI is taken by the host's ABI (by_abi 2, its differences), not by another ABI asked, and never as its own version
+    img_t I = make_lib(); vka_shlib L; char err[256]; dmsh_vk_header *H = (dmsh_vk_header *)I.p;
+    memcpy(H->abi, "674db0a4ff79", 12);
+    CHECK(vka_shlib_check(&L, I.p, I.n, DMSH_CHAIN, "000000000000", "0100000000001000", DMSH_VK_ABI, err, sizeof err) && L.by_abi == 2 && L.differs == VKA_ABI_LOG_PAGES,
+          "the older ABI refused or unmarked: %s (by_abi %d, differs %#x)", err, L.by_abi, L.differs);
+    CHECK(!vka_shlib_check(&L, I.p, I.n, DMSH_CHAIN, "000000000000", NULL, "0123456789ab", err, sizeof err), "the older ABI taken for another host ABI");
+    CHECK(!vka_shlib_check(&L, I.p, I.n, DMSH_CHAIN, "000000000000", NULL, NULL, err, sizeof err), "the older ABI taken with no ABI asked");
+    CHECK(!vka_shlib_check(&L, I.p, I.n, DMSH_CHAIN, "000000000000", "040074A01BF12000", DMSH_VK_ABI, err, sizeof err) && strstr(err, "game"), "the older ABI, other game taken: %s", err);
+    memcpy(H->abi, "0123456789ab", 12);
+    CHECK(!vka_shlib_check(&L, I.p, I.n, DMSH_CHAIN, "000000000000", NULL, DMSH_VK_ABI, err, sizeof err) && strstr(err, "Vulkan chain"), "an unknown ABI taken: %s", err);
+    memcpy(H->abi, DMSH_VK_ABI, 12);
+    CHECK(vka_shlib_check(&L, I.p, I.n, DMSH_CHAIN, "000000000000", NULL, DMSH_VK_ABI, err, sizeof err) && L.by_abi == 1 && !L.differs, "the host's ABI: by_abi %d, differs %#x", L.by_abi, L.differs);
+    free(I.p);
+}
+
+// ---------- The write log's two formats (vka_gml.h), written as the modules write them ----------
+static void gml_store_bitmap(uint32_t *w, int entry) { w[entry >> 5] |= 1u << (entry & 31); }   // GlobalToStorage since a319e773: the entry's bit (a load, then an atomic or)
+static void gml_store_pages(uint32_t *w, uint64_t addr) {   // before it: the page into the hash set, 8 compare-and-swap probes, word 0 when none is free
+    uint32_t page = (uint32_t)(addr >> 32) << 20 | (uint32_t)addr >> 12, hash = (page * 0x9e3779b1u) >> (32 - VKA_GML_PAGES_LOG2);
+    for (int p = 0; p < 8; p++) { uint32_t *slot = &w[((hash + p) & ((1u << VKA_GML_PAGES_LOG2) - 1)) + 1]; if (*slot == 0 || *slot == page) { *slot = page; return; } }
+    w[0] = 1;
+}
+typedef struct { int entries[64], ne; uint64_t pages[2048]; int np; } gml_seen;
+static void seen_entry(void *a, int k) { gml_seen *s = a; if (s->ne < 64) s->entries[s->ne] = k; s->ne++; }
+static void seen_page(void *a, uint64_t p) { gml_seen *s = a; if (s->np < 2048) s->pages[s->np] = p; s->np++; }
+static int has_page(const gml_seen *s, uint64_t p) { for (int i = 0; i < s->np && i < 2048; i++) if (s->pages[i] == p) return 1; return 0; }
+static void test_gml(void) {
+    CHECK(vka_gml_bytes(0) == DMSH_GMEM_MAP_ENTRIES / 8 && vka_gml_bytes(VKA_ABI_LOG_PAGES) == 4100 && VKA_GML_MAX_BYTES == 4100, "log sizes %u %u %d",
+          vka_gml_bytes(0), vka_gml_bytes(VKA_ABI_LOG_PAGES), (int)VKA_GML_MAX_BYTES);
+    static uint32_t w[VKA_GML_MAX_BYTES / 4]; gml_seen s;
+    // The bitmap: every entry bit but entry 0's, high entries too (past the old table's 4096), in order
+    memset(w, 0, sizeof w); memset(&s, 0, sizeof s);
+    int want[] = {1, 31, 32, 159, 4095, 4096, DMSH_GMEM_MAP_ENTRIES - 1};
+    for (unsigned i = 0; i < sizeof want / sizeof want[0]; i++) { gml_store_bitmap(w, want[i]); gml_store_bitmap(w, want[i]); }
+    gml_store_bitmap(w, 0);
+    CHECK(!vka_gml_walk(w, 0, seen_entry, seen_page, &s), "the bitmap reported an overflow");
+    CHECK(s.ne == (int)(sizeof want / sizeof want[0]) && !s.np, "the bitmap: %d entries, %d pages", s.ne, s.np);
+    for (unsigned i = 0; i < sizeof want / sizeof want[0] && (int)i < s.ne; i++) CHECK(s.entries[i] == want[i], "the bitmap's entry %u: %d, want %d", i, s.entries[i], want[i]);
+    // The page-hash set of 674db0a4ff79's modules: each page once, whatever the store's offset in it, guest addresses past 4 GiB too
+    memset(w, 0, sizeof w); memset(&s, 0, sizeof s);
+    uint64_t pages[] = {0x80001000ull, 0x80002000ull, 0x123456000ull, 0x8000000000ull, 0xfff000ull};
+    for (unsigned i = 0; i < sizeof pages / sizeof pages[0]; i++) { gml_store_pages(w, pages[i] + 0x10); gml_store_pages(w, pages[i] + 0xffc); }
+    CHECK(!vka_gml_walk(w, VKA_ABI_LOG_PAGES, seen_entry, seen_page, &s), "the page set reported an overflow");
+    CHECK(s.np == (int)(sizeof pages / sizeof pages[0]) && !s.ne, "the page set: %d pages, %d entries", s.np, s.ne);
+    for (unsigned i = 0; i < sizeof pages / sizeof pages[0]; i++) CHECK(has_page(&s, pages[i]), "the page set lost page %#llx", (unsigned long long)pages[i]);
+    // Read as a bitmap, the same words name entries, not those pages: the format must be the library's
+    memset(&s, 0, sizeof s); vka_gml_walk(w, 0, seen_entry, seen_page, &s);
+    CHECK(!s.np && s.ne > 0, "the page set read as a bitmap: %d entries", s.ne);
+    // More pages than slots: word 0 says so, and the slots that were filled are all read
+    memset(w, 0, sizeof w); memset(&s, 0, sizeof s);
+    for (uint64_t i = 0; i < 2000; i++) gml_store_pages(w, 0x100000000ull + (i << 12));
+    int full = vka_gml_walk(w, VKA_ABI_LOG_PAGES, seen_entry, seen_page, &s);
+    int filled = 0; for (int k = 1; k <= 1 << VKA_GML_PAGES_LOG2; k++) filled += w[k] != 0;
+    CHECK(full && s.np == filled && filled <= 1 << VKA_GML_PAGES_LOG2, "the full page set: overflow %d, %d pages read, %d slots filled", full, s.np, filled);
+}
+
 int main(void) {
     test_made();
+    test_entry_hash();
+    test_compat();
+    test_gml();
     test_walk();
     test_real();
     if (g_fail) { printf("t_android_shlib: %d failures\n", g_fail); return 1; }

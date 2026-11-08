@@ -35,6 +35,7 @@ final class Rumble {
     private static final class Env { float now, peak, out; int amp; }
     private final Map<Vibrator, Env> env = new IdentityHashMap<>();
     private ScheduledExecutorService ticker;
+    private volatile boolean muted;   // the in-game panel's Rumble off (mute): the game's changes are dropped until it is on again
 
     Rumble(Context c) {
         VibratorManager vm = c.getSystemService(VibratorManager.class);
@@ -73,6 +74,7 @@ final class Rumble {
     /** From the host's rumble thread (nxlaunch.c rumble): intensity 0..1, 0 = quiet. Only noted here: tick() drives the vibrator */
     @SuppressWarnings("unused")
     void onRumble(int player, float intensity, float sharpness) {
+        if (muted) return;
         Vibrator v;
         synchronized (this) {
             v = byPlayer.get(player);
@@ -106,6 +108,9 @@ final class Rumble {
             else m.getKey().vibrate(VibrationEffect.createWaveform(new long[] {10_000}, new int[] {m.getValue()}, 0), attrs);
         }
     }
+
+    /** The in-game panel's Rumble switch while the game runs: off stops every vibrator at once; on takes the game's next change */
+    void mute(boolean m) { muted = m; if (m) stopAll(); }
 
     /** The screen goes away or the game is suspended: every vibrator stops (the host sends the next change when the game rumbles again) */
     void stopAll() {

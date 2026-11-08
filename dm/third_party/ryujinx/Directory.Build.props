@@ -3,5 +3,11 @@
     <TargetFramework>net10.0</TargetFramework>
     <LangVersion>preview</LangVersion>
     <DebugType Condition="'$(Configuration)'=='Release'">none</DebugType>
+    <!-- No build-machine paths in the binaries (a home path once reached the public repository through them): source paths map to /_/, and no SourceLink
+         (it would embed the git remote and commit) -->
+    <PathMap>$([System.IO.Path]::GetFullPath('$(MSBuildThisFileDirectory)../../../'))=/_/</PathMap>
+    <Deterministic>true</Deterministic>
+    <EnableSourceLink>false</EnableSourceLink>
+    <EnableSourceControlManagerQueries>false</EnableSourceControlManagerQueries>
   </PropertyGroup>
 </Project>

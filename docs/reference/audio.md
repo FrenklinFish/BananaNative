@@ -319,3 +319,10 @@ For a replaced DSP renderer the size query keeps the service's work-buffer contr
 - **Fix:** an update with a full queue waits (at most 50 ms) for the render thread to play one queued frame, so catch-up frames keep real time (`hle_audren.c`). The render thread then only plays queued frames, and the driver's updates render every frame. A queued frame does not signal the renderer event (the SDK signals it in each render): signalled, an ordinary game woke, updated with nothing rendered since and rendered the next catch-up frame, so every frame became one ([Big Brain Academy: Brain vs. Brain](../../dm/games/0100620012D6E000/README.md), about 38,000 catch-up renders instead of 37).
 - **Found on:** [DRAGON QUEST XI S: Echoes of an Elusive Age – Definitive Edition](../../dm/games/01006C300E9F0000/README.md).
 - **Check:** `audren: rendered 12000 frames, N of them not silent` shows whether a game's sound reaches the output.
+
+### No virtual audio input devices (SDK 22)
+
+- **Symptom:** abort at boot in SDK 22's audio input subsystem when listing virtual audio input devices.
+- **Cause:** SDK 22 added `nn::audio::ListVirtualInputDevices` and related virtual device query hooks (`auddmg:u`), which were unhandled.
+- **Fix:** implement `ListVirtualInputDevices` (returning 0 devices) and `GetVirtualInputDeviceProperties` (`RES_FAIL`), along with input stream hooks in `dm/host/hle_audio.c`.
+- **Found on:** [The Legend of Zelda: Ocarina of Time](../../dm/games/0400486024DEC000/README.md).

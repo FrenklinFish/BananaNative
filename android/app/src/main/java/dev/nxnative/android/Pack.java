@@ -57,10 +57,6 @@ final class Pack {
         return f.isFile() ? f : null;
     }
 
-    /**
-     * A library of another version the host plays while the shader update makes this APK's (ShaderLibs.playable: the game's, with this APK's DMSH_VK_ABI), null when none;
-     * only asked when {@link #libraryProblem} finds this version's missing
-     */
     /** This version's library made from an older one by its header alone, when the profile's manifest has a "stamp" row for it (ShaderLibs.restamp; seconds, no job) */
     static String restamp(File dir, String titleId) {
         Profile p = Profile.of(titleId);
@@ -73,7 +69,13 @@ final class Pack {
         return p == null ? -1 : ShaderLibs.toTranslate(p.delta, ShaderLibs.older(dir, titleId, BuildConfig.NX_DMSH_VK_CHAIN));
     }
 
-    static File playableLibrary(File dir, String titleId) { return ShaderLibs.playable(dir, titleId, BuildConfig.NX_DMSH_VK_CHAIN, BuildConfig.NX_DMSH_VK_ABI); }
+    /**
+     * A library of another version the host plays while the shader update makes this APK's (ShaderLibs.playable: the game's, with this APK's DMSH_VK_ABI, else with one of
+     * the older ABIs its host also plays, DMSH_VK_ABI_COMPAT), null when none; only asked when {@link #libraryProblem} finds this version's missing
+     */
+    static File playableLibrary(File dir, String titleId) {
+        return ShaderLibs.playable(dir, titleId, BuildConfig.NX_DMSH_VK_CHAIN, BuildConfig.NX_DMSH_VK_ABI, BuildConfig.NX_DMSH_VK_ABI_COMPAT);
+    }
 
     /** A library of another version made before versioned shader updates (no ABI): played with a warning when no playable one is there (ShaderLibs.legacy), null when none */
     static File legacyLibrary(File dir, String titleId) { return ShaderLibs.legacy(dir, titleId, BuildConfig.NX_DMSH_VK_CHAIN); }

@@ -33,7 +33,7 @@ Nothing beyond the profile the NSP script's survey guessed and the depth mode: n
 
 ## Mac testing
 
-Build with `scripts/build_ipa_from_nsp.py <NSP folder> -k <prod.keys> --platform mac`; its final line runs the game with the correct paths. The game shows its title only after a button press. The first 30 seconds of a run go to pipeline preparation, so scripted presses (`DM_KEYS`) should start later than that.
+Build with `scripts/build_ipa_from_nsp.py <dump folder> --platform mac`; its final line runs the game with the correct paths. The game shows its title only after a button press. The first 30 seconds of a run go to pipeline preparation, so scripted presses (`DM_KEYS`) should start later than that.
 
 ## Testing
 

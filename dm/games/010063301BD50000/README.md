@@ -34,7 +34,7 @@ Update 1.4.1 (v720896) over the base game, SDK 18.3.5. Unity 2022.3.44f1 IL2CPP 
 
 ## Mac routes
 
-- Build with `scripts/build_ipa_from_nsp.py <NSP folder> -k <prod.keys> --platform mac` and use its printed command.
+- Build with `scripts/build_ipa_from_nsp.py <dump folder> --platform mac` and use its printed command.
 - The CRIWARE logo, then the title by about 25 s. Left alone, the title alternates with attract battles from many series, a good test of battle scenes and of memory.
 - From a fresh save: A at the title, A on the terms of service and the privacy policy, A then Right and A to decline the data usage consent. That reaches the menu: A on Start, A on a mode, A on Yes, A on a character, five times Down to Game Start, A, A on Yes.
 - **Hold B (`B~3`) to skip a scene.** A tap of B closes the tutorial popups, which A does not. One scene, reached through Continue, had Skip Scene greyed out and advanced only with A.

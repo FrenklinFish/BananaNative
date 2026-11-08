@@ -153,6 +153,23 @@ static void nup_tests(const char *root) {
         CHECK(h_fs_MountAoc("aocm", 2, NULL, 0) == RES_TARGET_NOT_FOUND, "an index with no link is not found");
         unsetenv("DM_AOC_DIR");
     }
+    // fd:<n>/<name> in place of the path (a .nup picked with Android's file picker: the launcher's descriptor, nup_image.h nup_fd_spec)
+    {   int fd = open(np, O_RDONLY); CHECK(fd >= 0, "open the .nup for its descriptor");
+        snprintf(spec, sizeof spec, "fd:%d/Game Name.nup:update/65536/romfs", fd); setenv("DM_ROMFS", spec, 1); g_nmnt = 0;
+        CHECK(h_fs_MountRom("rom", NULL, 0) == RES_OK && read_fs("rom:/data/a", got, sizeof got) && !strcmp(got, "HELLO"), "fd:<n>/<name>.nup:update/65536/romfs mounts that update");
+        CHECK(read_fs("rom:/data/z", got, sizeof got) && !memcmp(got, want, 102000), "a zstd file reads through the descriptor");
+        CHECK(lseek(fd, 0, SEEK_CUR) == 0, "the descriptor's own position is not moved (pread of a duplicate)");
+        g_nmnt = 0;
+        {   char aocd[1100], ln[1200], tgt[64]; snprintf(aocd, sizeof aocd, "%s/aocfd", root); mkdir(aocd, 0755);
+            snprintf(ln, sizeof ln, "%s/1.nup", aocd); unlink(ln); snprintf(tgt, sizeof tgt, "fd:%d/Game Name.nup", fd);
+            CHECK(!symlink(tgt, ln), "link 1.nup to fd:<n>/<name>"); setenv("DM_AOC_DIR", aocd, 1);
+            CHECK(h_fs_MountAoc("aocf", 1, NULL, 0) == RES_OK && read_fs("aocf:/d.txt", got, sizeof got) && !strcmp(got, "dlc"), "add-on 1 mounts through a link to the descriptor");
+            unsetenv("DM_AOC_DIR");
+        }
+        close(fd);
+        snprintf(spec, sizeof spec, "fd:%d/Game Name.nup:base", fd); CHECK(!img_open(spec), "a descriptor that is not open is refused");
+        g_nmnt = 0;
+    }
     snprintf(spec, sizeof spec, "%s:addon/040074a01bf13001", np); { romfs_img *m = img_open(spec); CHECK(m && m->n == 2, "addon/<title ID> selects the add-on"); romfs_image_close(m); }
     snprintf(spec, sizeof spec, "%s:update/1", np); CHECK(!img_open(spec), "an update that is not there is refused");
     snprintf(spec, sizeof spec, "%s:patch", np); CHECK(!img_open(spec), "an unknown selector is refused");
@@ -233,7 +250,7 @@ int main(void) {
         CHECK(h_fs_QueryAocCache(&cache, 2) == RES_OK && cache == 176, "DLC image reports Horizon table size (176, got %zu)", cache);
         CHECK(h_fs_MountAoc("aoc", 2, NULL, 0) == RES_OK && read_fs("aoc:/data/a", got, sizeof got) && !strcmp(got, "hello"), "DLC mounts and reads directly from its image");
         unsetenv("DM_AOC_DIR"); g_nmnt = 0;
-        {   // a file written as read from a damaged NSP (nx_extract --allow-damaged) still reads, and the mount counts it and the first open names it once
+        {   // a file the image marks damaged (IMG_ENT_DAMAGED) still reads, and the mount counts it and the first open names it once
             romfs_img *clean = img_open(ip); CHECK(clean && !clean->damaged, "a clean image has no damaged files"); romfs_image_close(clean);
             e[2].flags = IMG_ENT_DAMAGED; memcpy(img + 39, e, sizeof e);
             f = fopen(ip, "wb"); fwrite(img, 1, sizeof img, f); fclose(f);

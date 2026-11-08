@@ -3,12 +3,12 @@
 layout(local_size_x = 8, local_size_y = 8) in;
 layout(set = 0, binding = 0) uniform sampler2DArray img;
 layout(set = 0, binding = 1) buffer O { uint nan; uint inf; uint first; uint pad; } o;
-layout(push_constant) uniform P { uvec2 size; uint layer; uint pad; } pc;
+layout(push_constant) uniform P { uvec2 size; uint layer; uint big; } pc;   // big: DM_VK_NANSCAN_BIG's float bits (0 = off): finite texels above it count as infinite
 void main() {
     uvec2 p = gl_GlobalInvocationID.xy;
     if (p.x >= pc.size.x || p.y >= pc.size.y) return;
     vec4 v = texelFetch(img, ivec3(p, pc.layer), 0);
-    bool n = any(isnan(v)), i = any(isinf(v));
+    bool n = any(isnan(v)), i = any(isinf(v)) || (pc.big != 0u && any(greaterThan(abs(v), vec4(uintBitsToFloat(pc.big)))));
     if (n) atomicAdd(o.nan, 1u);
     if (i) atomicAdd(o.inf, 1u);
     if (n || i) atomicMin(o.first, p.y << 16 | p.x);

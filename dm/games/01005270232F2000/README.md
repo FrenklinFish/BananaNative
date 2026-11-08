@@ -15,7 +15,7 @@ Status: brought up on the Mac through character creation and the story opening i
 | 3.75 GB guest block: `mem_reserve 0xF0000000`, `mem_alias 0xC8000000`, `mem_stack 0x10000000`, `app_pool 0xCD500000` | `game.tsv` | alias region = node area + the engine region (this SDK build aligns regions to 2 MB only) + 256 MB for regions made later; 256 MB stacks, 128 MB heap |
 | `tex_dyn_slots on` | `game.tsv` | 61 particle vertex shaders pick one of several c2 table slots at run time (separate texture slots 0-10, samplers 0-4); see [Shaders](#shaders) |
 
-No `pad_layout` key: the iPhone gamepad starts in the 2D layout ([README](../../../README.md)).
+No `pad_layout` key: the iPhone gamepad starts in the 2D layout ([README](../../../docs/nxnative.md)).
 
 ## Frame rate
 

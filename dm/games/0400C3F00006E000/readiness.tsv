@@ -2,11 +2,11 @@
 # <required|degraded> <TAB> <fact> <TAB> <at least> <TAB> <title>: <why>. Facts: what vka_readiness.c reports, ram_gib (ActivityManager totalMem in GiB) and android.sdk.
 # A table of its own, not game.tsv rows: the launcher's rows apart from the host's (a pack's rewrite key hashes only game.tsv's build rows, pack_android.py rewrite_key).
 
-# In bring-up on Android: it reaches its first frames and does not play yet on the tested phone (the note)
-status	bring-up
+# Playable on the tested 16 GB phone (the user's check, 2026-11-08); Supported on the player pages
+status	playable
 
-# Memory: on the 16 GB phone (14.66 GiB totalMem) the game reaches its first frames and is stopped by the low-memory killer about 20 s in (the note); nothing less has run it
-required	ram_gib	14	Memory: the game needs more than 8 GB; even a 16 GB phone runs short today
+# Memory: plays on the 16 GB phone (14.66 GiB totalMem; earlier builds were stopped there by the low-memory killer about 20 s in, the note); nothing less has run it
+required	ram_gib	14	Memory: the game needs a 16 GB phone (14 GiB reported); 12 GB phones run out of memory
 
 # The shader library: 168 compute shaders take 49,152 bytes of shared memory (shader_facts.tsv), more than Vulkan's minimum of 16 KiB. The tested phone reports 32,768
 # (Adreno 840, Qualcomm 718a07726a) and the game still reaches its first frames there, so the row is degraded, not required: what those dispatches do above the limit

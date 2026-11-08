@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""The DM_* environment switches the code reads, as one table: docs/env_switches.tsv (name, class, meaning; class and meaning kept by hand, docs/development.md says what
+"""The DM_* (and DMSH_VK_*) environment switches the code reads, as one table: docs/env_switches.tsv (name, class, meaning; class and meaning kept by hand, docs/development.md says what
 the classes are).
   env_switches.py           write the table: a new switch gets a row with a guessed class and no meaning, a switch nothing reads any more loses its row
   env_switches.py --check   exit 1 when the table does not list exactly the switches the sources read, or a row has no meaning or an unknown class
@@ -14,12 +14,13 @@ TABLE = REPO / 'docs/env_switches.tsv'
 HEAD = 'name\tclass\tmeaning\n'
 CLASSES = ('player', 'path', 'switch', 'diagnostic', 'test')
 CODE = ('.c', '.m', '.h', '.inc', '.swift', '.py', '.sh', '.S')
-NAME = r'DM_[A-Z0-9_]*[A-Z0-9]'
+NAME = r'(?:DM|DMSH_VK)_[A-Z0-9_]*[A-Z0-9]'   # the host's and tools' DM_* switches, and the Android shader build's DMSH_VK_* (vk_android_build.py)
 READ = r'(?:getenv\(|environ(?:\.get\(|\[))\s*["\'](' + NAME + r')["\']'   # a literal name in getenv(…), os.environ.get(…) or os.environ[…]
 
 
 def tracked():
-    out = subprocess.run(['git', 'ls-files', 'dm', 'scripts', 'docs', 'README.md'], cwd=REPO, capture_output=True, text=True, check=True).stdout.split('\n')
+    # android/app/src/main/cpp: the launcher's JNI shim (nxlaunch.c), which reads the game process's own switches (DM_TEST_CRASH)
+    out = subprocess.run(['git', 'ls-files', 'dm', 'scripts', 'docs', 'README.md', 'android/app/src/main/cpp'], cwd=REPO, capture_output=True, text=True, check=True).stdout.split('\n')
     return [p for p in out if p and 'third_party' not in p.split('/')]
 
 
@@ -62,7 +63,7 @@ def rows():
     if TABLE.exists():
         for l in TABLE.read_text().split('\n'):
             f = l.split('\t')
-            if len(f) == 3 and f[0].startswith('DM_'): kept[f[0]] = f[1:]
+            if len(f) == 3 and f[0].startswith(('DM_', 'DMSH_VK_')): kept[f[0]] = f[1:]
     out, bad = [], []
     for n in sorted(reads):
         cls, meaning = kept.get(n, [guess(n, reads[n], player), ''])

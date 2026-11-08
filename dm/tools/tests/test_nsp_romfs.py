@@ -23,7 +23,7 @@ class RomfsOption(unittest.TestCase):
 
     def test_separate_cannot_be_a_mac_build(self):
         with tempfile.TemporaryDirectory() as t, mock.patch.object(nsp, 'apple_silicon', return_value=True):
-            with self.assertRaises(nsp.BuildError) as e: nsp.main(nsp.parse_args(['--platform', 'mac', '--romfs', 'separate', '-k', t, t]))
+            with self.assertRaises(nsp.BuildError) as e: nsp.main(nsp.parse_args(['--platform', 'mac', '--romfs', 'separate', t]))
             self.assertIn('--romfs separate', str(e.exception))
 
     def test_separate_requires_keeping_the_image_for_deployment(self):
@@ -31,7 +31,7 @@ class RomfsOption(unittest.TestCase):
                                   ([], {'ROMFS': 'separate', 'KEEP_EXTRACTED': False})):
             with self.subTest(options=options, settings=settings), tempfile.TemporaryDirectory() as t, mock.patch.multiple(nsp, **settings):
                 with self.assertRaises(nsp.BuildError) as e:
-                    nsp.main(nsp.parse_args([*options, '-k', t, t]))
+                    nsp.main(nsp.parse_args([*options, t]))
                 self.assertIn('--romfs separate requires --keep-extracted', str(e.exception))
 
     def test_push_command_names_the_image(self):

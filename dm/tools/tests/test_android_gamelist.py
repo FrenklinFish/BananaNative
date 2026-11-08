@@ -31,7 +31,7 @@ public final class BuildConfig {
     public static final String NX_PROFILES = "%s\\tFixture\\t0\\tunknown\\t65536 main=%s sdk=%s\\n%s\\tDonkey Kong Bananza\\t0\\tunknown\\t%s %s %s\\t\\t\\t\\t\\t\\t%s"
             + "\\n%s\\tFixture Two\\t0\\tunknown\\t0 @1.8.0 main=%s sdk=%s"
             + "\\n%s\\tFixture Three\\t0\\tunknown\\t65536 main=%s sdk=%s\\t\\t\\t\\t\\t\\t%s";
-    public static final String NX_DMSH_VK_CHAIN = "c0ffee000001", NX_DMSH_VK_ABI = "abc123abc123";
+    public static final String NX_DMSH_VK_CHAIN = "c0ffee000001", NX_DMSH_VK_ABI = "abc123abc123", NX_DMSH_VK_ABI_COMPAT = "";
 }
 ''' % (FIX_TID, nso_id(2), nso_id(3), *DKB, CHECK, FIX2, nso_id(11), nso_id(3), FIX3, nso_id(2), nso_id(3), CHECK)
 
@@ -118,6 +118,23 @@ class DumpLayouts(unittest.TestCase):
                         self.assertTrue(str(exe).endswith(f'{own}/exefs'), exe)
                         self.assertTrue(str(rom).endswith(f'{base if name == "code-in-update" else own}/romfs'), rom)
 
+
+
+class ProfileRows(unittest.TestCase):
+    """The profiles' romfs_check rows, as build.gradle romfsChecksOf gives them; with NX_TEST_MKW_ROMFS set to a Mario Kart World 1.8.0 RomFS folder, its file holds
+    the profile's main build ID on that line (read only; skipped otherwise)"""
+    def rows(self, game):
+        return ['|'.join(c.strip() for c in l.split('\t')[1:4]) for l in (REPO / f'dm/games/{game}/game.tsv').read_text().splitlines() if l.startswith('romfs_check\t')]
+
+    def test_rows(self):
+        self.assertEqual(self.rows('040074A01BF12000'), [CHECK])
+        self.assertEqual(self.rows('0400C3F00006E000'), [CHECK])
+
+    @unittest.skipUnless(os.environ.get('NX_TEST_MKW_ROMFS'), 'NX_TEST_MKW_ROMFS not set')
+    def test_mkw_dump(self):
+        lines = (Path(os.environ['NX_TEST_MKW_ROMFS']) / 'System/RegionLangMask.txt').read_text().splitlines()
+        main = next(c.split('=')[1] for l in (REPO / 'dm/games/0400C3F00006E000/game.tsv').read_text().splitlines() if l.startswith('build\t') for c in l.split('\t') if c.startswith('main='))
+        self.assertEqual(lines[3].strip().lower(), main.lower())
 
 if __name__ == '__main__':
     unittest.main()

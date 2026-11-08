@@ -42,7 +42,7 @@ No frame-rate key: the game asks for present interval 2 and runs at 30 fps, as o
 
 ## Mac routes
 
-- Build with `scripts/build_ipa_from_nsp.py <NSP folder> -k <prod.keys> --platform mac`; its last line runs the game.
+- Build with `scripts/build_ipa_from_nsp.py <dump folder> --platform mac`; its last line runs the game.
 - From an empty save, with `DM_CTL` presses (the work folder's `run/route.sh`, about 4 minutes): A at the language screen (about 45 s after boot), A at the health warning, A at the license notice, A at the title, A on the first save slot, A on the new-game options' Continue, A at the autosave notice, A on New Story. The opening cutscene follows; at the cremation prompt ("Incinerate") B must be held for several seconds (`B~6`; short presses do nothing); the diner follows after the credits begin. In the diner the left stick walks and the right stick turns.
 
 ## Testing

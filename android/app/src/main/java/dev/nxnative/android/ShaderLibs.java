@@ -21,7 +21,8 @@ import java.util.TreeSet;
  * The shader libraries of a pack folder (shaders/v-&lt;V&gt;/dmsh_vk.lib) and their delta update (android/SHADERS.md#delta-updates), as the launcher decides them:
  * <ul>
  * <li>{@link #playable}: a library of another version the host plays while this version's library is being made: its header names the game and carries this APK's
- * DMSH_VK_ABI, the rule of the replay's own choice (vka_shader.c lib_load, vka_shlib_check); the newest such one, as the replay takes it.</li>
+ * DMSH_VK_ABI, or else one of the older ABIs the host also plays (DMSH_VK_ABI_COMPAT, vka_abi_compat.h), the rule of the replay's own choice (vka_shader.c lib_load,
+ * vka_shlib_check); the newest such one, as the replay takes it.</li>
  * <li>{@link #toTranslate}: how many shaders the update translates from the older libraries the pack has, from the profile's delta manifest "from" rows (Profile.delta),
  * and {@link #minutes} the time that takes on the phone.</li>
  * <li>{@link #restamp}: an older library that is this version's byte for byte but for the header's version and abi (the manifest's "stamp" rows, Profile.stamp) becomes
@@ -74,21 +75,28 @@ final class ShaderLibs {
     }
 
     /**
-     * The library of another version than current the host plays (the newest one whose header names titleId and carries abi), null when none. current: this APK's
-     * DMSH_VK_CHAIN (its own library is the launcher's usual check, not this one); abi: its DMSH_VK_ABI
+     * The library of another version than current the host plays (the newest one whose header names titleId and carries abi; when there is none, the newest that carries
+     * one of compat, the older ABIs this APK's host also plays), null when none. current: this APK's DMSH_VK_CHAIN (its own library is the launcher's usual check, not this
+     * one); abi: its DMSH_VK_ABI; compat: its DMSH_VK_ABI_COMPAT (vka_abi_compat.h: space-separated, "" or null = none), the order of vka_shader.c lib_load
      */
-    static File playable(File packDir, String titleId, String current, String abi) {
+    static File playable(File packDir, String titleId, String current, String abi, String compat) {
         if (abi == null || !abi.matches("[0-9a-f]{12}")) return null;
-        File best = null;
+        Set<String> older = new HashSet<>();
+        if (compat != null) for (String c : compat.trim().split("\\s+")) if (c.matches("[0-9a-f]{12}") && !c.equals(abi)) older.add(c);
+        File best = null, bestOlder = null;
         for (File d : libraries(packDir)) {
             if (d.getName().equals("v-" + current)) continue;
             File lib = new File(d, "dmsh_vk.lib");
             Header h = header(lib);
-            if (h == null || !titleId.equals(h.game) || !abi.equals(h.abi)) continue;
-            if (best == null || lib.lastModified() > best.lastModified()) best = lib;
+            if (h == null || !titleId.equals(h.game)) continue;
+            if (abi.equals(h.abi)) { if (best == null || lib.lastModified() > best.lastModified()) best = lib; }
+            else if (older.contains(h.abi) && (bestOlder == null || lib.lastModified() > bestOlder.lastModified())) bestOlder = lib;
         }
-        return best;
+        return best != null ? best : bestOlder;
     }
+
+    /** As above with no older ABIs */
+    static File playable(File packDir, String titleId, String current, String abi) { return playable(packDir, titleId, current, abi, null); }
 
     /**
      * A library of another version made before the header's abi field (no ABI: whether the host reads it the same is not known), the newest; null when none. The host plays
@@ -231,6 +239,15 @@ final class ShaderLibs {
         File[] l = f.listFiles();
         if (l != null) for (File x : l) deleteTree(x);
         f.delete();
+    }
+
+    /**
+     * A game card's state while a background shader update runs (MainActivity's card, from the update's job): "Ready · updating shaders 1,234 / 22,852 · about 12 min
+     * left", "Ready · shader update paused 1,234 / 22,852", or without the count while the job has none yet. eta: Job.etaText ("" while unknown)
+     */
+    static String updatingText(Locale l, long done, long total, String eta, boolean paused) {
+        String count = total > 0 ? String.format(l, " %,d / %,d", Math.min(done, total), total) : "";
+        return (paused ? "Ready · shader update paused" : "Ready · updating shaders") + count + (!paused && eta != null && !eta.isEmpty() ? " · " + eta : "");
     }
 
     static String minutesText(int n) {

@@ -148,6 +148,7 @@ int vcap_png(const char *path, const uint8_t *px, uint32_t w, uint32_t h, VkForm
             case VK_FORMAT_B8G8R8A8_UNORM: case VK_FORMAT_B8G8R8A8_SRGB: b = px[4 * i]; g = px[4 * i + 1]; r = px[4 * i + 2]; break;
             case VK_FORMAT_A2B10G10R10_UNORM_PACK32: memcpy(&v, px + 4 * i, 4); r = (uint8_t)((v & 1023) >> 2); g = (uint8_t)((v >> 10 & 1023) >> 2); b = (uint8_t)((v >> 20 & 1023) >> 2); break;
             case VK_FORMAT_B10G11R11_UFLOAT_PACK32: memcpy(&v, px + 4 * i, 4); r = lin8(uf(v & 2047, 6)); g = lin8(uf(v >> 11 & 2047, 6)); b = lin8(uf(v >> 22, 5)); break;
+            case VK_FORMAT_E5B9G9R9_UFLOAT_PACK32: { memcpy(&v, px + 4 * i, 4); float sc = ldexpf(1.0f, (int)(v >> 27) - 24); r = lin8((float)(v & 511) * sc); g = lin8((float)(v >> 9 & 511) * sc); b = lin8((float)(v >> 18 & 511) * sc); break; }
             case VK_FORMAT_R16G16B16A16_SFLOAT: { uint16_t c[4]; memcpy(c, px + 8 * i, 8); r = lin8(half_f(c[0])); g = lin8(half_f(c[1])); b = lin8(half_f(c[2])); break; }
             case VK_FORMAT_R16G16_SFLOAT: { uint16_t c[2]; memcpy(c, px + 4 * i, 4); r = lin8(half_f(c[0])); g = lin8(half_f(c[1])); break; }
             case VK_FORMAT_R16_SFLOAT: { uint16_t c; memcpy(&c, px + 2 * i, 2); r = g = b = lin8(half_f(c)); break; }

@@ -1,8 +1,12 @@
 package dev.nxnative.android;
 
+import java.io.Closeable;
+import java.io.EOFException;
 import java.io.File;
 import java.io.IOException;
 import java.io.RandomAccessFile;
+import java.nio.ByteBuffer;
+import java.nio.channels.FileChannel;
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
@@ -23,6 +27,10 @@ import java.util.regex.Pattern;
  * <p>
  * Naming (NUP.md "Naming a package"): {@code <file>.nup:<selector>[/<path>]}, split at the last ".nup:", with the selector {@code base}, {@code update/<version>}
  * or {@code addon/<16 hex digits>}. {@link #parse} reads one, {@link #spec} writes one. No Android classes: the JVM test runs it on the Mac.
+ * <p>
+ * Reading goes through a {@link Source}: a plain file, or, for a .nup the user picked with the system file picker (no path the app may open without All files
+ * access: PickedNup), a descriptor from the {@link #opener} the app installs. Such a file has a stand-in path in app storage that names it wherever a path
+ * names a game; nothing exists at that path.
  */
 final class Nup {
     static final int BASE = 0, UPDATE = 1, ADDON = 2;
@@ -79,13 +87,75 @@ final class Nup {
         }
     }
 
+    /**
+     * Where a .nup's bytes come from: a channel read by position (pread), its size, and what identifies its content for the caches (path or document, size, time).
+     * close() closes the channel and what it came from (a file, or a descriptor the provider gave).
+     */
+    static final class Source implements Closeable {
+        final FileChannel ch;
+        final long size;
+        final String key;
+        private final Closeable owner;
+
+        Source(FileChannel ch, long size, String key, Closeable owner) { this.ch = ch; this.size = size; this.key = key; this.owner = owner; }
+
+        /** n bytes at pos into b[off..], all of them (EOFException when the file ends first) */
+        void read(long pos, byte[] b, int off, int n) throws IOException {
+            ByteBuffer bb = ByteBuffer.wrap(b, off, n);
+            while (bb.hasRemaining()) {
+                int k = ch.read(bb, pos + (bb.position() - off));
+                if (k < 0) throw new EOFException("the file ends at byte " + (pos + bb.position() - off) + ", before byte " + (pos + n));
+            }
+        }
+
+        @Override public void close() throws IOException {
+            try { ch.close(); } finally { if (owner != null) owner.close(); }
+        }
+    }
+
+    /** Opens the .nup files that are not plain files (PickedNup: a document picked with the system file picker) */
+    interface Opener {
+        /** Whether f is one of its stand-in paths (then {@link #open} answers for it; nothing exists at f itself) */
+        boolean owns(File f);
+
+        /** f's bytes; an IOException with a sentence when it cannot be opened (moved, deleted, its permission taken back) */
+        Source open(File f) throws IOException;
+    }
+
+    /** Set once per process by the app (NxApp); null on the JVM unless a test sets one */
+    static volatile Opener opener;
+
+    /** Whether f is a picked .nup (read through the opener, not by its path) */
+    static boolean picked(File f) {
+        Opener o = opener;
+        return f != null && o != null && o.owns(f);
+    }
+
+    /** f's source: the opener's for a picked .nup, else the file's */
+    static Source source(File f) throws IOException {
+        Opener o = opener;
+        if (o != null && o.owns(f)) return o.open(f);
+        if (!f.isFile()) throw new IOException(f + " is not a file");
+        RandomAccessFile r = new RandomAccessFile(f, "r");
+        try {
+            return new Source(r.getChannel(), r.length(), f.getAbsolutePath() + "|" + r.length() + "|" + f.lastModified(), r);
+        } catch (IOException | RuntimeException e) {
+            r.close();
+            throw e;
+        }
+    }
+
     final File file;
+    /** Its source's key when it was read: what changes when the file does (BuildCheck's cache) */
+    final String identity;
     final long fileSize, tocOffset, tocSize, blobOffset, dirCount, fileCount, poolOff, poolSize;
     final List<Pkg> packages;
     private final long offDir, offFile, offKids;
 
-    private Nup(File file, long fileSize, long tocOffset, long tocSize, long blobOffset, long dirCount, long fileCount, long poolOff, long poolSize, List<Pkg> packages) {
+    private Nup(File file, String identity, long fileSize, long tocOffset, long tocSize, long blobOffset, long dirCount, long fileCount, long poolOff, long poolSize,
+                List<Pkg> packages) {
         this.file = file;
+        this.identity = identity;
         this.fileSize = fileSize;
         this.tocOffset = tocOffset;
         this.tocSize = tocSize;
@@ -148,14 +218,18 @@ final class Nup {
 
     private static final Map<String, Nup> cache = new LinkedHashMap<>();
 
-    /** The .nup checked (superblock, TOC SHA-256); cached by path, size and time, so a card's checks do not hash the TOC again */
+    /** The .nup checked (superblock, TOC SHA-256); cached by path (or picked document), size and time, so a card's checks do not hash the TOC again */
     static Nup open(File f) throws IOException {
-        String key = f.getAbsolutePath() + "|" + f.length() + "|" + f.lastModified();
-        synchronized (cache) {
-            Nup n = cache.get(key);
-            if (n != null) return n;
+        Nup n;
+        String key;
+        try (Source src = source(f)) {
+            key = f.getAbsolutePath() + "|" + src.key;
+            synchronized (cache) {
+                n = cache.get(key);
+                if (n != null) return n;
+            }
+            n = read(f, src, true);
         }
-        Nup n = read(f, true);
         synchronized (cache) {
             cache.put(key, n);
             while (cache.size() > 4) cache.remove(cache.keySet().iterator().next());
@@ -164,15 +238,18 @@ final class Nup {
     }
 
     /** Only the superblock and the package records, TOC not hashed: quick, for the UI's "is it a dump" (never for what is read from it) */
-    static Nup peek(File f) throws IOException { return read(f, false); }
+    static Nup peek(File f) throws IOException {
+        try (Source src = source(f)) {
+            return read(f, src, false);
+        }
+    }
 
-    private static Nup read(File f, boolean verify) throws IOException {
-        if (!f.isFile()) throw new IOException(f + " is not a file");
-        try (RandomAccessFile r = new RandomAccessFile(f, "r")) {
-            long len = r.length();
+    private static Nup read(File f, Source r, boolean verify) throws IOException {
+        {
+            long len = r.size;
             if (len < 0x80) throw new IOException(f.getName() + " is too short for a .nup");
             byte[] sb = new byte[0x80];
-            r.readFully(sb);
+            r.read(0, sb, 0, sb.length);
             if (sb[0] != 'N' || sb[1] != 'U' || sb[2] != 'P') throw new IOException(f.getName() + " is not a .nup (no NUP magic)");
             if (sb[3] != 1) throw new IOException(f.getName() + " is .nup format " + (sb[3] & 0xff) + "; this app reads format 1");
             int headerSize = u16(sb, 4);
@@ -186,17 +263,17 @@ final class Nup {
             if (pkgCount < 1 || pkgCount > 65536) throw new IOException(f.getName() + " has " + pkgCount + " packages");
             if (0x30 + 0x40 * pkgCount > tocSize) throw new IOException(f.getName() + ": the package records do not fit in the TOC");
             byte[] head = new byte[(int) (0x30 + 0x40 * pkgCount)];
-            r.seek(tocOff);
-            r.readFully(head);
+            r.read(tocOff, head, 0, head.length);
             if (verify) {
                 MessageDigest h = sha256();
                 h.update(head);
                 byte[] buf = new byte[1 << 16];
-                long left = tocSize - head.length;
+                long at = tocOff + head.length, left = tocSize - head.length;
                 while (left > 0) {
-                    int n = r.read(buf, 0, (int) Math.min(buf.length, left));
-                    if (n < 0) throw new IOException(f.getName() + ": the TOC ends early");
+                    int n = (int) Math.min(buf.length, left);
+                    try { r.read(at, buf, 0, n); } catch (EOFException e) { throw new IOException(f.getName() + ": the TOC ends early"); }
                     h.update(buf, 0, n);
+                    at += n;
                     left -= n;
                 }
                 if (!Arrays.equals(h.digest(), Arrays.copyOfRange(sb, 0x18, 0x38)))
@@ -222,7 +299,7 @@ final class Nup {
                 pk.add(p);
             }
             if (bases > 1) throw new IOException(f.getName() + " has " + bases + " base packages");
-            return new Nup(f, len, tocOff, tocSize, blob, dirs, files, poolOff, poolSize, pk);
+            return new Nup(f, r.key, len, tocOff, tocSize, blob, dirs, files, poolOff, poolSize, pk);
         }
     }
 
@@ -270,7 +347,7 @@ final class Nup {
 
     // ---- The tree ----
 
-    private Node node(RandomAccessFile r, long id) throws IOException {
+    private Node node(Source r, long id) throws IOException {
         if (id < dirCount) {
             byte[] b = toc(r, offDir + 0x18 * id, 0x18);
             return new Node(true, id, name(r, u32(b, 0), u32(b, 4)), 0, 0, 0, 0, null, u32(b, 8), u32(b, 12));
@@ -285,16 +362,15 @@ final class Nup {
         return new Node(false, fi, name(r, u32(b, 0), u32(b, 4)), size, eo, es, codec, Arrays.copyOfRange(b, 0x20, 0x40), 0, 0);
     }
 
-    private String name(RandomAccessFile r, long off, long len) throws IOException {
+    private String name(Source r, long off, long len) throws IOException {
         if (off + len > poolSize || len > 4096) throw new IOException(file.getName() + ": a name outside the string pool");
         return new String(toc(r, poolOff + off, (int) len), StandardCharsets.UTF_8);
     }
 
-    private byte[] toc(RandomAccessFile r, long off, int n) throws IOException {
+    private byte[] toc(Source r, long off, int n) throws IOException {
         if (off + n > tocSize) throw new IOException(file.getName() + ": a TOC read past its end");
         byte[] b = new byte[n];
-        r.seek(tocOffset + off);
-        r.readFully(b);
+        r.read(tocOffset + off, b, 0, n);
         return b;
     }
 
@@ -302,7 +378,7 @@ final class Nup {
     List<Node> children(Node dir) throws IOException {
         List<Node> out = new ArrayList<>();
         if (!dir.dir) return out;
-        try (RandomAccessFile r = new RandomAccessFile(file, "r")) {
+        try (Source r = source(file)) {
             long kids = (offKids + 4 * (dir.firstChild + dir.childCount));
             if (kids > poolOff) throw new IOException(file.getName() + ": a directory's children past the table");
             byte[] ids = toc(r, offKids + 4 * dir.firstChild, (int) (4 * dir.childCount));
@@ -314,7 +390,7 @@ final class Nup {
     /** A directory by its index (a package's root, exefs or romfs) */
     Node dir(long index) throws IOException {
         if (index == NONE) return null;
-        try (RandomAccessFile r = new RandomAccessFile(file, "r")) {
+        try (Source r = source(file)) {
             return node(r, index);
         }
     }
@@ -342,18 +418,16 @@ final class Nup {
         if (f.size == 0) return new byte[0];
         if (f.extentSize > Integer.MAX_VALUE - 16 || (max < 0 && f.size > Integer.MAX_VALUE - 16)) throw new IOException(f.name + " is too large to read into memory");
         byte[] out;
-        try (RandomAccessFile r = new RandomAccessFile(file, "r")) {
+        try (Source r = source(file)) {
             if (f.codec == 0) {
                 if (f.extentSize != f.size) throw new IOException(f.name + ": a raw extent of another size than the file");
                 int n = (int) (max < 0 ? f.size : Math.min(f.size, max));
                 out = new byte[n];
-                r.seek(f.extentOffset);
-                r.readFully(out);
+                r.read(f.extentOffset, out, 0, n);
                 if (max >= 0) return out;
             } else {
                 byte[] z = new byte[(int) f.extentSize];
-                r.seek(f.extentOffset);
-                r.readFully(z);
+                r.read(f.extentOffset, z, 0, z.length);
                 out = Zstd.decode(z, 0, z.length, max);
                 if (max >= 0) return out;
                 if (out.length != f.size) throw new IOException(f.name + ": decompressed to " + out.length + " bytes, the TOC says " + f.size);

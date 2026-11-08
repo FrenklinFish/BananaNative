@@ -100,6 +100,7 @@ class ReadinessJvm(unittest.TestCase):
     def test_tested_phone(self):   # the tested phone's facts against each profile: what its players see
         if not FIXTURE.is_file(): self.skipTest('no facts of the tested phone')
         for t in tables():
+            if not gradle_rows(t): continue   # a status row only (a game supported on Android with no needs of its own measured yet)
             with self.subTest(game=t.parent.name):
                 r = self.java(FIXTURE, gradle_rows(t))
                 self.assertEqual(r.returncode, 0, r.stdout + r.stderr)

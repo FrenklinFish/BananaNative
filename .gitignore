@@ -11,3 +11,12 @@ dm/games/*/cb_extent.tsv
 .coverage
 .coverage.*
 /coverage.json
+# The packer environment scripts/bananative.command / .bat uses (a local path)
+/.bananative-env
+
+# Internal notes: kept in the private repository only
+/internal/
+HANDOFF*.md
+ONDEVICE*.md
+STUTTER-TEST*.md
+*.internal.md

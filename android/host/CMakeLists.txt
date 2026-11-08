@@ -65,6 +65,14 @@ target_compile_options(vpx PRIVATE -O2 -w)
 add_library(zstddec STATIC ${TP}/zstd/zstddeclib.c)
 target_compile_options(zstddec PRIVATE -O2 -w -fvisibility=hidden)
 
+# dav1d (AV1 movies, dm/third_party/dav1d): C sources and per-bit-depth wrappers
+file(GLOB DAV1D_C CONFIGURE_DEPENDS ${TP}/dav1d/src/*.c ${TP}/dav1d/config/tmpl/*.c)
+list(FILTER DAV1D_C EXCLUDE REGEX "_tmpl\\.c$")
+list(APPEND DAV1D_C ${TP}/dav1d/src/arm/cpu.c)
+add_library(dav1d STATIC ${DAV1D_C})
+target_include_directories(dav1d PRIVATE ${TP}/dav1d ${TP}/dav1d/include ${TP}/dav1d/config)
+target_compile_options(dav1d PRIVATE -O2 -w -fvisibility=hidden)
+
 # One host: target <tgt> with the profile of <game> compiled in. The game profile header, as dm/host/Makefile makes it (game.py header), goes into gen/<game>
 function(nxhost_add tgt game)
   set(GAME_H ${GEN}/${game}/game_profile.h)
@@ -73,7 +81,7 @@ function(nxhost_add tgt game)
     DEPENDS ${ROOT}/dm/games/${game}/game.tsv ${ROOT}/dm/games/game.py
     COMMENT "game profile ${game}")
   add_library(${tgt} SHARED ${HOST_C} ${GFX_C} ${ASM_OUT} ${GAME_H})
-  target_include_directories(${tgt} PRIVATE ${GEN}/${game} ${GFX}/nvn/include ${TP}/vulkan-headers/include ${TP}/libvpx ${TP}/libvpx/config ${TP}/stb_vorbis ${HOST})
+  target_include_directories(${tgt} PRIVATE ${GEN}/${game} ${GFX}/nvn/include ${TP}/vulkan-headers/include ${TP}/libvpx ${TP}/libvpx/config ${TP}/dav1d/include ${TP}/stb_vorbis ${HOST})
   # DM_NUP_ZSTD: compressed files of a NUP container are decompressed with zstddec (dm/host/nup_image.h)
   target_compile_definitions(${tgt} PRIVATE _GNU_SOURCE DM_NUP_ZSTD $<$<BOOL:${NX_LSFG}>:NX_LSFG>)
   # As the Mac host (-O1 -g -Wall -Wno-unused-function). Hidden visibility: the assembly reaches C symbols with adrp, which a shared library allows only for symbols it binds itself
@@ -84,7 +92,7 @@ function(nxhost_add tgt game)
   set_source_files_properties(${VKA_C} PROPERTIES COMPILE_OPTIONS -O2)
   target_link_options(${tgt} PRIVATE -Wl,-Bsymbolic -Wl,--no-undefined -Wl,--error-limit=0 -Wl,--version-script=${CMAKE_CURRENT_SOURCE_DIR}/libnxhost.map)
   set_target_properties(${tgt} PROPERTIES LINK_DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/libnxhost.map)
-  target_link_libraries(${tgt} PRIVATE vpx zstddec aaudio mediandk android log m dl z)   # libvulkan.so is opened at run time (vka_dev.c)
+  target_link_libraries(${tgt} PRIVATE vpx dav1d zstddec aaudio mediandk android log m dl z)   # libvulkan.so is opened at run time (vka_dev.c)
 endfunction()
 
 if(NX_GAMES)

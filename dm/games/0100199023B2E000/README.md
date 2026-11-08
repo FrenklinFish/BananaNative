@@ -34,7 +34,7 @@ No code of the game is cut, and the profile needs no run-time key: the game sets
 
 ## Mac routes
 
-- Build with `scripts/build_ipa_from_nsp.py <NSP folder> -k <prod.keys> --platform mac`; its last line runs the game.
+- Build with `scripts/build_ipa_from_nsp.py <dump folder> --platform mac`; its last line runs the game.
 - From a fresh save: A at about 45 s and again 3 s later, Plus skips the rest of the opening, A at "Press any button", A on New Game; then A every second goes through the opening story into the field on Kurken Island (about 4 minutes; `DM_KEYS=45:A,48:A,52:Plus,56:A,62:A*260/1`). The game autosaves there.
 - With a save, the title menu selects Load Game: the same keys up to about 68 s load the autosave into the field.
 - In the field the left stick walks relative to the camera, R runs, Y swings the staff, X opens the menu and D-pad Down the full map.

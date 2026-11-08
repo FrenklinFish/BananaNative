@@ -1,6 +1,7 @@
 // Android input → the host's pad, touch and motion state, the pure part (no Android or JNI headers, no host state), so tests/t_android_input.c checks it on the Mac.
 // input_android.c feeds it from the launcher's events and publishes the results through dm_input.h / front.h.
 #pragma once
+#include <stddef.h>
 #include <stdint.h>
 #include "../dm_input.h"
 
@@ -21,13 +22,26 @@ enum { AM_DOWN = 0, AM_UP = 1, AM_MOVE = 2, AM_CANCEL = 3, AM_POINTER_DOWN = 5, 
 // Face buttons: Android names them by position as on an Xbox pad (BUTTON_A bottom, B right, X left, Y top), the Switch's layout is right A, bottom B, top X, left Y,
 // so by default a pad maps by position (pad_apple.h does the same). labelled = 1 maps name for name instead, for a pad whose driver reports Nintendo's labels
 uint64_t nxin_key_button(int keycode, int labelled);   // DM_BTN_* bit, 0 when the key is not a pad button
+// Button remapping (DM_PAD_MAP, the launcher's Button mapping): each physical source is an Android button by its key name without KEYCODE_ (BUTTON_A … DPAD_RIGHT,
+// BUTTON_C, BUTTON_Z); the analog triggers count as BUTTON_L2 / BUTTON_R2 and the hat as DPAD_*. A source with an entry presses its Switch button (or nothing: NONE),
+// whatever DM_PAD_LABELLED says; one without keeps the default mapping. The spec: "BUTTON_A=A,BUTTON_B=B,BUTTON_L2=NONE" (Switch names A B X Y L R ZL ZR LS RS PLUS
+// MINUS UP DOWN LEFT RIGHT NONE)
+enum { NXIN_SRC_N = 18 };
+extern const char *const nxin_src_names[NXIN_SRC_N];
+extern const char *const nxin_switch_names[16];   // by DM_BTN_* bit
+typedef struct { uint64_t to[NXIN_SRC_N]; uint32_t set; } nxin_map;
+int nxin_src_of_key(int keycode);   // the source index of a keycode, -1 when it is none
+// Parses spec into m (cleared first); returns the number of entries taken, and writes the first entry it could not read to bad ("" when all were read)
+int nxin_map_parse(nxin_map *m, const char *spec, char *bad, size_t nbad);
 typedef struct {
+    const nxin_map *map;           // DM_PAD_MAP, or NULL: the default mapping
     uint64_t keys;                 // buttons held from key events
     float lx, ly, rx, ry;          // sticks as Android reports them (-1..1, y down)
     float hat_x, hat_y, lt, rt;    // D-pad hat (-1, 0, 1) and the triggers (0..1)
     int lt_on, rt_on;              // the triggers as ZL / ZR, with hysteresis
 } nxin_pad;
-int nxin_pad_key(nxin_pad *p, int keycode, int down, int labelled);   // 1 when the key is a pad button (the launcher then consumes the event)
+int nxin_pad_key(nxin_pad *p, int keycode, int down, int labelled);   // 1 when the key is a pad button or a mapped source (the launcher then consumes the event)
+uint64_t nxin_pad_button(const nxin_pad *p, int keycode, int labelled);   // the Switch button a key presses on this pad (its map first), 0 for none
 int nxin_pad_axis(nxin_pad *p, int axis, float v);                     // 1 when the axis is used
 // One MotionEvent's axes (only those the device has: InputDevice.getMotionRange). A device that has Z / RZ has its right stick there (Android's key layouts put it there,
 // with the triggers on LTRIGGER / RTRIGGER), and its RX / RY are left out, so a pad that also reports RX / RY as idle or as triggers does not pull the stick back. Returns 1 when any is used

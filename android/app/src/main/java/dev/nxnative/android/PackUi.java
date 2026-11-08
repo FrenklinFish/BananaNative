@@ -153,7 +153,12 @@ final class PackUi {
             }
             return target;
         }, (r, err) -> {
-            if (err != null) { a.error("The pack was not imported: " + err + "\n\n" + (target.isDirectory() ? "The pack in " + target + " is as it was." : "Nothing was changed.")); return; }
+            if (err != null) {
+                int cut = err.indexOf("\n\n");   // a build check's sentence, then the build IDs
+                Ui.explain(a, "Pack not imported", PrepareText.capital(cut > 0 ? err.substring(0, cut) : err) + (err.endsWith(".") ? "" : ".") + " Nothing was changed.",
+                        (cut > 0 ? err.substring(cut + 2) + "\n" : "") + "Pack folder: " + target).setPositiveButton("OK", null).show();
+                return;
+            }
             String old = Folders.pickedPack(a, g.titleId);
             Folders.pickedPack(a, g.titleId, null);   // the card plays the imported pack; a picked folder would win over it at the next Add game
             if (old != null && old.equals(Prefs.folder(a, "pack"))) Prefs.folder(a, "pack", null);
@@ -162,7 +167,7 @@ final class PackUi {
             String shaders = lp == null ? "It has this app's shader library (" + BuildConfig.NX_DMSH_VK_CHAIN + "): ready to play."
                     : Pack.playableLibrary(target, g.titleId) != null || Pack.legacyLibrary(target, g.titleId) != null
                     ? "Its shaders are of an older version: the game plays with them while the app updates them, as after an app update." : lp + " The game's card offers what fixes it.";
-            new AlertDialog.Builder(a).setTitle("Pack imported").setMessage(target + "\n\n" + shaders + (old != null ? "\n\nThe pack folder picked before (" + old + ") is kept as it was; the game now uses this one." : ""))
+            Ui.explain(a, "Pack imported", shaders, "Pack folder: " + target + (old != null ? "\nThe pack folder picked before (" + old + ") is kept as it was; the game now uses this one." : ""))
                     .setPositiveButton("OK", null).show();
         });
     }

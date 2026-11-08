@@ -166,6 +166,60 @@ final class Readiness {
     }
 
     /** Of a game's environment (KEY=VALUE, in start's order), the lines that pick its GPU driver: what the readiness facts must be read on */
+    /**
+     * The game's environment for the check, as start() will set it (KEY=VALUE lines in start's order, the last of a key winning), less the keys in skip (the paths
+     * start sets itself). A driver reads some variables once, when its first device is made (Mesa's FD_DEV_FEATURES, TU_DEBUG): the check makes that device in the
+     * game's process, so it must see them too (GitHub #40)
+     */
+    static String[] gameEnv(List<String> env, java.util.Set<String> skip) {
+        List<String> out = new ArrayList<>();
+        for (String kv : env) {
+            int eq = kv.indexOf('=');
+            if (eq > 0 && !skip.contains(kv.substring(0, eq).trim())) out.add(kv);
+        }
+        return out.toArray(new String[0]);
+    }
+
+    /** The DM_ names of these lines that are not in known (BuildConfig.NX_ENV_SWITCHES: what this build reads), once each, in order */
+    static List<String> unknownSwitches(List<String> lines, java.util.Set<String> known) {
+        List<String> out = new ArrayList<>();
+        for (String kv : lines) {
+            int eq = kv.indexOf('=');
+            String k = eq > 0 ? kv.substring(0, eq).trim() : "";
+            if (k.startsWith("DM_") && !known.contains(k) && !out.contains(k)) out.add(k);
+        }
+        return out;
+    }
+
+    /** The known switch closest to an unknown name (at most 2 edits, as DM_VK_PS0_ASYNC for DM_VK_PSO_ASYNC), null when none is that close */
+    static String closest(String name, java.util.Set<String> known) {
+        String best = null;
+        int bd = 3;
+        for (String k : known) {
+            if (Math.abs(k.length() - name.length()) >= bd) continue;
+            int d = edits(name, k);
+            if (d < bd || d == bd && best != null && k.compareTo(best) < 0) { bd = d; best = k; }
+        }
+        return bd <= 2 ? best : null;
+    }
+
+    private static int edits(String a, String b) {
+        int[] prev = new int[b.length() + 1], cur = new int[b.length() + 1];
+        for (int j = 0; j <= b.length(); j++) prev[j] = j;
+        for (int i = 1; i <= a.length(); i++) {
+            cur[0] = i;
+            for (int j = 1; j <= b.length(); j++) cur[j] = Math.min(Math.min(cur[j - 1] + 1, prev[j] + 1), prev[j - 1] + (a.charAt(i - 1) == b.charAt(j - 1) ? 0 : 1));
+            int[] t = prev; prev = cur; cur = t;
+        }
+        return prev[b.length()];
+    }
+
+    /** The [RED] line for an unknown DM_ name of a user line (from: env.txt, the game's settings, env-<id>.txt) */
+    static String unknownLine(String name, String from, java.util.Set<String> known) {
+        String near = closest(name, known);
+        return "[RED] " + name + " (" + from + ") is not a switch of this build: nothing reads it" + (near != null ? "; did you mean " + near + "?" : "") + " (docs/env_switches.tsv lists the switches)";
+    }
+
     static String[] driverEnv(List<String> env) {
         List<String> out = new ArrayList<>();
         for (String kv : env) if (kv.startsWith("DM_VK_DRIVER=") || kv.startsWith("DM_VK_HOOKDIR=")) out.add(kv);
@@ -184,6 +238,19 @@ final class Readiness {
         List<Check> out = new ArrayList<>();
         for (Check c : l) if (c.status == s) out.add(c);
         return out;
+    }
+
+    /** Qualcomm's PCI vendor ID, as VkPhysicalDeviceProperties.vendorID reports it (gpu.vendor) */
+    static final long VENDOR_QUALCOMM = 0x5143;
+
+    /**
+     * Whether the custom drivers the app installs can run on this GPU: they are Adreno drivers (Turnip, Qualcomm's builds) loaded through libadrenotools, so only on
+     * a GPU whose reported vendor ID is Qualcomm's. A Mali, Xclipse or PowerVR GPU has its system driver alone. Unknown (no facts): true, as before
+     */
+    static boolean customDriversFit(Map<String, String> f) {
+        String v = f == null ? null : f.get("gpu.vendor");
+        if (v == null || v.isEmpty()) return true;
+        try { return Long.decode(v.trim()) == VENDOR_QUALCOMM; } catch (NumberFormatException e) { return true; }
     }
 
     /** The GPU and driver in one line: name, driver name and info, driver ID and version, and a custom driver's name */

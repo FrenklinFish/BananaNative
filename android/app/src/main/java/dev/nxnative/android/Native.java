@@ -87,6 +87,13 @@ final class Native {
      *  (0 off, 1 generating, 2 on and not generating, -1 unavailable), out[4] images per game frame, out[5] GPU ms a game frame (-1: none). False when stale (no present for 2.5 s) or not in this host. */
     static native boolean fps(float[] out);
 
+    /** The overlay's block for the present to draw into the game's images (nxhost_overlay_set): slot 0 top left (the build tag), 1 top right (the frame rate and the other items);
+     *  px a direct buffer with an ARGB_8888 bitmap's pixels (stride bytes a row), null to empty the slot. False: the present does not draw it, the launcher's views show it */
+    static native boolean overlaySet(int slot, java.nio.ByteBuffer px, int w, int h, int stride);
+
+    /** 1 = the present has drawn the overlay (the launcher's views hide), 0 = not yet, -1 = the present does not draw it (DM_VK_OVERLAY=0, a failure, or not in this host) */
+    static native int overlayState();
+
     /** Frame generation's settings for the next frames (nxhost_framegen_set): on, images per game frame 2..4, target rate (0 = fixed), flow scale % (0 = auto). */
     static native void frameGenSet(boolean on, int multiplier, int targetRate, int flowPct);
 
@@ -123,4 +130,7 @@ final class Native {
 
     /** Whether a player has a vibrator: the host sends that player's vibration only while it has one. */
     static native void rumbleRoute(int player, boolean on);
+
+    /** Places the replay thread on the phone's fastest cores and the encoder and the game's threads off the small ones (nxlaunch.c); the number placed by this call, -1 when the phone reports no clocks */
+    static native int pinThreads();
 }

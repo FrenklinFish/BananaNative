@@ -2,7 +2,7 @@
 
 The Switch version of the game draws with NVN (the Switch's native graphics interface). The graphics layer reimplements this interface on top of Apple's Metal: every NVN call the game makes lands here, is recorded as a command, and is replayed as Metal commands at submit time. The game's shaders are not translated at run time; they are translated offline, once, on a computer, into Metal shader libraries (when the computer has no Apple Metal compiler, the final compile step moves to the phone; see below).
 
-For the build steps of the whole project see [README.md](../../README.md) and [docs/development.md](../../docs/development.md) (the tools they need: Xcode, xcodegen, .NET SDK, zstd, and the Python packages lz4 / capstone / fonttools; spirv-cross is the in-repo build `tools/spirv_cross_bin`); this page covers only the graphics layer's own matters.
+For the build steps of the whole project see [nxnative's README](../../docs/nxnative.md) and [docs/development.md](../../docs/development.md) (the tools they need: Xcode, xcodegen, .NET SDK, zstd, and the Python packages lz4 / capstone / fonttools; spirv-cross is the in-repo build `tools/spirv_cross_bin`); this page covers only the graphics layer's own matters.
 
 ## How it works
 

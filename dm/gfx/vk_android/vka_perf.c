@@ -106,11 +106,16 @@ void vka_perf_thread(int nice) {
 // period as target the session would lower the clocks until the frame took 50 ms and keep it there). Each frame is reported once. Not phone-checked (STUTTER-TEST.md)
 // Since 2026-11-05 the period is the game's shortest (vka_dev.c vka_floor_period_ns: 16.7 ms unless the game asked for less, or DM_VK_GPU_FLOOR_PERIOD), not the current
 // one capped at 33.3 ms: at 30 fps a frame the controller could only take back to 60 fps once it fits in a vsync. Unset (-1), DM_VK_ADPF_SPAN is 100 when the session is
-// the GPU clock floor (vka_floor_adpf: neither VK_QCOM_queue_perf_hint nor the KGSL constraint) and 0 otherwise
+// the GPU clock floor (vka_floor_adpf: neither VK_QCOM_queue_perf_hint nor the KGSL constraint) and 0 otherwise. With the queue hint or KGSL as the floor the session still
+// sets the CPU clocks and cores of the replay's threads, and the old reports read a frame recorded in 30 ms at 20 fps as on target against the 50 ms period; whether that
+// holds the frame rate low after the phone cools is open (docs/reference/frame-rate.md "A dynamic interval that does not step back up after the phone cools on the Vulkan
+// replay"): DM_VK_ADPF_SPAN=100 is that A/B arm, the default stays until a phone run shows it helps
 static int span_pct(void) { int vka_floor_adpf(void); int p = VKA_ENV("DM_VK_ADPF_SPAN", -1); if (p < 0) p = vka_floor_adpf() ? 100 : 0; return p <= 0 ? 0 : p > 100 ? 100 : p; }
 static int64_t span_target(double period_s, int pct) { (void)period_s; int64_t vka_floor_period_ns(void); return vka_floor_period_ns() * pct / 100; }
 uint64_t vka_floor_span_of(uint64_t f); uint64_t vka_frame_start_ns(uint64_t f); uint64_t now_ns(void);
+static void pace_tick(double period_s);
 void vka_perf_frame(double period_s) {
+    pace_tick(period_s);
     if (period_s > 0.004 && period_s < 0.2) {   // the shortest period the game asked for (vka_dev.c vka_floor_period_ns)
         extern _Atomic int64_t vka_period_min_ns; int64_t p = (int64_t)(period_s * 1e9), m = atomic_load_explicit(&vka_period_min_ns, memory_order_relaxed);
         if (!m || p < m) atomic_store_explicit(&vka_period_min_ns, p, memory_order_relaxed);
@@ -151,6 +156,92 @@ void vka_perf_frame(double period_s) {
                   int r = H.report2(g_s, wd); static int nl; if (r && nl++ < 3) VRED("ADPF report with GPU time: %d", r); else if (!r && !nl++) VLOG("ADPF: frames report their GPU time (%.2f ms)", gpu / 1e6); }
     } else if (g_s && work > 0) H.report(g_s, work);
     pthread_mutex_unlock(&g_mu);
+}
+// ---------- The pace line (vka_pace.h) ----------
+// DM_VK_PACE_LOG=<ms> (live; default 5000, 0 off): every that many ms, on the replay thread at a present, one line with what decides a dynamic interval's frame rate:
+//   [vk] pace up to frame F (5.0 s): interval 2 60 %, 3 40 %; 24.1 fps; GPU busy p50/p90 31.2/40.3 ms, recording start to GPU end p50/p90 48.0/60.1 ms; replay recording
+//   32.0 ms a frame (its CPU 21.0), 21000 draws; GPU clock floor KGSL 100 % (0); ADPF span against 16.7 ms; window 30 fps, panel 30.00 Hz; thermal 3, headroom nan; CPU MHz 2745/3628 3129/4608
+// The game's controller (DKB main+0x204a18) steps up only once its measure of a frame (start to GPU end, about the span here) fits the faster interval, so the line tells
+// a frame that cannot fit (the span, the recording or the GPU time over the period of the next faster interval) from one held by the clocks: the floor, ADPF, the thermal
+// status (AThermal_getCurrentThermalStatus: 0 none, 1 light, 2 moderate, 3 severe, 4 critical) and the CPU clocks (cpufreq policies: now / cap). The window's rate and the
+// panel's refresh show whether the panel runs below the game's rate (vka_present.c frame_rate, DM_VK_FRAME_RATE_HOLD)
+#include "vka_pace.h"
+void vka_worker_waits(uint64_t *room_ns, uint64_t *sub_ns); uint64_t vka_worker_sub_cpu(void); void mtl_stats(uint64_t *passes, uint64_t *draws);
+const char *vka_floor_state(int *pct, int *res); void vka_present_rates(int *fps, double *hz);
+static int pace_thermal(float *headroom) {   // the thermal status (-1: not available) and the headroom (NaN when the platform has none)
+    static int looked; static void *mgr; static int (*st)(void *); static float (*hr)(void *, int);
+    if (!looked) { looked = 1; void *h = dlopen("libandroid.so", RTLD_NOW); void *(*acq)(void) = h ? (void *(*)(void))dlsym(h, "AThermal_acquireManager") : NULL;
+                   if (acq) { mgr = acq(); st = (int (*)(void *))dlsym(h, "AThermal_getCurrentThermalStatus"); hr = (float (*)(void *, int))dlsym(h, "AThermal_getThermalHeadroom"); } }
+    *headroom = mgr && hr ? hr(mgr, 0) : __builtin_nanf("");
+    return mgr && st ? st(mgr) : -1;
+}
+static void pace_cpu(char *b, size_t n) {   // "now/cap" MHz of each cpufreq policy
+    size_t o = 0; b[0] = 0;
+    for (int k = 0; k < 16 && o < n; k++) {
+        char p[96]; unsigned long cur = 0, max = 0; FILE *f;
+        snprintf(p, sizeof p, "/sys/devices/system/cpu/cpufreq/policy%d/scaling_cur_freq", k); if (!(f = fopen(p, "r"))) continue; if (fscanf(f, "%lu", &cur) != 1) cur = 0; fclose(f);
+        snprintf(p, sizeof p, "/sys/devices/system/cpu/cpufreq/policy%d/scaling_max_freq", k); if ((f = fopen(p, "r"))) { if (fscanf(f, "%lu", &max) != 1) max = 0; fclose(f); }
+        int w = snprintf(b + o, n - o, "%s%lu/%lu", o ? " " : "", cur / 1000, max / 1000); if (w < 0) break; o += (size_t)w;
+    }
+    if (!b[0]) snprintf(b, n, "not readable");
+}
+// The second pace line: where the recording's time goes. Its parts a frame: the draws (the timed sample's mean per draw, vka_draw.c, times the draws), the texture work at each
+// submission's start (vka_tex_prepare), the rest of the start, the commit; the remainder is the walk of the other records (passes, clears, copies, barriers, state). Then
+// the replay thread's and the encoder's scheduling: time on a core, time runnable but waiting for one (another thread had it), and their switches (voluntary: blocked
+// on a lock, a futex or a fence; involuntary: preempted); then the encoder's time by kind of call and the draw path by phase
+void vka_draw_pace(char *b, size_t n, double *draw_us); void vka_enc_pace(char *b, size_t n, double frames); void vka_exec_phases(uint64_t *begin, uint64_t *prep, uint64_t *commit);
+int vka_rec_tid(void); int vka_enc_tid(void);
+static int pace_thr(int tid, vkpace_thr *o) {
+    if (tid <= 0) return 0;
+    char p[64], b[2048]; FILE *f; int ok = 0;
+    snprintf(p, sizeof p, "/proc/self/task/%d/schedstat", tid);
+    if ((f = fopen(p, "re"))) { size_t k = fread(b, 1, sizeof b - 1, f); b[k] = 0; fclose(f); ok = vkpace_schedstat(b, o); }
+    snprintf(p, sizeof p, "/proc/self/task/%d/status", tid);
+    if (ok && (f = fopen(p, "re"))) { size_t k = fread(b, 1, sizeof b - 1, f); b[k] = 0; fclose(f); if (!vkpace_status(b, o)) o->vol = o->invol = 0; }
+    return ok;
+}
+static void pace_cost(uint64_t f, double nf, uint64_t draws, double rec_ms) {
+    static int rtid, etid; static vkpace_thr r0, e0; static uint64_t b0, p0, c0;
+    uint64_t bg, pr, cm; vka_exec_phases(&bg, &pr, &cm);
+    int rt = vka_rec_tid(), et = vka_enc_tid(); vkpace_thr r1 = {0}, e1 = {0};
+    int rok = pace_thr(rt, &r1), eok = pace_thr(et, &e1);
+    int rfirst = rt != rtid, efirst = et != etid;   // (a new thread: its counters from the next window)
+    vkpace_thr rd = vkpace_thr_delta(&r0, &r1), ed = vkpace_thr_delta(&e0, &e1);
+    char dp[700], ep[400]; double dus = 0; vka_draw_pace(dp, sizeof dp, &dus); vka_enc_pace(ep, sizeof ep, nf);
+    double dms = nf ? dus * (double)draws / nf / 1e3 : 0, pms = nf ? (pr - p0) / 1e6 / nf : 0, bms = nf ? (bg - b0) / 1e6 / nf - pms : 0, cms = nf ? (cm - c0) / 1e6 / nf : 0;
+    char rs[160], es[160];
+    if (rok && !rfirst && nf) snprintf(rs, sizeof rs, "on a core %.1f ms, waited for a core %.1f ms, %.0f blocked / %.0f preempted switches", rd.run_ns / 1e6 / nf, rd.wait_ns / 1e6 / nf, rd.vol / nf, rd.invol / nf);
+    else snprintf(rs, sizeof rs, "%s", rok ? "from the next line" : "not readable");
+    if (eok && !efirst && nf) snprintf(es, sizeof es, "on a core %.1f ms, waited for a core %.1f ms, %.0f blocked / %.0f preempted switches", ed.run_ns / 1e6 / nf, ed.wait_ns / 1e6 / nf, ed.vol / nf, ed.invol / nf);
+    else snprintf(es, sizeof es, "%s", eok ? "from the next line" : et ? "not readable" : "off");
+    if (nf) VLOG("pace cost up to frame %llu, a frame: recording %.1f ms = draws %.1f + texture prepare %.1f + submission start %.1f + commit %.1f + other records %.1f; replay thread %s; encoder %s; "
+                 "encoder calls ms (count): %s; %s", (unsigned long long)f, rec_ms, dms, pms, bms, cms, rec_ms - dms - pms - bms - cms, rs, es, ep[0] ? ep : "none", dp[0] ? dp : "no draws timed");
+    rtid = rt; etid = et; if (rok) r0 = r1; if (eok) e0 = e1; b0 = bg; p0 = pr; c0 = cm;
+}
+static void pace_tick(double period_s) {
+    static vkpace P; static uint64_t sampled;
+    int ms = VKA_ENV("DM_VK_PACE_LOG", 5000); if (ms <= 0) return;
+    uint64_t now = now_ns(), f = vka_frame(), draws = 0, rec = 0, cpu = vka_worker_sub_cpu(); mtl_stats(NULL, &draws); vka_worker_waits(NULL, &rec);
+    if (!P.t0) { vkpace_reset(&P, now, f, draws, rec, cpu); sampled = f > 10 ? f - 10 : 0; return; }   // (sampled <= f - 10 from here on: the catch-up below cannot wrap)
+    vkpace_frame(&P, period_s);
+    if (f > 10 + 64 && f - 10 - sampled > 64) sampled = f - 10 - 64;   // (the rings keep 64 frames)
+    for (uint64_t g = sampled + 1; f > 10 && g <= f - 10; g++) { double sp = vka_floor_span_of(g) / 1e6; vkpace_gpu(&P, mtl_gpu_ms(g), sp); }   // GPU times come in a few frames late
+    if (f > 10 && f - 10 > sampled) sampled = f - 10;
+    if (now - P.t0 < (uint64_t)ms * 1000000ull) return;
+    double s = (now - P.t0) / 1e9, nf = f > P.f0 ? (double)(f - P.f0) : 0;
+    char itv[96], cpus[160]; vkpace_intervals(&P, itv, sizeof itv); pace_cpu(cpus, sizeof cpus);
+    int fl = -1, flr = 0; const char *fk = vka_floor_state(&fl, &flr); int wfps = 0; double hz = 0; vka_present_rates(&wfps, &hz);
+    float head; int th = pace_thermal(&head);
+    int pct = H.report2 && H.wd_create && H.wd_gpu && VKA_ENV("DM_VK_ADPF_GPU", 1) ? span_pct() : 0;
+    pthread_mutex_lock(&g_mu); int have = g_state > 0 && g_s; int64_t tg = g_target; pthread_mutex_unlock(&g_mu);   // (other threads join the session under g_mu)
+    char adpf[64]; if (!have) snprintf(adpf, sizeof adpf, "no session"); else if (pct) snprintf(adpf, sizeof adpf, "span against %.1f ms", tg / 1e6); else snprintf(adpf, sizeof adpf, "present period against %.1f ms", tg / 1e6);
+    char flb[48]; if (fl < 0) snprintf(flb, sizeof flb, "%s", fk); else snprintf(flb, sizeof flb, "%s %d %% (%d)", fk, fl, flr);
+    VLOG("pace up to frame %llu (%.1f s): interval %s; %.1f fps; GPU busy p50/p90 %.1f/%.1f ms, recording start to GPU end p50/p90 %.1f/%.1f ms; replay recording %.1f ms a frame (its CPU %.1f), %.0f draws; "
+         "GPU clock floor %s; ADPF %s; window %d fps, panel %.2f Hz; thermal %d, headroom %.2f; CPU MHz %s",
+         (unsigned long long)f, s, itv, nf / s, vkpace_pct(P.gpu_us, P.ng, 50), vkpace_pct(P.gpu_us, P.ng, 90), vkpace_pct(P.span_us, P.ns, 50), vkpace_pct(P.span_us, P.ns, 90),
+         nf ? (rec - P.rec0) / 1e6 / nf : 0.0, nf ? (cpu - P.cpu0) / 1e6 / nf : 0.0, nf ? (draws - P.draws0) / nf : 0.0, flb, adpf, wfps, hz, th, (double)head, cpus);
+    pace_cost(f, nf, draws - P.draws0, nf ? (rec - P.rec0) / 1e6 / nf : 0.0);
+    vkpace_reset(&P, now, f, draws, rec, cpu);
 }
 // hle_nvn.c's time-constraint request for its acquire / present thread (Apple's THREAD_TIME_CONSTRAINT_POLICY): that thread joins the session, at display priority
 void dm_perf_time_constraint(uint64_t period_ns, uint64_t comp_ns) {

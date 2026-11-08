@@ -1,5 +1,5 @@
 """NSP script progress (scripts/build_ipa_from_nsp.py --progress): the json mode's events, a count held back and sent by the ticker, a failed step's log tail,
-and the human modes' lines; no game files, keys or Xcode needed (temporary files only in a temporary folder)."""
+and the human modes' lines; no game files or Xcode needed (temporary files only in a temporary folder)."""
 import contextlib
 import importlib.util
 import io
@@ -191,7 +191,7 @@ class Cli(unittest.TestCase):
 
     def test_json_error(self):
         with tempfile.TemporaryDirectory() as tmp:
-            r = subprocess.run([sys.executable, '-B', str(SCRIPT), '--progress', 'json', str(Path(tmp) / 'missing'), '-k', str(Path(tmp) / 'keys')],
+            r = subprocess.run([sys.executable, '-B', str(SCRIPT), '--progress', 'json', str(Path(tmp) / 'missing')],
                                capture_output=True, text=True, timeout=30)
         self.assertEqual((r.returncode, r.stderr), (1, ''))
         es = [json.loads(l) for l in r.stdout.splitlines()]

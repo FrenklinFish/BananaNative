@@ -19,8 +19,8 @@ typedef struct { rec_t r[MAXR]; int n; res_t *res; VkDeviceSize off; } batch_t;
 static batch_t g_b[NBATCH]; static unsigned g_bi; static vka_span g_res;
 static VkPipeline g_pipe, g_pipe3, g_fetch; static VkPipelineLayout g_lay; static VkDescriptorSetLayout g_dsl;
 static uint32_t g_pass; static uint64_t g_pvs[NKEY], g_pfs[NKEY]; static uint32_t g_pn, g_pdraws, g_d0;   // g_pdraws: draws of the game's pass so far, g_d0: the segment's first
-static uint64_t g_probe; static int g_split, g_nsplit; static uint32_t g_step = 64, g_from, g_to = UINT32_MAX; static uint64_t g_only;
-static _Atomic int g_lines;
+static uint64_t g_probe, g_from_frame; static uint32_t g_big; static int g_split, g_nsplit; static uint32_t g_step = 64, g_from, g_to = UINT32_MAX; static uint64_t g_only;
+static _Atomic int g_lines; static int g_maxl = 200;
 
 int vka_nan_on(void) {
     static int v = -1; if (v >= 0) return v;
@@ -31,6 +31,10 @@ int vka_nan_on(void) {
         if (r) { char *x; g_from = (uint32_t)strtoul(r, &x, 10); if (*x == '-') g_to = (uint32_t)strtoul(x + 1, NULL, 10); }
         VLOG("DM_VK_NANSCAN=2: passes split every %u draws in draws %u-%u of a pass%s, at most %d splits a submission", g_step, g_from, g_to, g_only ? " into DM_VK_NANSCAN_SERIAL" : "", MAXSPLIT);
     } else if (v) VLOG("DM_VK_NANSCAN: every pass's float attachments are scanned for NaN / infinite texels");
+    const char *bg = getenv("DM_VK_NANSCAN_BIG"); float bf = bg ? strtof(bg, NULL) : 0;   // finite texels above this count as infinite: values out of a shader's range
+    if (v && bf > 0) { memcpy(&g_big, &bf, 4); VLOG("DM_VK_NANSCAN_BIG: texels above %g count as infinite", bf); }
+    const char *ml = getenv("DM_VK_NANSCAN_LINES"); if (ml && atoi(ml) > 0) g_maxl = atoi(ml);   // the lines logged in all (default 200)
+    const char *ff = getenv("DM_VK_NANSCAN_FROM"); if (v && ff) { g_from_frame = strtoull(ff, NULL, 10); VLOG("DM_VK_NANSCAN_FROM: scans from frame %llu", (unsigned long long)g_from_frame); }
     return v;
 }
 // DM_VK_NANSCAN=2, after a draw: 1 = end the Vulkan pass now for a scan (the game's pass goes on)
@@ -126,7 +130,7 @@ static int scan_one(VkCommandBuffer cb, batch_t *b, vka_img *im, uint32_t lv, ui
     VkDescriptorBufferInfo bi = {g_res.buf, b->off + (VkDeviceSize)k * sizeof(res_t), sizeof(res_t)};
     VkWriteDescriptorSet wr[2] = {{VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, .dstBinding = 0, .descriptorCount = 1, .descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, .pImageInfo = &ii},
                                   {VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, .dstBinding = 1, .descriptorCount = 1, .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, .pBufferInfo = &bi}};
-    uint32_t pc[4] = {w, h, v3 ? dz : 0, 0};
+    uint32_t pc[4] = {w, h, v3 ? dz : 0, g_big};   // 2D: layer 0 of the 2D-array view; g_big: DM_VK_NANSCAN_BIG
     vk.vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_COMPUTE, v3 ? g_pipe3 : g_pipe);
     vk.vkCmdPushDescriptorSetKHR(cb, VK_PIPELINE_BIND_POINT_COMPUTE, g_lay, 0, 2, wr); vka_dyn_invalidate();   // the draws' last push is no longer bound (vka_draw.c push_same)
     vk.vkCmdPushConstants(cb, g_lay, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof pc, pc);
@@ -159,6 +163,7 @@ void vka_nan_pass(VkCommandBuffer cb, vka_img *const *ims, const uint32_t *lvs, 
     batch_t *b = &g_b[g_bi % NBATCH];
     int split = g_split; g_split = 0;
     uint32_t pass = split ? g_pass : g_pass++;
+    if (vka_frame() < g_from_frame) { g_pn = 0; g_pdraws = 0; g_d0 = 0; return; }   // DM_VK_NANSCAN_FROM: not yet
     if (!ready()) return;
     if (!g_astc_state) { g_astc_state = -1; astc_check(cb); }
     int any = 0;
@@ -171,13 +176,30 @@ void vka_nan_pass(VkCommandBuffer cb, vka_img *const *ims, const uint32_t *lvs, 
     g_pn = 0;
     if (split) g_d0 = g_pdraws; else { g_pdraws = 0; g_d0 = 0; }
 }
+// After a dispatch (DM_VK_NANSCAN): its float storage images, level 0 (each layer up to 6, a 3D one whole), logged as a pass whose only shader is the compute shader (vertex 0)
+void vka_nan_dispatch(VkCommandBuffer cb, uint64_t key, vka_img *const *ims, int n) {
+    batch_t *b = &g_b[g_bi % NBATCH];
+    if (vka_frame() < g_from_frame || !ready()) return;
+    uint64_t pvs[NKEY], pfs[NKEY]; uint32_t pn = g_pn, pd = g_pdraws, d0 = g_d0; memcpy(pvs, g_pvs, sizeof pvs); memcpy(pfs, g_pfs, sizeof pfs);   // (an open game pass's draws: kept)
+    g_pvs[0] = 0; g_pfs[0] = key; g_pn = 1; g_pdraws = 1; g_d0 = 0;
+    int any = 0;
+    for (int i = 0; i < n; i++) {
+        vka_img *im = ims[i]; int dup = 0;
+        for (int j = 0; j < i; j++) dup |= ims[j] == im;
+        if (!im || dup || im->f.kind != 0 || im->samples > 1 || !(im->usage & VK_IMAGE_USAGE_SAMPLED_BIT)) continue;
+        uint32_t nl = im->d.target == NVN_TEXTURE_TARGET_3D ? 1 : im->layers;
+        for (uint32_t l = 0; l < nl && l < 6; l++) any |= scan_one(cb, b, im, 0, l, g_pass, -1, 0);
+    }
+    if (any) vka_barrier(cb);
+    memcpy(g_pvs, pvs, sizeof pvs); memcpy(g_pfs, pfs, sizeof pfs); g_pn = pn; g_pdraws = pd; g_d0 = d0;
+}
 static void report(void *arg) {
     batch_t *b = arg;
     for (int k = 0; k < b->n; k++) {
         const res_t *r = &b->res[k]; const rec_t *c = &b->r[k];
         if (!r->nan && !r->inf) continue;
         if (c->bind >= 0) {
-            if (atomic_fetch_add(&g_lines, 1) >= 200) return;
+            if (atomic_fetch_add(&g_lines, 1) >= g_maxl) return;
             VLOG("NaN scan: frame %llu pass %u (fragment %016llx): input binding %d texture ID %d serial %llu (format %#x %ux%u level %u layer %u): %u NaN + %u infinite texels, first at (%u, %u)",
                  (unsigned long long)c->frame, c->pass, (unsigned long long)g_probe, c->bind, c->tid, (unsigned long long)c->serial, c->fmt, c->w, c->h, c->lv, c->layer, r->nan, r->inf, r->first & 0xffff, r->first >> 16);
             continue;
@@ -186,7 +208,7 @@ static void report(void *arg) {
             int j = k - 1; while (j >= 0 && (b->r[j].serial != c->serial || b->r[j].lv != c->lv || b->r[j].layer != c->layer)) j--;
             if (j >= 0 && b->res[j].nan + b->res[j].inf >= r->nan + r->inf) continue;
         }
-        if (atomic_fetch_add(&g_lines, 1) >= 200) return;
+        if (atomic_fetch_add(&g_lines, 1) >= g_maxl) return;
         char keys[400] = ""; size_t o = 0;
         for (uint32_t i = 0; i < c->nkeys && o < sizeof keys - 40; i++) o += (size_t)snprintf(keys + o, sizeof keys - o, " %016llx/%016llx", (unsigned long long)c->vs[i], (unsigned long long)c->fs[i]);
         VLOG("NaN scan: frame %llu pass %u: %u NaN + %u infinite texels in serial %llu (format %#x %ux%u level %u layer %u), first at (%u, %u); draws %u-%u of the pass, vertex/fragment%s%s",

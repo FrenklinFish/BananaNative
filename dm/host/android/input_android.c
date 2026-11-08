@@ -47,15 +47,25 @@ static void publish_fingers(void) {   // under g_mu
     dm_touch t[16]; int n = nxin_touch_fingers(&g_touch, (nxin_finger *)t, 16);
     dm_touch_set(t, n);
 }
+static nxin_map g_map; static int g_map_on = -1;   // DM_PAD_MAP (the launcher's Button mapping), read once
+static const nxin_map *pad_map(void) {   // under g_mu
+    if (g_map_on < 0) {
+        const char *e = getenv("DM_PAD_MAP"); char bad[64];
+        g_map_on = e && *e && nxin_map_parse(&g_map, e, bad, sizeof bad) > 0;
+        if (e && *e) LOG("input: DM_PAD_MAP %s: %d button(s) remapped", e, __builtin_popcount(g_map.set));
+        if (e && *e && *bad) LOG("[RED] input: DM_PAD_MAP: \"%s\" is not <Android button>=<Switch button> (names in docs/env_switches.tsv): left out", bad);
+    }
+    return g_map_on ? &g_map : NULL;
+}
 static int take(int device, const char *name, int labelled) {   // under g_mu
     int had = pad_slot_of(&g_slots, owner(device)) >= 0;
     int p = pad_slot_take(&g_slots, owner(device), name);
     if (p < 0) { if (!had) LOG("[RED] input: device %d (%s): every player is taken", device, name ? name : "?"); return -1; }
     if (!had) {
         const char *e = getenv("DM_PAD_LABELLED");
-        g_labelled[p] = e ? atoi(e) != 0 : labelled; memset(&g_pad[p], 0, sizeof g_pad[p]);
+        g_labelled[p] = e ? atoi(e) : labelled; memset(&g_pad[p], 0, sizeof g_pad[p]); g_pad[p].map = pad_map();   // 1: all four face buttons by label; 2: A and B by label, X and Y by position
         dm_pad_players(pad_slot_mask(&g_slots));
-        LOG("input: device %d (%s) is player %d%s", device, name && *name ? name : "unnamed", p + 1, g_labelled[p] ? ", face buttons by label" : "");
+        LOG("input: device %d (%s) is player %d%s", device, name && *name ? name : "unnamed", p + 1, g_labelled[p] == 1 ? ", face buttons by label" : g_labelled[p] == 2 ? ", A and B by label, X and Y by position" : "");
     }
     return p;
 }
@@ -74,8 +84,9 @@ void nxhost_input_device_removed(int device) {
 }
 int nxhost_input_device_player(int device) { pthread_mutex_lock(&g_mu); int p = pad_slot_of(&g_slots, owner(device)); pthread_mutex_unlock(&g_mu); return p; }
 bool nxhost_input_key(int device, int keycode, bool down) {
-    if (!nxin_key_button(keycode, 0)) return false;
     pthread_mutex_lock(&g_mu);
+    const nxin_map *m = pad_map(); int src = nxin_src_of_key(keycode);
+    if (!nxin_key_button(keycode, 0) && !(m && src >= 0 && (m->set & (1u << src)))) { pthread_mutex_unlock(&g_mu); return false; }   // BUTTON_C / Z only when mapped
     if (g_held) { pthread_mutex_unlock(&g_mu); return true; }
     int p = take(device, NULL, 0);
     if (p >= 0 && nxin_pad_key(&g_pad[p], keycode, down, g_labelled[p])) publish_pad(p);
@@ -153,7 +164,7 @@ void nxhost_text_input_callback(nxhost_text_input_fn fn, void *ctx) {
 static void input_hold(int on) {
     pthread_mutex_lock(&g_mu);
     g_held = on;
-    for (int p = 0; p < DM_PLAYERS; p++) if (pad_slot_mask(&g_slots) >> p & 1) { memset(&g_pad[p], 0, sizeof g_pad[p]); publish_pad(p); }
+    for (int p = 0; p < DM_PLAYERS; p++) if (pad_slot_mask(&g_slots) >> p & 1) { memset(&g_pad[p], 0, sizeof g_pad[p]); g_pad[p].map = pad_map(); publish_pad(p); }
     touch_release_all();
     pthread_mutex_unlock(&g_mu);
 }
@@ -331,7 +342,7 @@ void nxhost_audio_interrupt(bool on) {
 void nxhost_audio_route_changed(void) { LOG("audio: the output device changed; opening the streams again"); dm_audio_reset(); }
 static void input_release(void) {   // what is held when the app leaves the screen is let go: the game must not see a button stuck down
     pthread_mutex_lock(&g_mu);
-    for (int p = 0; p < DM_PLAYERS; p++) if (g_slots.owner[p]) { memset(&g_pad[p], 0, sizeof g_pad[p]); dm_pad_set_player(p, 0, 0, 0, 0, 0); }
+    for (int p = 0; p < DM_PLAYERS; p++) if (g_slots.owner[p]) { memset(&g_pad[p], 0, sizeof g_pad[p]); g_pad[p].map = pad_map(); dm_pad_set_player(p, 0, 0, 0, 0, 0); }
     touch_release_all();
     pthread_mutex_unlock(&g_mu);
 }

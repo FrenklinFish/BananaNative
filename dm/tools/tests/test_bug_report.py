@@ -38,7 +38,7 @@ class BugReport(unittest.TestCase):
         (b / 'logs/sub').mkdir(); (b / 'logs/sub/inner.log').write_text('nested\n')
         (b / 'extract/main.nso').write_bytes(b'NSO0decoy'); (b / 'run/save.bin').write_bytes(b'save')
         (b / 'shader/b-deadbeef0001/lib.metallib').write_bytes(b'metallib')
-        (self.nsp / 'game.nsp').write_bytes(b'nsp')
+        (self.nsp / 'base/romfs').mkdir(parents=True); (self.nsp / 'base/romfs/game.bin').write_bytes(b'game')
         self.patches = [mock.patch.object(br, 'read_prefs', return_value={'launcher.DM_FPS_TARGET': '30', 'dataFolder': f'{self.home}/data'}),
                         mock.patch.object(br, 'device', return_value={'Mac': 'Mac99,1', 'Chip': 'Apple M9', 'macOS': '27.0', 'Xcode': 'Xcode 27.1', 'Metal compiler': 'metal 1'})]
         self.mocks = [p.start() for p in self.patches]
@@ -165,12 +165,12 @@ class BugReport(unittest.TestCase):
             self.assertTrue(was_cut); self.assertLessEqual(len(text.encode()), cap)
 
     def test_explicit_keys_file_is_not_read(self):
-        path = self.root / 'prod.keys'; path.write_text('synthetic decoy\n')
+        path = self.root / 'decoy.keys'; path.write_text('synthetic decoy\n')
         with mock.patch('builtins.open', side_effect=AssertionError('must not read .keys')):
             self.assertIsNone(br.read_text(path))
         code, out = self.run_main(TID, '--ios-log', str(path))
         self.assertEqual(code, 0)
-        self.assertNotIn('logs/ios/prod.keys', self.names(out))
+        self.assertNotIn('logs/ios/decoy.keys', self.names(out))
 
     def test_missing_log_is_a_note(self):
         (self.home / f'Library/Logs/nxnative/{TID}.log').unlink()

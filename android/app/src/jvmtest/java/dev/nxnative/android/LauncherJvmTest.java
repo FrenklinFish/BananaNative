@@ -100,7 +100,7 @@ public final class LauncherJvmTest {
         check(Profile.parse("0400C3F00006E000\tM\t0\tx\t\t\t\t\t\tscale:original=1/console").get(0).resolutionEnv("original").equals(List.of("DM_GRAPHICS_SCALE=1", "DM_OPMODE=1")), "console");
         check(Profile.versionName(0).equals("the base game") && Profile.versionName(458752).equals("update 458752"), "versionName");
         check(Profile.of("040074A01BF12000") != null && Profile.of("0100000000010000") == null, "Profile.of over BuildConfig.NX_PROFILES");
-        check(Profile.missing("0100000000010000", "Mario").contains("has no game profile") && Profile.missing("040074A01BF12000", null) == null, "Profile.missing");
+        check(Profile.missing("0100000000010000", "Mario").startsWith("This app version does not include Mario (0100000000010000).") && Profile.missing("040074A01BF12000", null) == null, "Profile.missing");
     }
 
     static void backup(File t) throws Exception {

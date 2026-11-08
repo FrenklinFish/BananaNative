@@ -1,5 +1,6 @@
 // The Vulkan shader library reader (vka_shlib.h). Every offset in the file is checked once at open, so lookups afterwards index the tables without further checks
 #include "vka_shlib.h"
+#include "vka_abi_compat.h"
 #include <fcntl.h>
 #include <stdarg.h>
 #include <stdio.h>
@@ -28,9 +29,11 @@ int vka_shlib_check(vka_shlib *L, const void *base, size_t size, const char *cha
     if (h->magic != DMSH_VK_LIB_MAGIC) return fail(err, errn, "magic %#x, not a Vulkan shader library", h->magic);
     if (h->version != DMSH_VK_LIB_VERSION) return fail(err, errn, "library format %u, this host reads %u", h->version, DMSH_VK_LIB_VERSION);
     // Another version is taken only by the ABI the header records (12 characters, no NUL; zero in a library made before the field): what this host reads of it is the same
-    int by_abi = 0;
+    // or by an older ABI this host plays too (vka_abi_compat.h), when the ABI asked is this host's own: differs says what its modules do otherwise
+    int by_abi = 0, compat = -1;
     if ((chain && !str_is(h->chain, chain)) || (vk_chain && !str_is(h->vk_chain, vk_chain))) {
         by_abi = abi && strlen(abi) == sizeof h->abi && !memcmp(h->abi, abi, sizeof h->abi);
+        if (!by_abi && abi && !strcmp(abi, DMSH_VK_ABI) && (compat = vka_abi_compat_of(h->abi)) >= 0) by_abi = 2;
         char a[13]; memcpy(a, h->abi, 12); a[12] = 0; for (int i = 0; i < 12; i++) if (a[i] < 32 || a[i] > 126) { a[0] = 0; break; }
         if (!by_abi && chain && !str_is(h->chain, chain)) { vka_shlib_str(h->chain, s); return fail(err, errn, "translator chain %s, this host has %s (library ABI %s, this host's %s)", s, chain, *a ? a : "none", abi ? abi : "not asked"); }
         if (!by_abi) { vka_shlib_str(h->vk_chain, s); return fail(err, errn, "Vulkan chain %s, this host has %s (library ABI %s, this host's %s)", s, vk_chain, *a ? a : "none", abi ? abi : "not asked"); }
@@ -42,7 +45,7 @@ int vka_shlib_check(vka_shlib *L, const void *base, size_t size, const char *cha
     if ((uint64_t)h->mod_off + (uint64_t)h->mod_count * sizeof(dmsh_vk_module) > sz || (h->mod_off & 7)) return fail(err, errn, "module table out of the file");
     if (h->blob_off > sz || h->blob_size > sz - h->blob_off) return fail(err, errn, "blob out of the file");
     const uint8_t *b = base;
-    L->base = b; L->size = size; L->h = h; L->by_abi = by_abi;
+    L->base = b; L->size = size; L->h = h; L->by_abi = by_abi; L->differs = compat > 0 ? (unsigned)compat : 0;
     L->ent = (const dmsh_vk_entry *)(b + h->entry_off); L->bind = (const dmsh_vk_bind *)(b + h->bind_off); L->mod = (const dmsh_vk_module *)(b + h->mod_off); L->blob = b + h->blob_off;
     for (uint32_t i = 0; i < h->entry_count; i++) {
         const dmsh_vk_entry *e = &L->ent[i];
@@ -90,6 +93,26 @@ const dmsh_vk_entry *vka_shlib_find(const vka_shlib *L, uint64_t key) {
         if (k < key) lo = m + 1; else hi = m;
     }
     return NULL;
+}
+static uint64_t eh_mix(const void *p, size_t n, uint64_t h) {   // 8 bytes a step (the stored modules of a game's shaders are tens of MB)
+    const uint8_t *b = p; size_t i = 0;
+    for (; i + 8 <= n; i += 8) { uint64_t w; memcpy(&w, b + i, 8); h = (h ^ w) * 0x9E3779B97F4A7C15ull; h ^= h >> 29; }
+    for (; i < n; i++) h = (h ^ b[i]) * 1099511628211ull;
+    return h;
+}
+uint64_t vka_shlib_entry_hash(const vka_shlib *L, const dmsh_vk_entry *e) {
+    dmsh_vk_entry z = *e; z.mod = 0; z.bind = 0; z.c1_off = 0; z.c1_off_hi = 0;
+    uint64_t h = eh_mix("DMVKPC1", 8, 1469598103934665603ull);
+    h = eh_mix(&z, sizeof z, h);
+    h = eh_mix(L->bind + e->bind, (size_t)e->bind_count * sizeof(dmsh_vk_bind), h);
+    if (e->c1_len) h = eh_mix(vka_shlib_c1(L, e), e->c1_len, h);
+    for (unsigned i = 0; i < e->mod_count; i++) {
+        dmsh_vk_module m = L->mod[e->mod + i]; const uint8_t *src = L->blob + vka_shlib_mod_off(&m);
+        m.off = 0; m.off_hi = 0;
+        h = eh_mix(&m, sizeof m, h); h = eh_mix(src, m.stored, h);
+    }
+    h ^= h >> 32;
+    return h ? h : 1;
 }
 const dmsh_vk_module *vka_shlib_module(const vka_shlib *L, const dmsh_vk_entry *e, int variant) {
     for (unsigned i = 0; i < e->mod_count; i++) if (L->mod[e->mod + i].variant == variant) return &L->mod[e->mod + i];

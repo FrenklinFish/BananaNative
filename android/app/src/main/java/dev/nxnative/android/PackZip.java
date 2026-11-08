@@ -219,7 +219,7 @@ final class PackZip {
     static Pack stage(File source, File packs, String want) throws IOException {
         String id = titleOf(source);
         if (!id.matches("[0-9A-F]{16}")) throw new IOException("pack.tsv names the title " + id + ", not a title ID");
-        String why = Profile.missing(id, "That pack's game");
+        String why = Profile.missing(id, null);
         if (why != null) throw new IOException(why);
         if (want != null && !want.equals(id)) throw new IOException("that pack is for " + id + ", not " + want);
         File target = new File(packs, id), part = new File(packs, id + PARTIAL);

@@ -15,7 +15,7 @@ typedef struct { vkz_ent *e; int n, cap; uint64_t made, owned; } vkz_tab;   // m
 // An image is a candidate when it is dense (no residency image), single-sampled, not 3D, not block-compressed, not linear and not a display (window) texture, and its storage
 // takes at least min_bytes. Whether its content is the GPU's (ST_ZERO) is the caller's: only those are bound to shared memory
 static inline int vkz_candidate(uint64_t storage_bytes, uint64_t min_bytes, int res, uint32_t samples, int is3d, int compressed, int linear_or_display) {
-    return min_bytes && storage_bytes >= min_bytes && !res && samples <= 1 && !is3d && !compressed && !linear_or_display;
+    return min_bytes && storage_bytes >= min_bytes && storage_bytes <= (32ull * 1024 * 1024) && !res && samples <= 1 && !is3d && !compressed && !linear_or_display;
 }
 static inline int vkz_find(const vkz_tab *t, const void *key, uint32_t klen) {
     for (int i = 0; i < t->n; i++) if (t->e[i].klen == klen && !memcmp(t->e[i].key, key, klen)) return i;

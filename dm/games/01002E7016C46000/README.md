@@ -38,7 +38,7 @@ No code of the game is cut. The game asks for present interval 1, so it needs no
 
 ## Mac routes
 
-- Build with `scripts/build_ipa_from_nsp.py <NSP folder> -k <prod.keys> --platform mac`; its last line runs the game.
+- Build with `scripts/build_ipa_from_nsp.py <dump folder> --platform mac`; its last line runs the game.
 - From a fresh save, through `DM_CTL`: A at "Press Any Button to Start" (about 40 s after boot), hold B to skip the intro movie, A (Play), A (the first New Save). The opening walk starts about 25 s later: hold up along the path to the bishops; the scene waits with no prompt until the lamb walks onto the pentagram ("Kneel to be Sacrificed", A). A through The One Who Waits' dialogue (left, A for "Yes."), and the first fight follows (Y attacks, B dodges).
 
 ## Testing

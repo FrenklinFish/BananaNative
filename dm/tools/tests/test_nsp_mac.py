@@ -1,7 +1,7 @@
 """NSP script Mac-only build (scripts/build_ipa_from_nsp.py --platform mac): the shader steps build only the Mac's libraries, each output keeps its own reuse key, a Mac-only build is
 rebuilt after an iOS-only NVN build and an iOS build is not reused after a Mac-only one but builds its Mac libraries again (kept for the Mac run command), neither key without the Mac outputs' stamp (inputs.tsv, which the one
 chain version's c1_full.tsv / cb_extent.tsv name); the run command's environment file is read as the iOS app reads it.
-No game files, keys or Xcode needed (temporary files only in a temporary folder)."""
+No game files or Xcode needed (temporary files only in a temporary folder)."""
 import importlib.util
 from pathlib import Path
 import shutil

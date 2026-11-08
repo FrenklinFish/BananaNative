@@ -120,7 +120,7 @@ class HmmaLdsRewrite(unittest.TestCase):
     def test_lowered_and_valid(self):
         with tempfile.TemporaryDirectory() as d:
             d = Path(d); m = compile_module(d, FOUR)
-            self.assertEqual(spv.hmma_lds(m), 5)
+            self.assertEqual(spv.hmma_lds(m, 4), 5)   # a limit above the 3 tiles this block has live, so every tile is gathered once (HMMA_KEEP: test_bounded_cache)
             self.assertNotIn(spv.HMMA_NAME, spv.functions_named(m))
             self.assertEqual(len(ops(m, spv.OP_FUNCTION_CALL)), 0)
             # gathers: A0 B0 (1st), B1 (2nd), A1 (3rd), none (4th), A0' (5th: a0 was stored again): 4 gathers, two barriers each
@@ -132,6 +132,20 @@ class HmmaLdsRewrite(unittest.TestCase):
             r = subprocess.run(['spirv-val', '--target-env', 'vulkan1.3', str(d / 'r.spv')], capture_output=True, text=True)
             self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
             self.assertEqual(spv.hmma_lds(m), 0)   # no helper left
+
+    def test_bounded_cache(self):
+        with tempfile.TemporaryDirectory() as d:
+            d = Path(d); uv4 = None
+            for keep, loads in ((0, 5 * 8), (1, 8 + 4 + 8 + 4 + 8), (2, 8 + 4 + 4 + 8)):
+                # keep 0: every call gathers both tiles; keep 1: the tile needed soonest stays (A0, then B1, then A1); keep 2: B0 is dropped for A1 and B1 and gathered again with A0'
+                m = compile_module(d, FOUR)
+                self.assertEqual(spv.hmma_lds(m, keep), 5)
+                uv4 = m.find_type(spv.OP_TYPE_VECTOR, m.find_type(spv.OP_TYPE_INT, 32, 0), 4)
+                self.assertEqual(sum(1 for x in ops(m, spv.OP_LOAD) if x[1] == uv4), loads, f'keep {keep}')
+                self.assertEqual(sum(1 for x in ops(m, spv.OP_EXT_INST) if x[4] == spv.GLSL_FMA), 5 * 64)
+                (d / 'r.spv').write_bytes(m.data())
+                r = subprocess.run(['spirv-val', '--target-env', 'vulkan1.3', str(d / 'r.spv')], capture_output=True, text=True)
+                self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
 
     def test_other_shape_left_alone(self):
         with tempfile.TemporaryDirectory() as d:
@@ -167,11 +181,14 @@ class HmmaLdsOnGpu(unittest.TestCase):
             ref = subprocess.run([str(run), str(self.metallib(d, 'translator', m.data()))], capture_output=True)
             if ref.returncode == 2: self.skipTest(ref.stdout.decode().strip())
             self.assertEqual(ref.returncode, 0, ref.stdout[:200])
-            self.assertEqual(spv.hmma_lds(m), 5)
-            out = subprocess.run([str(run), str(self.metallib(d, 'lds', m.data()))], capture_output=True)
-            self.assertEqual(out.returncode, 0, out.stdout[:200])
-            diff = sum(1 for i in range(0, len(ref.stdout), 4) if ref.stdout[i:i + 4] != out.stdout[i:i + 4])
-            self.assertEqual(diff, 0, f'{diff} of {len(ref.stdout) // 4} words differ')
+            src = m.data()
+            for keep in (None, 0, 1):   # the default, and caches that gather tiles again
+                m = spv.Module(src)
+                self.assertEqual(spv.hmma_lds(m, keep), 5)
+                out = subprocess.run([str(run), str(self.metallib(d, f'lds{keep}', m.data()))], capture_output=True)
+                self.assertEqual(out.returncode, 0, out.stdout[:200])
+                diff = sum(1 for i in range(0, len(ref.stdout), 4) if ref.stdout[i:i + 4] != out.stdout[i:i + 4])
+                self.assertEqual(diff, 0, f'keep {keep}: {diff} of {len(ref.stdout) // 4} words differ')
 
     def test_matches_reference(self):
         import test_dmsh_hmma

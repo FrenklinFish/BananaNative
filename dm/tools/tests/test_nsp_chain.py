@@ -1,7 +1,7 @@
 """NSP script chain files (scripts/build_ipa_from_nsp.py chain_header, chain_tables): the one chain version header (dm/gfx/nvn/dmsh_chain.h) is written again when stale and left
 alone when current, and the committed one is current; only the c1 / uniform extent tables that are missing (they are not committed) or do not name the library's stamp (its chain version
 and profile inputs) are made (GitHub issue #78), none without a stamped library, and no step's reuse key counts them; the tools that make them read only the shader build's outputs
-(an exFAT drive's AppleDouble `._<name>` beside each, PR #555); no game files, keys or Xcode needed (temporary files only in a
+(an exFAT drive's AppleDouble `._<name>` beside each, PR #555); no game files or Xcode needed (temporary files only in a
 temporary folder)."""
 import importlib.util
 import json

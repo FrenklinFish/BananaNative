@@ -1,5 +1,5 @@
 """NSP script: a 32-bit ARM version (main.npdm with the 64-bit instruction flag clear) stops the build right after extraction, for a game that has a profile too (Mario Kart 8 Deluxe 1.0.0, LNPANDY/NX2Apple#116),
-naming the version and the registered versions to pack instead. No game files, keys or Xcode needed (temporary files only)."""
+naming the version and the registered versions to pack instead. No game files or Xcode needed (temporary files only)."""
 import importlib
 from pathlib import Path
 import shutil

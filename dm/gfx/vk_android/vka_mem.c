@@ -21,6 +21,7 @@
 #include "../nvn/nvn_mtl.h"
 #include "../nvn/nvn_dirty.h"
 #include "vka_place.h"
+#include "vka_gmem.h"
 #include "../../host/dm.h"
 #include <errno.h>
 #include <sched.h>
@@ -691,6 +692,28 @@ uint64_t vka_addr_run(uint64_t addr, uint64_t len, VkBuffer *buf, VkDeviceSize *
     return n;
 }
 
+// Raw global memory's sink (dmsh_abi.h DMSH_GMEM_MAP_*, entry 0's words 6 and 7; vk_android_spv.py gmem_sink): the device address of a buffer of its own that the library's
+// branchless helpers load from and store to when an address lies in no pool, so such an access touches no guest memory (the translator's helpers skipped it in a branch).
+// The buffer is 16 KiB, the sink the 8 KiB-aligned address in it. Made once; 0 without buffer device addresses or when it could not be made (logged)
+uint64_t vka_mem_sink(void) {
+    static uint64_t bda; static int tried;
+    if (tried || !V.bda) return bda;
+    tried = 1;
+    VkBuffer b; VkDeviceMemory mem; VkMemoryRequirements mr;
+    VkBufferCreateInfo bi = {VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO, .size = 2 * VKA_GMEM_SINK_ALIGN, .usage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT};
+    if (vk.vkCreateBuffer(V.dev, &bi, NULL, &b)) { VRED("raw global memory sink: vkCreateBuffer failed"); return 0; }
+    vk.vkGetBufferMemoryRequirements(V.dev, b, &mr);
+    uint32_t t = vka_mem_type(mr.memoryTypeBits, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, 0);
+    if (t == UINT32_MAX) t = vka_mem_type(mr.memoryTypeBits, 0, 0);
+    VkMemoryAllocateFlagsInfo af = {VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_FLAGS_INFO, .flags = VK_MEMORY_ALLOCATE_DEVICE_ADDRESS_BIT};
+    VkMemoryAllocateInfo ai = {VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO, .pNext = &af, .allocationSize = mr.size, .memoryTypeIndex = t};
+    if (t == UINT32_MAX || vk.vkAllocateMemory(V.dev, &ai, NULL, &mem)) { VRED("raw global memory sink: no memory"); vk.vkDestroyBuffer(V.dev, b, NULL); return 0; }
+    vk.vkBindBufferMemory(V.dev, b, mem, 0);
+    VkBufferDeviceAddressInfo bdi = {VK_STRUCTURE_TYPE_BUFFER_DEVICE_ADDRESS_INFO, .buffer = b};
+    bda = vka_gmem_sink_at(vk.vkGetBufferDeviceAddress(V.dev, &bdi));   // 8 KiB aligned inside the buffer: its low word never reads as a hint (vka_gmem.h)
+    return bda;   // (kept for the process's life)
+}
+
 // The placed segments in address order (raw global memory's table, vka_draw.c gmem_map): at most max, the count returned
 int vka_mem_chunks(uint64_t *lo, uint64_t *hi, uint64_t *bda, int max) {
     pthread_rwlock_rdlock(&g_rw);
@@ -884,7 +907,7 @@ int vka_pools(uint64_t *lo, uint64_t *size, int max) {
     return n;
 }
 int vka_pool_bda(uint64_t addr, VkDeviceAddress *bda) { VkDeviceAddress b = 0; if (!vka_addr(addr, 1, NULL, NULL, &b) || !b) return 0; *bda = b; return 1; }
-void mtl_alias_drop_pool(const void *pool) { (void)pool; }
+void mtl_alias_drop_pool(const void *pool) { vka_tex_drop_pool(pool); }
 int mtl_addr(uint64_t addr, uint64_t len, void **buf, uint64_t *off) {
     VkBuffer b; VkDeviceSize o;
     if (!vka_addr(addr, len, &b, &o, NULL)) { if (off) *off = 0; return 0; }

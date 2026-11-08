@@ -395,8 +395,8 @@ static void *plt_target(const uint32_t *pc) {   // adrp x16, page; ldr x17, [x16
     uint64_t page = ((uint64_t)pc & ~0xfffull) + (uint64_t)imm;
     return *(void **)(page + ((l >> 10) & 0xfff) * 8);
 }
-static int update_lock(size_t *off, int *os_mutex) {
-    const uint32_t *f = guest_sym("_ZN2nn5audio6server17AudioRenderSystem6UpdateEPvmS3_mPKvm");
+static int update_lock(const char *fn, size_t *off, int *os_mutex) {   // fn: the function that takes the lock (Update before SDK 20; UpdateImpl from SDK 20, whose Update reads the tick and calls it)
+    const uint32_t *f = guest_sym(fn);
     void *lock_mutex = guest_sym("_ZN2nn2os9LockMutexEPNS0_9MutexTypeE"), *sdk_lock = guest_sym("_ZN2nn2os12SdkMutexType4LockEv");
     if (!f) return 0;
     uint32_t self = 1u << 0; int64_t add[32]; for (int r = 0; r < 32; r++) add[r] = -1;
@@ -430,8 +430,11 @@ static Result render_once(uint8_t *sys, int16_t *dst, int *nout) {
         }
         mu_off = gen20 ? 0x2d0 : 0x1f0; g_sink_id = gen20 ? 0x14 : 0x13;
         int os_mutex = 0;
+        // The Span layout's lock is read off UpdateImpl too: SDK 22.2.8 locks the SdkMutexType at +0x2d8, not +0x2d0 (a lock word written into the field before the mutex excluded nothing, and
+        // the render thread crashed in AddressInfo::GetReference while RequestUpdate rewrote a voice). +0x2d0 stays when the prologue shows no SdkMutexType::Lock
+        if (gen20) { size_t o; int om; if (update_lock("_ZN2nn5audio6server17AudioRenderSystem10UpdateImplEPvmS3_mPKvm", &o, &om) && !om) mu_off = o; }
         // SdkMutexType is looked up only when the SDK uses it: SDK 3.5.1 has none (OCTOPATH TRAVELER: LockMutex at +0x1f8)
-        if (!gen20 && update_lock(&mu_off, &os_mutex) && os_mutex) { lock = gsym("_ZN2nn2os9LockMutexEPNS0_9MutexTypeE"); unlock = gsym("_ZN2nn2os11UnlockMutexEPNS0_9MutexTypeE"); }
+        if (!gen20 && update_lock("_ZN2nn5audio6server17AudioRenderSystem6UpdateEPvmS3_mPKvm", &mu_off, &os_mutex) && os_mutex) { lock = gsym("_ZN2nn2os9LockMutexEPNS0_9MutexTypeE"); unlock = gsym("_ZN2nn2os11UnlockMutexEPNS0_9MutexTypeE"); }
         else { lock = gsym("_ZN2nn2os12SdkMutexType4LockEv"); unlock = gsym("_ZN2nn2os12SdkMutexType6UnlockEv"); }
         LOG("audren: AudioRenderSystem in the SDK %s layout (update lock %s at +%#zx)", gen20 ? "20" : "16", os_mutex ? "nn::os::MutexType" : "SdkMutexType", mu_off);
         tmax = gsym("_ZN2nn5audio3dsp20CommandListProcessor17SetProcessTimeMaxEj"); setup = gsym("_ZN2nn5audio3dsp20CommandListProcessor5SetupEPKvm");

@@ -128,11 +128,16 @@ public final class GameListJvmTest {
                     check(Pack.isDump(d), tag + ": base only is a dump");
                 } else if (folder == updOnly) {
                     check(vs.equals(List.of(65537L)) && Pack.isDump(d), tag + ": update only " + vs);
-                    check(f.error != null && f.version < 0 && f.error.contains("update 65537 (main " + id(12).substring(0, 16)) && f.error.contains("1.8.0 (the base game, version 0, main " + id(11).substring(0, 16))
-                            && f.error.contains("not a build this app supports"), tag + ": another version, said plainly: " + f.error);
+                    // said plainly (no build IDs in the main text: they are in detail, for Details), and Try anyway can take it
+                    check(f.error != null && f.version < 0 && f.otherBuild && f.error.contains("not a build this app supports (it supports 1.8.0)") && f.error.contains("update 65537")
+                            && !f.error.contains(id(12).substring(0, 16)) && f.detail.contains("update 65537 (main " + id(12).substring(0, 16))
+                            && f.detail.contains("1.8.0 (the base game, version 0, main " + id(11).substring(0, 16)), tag + ": another version, said plainly: " + f.error + " | " + f.detail);
+                    DumpLayout.Found any = DumpLayout.find(d, true);
+                    check(any.error == null && any.untested && any.version == 65537 && any.build < 0 && any.buildIds.get("main").startsWith(id(12)),
+                            tag + ": Try anyway takes the newest version, untested: " + any.error);
                     check(DumpLayout.path(d, 65537, "romfs").endsWith(Nup.isNup(d) ? ".nup:update/65537/romfs" : "updates/65537/romfs"), tag + ": its own romfs");
                 } else if (folder == both) {
-                    check(vs.equals(List.of(0L, 65537L)) && f.error != null && f.error.contains("the base (main " + id(10).substring(0, 16)) && f.error.contains("update 65537"), tag + ": " + f.error);
+                    check(vs.equals(List.of(0L, 65537L)) && f.error != null && f.detail.contains("the base (main " + id(10).substring(0, 16)) && f.error.contains("update 65537"), tag + ": " + f.error);
                 } else if (folder == codeInUpd) {
                     check(f.error == null && f.version == 65537 && f.buildIds.get("main").startsWith(id(11)), tag + ": the build in an update package: " + f.error);
                     check(DumpLayout.path(d, 65537, "romfs").endsWith(Nup.isNup(d) ? ".nup:base/romfs" : "base/romfs") && DumpLayout.hasRomfs(d, 65537),

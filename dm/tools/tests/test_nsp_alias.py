@@ -1,5 +1,5 @@
 """NSP script: a title ID no profile has, whose main is a build a profile registers (a regional release of the same build, GitHub issue #114), packs from a profile derived
-from that one (same_build, game.py by_build, derive_profile with the folder's title ID and main.npdm's program ID). No game files, keys or Xcode needed (temporary files only)."""
+from that one (same_build, game.py by_build, derive_profile with the folder's title ID and main.npdm's program ID). No game files or Xcode needed (temporary files only)."""
 import importlib.util
 import os
 from pathlib import Path
@@ -40,28 +40,20 @@ class Alias(unittest.TestCase):
         self.assertIsNone(game.by_build(UPD_BID))
         self.assertIsNone(game.by_title(OTHER))
 
-    def test_same_build_tries_the_update_then_the_base(self):
-        seen = []
-        def fake_run(cmd, log, env=None, cwd=None, on_line=None, ok=()):   # nx_extract: the update's main is another build, the base game's is the profile's
-            seen.append(cmd[3]); nso(Path(cmd[4]) / 'ExeFS/main', UPD_BID if cmd[3] != '-' else BID)
-        fam = {'base': self.tmp / 'base.nsp', 'updates': [(65536, self.tmp / 'upd.nsp')], 'dlc': []}
-        with mock.patch.object(nsp, 'build_nx_extract', lambda *a: 'nx'), mock.patch.object(nsp, 'run', fake_run):
-            g, ver, bid = nsp.same_build(self.tmp, OTHER, fam, self.tmp / 'prod.keys', REPO, {})
+    def test_same_build_tries_the_update_then_the_base(self):   # the dump's newest update first, then the base game
+        dump = self.tmp / 'dump'; nso(dump / 'base/exefs/main', BID); nso(dump / 'updates/65536/exefs/main', UPD_BID)
+        fam = {'base': dump / 'base', 'updates': [(65536, dump / 'updates/65536')], 'dlc': [], 'dump': True}
+        g, ver, bid = nsp.same_build(dump, OTHER, fam)
         self.assertEqual((g.id, ver, bid), (f'{PROFILE:016X}', 'v0', BID))
-        self.assertEqual(seen, [fam['updates'][0][1], '-'])
-        with mock.patch.object(nsp, 'build_nx_extract', lambda *a: 'nx'), mock.patch.object(nsp, 'run', lambda cmd, log, **k: nso(Path(cmd[4]) / 'ExeFS/main', UPD_BID)):
-            self.assertIsNone(nsp.same_build(self.tmp, OTHER, fam, self.tmp / 'prod.keys', REPO, {}))
+        nso(dump / 'base/exefs/main', UPD_BID)
+        self.assertIsNone(nsp.same_build(dump, OTHER, fam))
 
-    def test_same_build_goes_on_past_a_sparse_base(self):
-        seen = []
-        def fake_run(cmd, log, env=None, cwd=None, on_line=None, ok=()):   # nx_extract: the update's main is another build; the sparse base alone exits 4 without a main
-            seen.append((cmd[3], ok))
-            if cmd[3] != '-': nso(Path(cmd[4]) / 'ExeFS/main', UPD_BID)
-            elif 4 not in ok: raise nsp.BuildError('nx_extract exit code 4')
-        fam = {'base': self.tmp / 'base.nsp', 'updates': [(65536, self.tmp / 'upd.nsp')], 'dlc': []}
-        with mock.patch.object(nsp, 'build_nx_extract', lambda *a: 'nx'), mock.patch.object(nsp, 'run', fake_run):
-            self.assertIsNone(nsp.same_build(self.tmp, OTHER, fam, self.tmp / 'prod.keys', REPO, {}))
-        self.assertEqual([c for c, _ in seen], [fam['updates'][0][1], '-'])
+    def test_same_build_goes_on_past_a_base_without_code(self):   # an update-only dump: the base game has no main of its own
+        dump = self.tmp / 'dump'; nso(dump / 'updates/65536/exefs/main', BID); (dump / 'base').mkdir()
+        fam = {'base': dump / 'base', 'updates': [(65536, dump / 'updates/65536')], 'dlc': [], 'dump': True}
+        self.assertEqual(nsp.same_build(dump, OTHER, fam)[1:], ('v0', BID))
+        nso(dump / 'updates/65536/exefs/main', UPD_BID)
+        self.assertIsNone(nsp.same_build(dump, OTHER, fam))
 
     def test_derived_profile_takes_the_title_and_program_ids(self):
         d = self.tmp / 'extract/v0'; nso(d / 'ExeFS/main', BID)

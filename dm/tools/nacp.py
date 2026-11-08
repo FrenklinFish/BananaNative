@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# The game name, display version and languages from the NSP's control data (control.nacp, saved in the extraction folder by nx_extract): the iOS app name and version come from them (shared by the packing script and build_ipa.sh),
+# The game name, display version and languages from a game's control data (control.nacp beside an extraction's RomFS; a dump folder has none): the iOS app name and version come from them (shared by the packing script and build_ipa.sh),
 #   and the packing script checks the game language against the languages the game supports.
 # Usage: nacp.py <control.nacp> (prints the game name), nacp.py --version <control.nacp> (prints the display version), nacp.py --languages <control.nacp> (prints the supported language codes);
 #   each prints an empty line and exits 1 when none can be read. From Python: import nacp; nacp.name(path), nacp.version(path), nacp.languages(path)

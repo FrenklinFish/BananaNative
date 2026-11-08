@@ -4,6 +4,8 @@ import android.app.ActivityManager;
 import android.content.Context;
 import android.content.Intent;
 import android.content.IntentFilter;
+import android.graphics.Bitmap;
+import android.graphics.Canvas;
 import android.graphics.Color;
 import android.os.BatteryManager;
 import android.os.PowerManager;
@@ -12,23 +14,30 @@ import android.text.SpannableStringBuilder;
 import android.text.Spanned;
 import android.text.style.ForegroundColorSpan;
 import android.text.style.RelativeSizeSpan;
+import android.view.View;
+import android.view.ViewGroup;
 import android.widget.CheckBox;
 import android.widget.LinearLayout;
+import android.widget.TextView;
 
 import java.io.File;
 import java.io.IOException;
+import java.nio.ByteBuffer;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Locale;
+import java.util.Objects;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 
 /**
  * The overlay's top-right text over the game (GameActivity polls it twice a second while the overlay is on; nothing is read while it is off): the frame rate and frame
  * time (nxhost_fps), the throttle dot, the GPU's time a frame (nxhost_fps), the CPU clock caps, the battery and the memory (MemText: the game process's VmRSS and
- * the phone's RAM in use, read every 2 s on a thread of its own). Android text only, no GPU work. Each item has its own
+ * the phone's RAM in use, read every 2 s on a thread of its own). The text is drawn into a bitmap when it changes and handed to the host, whose present draws it into
+ * the game's own images (Block, nxhost_overlay_set): Android views over the SurfaceView made the app's window draw a new buffer on the GPU at every change and the
+ * compositor take a second changing layer, which cost a GPU-bound game frames (issue #34). The views show it only where the present does not. Each item has its own
  * switch (Prefs.overlayItem), all on by default, under the master switch (Prefs.overlay). The build tag top left is one of them too (GameActivity), on by default
  * like the rest, so screenshots and recordings name their build; the log's first line names it either way.
  *
@@ -229,6 +238,71 @@ final class Overlay {
             }
         }
         return s;   // every line at the overlay's one size (GameActivity.OVERLAY_SP): at 8 sp a smaller second size would no longer read
+    }
+
+    /** The text with its colours (the dot's, "low"), so that a change of colour alone counts as a change of the text */
+    static String key(CharSequence t) {
+        if (!(t instanceof Spanned)) return t.toString();
+        StringBuilder k = new StringBuilder(t);
+        Spanned sp = (Spanned) t;
+        for (ForegroundColorSpan c : sp.getSpans(0, t.length(), ForegroundColorSpan.class)) k.append('\u0000').append(sp.getSpanStart(c)).append(':').append(c.getForegroundColor());
+        return k.toString();
+    }
+
+    /**
+     * One block of the overlay (slot 0 the build tag top left, 1 the items top right) for the host's present, which draws it into each game image in its corner
+     * (nxhost_overlay_set): drawn with a TextView styled as the on-screen one but never attached, into a bitmap kept for the next time, and handed over only when the text
+     * changed. Nothing is drawn while the present does not take it (Native.overlayState() -1: DM_VK_OVERLAY=0, a failure, a host without it); the views show it then.
+     */
+    static final class Block {
+        private final int slot;
+        private final TextView view;
+        private Bitmap bm;
+        private Canvas canvas;
+        private ByteBuffer px;
+        private String key;
+        private boolean sent;
+
+        Block(int slot, TextView view) {
+            this.slot = slot; this.view = view;
+            // A view that is never attached has no layout params, and TextView.setText reads them (checkForRelayout): without these the first block crashed the game
+            // process with a NullPointerException two seconds into play
+            if (view.getLayoutParams() == null) view.setLayoutParams(new ViewGroup.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT));
+        }
+
+        /** Hands text (null: nothing in this corner) to the present. True = the present draws the overlay, so the on-screen views hide */
+        boolean host(CharSequence text) {
+            int st = Native.overlayState();
+            if (st < 0) { sent = false; return false; }
+            String k = text == null ? null : key(text);
+            if (!sent || !Objects.equals(k, key)) {
+                key = k;
+                sent = text == null ? Native.overlaySet(slot, null, 0, 0, 0) : draw(text);
+                st = Native.overlayState();
+            }
+            return sent && st == 1;
+        }
+
+        private boolean draw(CharSequence text) {
+            view.setText(text);
+            int any = View.MeasureSpec.makeMeasureSpec(0, View.MeasureSpec.UNSPECIFIED);
+            view.measure(any, any);
+            int w = view.getMeasuredWidth(), h = view.getMeasuredHeight();
+            if (w <= 0 || h <= 0) return Native.overlaySet(slot, null, 0, 0, 0);
+            view.layout(0, 0, w, h);
+            if (bm == null || bm.getWidth() < w || bm.getHeight() < h) {   // a little larger than asked, so a block a few pixels wider does not need a new one
+                bm = Bitmap.createBitmap(Math.max(w + 32, bm != null ? bm.getWidth() : 0), Math.max(h + 16, bm != null ? bm.getHeight() : 0), Bitmap.Config.ARGB_8888);
+                canvas = new Canvas(bm);
+                px = ByteBuffer.allocateDirect(bm.getByteCount());
+            }
+            bm.eraseColor(Color.TRANSPARENT);
+            int save = canvas.saveLayerAlpha(0, 0, w, h, Math.round(view.getAlpha() * 255));   // the view's own alpha, which its parent applies on screen
+            view.draw(canvas);
+            canvas.restoreToCount(save);
+            px.rewind();
+            bm.copyPixelsToBuffer(px);   // premultiplied RGBA bytes, as the present blends them
+            return Native.overlaySet(slot, px, w, h, bm.getRowBytes());
+        }
     }
 
     /** The log gets the dot's colour and why when it changes (at most every 10 s), so a slow stretch in a log can be matched with throttling */

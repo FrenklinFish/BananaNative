@@ -1,4 +1,4 @@
-"""NSP script reuse across derived and provisional builds. Real fingerprints and mock tool runs; no game files, keys or Xcode needed."""
+"""NSP script reuse across derived and provisional builds. Real fingerprints and mock tool runs; no game files or Xcode needed."""
 import importlib.util
 import json
 import os
@@ -280,12 +280,11 @@ class DeriveProfile(Base):
         key = nsp.derived_key(self.pdir)
         self.assertTrue(key.is_file())
         nsp.set_keys(game.Game(self.pdir), {'mem_alias': ('0x80000000', '')}, 'Heap check')
-        keys = self.tmp / 'prod.keys'; keys.write_text('test')
-        fam = {'base': self.tmp / 'base.nsp', 'updates': [], 'dlc': []}
-        args = nsp.parse_args([str(self.tmp), '-k', str(keys), '--platform', 'mac', '--provisional', '--profile-out', str(self.pdir.parent)])
+        fam = {'base': self.tmp / 'base', 'updates': [], 'dlc': [], 'dump': True}
+        args = nsp.parse_args([str(self.tmp), '--platform', 'mac', '--provisional', '--profile-out', str(self.pdir.parent)])
         with mock.patch.object(nsp, 'find_repo', return_value=REPO), mock.patch.object(nsp, 'apple_silicon', return_value=True), \
              mock.patch.object(nsp, '_importable', return_value=True), mock.patch.object(nsp.shutil, 'which', return_value='/dotnet'), \
-             mock.patch.object(nsp, 'scan_nsps', return_value=(TID, fam)), mock.patch.object(nsp, 'decompress_nsz', return_value=fam), \
+             mock.patch.object(nsp, 'scan_dump', return_value=(TID, fam)), \
              mock.patch.object(nsp, 'nsp_versions', side_effect=RuntimeError('profile selected')):
             with self.assertRaisesRegex(RuntimeError, 'profile selected'): nsp.main(args)
         self.assertFalse(key.exists())
@@ -674,13 +673,6 @@ class SplitShaders(Base):
         self.assertEqual((self.src / 'shader_map.tsv').read_text(), '# older header\nshader_map.tsv\tderived\n')
         with self.assertRaisesRegex(nsp.BuildError, 'differ from game profile'): self.go(g, own=False)   # a failed check is not reused
         self.assertEqual(self.splits, 3)
-
-    def test_damaged_never_reuses(self):
-        g = self.own()
-        with mock.patch.object(nsp, 'ALLOW_DAMAGED', True):
-            self.assertIsNone(self.go(g)); self.assertIsNone(self.go(g))
-        self.assertEqual(self.splits, 2)
-        self.go(g); self.assertEqual(self.splits, 3)   # a damaged run leaves no key behind
 
     def test_missing_split_pairs_are_generated_again(self):
         for n in self.NAMES[:3]: (self.src / n).write_text(self.table(n))

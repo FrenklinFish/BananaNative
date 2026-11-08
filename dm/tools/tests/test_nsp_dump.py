@@ -1,5 +1,5 @@
-"""NSP script with a dump folder (scripts/pack_dump.py): the folder's layout is read and packed into what the script's later steps read, and the script asks for no keys.
-The run stops at the prerequisite check; no game files, keys or Xcode needed."""
+"""NSP script with a dump folder (scripts/pack_dump.py), its only input: the folder's layout is read and packed into what the script's later steps read.
+The run stops at the prerequisite check; no game files or Xcode needed."""
 import importlib.util
 from pathlib import Path
 import shutil
@@ -10,7 +10,7 @@ import unittest
 from unittest import mock
 
 REPO = Path(__file__).resolve().parents[3]
-sys.path.insert(0, str(REPO / 'dm/tools'))
+sys.path.insert(0, str(REPO / 'dm/tools')); sys.path.insert(0, str(REPO / 'dm/games'))
 import romfs_image
 spec = importlib.util.spec_from_file_location('build_ipa_from_nsp', REPO / 'scripts/build_ipa_from_nsp.py')
 if spec is None or spec.loader is None: raise ImportError('scripts/build_ipa_from_nsp.py')
@@ -72,14 +72,9 @@ class Scan(Base):
         with self.assertRaisesRegex(pack_dump.Error, 'not a base title ID'): pack_dump.scan(d)
         with self.assertRaisesRegex(pack_dump.Error, 'no base/exefs'): pack_dump.scan(self.dump.parent)
 
-    def test_packages_win_over_the_layout(self):
+    def test_layout_is_the_only_input(self):
         self.assertTrue(nsp.dump_folder(self.dump))
-        (self.dump / 'game.nsp').write_bytes(b'x')
-        self.assertFalse(nsp.dump_folder(self.dump))
-
-    def test_appledouble_is_no_package(self):
-        (self.dump / '._game.nsp').write_bytes(b'x')
-        self.assertTrue(nsp.dump_folder(self.dump))
+        self.assertFalse(nsp.dump_folder(self.dump / 'dlc'))
 
 
 class Pack(Base):
@@ -124,13 +119,13 @@ class Main(Base):
         args = nsp.parse_args([str(self.dump), *opts])
         seen, said = {}, []
         def stop(env, *a): seen.update(env); raise Stop()
-        with mock.patch.object(nsp, 'find_repo', return_value=REPO), mock.patch.object(nsp, 'configure_dotnet'), mock.patch.object(nsp, 'WORK_DIR', ''), mock.patch.object(nsp, 'PROD_KEYS', ''), \
+        with mock.patch.object(nsp, 'find_repo', return_value=REPO), mock.patch.object(nsp, 'configure_dotnet'), mock.patch.object(nsp, 'WORK_DIR', ''), \
              mock.patch.object(nsp, 'check_prereqs', side_effect=stop), mock.patch.object(nsp, 'say', side_effect=said.append), \
-             mock.patch.object(nsp, 'ask', side_effect=AssertionError('asked for something')), mock.patch.object(nsp, 'package_title_reader', side_effect=AssertionError('read a package')):
+             mock.patch.object(nsp, 'ask', side_effect=AssertionError('asked for something')):
             with self.assertRaises(Stop): nsp.main(args)
         return Path(seen['DM_ROOT']), said
 
-    def test_needs_no_keys_and_builds_beside_the_dump(self):
+    def test_asks_for_nothing_and_builds_beside_the_dump(self):
         work, said = self.run_main()
         self.assertEqual(work, self.dump / f'{TID:016X}_build')
         self.assertTrue(any(s.startswith('a dump folder: ') for s in said), said)
@@ -139,10 +134,31 @@ class Main(Base):
         with mock.patch.object(nsp, 'find_repo', return_value=REPO), mock.patch.object(nsp, 'configure_dotnet'), self.assertRaisesRegex(nsp.BuildError, 'which holds'):
             nsp.main(nsp.parse_args([str(self.dump), '--title-id', '0100000000010000']))
 
-    def test_no_profile_refused(self):
-        d = self.dump.parent / 'unknown'; version(d / 'base', tid=0x0400000000000000)
-        with mock.patch.object(nsp, 'find_repo', return_value=REPO), mock.patch.object(nsp, 'configure_dotnet'), self.assertRaisesRegex(nsp.BuildError, 'has none'):
+    def test_not_a_dump_refused(self):
+        d = self.dump.parent / 'empty'; d.mkdir(); (d / 'game.bin').write_bytes(b'x')
+        with mock.patch.object(nsp, 'find_repo', return_value=REPO), mock.patch.object(nsp, 'configure_dotnet'), self.assertRaisesRegex(nsp.BuildError, 'no base/exefs'):
             nsp.main(nsp.parse_args([str(d)]))
+
+    def test_no_profile_is_surveyed_from_the_dump(self):
+        d = self.dump.parent / 'unknown'; version(d / 'base', tid=0x0400000000000000)
+        with mock.patch.object(nsp, 'find_repo', return_value=REPO), mock.patch.object(nsp, 'configure_dotnet'), mock.patch.object(nsp, 'say'), \
+             mock.patch.object(nsp, 'same_build', return_value=None), mock.patch.object(nsp, '_importable', return_value=True), mock.patch.object(nsp, 'check_capstone'), \
+             mock.patch.object(nsp, 'survey', side_effect=Stop()) as survey:
+            with self.assertRaises(Stop): nsp.main(nsp.parse_args([str(d), '--survey-only']))
+        self.assertEqual(survey.call_args.args[:2], (d, 0x0400000000000000))
+
+    def test_survey_lists_the_newest_version(self):   # the survey's extraction: the code modules, a RomFS manifest and the RomFS's NROs, read from the dump in place
+        (self.dump / f'updates/{VER}/romfs/nro').mkdir(); (self.dump / f'updates/{VER}/romfs/nro/m.nro').write_bytes(b'nro')
+        _, fam = nsp.scan_dump(self.dump)
+        import nacp, profile_guess
+        with mock.patch.object(nsp, 'pg', profile_guess, create=True), mock.patch.object(nsp, 'nacp', nacp, create=True), mock.patch.object(nsp, 'say'), \
+             mock.patch.object(nsp, 'PROG', mock.Mock()), mock.patch.object(nsp, 'check_aarch64'), mock.patch.object(profile_guess, 'facts_of', side_effect=Stop()):
+            with self.assertRaises(Stop): nsp.survey(self.dump, TID, fam, REPO, sys.executable, {})
+        ex = self.dump / f'{TID:016X}_survey/extract'
+        self.assertEqual((ex / 'ExeFS/main').read_bytes(), b'new code')
+        rows = sorted(l.split('\t')[:2] for l in (ex / 'romfs_manifest.tsv').read_text().splitlines() if not l.startswith('#'))
+        self.assertEqual(rows, [['/dir/new', '4'], ['/nro/m.nro', '3']])
+        self.assertEqual((ex / 'romfs_nro/nro/m.nro').read_bytes(), b'nro')
 
 
 if __name__ == '__main__':

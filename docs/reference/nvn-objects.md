@@ -655,3 +655,10 @@ Games read this count as a position in their own command memory and size their h
 ### `nvnPrivate0`, an inlined command-buffer fast path flag
 
 - `nvnPrivate0`, a new SDK 20 import, needs nothing: it is a flag in `sdk`'s bss that enables an inlined command-buffer fast path when the NVN driver sets it (it stays 0). Found on [The Legend of Zelda: Breath of the Wild](../../dm/games/01007EF00011E000/README.md) (1.9.0, SDK 20.5.22).
+
+### A bindless pool churns finalized textures within a submission
+
+- **Symptom:** memory ballooning (e.g. 18,930 MiB on Mac or out-of-memory crash on devices) during 3D scenes when processing bindless texture pool updates.
+- **Cause:** textures finalized by the game within a frame or submission churned the ghost ring, causing the bindless pool walks to allocate new backing storage for thousands of dead texture descriptors on every submission.
+- **Fix:** implement submission-local backing and filter finalized texture descriptors from churn walks, stabilizing memory residency to ~7.9 GiB.
+- **Found on:** [The Legend of Zelda: Ocarina of Time](../../dm/games/0400486024DEC000/README.md).

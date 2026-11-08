@@ -48,7 +48,29 @@ the rest after it is unambiguous. Tools take these wherever they take the matchi
   compares it (DKB update 458752: 77,342 files, 8.55 GiB, all equal; base and DLC too).
 - `DM_AOC_DIR/<index>.nup` (a file or a symbolic link to the `.nup`): add-on content `<index>` is the addon package whose
   title ID's low 12 bits equal `<index>` (pack_android.py's index is `tid - app - 0x1000`, the same number). Checked
-  before `<index>.img` and `<index>/`.
+  before `<index>.img` and `<index>/`. The add-on list (`hle_misc.c` `aoc_load`) counts `<index>.nup` as it counts `<index>.img`
+  (before 2026-11-08 it skipped it, so a `.nup` game's add-on was linked but not reported as owned).
+
+## A .nup used where it is
+
+Without All files access an Android app can open a file the user picked only through its provider, by a descriptor; no path
+works (`/proc/self/fd/<n>` reopened by path is not reliable on every provider). So a `.nup` picked with the system file picker
+(android/README.md, "A .nup used where it is") is read by descriptor everywhere:
+
+- Host: a spec's file part may be `fd:<n>/<name>` in place of a path (`nup_image.h` `nup_fd_spec`, `nup_open_file`): descriptor
+  `<n>`, which the launcher opened (`PickedNup.detachedFd`) and keeps for the process's life; each image opens its own duplicate
+  (`F_DUPFD_CLOEXEC`), reads with pread only (the position the duplicates share never matters) and closes it with the image; a
+  descriptor that is not open is refused. `<name>` is for messages. `DM_ROMFS=fd:<n>/<name>:update/<v>/romfs`; the add-on link
+  `DM_AOC_DIR/<index>.nup` is a symbolic link whose target is `fd:<n>/<name>` (nothing is there: `aoc_dir` reads it with
+  readlink). Tests: t_fs "NUP container" (an update and a zstd file through the descriptor, its position unmoved, the add-on
+  link, a closed descriptor refused).
+- Tools: `DM_NUP_FD=<fd>:<path>` (`nup.py` `fd_of`, `open_fd`, `stat`): that path, compared after realpath, is read through a
+  duplicate of `<fd>` whether or not anything is there, so `pack_android.py`, `pack_dump.py` and `shader_split.py` take the
+  stand-in path as any `.nup` path. The phone's packer sets it per run (`PackService`); empty means none. Tests: test_nup.py
+  `Descriptor` (the trees, streams and mmap, pack_dump.scan, and pack_android.py's pack equal to the file's own).
+- Launcher: `Nup.Source` (a channel read by position, its size, its cache key) for every read; `Nup.opener` (`PickedNup`,
+  installed by `NxApp` in every process) answers for the stand-in paths `files/picked/<key>/<name>`. Tests: NupJvmTest
+  `picked` (the stand-in read through an opener, its DM_ROMFS and add-on link in the host's form, a lost file).
 
 ## Tools (Python: dm/tools/nup.py and its users)
 
@@ -78,8 +100,9 @@ the rest after it is unambiguous. Tools take these wherever they take the matchi
 ## App (android/app)
 
 - The extension is lower case: tools and host split at `.nup:`; the app refuses `.NUP` with "rename it to .nup".
-- Add game asks "a folder" or "a .nup file" (system file picker, turned into its /storage path; Recent and MediaStore
-  entries have none and are refused with a sentence). A picked folder holding `.nup` files (or dump subfolders) adds
+- Add game asks "a folder" or "a .nup file" (system file picker, turned into its /storage path with All files access; a
+  document with no such path, from Recent or Downloads, and every pick without All files access, is used where it is:
+  [A .nup used where it is](#a-nup-used-where-it-is)). A picked folder holding `.nup` files (or dump subfolders) adds
   all of them (`PackFind.gamesIn`; a title without a profile in this APK is named in the summary). adb: `--es game <file.nup>`, or
   `--es add_game <file.nup or folder>` for Add game's own path. A `.nup`'s pack is looked for beside it and in `<title ID>-work/<any name>`
   of its folder and up to three folders above it (`PackFind`).

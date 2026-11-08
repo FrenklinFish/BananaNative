@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-# Game files already extracted (a console dump: folders, not NSPs) → the layout build_ipa_from_nsp.py extracts NSPs into. build_ipa_from_nsp.py calls this when it is given such a folder, and
-# goes on with its other steps; run on its own, this script does only this step.
+# A game's dump folder (its files already extracted, made from your own console) → the layout build_ipa_from_nsp.py builds from. build_ipa_from_nsp.py calls this for its
+# dump folder, and goes on with its other steps; run on its own, this script does only this step.
 # The dump folder holds:
 #   base/exefs/ (main, main.npdm, sdk, rtld, subsdk*), base/romfs/   (base/romfs may be left out when an update has its romfs/: that one is the whole tree)
 #   updates/<version>/exefs/, updates/<version>/romfs/   (optional; <version> is the title version as a decimal number, 458752 = 0x70000)
@@ -11,12 +11,12 @@
 #   extract/v<version>/ExeFS/   the newest version's code modules (APFS clones, or copies on another volume)
 #   extract/v<version>/RomFS.img   its RomFS as one image (dm/tools/romfs_image.py: the host's DM_ROMFS, the IPA's romfs.img)
 #   aoc/<index>.img   each DLC's RomFS (index = DLC title ID − base title ID − 0x1000), the host's DM_AOC_DIR
-# A dump has no control data, so there is no control.nacp or icon.jpg beside them, as there is after nx_extract.
+# A dump has no control data, so there is no control.nacp or icon.jpg beside them.
 # A NUP file (one file holding base, updates and add-ons, android/NUP.md) stands for such a folder: its base, update/<version> and addon/<title ID> packages are
 # read in place (dm/tools/nup.py through romfs.py) as base/, updates/<version>/ and dlc/<title ID>/<n>/ are, and the build folder goes beside it.
 # The title ID is the program ID in main.npdm. A repeat run keeps code modules that are the same and an image whose source tree, packer and image are unchanged (romfs_image.py --reuse).
 # Usage: pack_dump.py <dump folder | .nup file> [--version N] [--work-dir DIR]   (exit 1 on error)
-import argparse, filecmp, shutil, struct, subprocess, sys
+import argparse, filecmp, os, shutil, struct, subprocess, sys
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'dm/tools'))
 import nup, romfs, romfs_image
@@ -36,9 +36,11 @@ def program_id(npdm):   # the ACI0 program ID of main.npdm
 def in_nup(p): return nup.split(p) is not None   # a path inside a NUP file (romfs.Path), read through romfs.py
 
 
-def clone(src, dst):   # an APFS clone on the same volume, else a copy; a file of a NUP package is written out
-    if in_nup(src): dst.write_bytes(src.read_bytes())
-    elif subprocess.run(['cp', '-c', src, dst], capture_output=True).returncode != 0: shutil.copy2(src, dst)
+def clone(src, dst):   # an APFS clone on the same volume, else a copy (Windows has no cp); a file of a NUP package is written out
+    if in_nup(src): dst.write_bytes(src.read_bytes()); return
+    try: cloned = os.name != 'nt' and subprocess.run(['cp', '-c', src, dst], capture_output=True).returncode == 0
+    except OSError: cloned = False
+    if not cloned: shutil.copy2(src, dst)
 
 
 def same(f, d): return d.is_file() and (f.read_bytes() == d.read_bytes() if in_nup(f) else filecmp.cmp(f, d, shallow=False))
@@ -50,7 +52,7 @@ def exefs(src, dst):
     tmp = dst.with_name(dst.name + '.partial')
     shutil.rmtree(tmp, ignore_errors=True); tmp.mkdir(parents=True)
     for f in files: clone(f, tmp / f.name)
-    shutil.rmtree(dst, ignore_errors=True); tmp.rename(dst)
+    shutil.rmtree(dst, ignore_errors=True); os.replace(tmp, dst)
 
 
 def pack(src, img, say=print):

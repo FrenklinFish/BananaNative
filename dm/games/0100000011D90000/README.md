@@ -36,7 +36,7 @@ No game-specific code cuts. `DM_FPS_TARGET=30 DM_PRESENT_INTERVAL=game` restores
 
 ## Mac testing
 
-Build with `scripts/build_ipa_from_nsp.py <NSP folder> -k <prod.keys> --platform mac`; its final line runs the game with the correct paths. Saves are under `<NSP folder>/0100000011D90000_build/run/save`. Use `DM_CTL=<file>` for input and screenshots, and `DM_KBD=<name>` for scripted name entry. Logs, screenshots and analysis stay in the NSP folder.
+Build with `scripts/build_ipa_from_nsp.py <dump folder> --platform mac`; its final line runs the game with the correct paths. Saves are under `<dump folder>/0100000011D90000_build/run/save`. Use `DM_CTL=<file>` for input and screenshots, and `DM_KBD=<name>` for scripted name entry. Logs, screenshots and analysis stay in the dump folder.
 
 ## Testing
 

@@ -8,8 +8,8 @@ uint64_t nxin_key_button(int k, int labelled) {
     switch (k) {
     case AK_BUTTON_A: return labelled ? DM_BTN_A : DM_BTN_B;   // bottom
     case AK_BUTTON_B: return labelled ? DM_BTN_B : DM_BTN_A;   // right
-    case AK_BUTTON_X: return labelled ? DM_BTN_X : DM_BTN_Y;   // left
-    case AK_BUTTON_Y: return labelled ? DM_BTN_Y : DM_BTN_X;   // top
+    case AK_BUTTON_X: return labelled == 1 ? DM_BTN_X : DM_BTN_Y;   // left (labelled 2: A and B by label, X and Y by position)
+    case AK_BUTTON_Y: return labelled == 1 ? DM_BTN_Y : DM_BTN_X;   // top
     case AK_BUTTON_L1: return DM_BTN_L;
     case AK_BUTTON_R1: return DM_BTN_R;
     case AK_BUTTON_L2: return DM_BTN_ZL;
@@ -25,9 +25,45 @@ uint64_t nxin_key_button(int k, int labelled) {
     default: return 0;   // BUTTON_MODE (Home), C, Z, BACK: nothing on the Switch side; left to the launcher
     }
 }
+const char *const nxin_src_names[NXIN_SRC_N] = {
+    "BUTTON_A", "BUTTON_B", "BUTTON_X", "BUTTON_Y", "BUTTON_L1", "BUTTON_R1", "BUTTON_L2", "BUTTON_R2", "BUTTON_THUMBL", "BUTTON_THUMBR",
+    "BUTTON_START", "BUTTON_SELECT", "DPAD_UP", "DPAD_DOWN", "DPAD_LEFT", "DPAD_RIGHT", "BUTTON_C", "BUTTON_Z",
+};
+static const int src_keys[NXIN_SRC_N] = {
+    AK_BUTTON_A, AK_BUTTON_B, AK_BUTTON_X, AK_BUTTON_Y, AK_BUTTON_L1, AK_BUTTON_R1, AK_BUTTON_L2, AK_BUTTON_R2, AK_BUTTON_THUMBL, AK_BUTTON_THUMBR,
+    AK_BUTTON_START, AK_BUTTON_SELECT, AK_DPAD_UP, AK_DPAD_DOWN, AK_DPAD_LEFT, AK_DPAD_RIGHT, AK_BUTTON_C, AK_BUTTON_Z,
+};
+enum { SRC_L2 = 6, SRC_R2 = 7, SRC_UP = 12, SRC_DOWN = 13, SRC_LEFT = 14, SRC_RIGHT = 15 };
+const char *const nxin_switch_names[16] = {"A", "B", "X", "Y", "LS", "RS", "L", "R", "ZL", "ZR", "PLUS", "MINUS", "LEFT", "UP", "RIGHT", "DOWN"};
+int nxin_src_of_key(int k) { for (int i = 0; i < NXIN_SRC_N; i++) if (src_keys[i] == k) return i; return -1; }
+static int name_is(const char *a, size_t n, const char *b) { return strlen(b) == n && !strncmp(a, b, n); }
+int nxin_map_parse(nxin_map *m, const char *spec, char *bad, size_t nbad) {
+    memset(m, 0, sizeof *m);
+    if (bad && nbad) *bad = 0;
+    int took = 0;
+    for (const char *s = spec ? spec : ""; *s;) {
+        while (*s == ',' || *s == ' ') s++;
+        if (!*s) break;
+        const char *e = s; while (*e && *e != ',') e++;
+        const char *eq = memchr(s, '=', (size_t)(e - s));
+        int src = -1, to = -2;
+        if (eq) {
+            for (int i = 0; i < NXIN_SRC_N; i++) if (name_is(s, (size_t)(eq - s), nxin_src_names[i])) src = i;
+            if (name_is(eq + 1, (size_t)(e - eq - 1), "NONE")) to = -1;
+            for (int i = 0; i < 16; i++) if (name_is(eq + 1, (size_t)(e - eq - 1), nxin_switch_names[i])) to = i;
+        }
+        if (src >= 0 && to >= -1) { m->to[src] = to < 0 ? 0 : 1ull << to; m->set |= 1u << src; took++; }
+        else if (bad && nbad && !*bad) { size_t n = (size_t)(e - s) < nbad - 1 ? (size_t)(e - s) : nbad - 1; memcpy(bad, s, n); bad[n] = 0; }
+        s = e;
+    }
+    return took;
+}
+static uint64_t mapped(const nxin_map *m, int src, uint64_t def) { return m && src >= 0 && (m->set & (1u << src)) ? m->to[src] : def; }
+uint64_t nxin_pad_button(const nxin_pad *p, int k, int labelled) { return mapped(p->map, nxin_src_of_key(k), nxin_key_button(k, labelled)); }
 int nxin_pad_key(nxin_pad *p, int k, int down, int labelled) {
-    uint64_t b = nxin_key_button(k, labelled);
-    if (!b) return 0;
+    int src = nxin_src_of_key(k);
+    uint64_t b = nxin_pad_button(p, k, labelled);
+    if (!b) return p->map && src >= 0 && (p->map->set & (1u << src));   // a source mapped to NONE is still the pad's: it does nothing, and the launcher does not act on it
     if (down) p->keys |= b; else p->keys &= ~b;
     return 1;
 }
@@ -63,9 +99,10 @@ void nxin_stick(float x, float y, float dz, int32_t *ox, int32_t *oy) {
 void nxin_pad_out(nxin_pad *p, float dz, uint64_t *buttons, int32_t *lx, int32_t *ly, int32_t *rx, int32_t *ry) {
     p->lt_on = p->lt_on ? p->lt > 0.4f : p->lt > 0.5f;   // the trigger hysteresis is state
     p->rt_on = p->rt_on ? p->rt > 0.4f : p->rt > 0.5f;
-    uint64_t b = p->keys | (p->lt_on ? DM_BTN_ZL : 0) | (p->rt_on ? DM_BTN_ZR : 0);
-    if (p->hat_x < -0.5f) b |= DM_BTN_LEFT; if (p->hat_x > 0.5f) b |= DM_BTN_RIGHT;
-    if (p->hat_y < -0.5f) b |= DM_BTN_UP; if (p->hat_y > 0.5f) b |= DM_BTN_DOWN;
+    const nxin_map *m = p->map;   // the analog triggers are BUTTON_L2 / R2 and the hat DPAD_* for the map
+    uint64_t b = p->keys | (p->lt_on ? mapped(m, SRC_L2, DM_BTN_ZL) : 0) | (p->rt_on ? mapped(m, SRC_R2, DM_BTN_ZR) : 0);
+    if (p->hat_x < -0.5f) b |= mapped(m, SRC_LEFT, DM_BTN_LEFT); if (p->hat_x > 0.5f) b |= mapped(m, SRC_RIGHT, DM_BTN_RIGHT);
+    if (p->hat_y < -0.5f) b |= mapped(m, SRC_UP, DM_BTN_UP); if (p->hat_y > 0.5f) b |= mapped(m, SRC_DOWN, DM_BTN_DOWN);
     *buttons = b;
     nxin_stick(p->lx, p->ly, dz, lx, ly); nxin_stick(p->rx, p->ry, dz, rx, ry);
 }

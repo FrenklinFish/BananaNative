@@ -2,184 +2,100 @@
 
 # Banana Native
 
-Switch 2 games, running natively on Android.
-
-This is not an emulator. The game's own ARM64 code runs directly on the phone's CPU. A small host answers the system
-calls the game makes, and its graphics (NVN, including the Switch 2's task and mesh shaders) are rebuilt on Vulkan.
-As far as I know, it is the first time Switch 2 games run natively on Android.
-
-Banana Native is an Android port of [nxnative](https://github.com/seedds/nxnative) by seedds, which does the same on
-the Mac, iPhone and iPad with Metal.
+Banana Native runs Switch 2 games from your own dumps on Android phones. Like Wine, it emulates no hardware: the
+game's own ARM64 code runs on the phone's CPU, Banana Native supplies the system services it calls and translates its
+graphics to Vulkan. It is an Android port of [nxnative](https://github.com/seedds/nxnative) by seedds.
 
 > [!NOTE]
-> Unofficial and experimental, tested on one phone. Not affiliated with Nintendo, nxnative or Eden: please don't send
-> them bug reports about this. Not related to [nx2android](https://github.com/shirai91/nx2android) either: Banana
-> Native is its own codebase, ported from nxnative, and not a fork of that project. Most of the code was written with
-> an AI coding assistant (Claude) and tested by hand. Releases are only published on this page.
+> Unofficial and experimental. Not affiliated with Nintendo, nxnative or Eden. The project contains no Nintendo code,
+> firmware or keys and decrypts nothing: it reads only a dump of a game you own, made from your own console. Most of the
+> code was written with an AI coding assistant (Claude) and tested by hand. [More](../docs/players/about.md).
 
 ## Games
 
-| Game | Title ID | Version | Status |
+| Game | Version | Status | Notes |
 |---|---|---|---|
-| Donkey Kong Bananza | `040074A01BF12000` | update 458752 | Works |
-| Mario Kart World | `0400C3F00006E000` | 1.8.0 (base game) | Work in progress: in game and driving, with graphics problems |
-| Pokémon Pokopia | `0400A3A01EE4C000` | update 655360 (Ver. 2.0.1) | Works, about 60 fps, on the system driver and Turnip |
+| Donkey Kong Bananza (`040074A01BF12000`) | update 458752 | Supported | 30 fps |
+| Mario Kart World (`0400C3F00006E000`) | 1.8.0 | Supported | a phone cooler is recommended |
+| Pokémon Pokopia (`0400A3A01EE4C000`) | update 655360 (Ver. 2.0.1) | Supported | about 60 fps |
+| The Legend of Zelda: Ocarina of Time (`0400486024DEC000`) | 2.0 | Experimental | plays, with visual glitches (too bright, mesh foliage missing); system driver only |
+| Splatoon Raiders (`0400380020056000`) | update 65536 | Experimental | boots and runs, but not playable yet (very low frame rate) |
 
-Only these versions run; the app tells you if your dump is a different one.
-
-## Performance
-
-Donkey Kong Bananza (`040074A01BF12000`) on the tested phone (Snapdragon 8 Elite Gen 5, 16 GB), first level, frame generation off:
-
-| GPU driver | Resolution | Frame rate |
-|---|---|---|
-| System (Qualcomm) | Phone 1080p | 30 fps, with stretches of 55-58 |
-| Turnip | Phone 1080p | 30 fps, with stretches of 49-59 |
-
-Both drivers are held at 30 fps by the CPU (recording the frame's GPU work); 60 fps is planned.
-
-Mario Kart World (`0400C3F00006E000`): not measured yet. Your numbers depend on the phone, its temperature and power mode. The first visit to
-an area stutters while shaders are built, and a hot phone throttles: a cooler helps. Frame generation (Settings) can
-take 30 fps to a 60 / 90 / 120 fps target, with some added latency.
+The app tells you if your dump is another version. Splatoon Raiders is not playable yet: it boots and runs at a very low
+frame rate, and ships so that people can test it and help. Ocarina of Time: only version 2.0 is tested; the first starts are slow
+(minutes of loading, then low fps and black frames) until the GPU driver's pipeline cache fills. [Experimental games](../docs/guides/experimental-games.md) has their known problems and how to help.
 
 ## What you need
 
-- An Android 13+ phone with a Snapdragon (Adreno) GPU and at least 12 GB of RAM. Tested on a Snapdragon 8 Elite Gen 5 with 16 GB.
-- A phone cooler is recommended, strongly for Mario Kart World (`0400C3F00006E000`).
-- Tested only with the phone's own Qualcomm (system) GPU driver and the latest Turnip; other drivers may not work.
-- Your own dump of the game as a folder. No keys or firmware are needed; NSP and XCI files don't work.
-  ```
-  <game>/
-    base/                  exefs/ and romfs/
-    updates/<version>/     the update, if the version above is one
-    dlc/<title id>/<n>/    extra content, if you have it
-  ```
-- Optionally, your own `Lossless.dll` from Lossless Scaling, for frame generation.
+- An Android 13+ phone with a Snapdragon (Adreno) GPU and at least 12 GB of RAM, 16 GB for Mario Kart World
+  (`0400C3F00006E000`). Tested on a Snapdragon 8 Elite Gen 5 with 16 GB, with the phone's own Qualcomm (system) driver
+  and Turnip.
+- Your own dump of the game, as a folder (or a `.nup` file of one): `base/`, and `updates/<version>/` and `dlc/` if you
+  have them, each with `exefs/` and `romfs/`. NSP and XCI files don't work.
+- Recommended: a Windows PC or a Mac, and a phone cooler.
 
 ## Setup
 
-Each game is prepared once: its code is rewritten for Android and its shaders are translated to Vulkan. A Mac does
-this in 10-15 minutes. The phone can do it alone, but it takes about an hour.
+Each game is prepared once into a **pack** (its code rewritten for Android, its shaders translated for Vulkan). A
+computer does this much faster than the phone.
 
-### With a Mac
+First install the APK from [Releases](https://github.com/moceure/BananaNative/releases) and allow **All files access**.
 
-```sh
-brew install --cask dotnet-sdk                                   # plus micromamba
-micromamba create -p ~/bananative-env -f android/environment.yml
-~/bananative-env/bin/python scripts/pack_android.py /path/to/<game>
-```
+**PC (Windows) or Mac** ([guide](../docs/guides/pc-mac-packing.md)). Mac: tested. Windows: new and not yet tested on a
+real PC — please report how it goes.
 
-The last command writes the pack to `<title ID>-work/android-pack` next to your game folder. Copy the game folder to
-the phone (say `Switch2/<game>`) and the pack next to it (`Switch2/<title ID>-work/android-pack`). Install the APK
-from [Releases](https://github.com/moceure/BananaNative/releases), allow **All files access**, tap **Add game** and pick the game folder. It finds the
-pack and is ready to play.
+1. Download this repository and double-click `scripts\bananative.bat` (Windows) or `scripts/bananative.command`
+   (Mac). The first time, it installs its tools (about 400 MB) into a folder you pick.
+2. Pick the game (its folder or `.nup` file) and click **Prepare**.
+3. Copy the game folder to the phone, and the pack next to it: `<title ID>-work/android-pack`.
+4. In the app, tap **Add game** and pick the game folder. It finds the pack. (Or use **Import pack…** with the pack
+   folder.)
 
-### Phone only
+**Phone only** ([guide](../docs/guides/getting-started.md)): copy the game folder to the phone, tap **Add game**, then
+**Prepare**. It runs in the background and can be paused; keep the phone on the charger. This takes about an hour. A
+computer is recommended for Mario Kart World (`0400C3F00006E000`).
 
-Copy the game folder to the phone, install the APK, **Add game**, then **Prepare**. It runs in the background and can
-be paused; keep the phone on the charger. Phone-only setup works for Donkey Kong Bananza (`040074A01BF12000`) for now: Mario Kart World (`0400C3F00006E000`)
-runs out of memory while its code is rewritten on the phone, so use a Mac for that one.
+## Problems
 
-If something doesn't work, start with Settings › **Readiness check**. A game's ⋯ menu has **Share log**.
-
-## Features
-
-- **Fold-aware layout**: separate layouts for the outer and inner screen, switched live when you fold or unfold. Move
-  the picture up or down and place the controls where you want them.
-- **Frame generation** with Lossless Scaling (LSFG): 2x, 3x, 4x, or a 60 / 90 / 120 fps target.
-- On-screen controls with a layout editor, gamepad support, frame-rate cap, resolution (1080p or native), performance
-  overlay, Turnip driver downloads, save backups, and pack export / import (one .zip). Saves and packs live in the app's storage (uninstalling asks
-  whether to keep them); backups go to `Switch2/save-backups/<title ID>`. Saves from 0.1.0 are copied in once.
-- **Updates in the app** (from v0.1.4): when a newer release is out, the app offers it at start (Update or Later), downloads it from this page's release and installs it after you confirm. Settings › **Updates** › **Check for updates**
-  checks at any time.
-
-## Known issues
-
-- **Warning, Mario Kart World (`0400C3F00006E000`) is a work in progress** and shows black pixels: after a race, going back to the
-  character selection screen can turn the 3D scene dark or black (the menus and the race HUD still draw). Free roam
-  alone is not affected. Being fixed.
-- Donkey Kong Bananza (`040074A01BF12000`): some texture glitches during fights in some caves.
-- Donkey Kong Bananza (`040074A01BF12000`) runs at 30 fps on both drivers: the CPU's work per frame holds it there. 60 fps is a later task.
-- Pokémon Pokopia (`0400A3A01EE4C000`): the sky is black.
-- Mario Kart World (`0400C3F00006E000`) has more problems: trees flicker, ground textures are sometimes missing, and memory is tight on
-  16 GB. It heats the phone a lot.
-- The first visit to an area stutters while its shaders and pipelines are built; later visits are smoother.
-- Phones get hot, and the frame rate drops when they throttle. Crashes happen.
-- A new app version may need the shaders prepared again; the app says so.
-
-## How it works
-
-```
- Mac or phone, once per game                      Phone
- your dump ─▶ pack_android.py ─▶ pack ─copy─▶  launcher (APK, no game code)
-              rewrites the code for Android        host: threads, memory, files, input, audio, video
-              translates shaders to SPIR-V         NVN on Vulkan
-```
-
-- `dm/tools/patch_nso.py --target android` rewrites the game's modules so they run as an Android process.
-- `dm/gfx/tools` translates the shaders to SPIR-V ahead of time, with Ryujinx's shader translator.
-- `dm/gfx/vk_android` replays the game's NVN command buffers on Vulkan.
-- `dm/host` and `android/host` stand in for the console's services; `android/app` is the launcher.
-
-Building it yourself: [android/README.md](../android/README.md).
-
-## Problems and questions
-
-Something wrong on your phone: open an [issue](https://github.com/moceure/BananaNative/issues/new/choose) with the form
-(phone, chip and RAM, GPU driver, game version, and the log from Settings › **Share log**). Every report from a phone
-other than the tested one helps. Questions, ideas and "it runs on my phone" reports go to
-[Discussions](https://github.com/moceure/BananaNative/discussions).
+- Settings › **Readiness check** says what your phone is missing and fixes most items.
+- A game's ⋯ button › **Share log** shares its log.
+- Open an [issue](https://github.com/moceure/BananaNative/issues/new/choose) with the form; questions go to
+  [Discussions](https://github.com/moceure/BananaNative/discussions). More: [Troubleshooting](../docs/guides/troubleshooting.md).
 
 > [!IMPORTANT]
-> **This GitHub repository is the only official place for Banana Native.** The project has no Discord server,
-> subreddit, Telegram group, X / social media account or website, and nobody speaks for it anywhere else. Download the
-> APK only from [Releases](https://github.com/moceure/BananaNative/releases): a copy from anywhere else may be modified
-> or malicious. Nobody connected to the project will ask you for money, keys, game files or account details. To reach
-> the developer, use issues or Discussions here.
+> This GitHub repository is the only official place for Banana Native: download the APK only from
+> [Releases](https://github.com/moceure/BananaNative/releases). Nobody from the project will ask you for money, keys or
+> game files.
 
-## Videos and device reports
+## Guides
 
-Videos are welcome. To make yours useful to viewers:
+[Getting started](../docs/guides/getting-started.md) ·
+[PC or Mac](../docs/guides/pc-mac-packing.md) ·
+[Storage access](../docs/guides/storage-access.md) ·
+[Saves](../docs/guides/saves.md) ·
+[Packs and app updates](../docs/guides/packs-and-updates.md) ·
+[GPU drivers](../docs/guides/gpu-drivers.md) ·
+[Troubleshooting](../docs/guides/troubleshooting.md) ·
+[Experimental games](../docs/guides/experimental-games.md)
 
-- Say the app version (for example v0.1.0), the phone, its chip and RAM, and the GPU driver.
-- Turn on the performance overlay so the frame rate is visible, and say whether frame generation is on.
-- Mention the [known issues](#known-issues) you run into, so viewers know which ones are already being fixed.
-- Link this page for downloads: releases are only published here, and copies elsewhere may be modified.
-- Please don't show or link game dumps, keys or firmware. The same goes for Issues and Discussions: posts that share, offer
-  or ask for game files, keys or links are edited or removed ([rules](https://github.com/moceure/BananaNative/discussions/23)).
+## More
 
-Post your video or your "it runs on my phone" report in
-[Discussions](https://github.com/moceure/BananaNative/discussions): every phone other than the tested one helps, and
-good videos get linked here.
+[Features](../docs/players/features.md) ·
+[Performance](../docs/players/performance.md) ·
+[How it works](../docs/players/how-it-works.md) ·
+[About the project](../docs/players/about.md) ·
+[Videos and device reports](../docs/players/videos.md) ·
+[History](../docs/players/history.md)
 
-## History
+## Contributing
 
-- **v0.1.0, 4 November 2026**: first public release, with Donkey Kong Bananza (`040074A01BF12000`) playable and Mario Kart World (`0400C3F00006E000`) in
-  progress.
-- **v0.1.1, 5 November 2026**: `.nup` files, emulator frontend launch, incremental shader updates (v0.1.0 packs are
-  taken over without a rebuild), phone Prepare and about 1 GiB less RAM for Mario Kart World (`0400C3F00006E000`), RAM in the in-game stats, fewer stutters and less memory
-  for large memory pools and large `.nup` files, saves and packs in the app's storage with pack export / import.
-- **v0.1.2, 5 November 2026**: hotfix for Prepare on shared storage, driver install, Add game and Turnip GPU clocks;
-  Donkey Kong Bananza (`040074A01BF12000`) at Phone 720p by default on Turnip as a stopgap.
-- **v0.1.3, 5 November 2026**: Donkey Kong Bananza (`040074A01BF12000`) at 30 fps on Turnip at Phone 1080p (was about 20): faster upscaler
-  shader on Adreno and a GPU clock floor for Turnip; Phone 1080p and dynamic resolution are the defaults again.
-- **v0.1.4, 5 November 2026**: in-app updates (a popup at start when a new release is out; Settings › Check for
-  updates), Prepare's code step in a fifth of the memory (fixes Mario Kart World (`0400C3F00006E000`) stopping at rewriting the game code,
-  #20), no false "Pack from other tools" chip.
-- **v0.1.5, 5 November 2026**: Pokémon Pokopia (`0400A3A01EE4C000`) playable at about 60 fps on the system driver and Turnip, with
-  Game resolution working for it (thanks to [Raphix91](https://github.com/Raphix91), #28 #29 #30); a text box for games
-  that ask you to type; shaders already on the phone carry over without an update.
+Each game's note says what is known and what is open ([games table](../dm/games/README.md#games)); working on the code:
+[docs/agents](../docs/agents/README.md), [android/README.md](../android/README.md). The experimental games need the
+most help: see the issues marked
+[help wanted](https://github.com/moceure/BananaNative/issues?q=is%3Aissue+is%3Aopen+label%3A%22help+wanted%22).
 
-## License and credits
+## Licence and credits
 
-nxnative is MIT. The Android app is **GPL-3.0-or-later** as a whole, because it includes frame generation ported from
-[Eden](https://git.eden-emu.dev/eden-emu/eden) / [lsfg-vk](https://github.com/PancakeTAS/lsfg-vk) and mesh shader
-lowering from [switch2mac](https://github.com/azmasm/switch2mac) / [Eglantine](https://github.com/djihads80/eglantine).
-Every release is built from its tagged commit. See [android/NOTICE.md](../android/NOTICE.md).
-
-Built on [nxnative](https://github.com/seedds/nxnative) (seedds) and
-[d2r-mobile](https://github.com/jhaizhou-ops/d2r-mobile), with findings from
-[kartnative](https://github.com/pahorema/kartnative) (pahorema) and switch2mac (azmasm), and
-[Ryujinx](https://github.com/Ryujinx/Ryujinx)'s shader translator. Thanks to all of them.
+The Android app is **GPL-3.0-or-later** as a whole; nxnative's own files keep their MIT licence. See [android/NOTICE.md](../android/NOTICE.md) and the [credits](../README.md#licence-and-credits).
 
 Use games you own. Please don't ask for games, keys or dumps.

@@ -33,7 +33,7 @@ Update 1.5.12620 (v589824) over the base game, SDK 20.5.21. Unity 6000.0.61f1 IL
 
 ## Mac routes
 
-- Build with `scripts/build_ipa_from_nsp.py <NSP folder> -k <prod.keys> --platform mac` and use its printed command.
+- Build with `scripts/build_ipa_from_nsp.py <dump folder> --platform mac` and use its printed command.
 - From a fresh save, the title is up by about 25 s. A on Start Game, A on the first slot, then the prologue text and the opening cinematic (about two minutes; skipping was not tried) lead to King's Pass.
 - In King's Pass, hold right. Walls of vines block the way until struck with Y (five strikes were always enough). Then there are a pit (B to jump out) and crawlids.
 - A save written there loads with A, A from the title and returns to King's Pass.

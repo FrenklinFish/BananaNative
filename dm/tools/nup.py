@@ -14,9 +14,13 @@ so a raw-only file needs no zstd module. A small zstd file is decompressed into 
 frame again) and goes to an unlinked temporary file only when a caller asks for its descriptor (mmap: romfs.py).
 romfs.py's Path / open / os / mmap take these paths as they take paths inside a RomFS image, so tools that read a RomFS folder through romfs.py read a package.
 
+A .nup may also be read through a descriptor in place of its path (android/NUP.md "A .nup used where it is"): DM_NUP_FD=<fd>:<path> names a path that is read
+through descriptor fd (duplicated for each reader, read with pread only), whether or not anything is at that path. The phone's packer sets it for a .nup the user
+picked with the system file picker, which the app may not open by any path; the tools name the file by its stand-in path as usual.
+
 Usage: nup.py <file>.nup [packages | ls [<name>] | cat <name> | verify [<name>]]   (exit 1 on a bad file; <name> is a selector with a path)
 """
-import builtins, errno, functools, hashlib, io, os, re, stat as _stat, struct, sys, tempfile
+import errno, functools, hashlib, io, os, re, stat as _stat, struct, sys, tempfile
 
 MAGIC, TOC_MAGIC = b'NUP\x01', b'TOC\x01'
 SB = struct.Struct('<4sHHQQ32sQQII16s32s')     # superblock, 0x80 bytes (SPEC §2)
@@ -33,6 +37,49 @@ SELECTOR = re.compile(r'(base|update/[0-9]+|addon/[0-9a-fA-F]{16})(?:/(.*))?', r
 
 
 class Error(ValueError): pass
+
+
+# Windows has no os.pread, and os.open there opens in text mode (CR LF read as LF) unless O_BINARY is given: every descriptor of a .nup (and romfs.py's of an
+# image) is opened with O_RDONLY | O_BINARY (0 elsewhere) and read with pread, os.pread where there is one, else a seek and reads under a lock (each stream has a
+# descriptor of its own; the lock keeps two threads reading one stream from moving its position under each other)
+O_RDONLY = os.O_RDONLY | getattr(os, 'O_BINARY', 0)
+if hasattr(os, 'pread'): pread = os.pread
+else:
+    import threading
+    _seek_lock = threading.Lock()
+    def pread(fd, n, offset):
+        out = []
+        with _seek_lock:
+            os.lseek(fd, offset, os.SEEK_SET)
+            while n > 0:
+                b = os.read(fd, min(n, 1 << 30))
+                if not b: break
+                out.append(b); n -= len(b)
+        return b''.join(out)
+
+
+def fd_of(path):
+    """The descriptor DM_NUP_FD gives for path (`<fd>:<path>`, the paths compared after realpath), else None. Read at each call: the phone's packer runs the tools
+    in one Python, with the environment of each run"""
+    v = os.environ.get('DM_NUP_FD', '')
+    fd, sep, named = v.partition(':')
+    if not sep or not fd.isdigit() or not named: return None
+    try: same = os.path.realpath(os.fsdecode(path)) == os.path.realpath(named)
+    except (TypeError, ValueError): return None
+    return int(fd) if same else None
+
+
+def open_fd(path):
+    """A read descriptor of a .nup: a duplicate of DM_NUP_FD's for its path, else the file opened (O_RDONLY | O_BINARY). The caller closes it. Read it with pread
+    only: a duplicate shares its file position with the descriptor it came from"""
+    fd = fd_of(path)
+    return os.dup(fd) if fd is not None else os.open(path, O_RDONLY)
+
+
+def stat(path):
+    """os.stat of a .nup, or fstat of DM_NUP_FD's descriptor for its path"""
+    fd = fd_of(path)
+    return os.fstat(fd) if fd is not None else os.stat(path)
 
 
 def zstd():
@@ -61,9 +108,11 @@ class Package:
 class Nup:
     def __init__(self, path):
         self.path = os.path.abspath(path)
-        with builtins.open(self.path, 'rb') as f:
-            st = os.fstat(f.fileno()); self.stat = st
-            head = f.read(SB.size)
+        fd = open_fd(self.path)
+        try:
+            st = os.fstat(fd); self.stat = st
+            if not _stat.S_ISREG(st.st_mode): raise Error(f'{path}: not a file')
+            head = pread(fd, SB.size, 0)
             if len(head) < SB.size: raise Error(f'{path}: not a NUP file (shorter than its superblock)')
             magic, hsize, hver, toc_off, toc_size, toc_sha, blob, fsize, npk, flags, self.uuid, _ = SB.unpack(head)
             if magic[:3] != MAGIC[:3]: raise Error(f'{path}: not a NUP file')
@@ -73,7 +122,8 @@ class Nup:
             if fsize != st.st_size: raise Error(f'{path}: {st.st_size} bytes, the superblock says {fsize} (a copy cut off, or not a whole NUP file)')
             if toc_off != hsize or blob % 16 or blob < toc_off + toc_size or blob > fsize or toc_size < TOC.size: raise Error(f'{path}: bad region bounds in the superblock')
             if not npk: raise Error(f'{path}: no packages')
-            f.seek(toc_off); toc = f.read(toc_size)
+            toc = pread(fd, toc_size, toc_off)
+        finally: os.close(fd)
         if len(toc) != toc_size: raise Error(f'{path}: TOC cut off')
         if hashlib.sha256(toc).digest() != toc_sha: raise Error(f'{path}: the TOC does not match its SHA-256 (damaged)')
         self.toc, self.blob, self.size = toc, blob, fsize
@@ -275,7 +325,7 @@ class Nup:
 class _Raw(io.RawIOBase):
     """A file's bytes as a slice of the .nup (codec 0); fileno() is the .nup's descriptor and the slice is in regions"""
     def __init__(self, path, start, length, regions=None):
-        self.fd = os.open(path, os.O_RDONLY)
+        self.fd = open_fd(path)
         self.start, self.length, self.pos, self.regions = start, length, 0, regions
         if regions is not None: regions[self.fd] = (start, length)
     def readable(self): return True
@@ -288,11 +338,11 @@ class _Raw(io.RawIOBase):
         self.pos = pos; return pos
     def readinto(self, buffer):
         size = min(len(buffer), max(0, self.length - self.pos))
-        data = os.pread(self.fd, size, self.start + self.pos) if size else b''
+        data = pread(self.fd, size, self.start + self.pos) if size else b''
         buffer[:len(data)] = data; self.pos += len(data)
         return len(data)
     def readall(self):
-        data = os.pread(self.fd, max(0, self.length - self.pos), self.start + self.pos) if self.pos < self.length else b''
+        data = pread(self.fd, max(0, self.length - self.pos), self.start + self.pos) if self.pos < self.length else b''
         self.pos += len(data); return data
     def close(self):
         if not self.closed:
@@ -325,7 +375,7 @@ class _Zstd(io.RawIOBase):
     def readinto(self, buffer):
         want = min(len(buffer), max(0, self.length - self.pos))
         if not want: return 0
-        if self.tmp is not None: data = os.pread(self.tmp.fileno(), want, self.pos)
+        if self.tmp is not None: data = pread(self.tmp.fileno(), want, self.pos)
         elif self.length <= SMALL:
             if self.data is None: self._load()
             data = self.data[self.pos:self.pos + want]
@@ -372,21 +422,28 @@ def _open(path, identity): return Nup(path)
 def open_nup(path):
     """The Nup of a .nup file, kept while the file is unchanged"""
     path = os.path.abspath(os.fsdecode(path))
-    st = os.stat(path)
+    st = stat(path)
     return _open(path, (st.st_dev, st.st_ino, st.st_size, st.st_mtime_ns, st.st_ctime_ns))
 
 
 def split(path):
-    """(the .nup file's path, the rest) of `<file>.nup:<rest>`, split at the last '.nup:', or None for any other path"""
+    """(the .nup file's path, the rest) of `<file>.nup:<rest>`, split at the last '.nup:', or None for any other path. The rest is always written with '/':
+    on Windows a path joined to a package (pathlib, os.path.join) has '\\' after the colon (`C:\\games\\game.nup:update\\458752\\romfs`), read the same as '/'
+    (a drive letter's colon is not '.nup:')"""
     p = os.fsdecode(path)
     i = p.rfind('.nup:')
-    return (p[:i + 4], p[i + 5:].strip('/')) if i >= 0 else None
+    if i < 0: return None
+    rest = p[i + 5:]
+    if os.sep != '/': rest = rest.replace(os.sep, '/')
+    return p[:i + 4], rest.strip('/')
 
 
 def is_nup(path):
     """Whether path is a NUP file itself (no selector): its magic, whatever its name"""
     try:
-        with builtins.open(path, 'rb') as f: return f.read(3) == MAGIC[:3]
+        fd = open_fd(path)
+        try: return _stat.S_ISREG(os.fstat(fd).st_mode) and pread(fd, 3, 0) == MAGIC[:3]
+        finally: os.close(fd)
     except (OSError, TypeError, ValueError): return False
 
 
@@ -395,7 +452,7 @@ def resolve(path):
     s = split(path)
     if not s: return None
     f, rest = s
-    try: st = os.stat(f)
+    try: st = stat(f)
     except OSError: return None
     if not _stat.S_ISREG(st.st_mode): return None
     nup = open_nup(f)   # Error when the file is not a NUP file

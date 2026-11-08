@@ -23,6 +23,12 @@ __attribute__((visibility("default"))) int nxhost_framegen_status(char *buf, int
 // Where the letterboxed picture sits in the window's free space, never scaled or cropped: x 0 = left, 1 = right; y 0 = top, 1 = bottom (as the user sees it); 0.5 = centred,
 // the default. Taken from the next present; values outside 0..1 are clamped
 __attribute__((visibility("default"))) void nxhost_picture_place(float x, float y);
+// The launcher's overlay drawn into each presented image (vka_present.c ovl_draw), so the app's window over the SurfaceView stays still: slot 0 the top-left block (the build tag),
+// 1 the top-right one (the frame rate and the other items); px rows of stride bytes, w x h premultiplied RGBA8 pixels (an Android ARGB_8888 bitmap's), copied; px NULL or
+// w 0 empties the slot. Taken from the next present. 1 = the present takes it, 0 = it does not (DM_VK_OVERLAY=0, or its image or pipeline failed): the launcher shows it
+__attribute__((visibility("default"))) int nxhost_overlay_set(int slot, const void *px, int w, int h, int stride);
+// 1 = the present has drawn the overlay (the launcher hides its own views), 0 = not yet, -1 = it does not (the launcher's views show it)
+__attribute__((visibility("default"))) int nxhost_overlay_state(void);
 // The readiness check (vka_readiness.c): what the Vulkan device and driver report, as "key=value" lines in buf (n bytes, at least 64), on the driver the replay would load
 // (DM_VK_DRIVER, read at the first call in the process: set it before). Its own instance, no device; callable before nxhost_main. 0 = facts written, 1 = an "error=" line
 // says why the facts stop there, -1 = no buffer

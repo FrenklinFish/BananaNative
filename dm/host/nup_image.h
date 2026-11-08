@@ -18,6 +18,7 @@
 #pragma once
 #include <errno.h>
 #include <fcntl.h>
+#include <limits.h>
 #include <pthread.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -91,6 +92,25 @@ static int nup_split(const char *spec, char *file, size_t fn, char *sel, size_t 
 }
 static int nup_is_spec(const char *spec) { char file[1100], sel[128]; return spec && nup_split(spec, file, sizeof file, sel, sizeof sel); }
 
+// A .nup's file part may be "fd:<n>/<name>" in place of a path: descriptor n, which the launcher opened for a .nup picked with Android's file picker (an app may open
+// such a document only through its provider, by no path; android/NUP.md "A .nup used where it is"). <name> is only for messages. Each image opens its own duplicate
+// (reads are pread only, so the shared file position never matters) and closes it with the image; the launcher's descriptor stays open for the process's life.
+// 1 and *fd for that form, 0 for a path; -1 (errno EBADF) for the form with a descriptor that is not open
+static int nup_fd_spec(const char *file, int *fd) {
+    if (strncmp(file, "fd:", 3) || file[3] < '0' || file[3] > '9') return 0;
+    char *end; long n = strtol(file + 3, &end, 10);
+    if ((*end != '/' && *end) || n < 0 || n > INT_MAX) return 0;
+    if (fcntl((int)n, F_GETFD) < 0) { errno = EBADF; return -1; }
+    *fd = (int)n; return 1;
+}
+// A read descriptor of the .nup a spec's file part names (its path, or a duplicate of fd:<n>); -1 with errno
+static int nup_open_file(const char *file) {
+    int fd = -1, k = nup_fd_spec(file, &fd);
+    if (k < 0) return -1;
+    if (k) return fcntl(fd, F_DUPFD_CLOEXEC, 0);
+    return open(file, O_RDONLY | O_CLOEXEC);
+}
+
 static uint32_t nup_u32(const uint8_t *p) { uint32_t v; memcpy(&v, p, 4); return v; }
 static uint64_t nup_u64(const uint8_t *p) { uint64_t v; memcpy(&v, p, 8); return v; }
 
@@ -100,8 +120,8 @@ static romfs_img *nup_image_open(const char *spec, char *why, size_t wn) {
     int fd = -1, e = EINVAL; struct stat st;
 #define NUP_BAD(...) do { snprintf(why, wn, __VA_ARGS__); goto bad; } while (0)
     if (!nup_split(spec, file, sizeof file, sel, sizeof sel)) NUP_BAD("not a .nup path");
-    if ((fd = open(file, O_RDONLY)) < 0) { e = errno; NUP_BAD("cannot open %s", file); }
-    if (fstat(fd, &st) || !romfs_image_read(fd, sb, sizeof sb, 0)) { e = errno ? errno : EINVAL; NUP_BAD("cannot read the superblock"); }
+    if ((fd = nup_open_file(file)) < 0) { e = errno; NUP_BAD("cannot open %s", file); }
+    if (fstat(fd, &st) || !S_ISREG(st.st_mode) || !romfs_image_read(fd, sb, sizeof sb, 0)) { e = errno ? errno : EINVAL; NUP_BAD("cannot read the superblock (not a file?)"); }
     e = EINVAL;
     if (memcmp(sb, "NUP\x01", 4)) NUP_BAD("not a NUP file (magic)");
     uint16_t hsize; memcpy(&hsize, sb + 4, 2);

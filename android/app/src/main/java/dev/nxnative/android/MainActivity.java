@@ -42,7 +42,7 @@ import java.util.List;
  * readable width, centered on a wide window. The activity handles rotation itself (configChanges), so a size change builds the page again (onConfigurationChanged).
  */
 public final class MainActivity extends Activity {
-    private static final int PICK_GAME = 1, PICK_PACK = 2, PICK_DLL = 3, PICK_DRIVER = 4, PICK_NUP = 5;
+    private static final int PICK_GAME = 1, PICK_PACK = 2, PICK_DLL = 3, PICK_DRIVER = 4, PICK_NUP = 5, PICK_NUP_HERE = 6;
 
     private final List<Game> games = new ArrayList<>();
     private LinearLayout gameBox;   // the game cards (refresh)
@@ -129,7 +129,7 @@ public final class MainActivity extends Activity {
         LinearLayout c = Ui.card(this);
         c.setBackground(Ui.round(Ui.col(this, R.color.bn_warn_tint), dp(20), Ui.col(this, R.color.bn_banana_deep), dp(1)));
         c.addView(Ui.heading(this, "Allow file access"));
-        Ui.add(c, Ui.body(this, "Needed to read your game dump."), 4);
+        Ui.add(c, Ui.body(this, "Needed to read a dump folder where it is. A .nup file works without it, and a dump folder can be copied into the app instead."), 4);
         Ui.add(c, Ui.button(this, "Allow", Ui.Kind.PRIMARY, v -> openAccessSettings()), 14, Ui.wrap());
         return c;
     }
@@ -165,6 +165,18 @@ public final class MainActivity extends Activity {
         play.addView(capRow.view);
         play.addView(new Ui.Setting(this, "📳", "Rumble", null).toggle(this, Prefs.rumble(this), (b, on) -> Prefs.rumbleDefault(this, on))
                 .value("On the controller, or the phone without one").view);
+        play.addView(new Ui.Setting(this, "🚀", "Use fast cores", null).toggle(this, Prefs.pinThreads(this), (b, on) -> Prefs.pinThreadsDefault(this, on))
+                .value("Keeps the busiest threads off the small cores").view);
+        Ui.Setting xbox = new Ui.Setting(this, "🅰️", "Xbox button label swap", null).chevron(this);
+        xbox.view.setOnClickListener(v -> new AlertDialog.Builder(this).setTitle("Xbox button label swap")
+                .setSingleChoiceItems(Prefs.XBOX_NAMES, Prefs.xboxButtons(this), (d, w) -> { Prefs.xboxButtonsDefault(this, w); xbox.value(Prefs.xboxLabel(w)); d.dismiss(); })
+                .setNegativeButton("Cancel", null).show());
+        xbox.value(Prefs.xboxLabel(Prefs.xboxButtons(this)));
+        play.addView(xbox.view);
+        Ui.Setting padMap = new Ui.Setting(this, "🕹️", "Button mapping", null).chevron(this);
+        padMap.view.setOnClickListener(v -> PadMapUi.forDefault(this, () -> padMap.value(PadMapUi.label(this, null))));
+        padMap.value(PadMapUi.label(this, null));
+        play.addView(padMap.view);
         lsfgRow = new Ui.Setting(this, "✨", "Frame generation", v -> frameGen()).chevron(this);
         play.addView(lsfgRow.view);
         TextView hint = Ui.small(this, "A game's own settings (⋯ on its card) override these.");
@@ -175,7 +187,10 @@ public final class MainActivity extends Activity {
         LinearLayout sys = settingsCard(content);
         gpuRow = new Ui.Setting(this, "🎮", "GPU driver", v -> GpuDriver.dialog(this, PICK_DRIVER)).chevron(this);   // custom GPU drivers (GpuDriver.java)
         sys.addView(gpuRow.view);
-        sys.addView(new Ui.Setting(this, "📁", "Folders", v -> Folders.dialog(this)).value("Game, pack and save folders").chevron(this).view);   // the game, pack and save folders, kept across updates (Folders.java)
+        sys.addView(new Ui.Setting(this, "📁", "Folders", v -> Folders.dialog(this)).value("Game, pack and save folders").chevron(this).view);
+        // some phones stop or slow a background job once the screen is off (GitHub discussion 58): Home keeps the screen on while preparing (Ondevice), the service its wake lock
+        sys.addView(new Ui.Setting(this, "🔆", "Keep the screen on while preparing", null).toggle(this, Prefs.keepScreenPreparing(this), (b, on) -> Prefs.keepScreenPreparing(this, on))
+                .value("While Home shows a game being prepared").view);   // the game, pack and save folders, kept across updates (Folders.java)
 
         Ui.add(content, Ui.section(this, "Help"), Ui.SECTION_GAP);
         LinearLayout help = settingsCard(content);
@@ -189,9 +204,9 @@ public final class MainActivity extends Activity {
         TextView tag = Ui.chip(this, Prefs.buildTag(this));   // which build this is (also the first line of every log)
         tag.setTextIsSelectable(true);
         about.addView(tag, Ui.wrap());
-        StringBuilder ids = new StringBuilder();
-        for (Profile p : Profile.all()) ids.append(ids.length() == 0 ? "" : ", ").append(p.titleId);
-        TextView t = Ui.small(this, "Title IDs: " + ids + "\nBased on nxnative by seedds. LSFG from Eden (GPL-3.0)." + (BuildConfig.NX_LSFG ? "" : " Built without LSFG."));
+        StringBuilder ids = new StringBuilder();   // the games this build includes, so a player can tell whether it has theirs (Profile.missing points here)
+        for (Profile p : Profile.all()) ids.append("\n· ").append(p.name).append(" (").append(p.titleId).append(")");
+        TextView t = Ui.small(this, "Games in this app:" + ids + "\n\nBased on nxnative by seedds. LSFG from Eden (GPL-3.0)." + (BuildConfig.NX_LSFG ? "" : " Built without LSFG."));
         t.setTextIsSelectable(true);
         Ui.add(about, t, 10);
         refreshSettings();
@@ -236,7 +251,7 @@ public final class MainActivity extends Activity {
         String fg = i.getStringExtra("frontend_game");   // FrontendLaunch: a game it could not start at once
         if (fg != null) { fromFrontend(new File(fg)); return; }
         String ag = i.getStringExtra("add_game");   // Add game's own path for a picked folder or .nup (gamePicked), without the picker
-        if (ag != null) { if (!needAccess()) gamePicked(new File(ag)); return; }
+        if (ag != null) { if (!needAccess(new File(ag))) gamePicked(new File(ag)); return; }
         String game = i.getStringExtra("game");
         if (game == null) return;
         File dir = new File(game);   // a game folder or a .nup (NUP.md)
@@ -255,7 +270,7 @@ public final class MainActivity extends Activity {
     private void fromFrontend(File game) {
         if (settingsPage) page(false);
         refresh();   // FrontendLaunch may have added its card
-        if (needAccess()) return;
+        if (needAccess(game)) return;
         for (Game g : games) if (GameList.samePath(g.gameDir, game.getPath())) { launch(g); return; }
         gamePicked(game);
     }
@@ -267,10 +282,12 @@ public final class MainActivity extends Activity {
         onResumeViews();
         Ondevice.resume(this);
         Updater.resume(this);   // back from "Install unknown apps" with an update download waiting
+        ExitWatch.resume(this);
+        updateTick();   // a game that ended unexpectedly: "The game stopped unexpectedly", once (and every 2 s while a game runs and Home shows)
     }
 
     private void onResumeViews() {
-        if (accessCard != null) accessCard.setVisibility(Environment.isExternalStorageManager() ? View.GONE : View.VISIBLE);
+        if (accessCard != null) accessCard.setVisibility(Environment.isExternalStorageManager() || !listNeedsAccess() ? View.GONE : View.VISIBLE);
         bananas.setRunning(true);
         refreshSettings();
     }
@@ -280,13 +297,49 @@ public final class MainActivity extends Activity {
         resumed = false;
         bananas.setRunning(false);
         Ondevice.pause(this);
+        ExitWatch.pause();
+        updateUi.removeCallbacks(updateRun);
         super.onPause();
+    }
+
+    // ---- A game card whose shaders are updated in the background (Ondevice.autoUpdate) while it stays playable: its state line carries the update's count and time left,
+    // every 2 s while Home shows ("Ready · updating shaders 1,234 / 22,852 · about 12 min left"); when the job is done the cards are checked again ----
+    private final java.util.Map<TextView, Game> updating = new java.util.HashMap<>();
+    private final android.os.Handler updateUi = new android.os.Handler(android.os.Looper.getMainLooper());
+    private final Runnable updateRun = this::updateTick;
+    private String updateDone;
+
+    private void updateTick() {
+        updateUi.removeCallbacks(updateRun);
+        if (!resumed || updating.isEmpty()) return;
+        boolean done = false;
+        for (java.util.Map.Entry<TextView, Game> e : updating.entrySet()) {
+            if (e.getKey().getParent() == null) continue;   // a card of an older list
+            Game g = e.getValue();
+            Job j = Ondevice.cardJob(this, g);
+            if (j == null) {   // no update runs for this card: say why instead of "updating" with no count
+                String why = Ondevice.busy(this) ? "Ready · shader update waits for the other game's preparing"
+                        : Ondevice.deltaShaders(new File(g.packDir), g.titleId) < 0 ? "Ready · new shaders: \u22ef \u203a Prepare to update them" : "Ready · shader update starting";
+                Ui.status(e.getKey(), why, R.color.bn_leaf);
+                continue;
+            }
+            String s = j.state();
+            if (s.equals("done")) {   // once per finished job: a card that still reads as updating after the check is not checked again and again
+                String key = j.file.getPath() + ":" + j.file.lastModified();
+                if (!key.equals(updateDone)) { updateDone = key; done = true; }
+                continue;
+            }
+            Ui.status(e.getKey(), ShaderLibs.updatingText(java.util.Locale.getDefault(), j.shadersDone(), j.shadersTotal(), Job.etaText(j.shadersEta()), !s.equals("running")), R.color.bn_leaf);
+        }
+        if (done) { refresh(); return; }   // the new library is in: the cards' states are checked again ("Ready")
+        updateUi.postDelayed(updateRun, 2000);
     }
 
     private int dp(int v) { return Math.round(v * getResources().getDisplayMetrics().density); }
 
     /** Home's games: a heading with Add game over one card per game (also over no card while a game is being prepared); with none, a single card that says what to do */
     void refresh() {
+        updating.clear();
         games.clear();
         games.addAll(Game.load(this));
         if (gameBox == null) return;
@@ -360,7 +413,7 @@ public final class MainActivity extends Activity {
         name.setEllipsize(TextUtils.TruncateAt.END);
         info.addView(name);
         boolean other = Profile.of(g.titleId) == null;   // no profile in this APK: it cannot run here (Profile.missing says why)
-        TextView st = other ? Ui.status(this, "Not supported", R.color.bn_danger) : Ui.status(this, "Checking…", R.color.bn_text_2);
+        TextView st = other ? Ui.status(this, "Not in this app version", R.color.bn_danger) : Ui.status(this, "Checking…", R.color.bn_text_2);
         LinearLayout.LayoutParams sp = Ui.wrap();
         sp.topMargin = dp(2);
         info.addView(st, sp);
@@ -368,8 +421,13 @@ public final class MainActivity extends Activity {
         top.addView(Ui.more(this, "Manage " + g.name, v -> manage(g)));
         c.addView(top);
         Ui.Action play = Ui.action(this, R.drawable.ic_play, "Play", Ui.Kind.PRIMARY, v -> launch(g));
+        if (other) {   // nothing on this card can work in this app: the sentence, and no button (⋯ still has its folders, saves and Remove)
+            Ui.add(c, Ui.body(this, Profile.missing(g.titleId, g.name)), 12);
+            c.setOnLongClickListener(v -> { manage(g); return true; });
+            return c;
+        }
         Ui.add(c, play, 16);
-        if (!other) check(g, st, play, info);
+        check(g, st, play, info);
         c.setOnLongClickListener(v -> { manage(g); return true; });
         return c;
     }
@@ -381,7 +439,12 @@ public final class MainActivity extends Activity {
         boolean shadersOnly;   // only the shader library is missing
         boolean playable;      // ... and an older library of the same ABI plays while the update makes it (Pack.playableLibrary)
         boolean legacy;        // ... or only one made before versioned updates, played with a warning (Pack.legacyLibrary)
-        String detail = "";    // what was compared (BuildCheck: the build IDs that differ), shown small under the state and logged
+        boolean anyway;        // Play still starts it after a warning (an untested game version, another version's RomFS: MainActivity.launch)
+        boolean resume;        // a Prepare beside the dump stopped part way: the button continues it
+        boolean repick;        // the game's file is gone (GameFile): the button picks it again
+        File saveGone;         // the picked save folder is gone: the button asks (the app's save, or pick the folder again)
+        String reason = "";    // one short line under the state: why, and what the button does
+        String detail = "";    // the technical part (what was compared: build IDs, the pack's error, its folder), in the card's Details and the log
 
         Problem(String label, boolean prepare) { this.label = label; this.prepare = prepare; }
     }
@@ -389,16 +452,47 @@ public final class MainActivity extends Activity {
     /** The card's short state when the game cannot start as it is; null when it can */
     private Problem problem(Game g) {
         File pd = new File(g.packDir), gd = new File(g.gameDir);
+        File saveGone = Folders.goneSave(this, g);
+        if (saveGone != null) {   // a picked save folder that is gone: the start would make a new empty save there, so it asks first
+            Problem s = new Problem("Save folder gone", false);
+            s.saveGone = saveGone;
+            s.reason = GameFile.saveGoneText(saveGone.getName());
+            s.detail = saveGone.getPath();
+            return s;
+        }
+        String gone = gone(g);
+        if (gone != null) {   // deleted, moved, renamed (or, for a .nup used where it is, its permission taken back): nothing else can be told
+            Problem s = new Problem("Game file gone", false);
+            s.repick = true;
+            s.reason = GameFile.goneText(gd.getName());
+            s.detail = gone;
+            return s;
+        }
         boolean dump = Ondevice.isDump(gd);
         Pack p;
-        try { p = Pack.read(pd); } catch (IOException e) { return new Problem(dump ? "Needs preparing" : "No pack", dump); }
-        if (p.unfinishedModule() != null) return new Problem(dump ? "Needs preparing" : "Pack unfinished", dump);
+        String readError = null;
+        try { p = Pack.read(pd); } catch (IOException e) { p = null; readError = e.getMessage(); }
+        String unfinished = p == null ? null : p.unfinishedModule();
+        if (p == null || unfinished != null) {
+            // Why it needs preparing, so the card does not only say "Needs preparing": no pack yet, one that cannot be read, code left unfinished, or a Prepare that
+            // stopped part way (its job beside the dump: the button continues it rather than asking to start over)
+            Job j = stoppedJob(gd, g.titleId);
+            Problem s = new Problem(j != null ? "Preparing not finished" : dump ? "Needs preparing" : p == null ? "No pack" : "Pack unfinished", dump || j != null);
+            s.resume = j != null;
+            s.reason = dump || j != null ? PrepareText.needsPreparing(pd.isDirectory() && readError != null && new File(pd, "pack.tsv").isFile(), unfinished != null, j != null)
+                    : "This game has no pack that fits, and it is not a dump Prepare can start from. ⋯ › Folders picks a pack.";
+            s.detail = (j != null ? j.statusText(false) + "\n\n" : "") + (readError != null ? readError : unfinished + ".android.key is missing: the rewrite of " + unfinished + " did not finish.")
+                    + "\nPack: " + pd + (j != null ? "\n" + j.errorDetail() : "");
+            return s;
+        }
         if (PackCheck.rewriting(this, pd, gd, p.titleId) != null) return new Problem("Preparing…", false);
         BuildCheck.Result b = BuildCheck.build(p, gd);
         if (!b.ok()) {
             android.util.Log.w("nxnative", g.titleId + " " + g.gameDir + " with pack " + g.packDir + ": " + b.label() + ": " + b.detail);
             Problem s = new Problem(b.label(), dump && (b.kind == BuildCheck.Kind.OTHER_BUILD || b.kind == BuildCheck.Kind.MISSING));   // Prepare makes a pack of the dump's build; it cannot fix unreadable files, an unsupported build or another version's data
-            s.detail = b.detail;
+            s.anyway = b.kind == BuildCheck.Kind.UNSUPPORTED || b.kind == BuildCheck.Kind.ROMFS;
+            s.reason = s.anyway ? "Untested: it may not start or may crash. Play asks first." : s.prepare ? "The pack does not fit this dump. Prepare makes a new one." : "";
+            s.detail = b.message + "\n\n" + b.detail + "\nPack: " + pd;
             return s;
         }
         if (Pack.libraryProblem(pd, g.titleId) != null) {
@@ -406,14 +500,38 @@ public final class MainActivity extends Activity {
             s.shadersOnly = true;
             s.playable = Pack.playableLibrary(pd, g.titleId) != null;
             s.legacy = !s.playable && Pack.legacyLibrary(pd, g.titleId) != null;
+            if (!s.playable && !s.legacy) {
+                s.reason = dump ? "This app version needs new shaders. Prepare shaders makes them from your dump." : "The pack has no shaders for this app version.";
+                s.detail = Pack.libraryProblem(pd, g.titleId);
+            }
             return s;
         }
         return null;
     }
 
+    /** Why a game's file or folder is gone, for Details; null when it is there (or cannot be told: no All files access for a game read by its path) */
+    String gone(Game g) {
+        File gd = new File(g.gameDir);
+        if (PickedNup.is(this, g.gameDir)) return PickedNup.problem(this, gd);
+        boolean readable = Environment.isExternalStorageManager() || CopyPlan.inApp(AppStorage.root(this), g.gameDir);
+        return GameFile.gone(gd.exists(), readable) ? gd.getPath() + " is not there." : null;
+    }
+
+    /** A Prepare of this dump that stopped part way (its job.json beside the dump, not done), else null */
+    private static Job stoppedJob(File dump, String titleId) {
+        File f = Job.fileOf(DumpCheck.workOf(dump, titleId));
+        try {
+            Job j = f.isFile() ? Job.read(f) : null;
+            return j != null && !"done".equals(j.state()) && !j.state().isEmpty() ? j : null;
+        } catch (IOException e) {
+            return null;
+        }
+    }
+
     /** The card's state, checked off the main thread (NSO headers, the stamp, and for a ready pack the rewriter's key, which hashes the modules) */
-    private void check(Game g, TextView st, Ui.Action play, LinearLayout info) {
+    private void check(Game card, TextView st, Ui.Action play, LinearLayout info) {
         new Thread(() -> {
+            Game g = Folders.repack(this, card);   // a remembered pack folder that is gone: the usual search instead (app storage first)
             // An APK update whose shaders did not change: the pack's older library becomes this version's by its header (Pack.restamp), before anything else is decided
             String restamped = Pack.restamp(new File(g.packDir), g.titleId);
             if (restamped != null) android.util.Log.i("nxnative", g.titleId + ": shader library v-" + restamped + " taken over as v-" + BuildConfig.NX_DMSH_VK_CHAIN + " (restamp)");
@@ -426,16 +544,28 @@ public final class MainActivity extends Activity {
                 // An APK update's new shaders: made in the background with no question when the pack's older library is one the delta manifest knows (Ondevice.autoUpdate)
                 if (problem != null && problem.shadersOnly && problem.prepare) Ondevice.autoUpdate(this, new File(g.gameDir), new File(g.packDir), g.titleId);
                 if (problem == null) Ui.status(st, "Ready", R.color.bn_leaf);
-                else if (problem.playable) Ui.status(st, "Ready · updating shaders", R.color.bn_leaf);
+                else if (problem.playable) { Ui.status(st, "Ready · updating shaders", R.color.bn_leaf); updating.put(st, g); updateTick(); }   // the count follows (updateTick)
                 else if (problem.legacy) Ui.status(st, "Ready · shaders need one update", R.color.bn_accent);
-                else Ui.status(st, problem.label, problem.prepare ? R.color.bn_accent : R.color.bn_danger);
-                if (problem != null && !problem.detail.isEmpty()) {   // which build IDs (or which file) the state is about
-                    TextView d = Ui.small(this, problem.detail);
-                    d.setTextIsSelectable(true);
-                    d.setTextSize(11);
-                    LinearLayout.LayoutParams dl = Ui.wrap();
+                else Ui.status(st, problem.label, problem.prepare || problem.anyway ? R.color.bn_accent : R.color.bn_danger);
+                if (problem != null && !problem.playable && !problem.legacy && !problem.reason.isEmpty()) {   // why, and what the button does, in a line
+                    LinearLayout.LayoutParams rl = Ui.fill();
+                    rl.topMargin = dp(4);
+                    info.addView(Ui.small(this, problem.reason), rl);
+                }
+                if (problem != null && !problem.detail.isEmpty()) {   // which build IDs (or which file) the state is about: closed under Details, copyable
+                    LinearLayout.LayoutParams dl = Ui.fill();
                     dl.topMargin = dp(2);
-                    info.addView(d, dl);
+                    info.addView(Ui.details(this, problem.detail), dl);
+                }
+                if (problem != null && problem.anyway) play.setText("Play (untested)");
+                if (problem != null && problem.saveGone != null) {
+                    play.setText("Fix the save folder");
+                    play.setOnClickListener(v -> Folders.saveGoneDialog(this, g, problem.saveGone));
+                }
+                if (problem != null && problem.repick) {
+                    play.setText("Pick it again");
+                    play.setIcon(R.drawable.ic_add);
+                    play.setOnClickListener(v -> relink(g));
                 }
                 if (problem != null && problem.legacy) {   // Play stays Play; a chip says why the shaders want one more update
                     TextView n = Ui.warnChip(this, "Shaders need one update", "Shaders need one update", ShaderLibs.LEGACY_WARNING);
@@ -444,9 +574,9 @@ public final class MainActivity extends Activity {
                     info.addView(n, wl);
                 }
                 if (problem != null && problem.prepare && !problem.playable && !problem.legacy) {   // the big button prepares (Ondevice asks first and says what it will make)
-                    play.setText(problem.shadersOnly ? "Prepare shaders" : "Prepare");
+                    play.setText(problem.resume ? "Continue preparing" : problem.shadersOnly ? "Prepare shaders" : "Prepare");
                     play.setIcon(R.drawable.ic_build);
-                    play.setOnClickListener(v -> { if (!needAccess()) Ondevice.prepare(this, new File(g.gameDir), false); });
+                    play.setOnClickListener(v -> { if (!needAccess(new File(g.gameDir))) Ondevice.prepare(this, new File(g.gameDir), false); });
                 }
                 if (!Boolean.FALSE.equals(code)) return;
                 // A pack whose code other tools made: a small chip; its tap says what that means
@@ -459,13 +589,13 @@ public final class MainActivity extends Activity {
         }, "nx-pack-check").start();
     }
 
+    /** The game's Manage sheet, also from its progress card's ⋯ while it is being prepared (Ondevice) */
+    void manageGame(Game g) { manage(g); }
+
     /**
      * A game's Manage sheet (⋯ on its card, or a long press): a list of actions (its folders, its settings, its log, its saves, Prepare again for a dump), its facts
      * (title ID, folders) below, and, apart at the bottom, Remove from the list (asked first; it deletes nothing on the storage). Play never sits next to it.
      */
-    /** The game's Manage sheet, also from its progress card's ⋯ while it is being prepared (Ondevice) */
-    void manageGame(Game g) { manage(g); }
-
     private void manage(Game g) {
         LinearLayout box = new LinearLayout(this);
         box.setOrientation(LinearLayout.VERTICAL);
@@ -479,7 +609,7 @@ public final class MainActivity extends Activity {
         if (noProfile == null && Shortcuts.supported(this))
             Ui.add(box, new Ui.Setting(this, "🏠", "Add to home screen", v -> { d[0].dismiss(); Shortcuts.pin(this, g); }).value("A shortcut that starts this game").chevron(this).view, 0);
         Ui.add(box, new Ui.Setting(this, "📁", "Folders", v -> { d[0].dismiss(); Folders.dialog(this, g); }).chevron(this).view, 0);
-        Ui.add(box, new Ui.Setting(this, "💾", "Back up saves", v -> { d[0].dismiss(); SaveUi.backup(this, g); }).value("To " + SaveUi.backups(g)).chevron(this).view, 0);
+        Ui.add(box, new Ui.Setting(this, "💾", "Back up saves", v -> { d[0].dismiss(); SaveUi.backup(this, g); }).value(SaveUi.backupLine(this, g)).chevron(this).view, 0);
         Ui.add(box, new Ui.Setting(this, "↩️", "Restore saves", v -> { d[0].dismiss(); SaveUi.restoreList(this, g); }).chevron(this).view, 0);
         Ui.add(box, new Ui.Setting(this, "📥", "Import save", v -> { d[0].dismiss(); SaveUi.importPick(this, g); }).chevron(this).view, 0);
         if (Ondevice.isDump(new File(g.gameDir)) && noProfile == null)
@@ -491,7 +621,8 @@ public final class MainActivity extends Activity {
         if (Ondevice.shows(g))   // its card is the progress card: the job's own Manage (Forget, the deletes)
             Ui.add(box, new Ui.Setting(this, "⏳", "Preparing", v -> { d[0].dismiss(); Ondevice.manageJob(this); }).value("Forget the job or delete its working files").chevron(this).view, 0);
         Ui.add(box, new Ui.Setting(this, "📨", "Share log", v -> { d[0].dismiss(); shareLog(g.titleId); }).chevron(this).view, 0);
-        TextView info = Ui.small(this, "Title ID: " + g.titleId + "\nGame: " + g.gameDir + (Nup.isNup(new File(g.gameDir)) ? " (.nup)" : "") + "\nPack: " + g.packDir
+        TextView info = Ui.small(this, "Title ID: " + g.titleId + "\nGame: " + (PickedNup.is(this, g.gameDir) ? new File(g.gameDir).getName() + " (.nup used where it is, picked with the file picker)"
+                : g.gameDir + (Nup.isNup(new File(g.gameDir)) ? " (.nup)" : "")) + "\nPack: " + g.packDir
                 + "\nShaders: " + (lp == null ? "present (" + BuildConfig.NX_DMSH_VK_CHAIN + ")" : lp) + "\nSaves: " + (save != null ? save.getPath() : "not set"));
         info.setTextIsSelectable(true);
         info.setTextSize(12);
@@ -510,6 +641,23 @@ public final class MainActivity extends Activity {
         }
     }
 
+    /** A game in app storage (Copy into the app, GameCopy) or a .nup picked in place (PickedNup: its stand-in path is in app storage) is read without All files access */
+    boolean needAccess(File game) { return (game == null || !CopyPlan.inApp(AppStorage.root(this), game.getPath())) && needAccess(); }
+
+    /** Whether Home's access card is worth showing: no game yet, or one that is read where it is by its path */
+    private boolean listNeedsAccess() {
+        List<Game> l = Game.load(this);
+        if (l.isEmpty()) return true;
+        for (Game g : l) if (!CopyPlan.inApp(AppStorage.root(this), g.gameDir)) return true;
+        return false;
+    }
+
+    /** A game copied into the app (Add game › Copy into the app): it is added as a picked one */
+    void copied(File game) {
+        Toast.makeText(this, "Copied into the app: " + game.getName(), Toast.LENGTH_LONG).show();
+        gamePicked(game);
+    }
+
     boolean needAccess() {
         if (Environment.isExternalStorageManager()) return false;
         new AlertDialog.Builder(this).setTitle("Allow file access").setMessage("The app needs All files access to read your game dump. Allow it, then come back.")
@@ -526,7 +674,7 @@ public final class MainActivity extends Activity {
 
     /** Add game: the dump is a folder (base/, updates/) or one .nup file (NUP.md); the user says which, then the system picker opens for it */
     void addGame() {
-        if (needAccess()) return;
+        if (!Environment.isExternalStorageManager()) { addWithoutAccess(); return; }
         new AlertDialog.Builder(this).setTitle("Add game: your dump is…")
                 .setItems(new String[] {"A folder (with base/, and updates/ if any)", "A .nup file"}, (d, w) -> {
                     if (w == 0) pickFolder(PICK_GAME, "Pick your dump folder (with base/, and updates/ if any)");
@@ -535,10 +683,102 @@ public final class MainActivity extends Activity {
                 .setNegativeButton("Cancel", null).show();
     }
 
-    /** The system file picker for a .nup; its document is turned into its /storage path (PathUtil.documentToPath), as a picked folder is */
+    /**
+     * Add game without All files access: a .nup is used where it is (PickedNup: the picker's read permission, kept; nothing copied); a dump folder is copied into the
+     * app's own storage (GameCopy: the game opens its RomFS files by path, and the picker gives no path); or the user turns All files access on to read dumps where
+     * they are
+     */
+    private void addWithoutAccess() {
+        new AlertDialog.Builder(this).setTitle("Add game: your dump is…")
+                .setItems(new String[] {"A .nup file (used where it is)", "A dump folder (copied into the app: a folder needs All files access to be read where it is)",
+                        "Allow All files access"}, (d, w) -> {
+                    if (w == 0) pickNupHere();
+                    else if (w == 1) { Toast.makeText(this, "Pick your dump folder (with base/, and updates/ if any)", Toast.LENGTH_LONG).show(); GameCopy.pickTree(this); }
+                    else openAccessSettings();
+                })
+                .setNegativeButton("Cancel", null).show();
+    }
+
+    /** The file picker for a .nup used where it is (PickedNup) */
+    void pickNupHere() {
+        Toast.makeText(this, "Pick your game's .nup file", Toast.LENGTH_LONG).show();
+        startActivityForResult(PickedNup.pickIntent(), PICK_NUP_HERE);
+    }
+
+    /** The card whose gone file is being picked again (relink): the next picked game goes to it */
+    private Game relinkFor;
+
+    /**
+     * Pick the file again for a card whose file is gone (GameFile): a .nup with the file picker (used where it is without All files access, by its path with it), a
+     * dump folder with the folder picker (All files access). The picked file takes the card's place when it holds the same game (relinkTo)
+     */
+    void relink(Game g) {
+        boolean nup = g.gameDir.endsWith(Nup.EXT);
+        if (!nup && needAccess()) return;
+        relinkFor = g;
+        if (!nup) pickFolder(PICK_GAME, "Pick " + g.name + "'s dump folder again");
+        else if (Environment.isExternalStorageManager()) pickNup();
+        else pickNupHere();
+    }
+
+    /** The picked file in the card's place (its pack, settings and saves stay: they belong to the card and its title ID), when it holds the same game */
+    private void relinkTo(Game g, File game) {
+        new Thread(() -> {
+            String id = null, err;
+            try { id = Pack.titleIdOf(game); err = GameFile.relinkProblem(g.titleId, g.name, id, game.getName()); } catch (IOException e) { err = e.getMessage(); }
+            if (err == null) {
+                synchronized (Game.class) {
+                    List<Game> list = Game.load(this);
+                    int i = GameFile.index(list, g.gameDir);
+                    if (i >= 0) list.set(i, new Game(g.titleId, g.name, game.getPath(), g.packDir, list.get(i).used));
+                    else list.add(new Game(g.titleId, g.name, game.getPath(), g.packDir, g.used));
+                    Game.save(this, list);
+                }
+                if (!game.getPath().equals(g.gameDir)) PickedNup.forget(this, new File(g.gameDir));   // the old .nup's permission, when it was one used where it is
+            } else if (!game.getPath().equals(g.gameDir)) PickedNup.forget(this, game);   // a picked file of another game: not kept
+            String fe = err;
+            runOnUiThread(() -> {
+                if (isFinishing()) return;
+                if (fe != null) { error(fe); return; }
+                Toast.makeText(this, g.name + " now uses " + game.getName() + ".", Toast.LENGTH_LONG).show();
+                refresh();
+            });
+        }, "nx-relink").start();
+    }
+
+    /** A .nup picked to use where it is: its permission kept and the file opened off the main thread, then added as any picked game */
+    private void nupHere(Uri u) {
+        new Thread(() -> {
+            File f = null;
+            String err = null;
+            boolean streamed = false;
+            try { f = PickedNup.picked(this, u); } catch (PickedNup.Streamed e) { err = e.getMessage(); streamed = true; } catch (IOException e) { err = e.getMessage(); }
+            File ff = f;
+            String fe = err;
+            boolean fs = streamed;
+            runOnUiThread(() -> {
+                if (isFinishing()) return;
+                if (ff == null) {
+                    relinkFor = null;
+                    AlertDialog.Builder b = Ui.explain(this, "Cannot use this file", fe, u.toString()).setNegativeButton("OK", null);
+                    if (fs) b.setPositiveButton("Copy into the app", (d, w) -> GameCopy.copyNup(this, u));
+                    b.show();
+                    return;
+                }
+                if (relinkFor != null) { Game g = relinkFor; relinkFor = null; relinkTo(g, ff); return; }
+                addAll(List.of(ff), true);
+            });
+        }, "nx-pick-nup").start();
+    }
+
+    /**
+     * The system file picker for a .nup; its document is turned into its /storage path (PathUtil.documentToPath), as a picked folder is. A document without such a path
+     * (Recent, Downloads) is used where it is (PickedNup), so the picker asks for a lasting read permission too
+     */
     private void pickNup() {
         Toast.makeText(this, "Pick your game's .nup file", Toast.LENGTH_LONG).show();
-        Intent i = new Intent(Intent.ACTION_OPEN_DOCUMENT).addCategory(Intent.CATEGORY_OPENABLE).setType("*/*");
+        Intent i = new Intent(Intent.ACTION_OPEN_DOCUMENT).addCategory(Intent.CATEGORY_OPENABLE).setType("*/*")
+                .addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION | Intent.FLAG_GRANT_PERSISTABLE_URI_PERMISSION);
         i.putExtra(DocumentsContract.EXTRA_INITIAL_URI, Uri.parse("content://com.android.externalstorage.documents/document/primary%3A"));
         startActivityForResult(i, PICK_NUP);
     }
@@ -549,10 +789,13 @@ public final class MainActivity extends Activity {
         if (request == ReadinessActivity.REQUEST) { if (result == ReadinessActivity.FIX_DRIVER) GpuDriver.dialog(this, PICK_DRIVER); return; }   // its "Pick a GPU driver"
         if (result != RESULT_OK || data == null || data.getData() == null) return;
         if (request == PICK_DRIVER) { GpuDriver.picked(this, data.getData()); return; }
+        if (GameCopy.activityResult(this, request, data)) return;
         if (PackUi.documentResult(this, request, data.getData())) return;
+        if (SaveUi.documentResult(this, request, data.getData())) return;
+        if (request == PICK_NUP_HERE) { nupHere(data.getData()); return; }
         if (request == PICK_NUP) {
             String p = PathUtil.documentToPath(data.getData());
-            if (p == null) { error("That file is not on this phone's storage by a path the app can read (" + data.getData() + "). Pick it from the phone's storage (☰ › the phone's name), not from Recent or Downloads."); return; }
+            if (p == null) { nupHere(data.getData()); return; }   // Recent, Downloads: no path, but the file can be used where it is (PickedNup)
             gamePicked(new File(p));
             return;
         }
@@ -565,7 +808,6 @@ public final class MainActivity extends Activity {
         if (path == null) { error("That folder is not on this phone's storage (" + data.getData() + ")."); return; }
         File dir = new File(path);
         if (Folders.activityResult(this, request, dir)) return;
-        if (SaveUi.activityResult(this, request, dir)) return;
         if (PackUi.activityResult(this, request, dir)) return;
         if (request == PICK_GAME) gamePicked(dir);
         else if (request == PICK_PACK && pendingGame != null) { pendingPackPick = dir; addWithPack(pendingGame, pendingId, dir); }
@@ -576,6 +818,7 @@ public final class MainActivity extends Activity {
      * dump subfolders), all of which are added (addAll); a folder with one game is that game
      */
     private void gamePicked(File game) {
+        if (relinkFor != null) { Game g = relinkFor; relinkFor = null; relinkTo(g, game); return; }
         if (Nup.isNup(game) || Nup.wrongCase(game)) { nupPicked(game); return; }
         if (Pack.npdmOf(game) != null) { addAll(List.of(game), true); return; }
         List<File> found = PackFind.gamesIn(game);
@@ -590,7 +833,7 @@ public final class MainActivity extends Activity {
     /** A single .nup (NUP.md): its name and access checked here, the rest as every game (addAll) */
     private void nupPicked(File nup) {
         if (Nup.wrongCase(nup)) { error(nup.getName() + ": rename it so that its name ends in \".nup\" (lower case); the game and the tools read only that name."); return; }
-        if (!nup.canRead()) { error(nup + " cannot be read. Check that All files access is on."); return; }
+        if (!Nup.picked(nup) && !nup.canRead()) { error(nup + " cannot be read. Check that All files access is on."); return; }
         addAll(List.of(nup), true);
     }
 
@@ -627,7 +870,7 @@ public final class MainActivity extends Activity {
                 out.add(k);
                 if (Nup.wrongCase(g)) { k.error = g.getName() + ": rename it so that its name ends in \".nup\" (lower case)."; continue; }
                 try { k.id = Pack.titleIdOf(g); } catch (IOException e) { k.error = e.getMessage(); continue; }
-                String why = Profile.missing(k.id, single ? "This game" : g.getName());
+                String why = Profile.missing(k.id, single ? null : g.getName());
                 if (why != null) { k.unsupported = true; k.error = why; continue; }
                 k.name = Profile.of(k.id).name;
                 k.dump = Pack.isDump(g);
@@ -661,15 +904,15 @@ public final class MainActivity extends Activity {
                     Ondevice.prepare(this, k.game, false);
                     return;
                 }   // a dump of a supported build: Prepare makes its pack
+                if (k.found != null && k.found.otherBuild) { Ondevice.prepare(this, k.game, false); return; }   // a build this app does not list: Prepare says so and offers Try anyway
                 pendingGame = k.game;
                 pendingId = k.id;
                 String what = Nup.isNup(k.game) ? ".nup" : "folder";
                 // Why Prepare cannot start from it (another build than this app's, an incomplete dump), plainly; a pack made elsewhere can still be picked
                 String why = k.found != null && k.found.error != null ? k.found.error
                         : "No pack found for this " + what + ", and it is not a dump Prepare can start from.";
-                new AlertDialog.Builder(this).setTitle(k.found != null && k.found.version < 0 && k.found.titleId != null && Profile.of(k.found.titleId) != null && !DumpLayout.versions(k.game).isEmpty()
-                                ? "Another version of " + k.name : "No pack for this " + what)
-                        .setMessage(why + "\n\nIf you have a pack folder made for exactly this " + what + " (with pack.tsv), you can pick it.")
+                Ui.explain(this, "No pack for this " + what, why + "\n\nIf you have a pack folder made for exactly this " + what + " (with pack.tsv), you can pick it.",
+                                k.found != null ? k.found.detail : "")
                         .setPositiveButton("OK", null)
                         .setNeutralButton("Pick a pack folder", (d, w) -> pickFolder(PICK_PACK, "Pick the pack folder (android-pack, with pack.tsv)")).show();
             });
@@ -694,8 +937,8 @@ public final class MainActivity extends Activity {
         if (!ok.isEmpty()) m.append("Added: ").append(TextUtils.join(", ", ok)).append(".");
         if (!prepare.isEmpty()) m.append(m.length() > 0 ? "\n\n" : "").append("Needs Prepare: ").append(TextUtils.join(", ", prepare))
                 .append(". No pack that fits was found: its card's Prepare makes one on this phone (one game at a time).");
-        if (!unsupported.isEmpty()) m.append(m.length() > 0 ? "\n\n" : "").append("Not supported by this app: ").append(TextUtils.join(", ", unsupported))
-                .append(". This app runs: ").append(TextUtils.join(", ", profileIds())).append(".");
+        if (!unsupported.isEmpty()) m.append(m.length() > 0 ? "\n\n" : "").append("Not in this app version: ").append(TextUtils.join(", ", unsupported))
+                .append(". Install a build that includes them (Settings › About lists the games this one has).");
         if (!noPack.isEmpty()) m.append(m.length() > 0 ? "\n\n" : "").append("No pack found: ").append(TextUtils.join(", ", noPack))
                 .append(". Add it on its own to pick its pack folder.");
         if (!failed.isEmpty()) m.append(m.length() > 0 ? "\n\n" : "").append("Not added: ").append(TextUtils.join(" ", failed));
@@ -729,12 +972,6 @@ public final class MainActivity extends Activity {
             Game.save(this, list);
         }
         refresh();
-    }
-
-    private static List<String> profileIds() {
-        List<String> ids = new ArrayList<>();
-        for (Profile p : Profile.all()) ids.add(p.titleId);
-        return ids;
     }
 
     /**
@@ -797,18 +1034,43 @@ public final class MainActivity extends Activity {
     /** Remove from the list (the Manage sheet): says exactly what goes (the list entry) and what stays (the folders and the saves) */
     private void confirmRemove(Game g) {
         File save = Folders.save(this, g);
+        if (CopyPlan.isCopy(AppStorage.root(this), g.gameDir)) { confirmRemoveCopy(g, save); return; }
         Ui.confirmDanger(this, "Remove " + g.name + "?",
                 "Only the list entry goes. Your dump, its pack and your saves" + (save != null ? " (" + save.getPath() + ")" : "") + " stay on the phone; Add game brings it back.",
                 "Remove", () -> {
                     List<Game> list = Game.load(this);
                     list.removeIf(x -> x.gameDir.equals(g.gameDir));
                     Game.save(this, list);
+                    PickedNup.forget(this, new File(g.gameDir));   // a .nup used where it is: its read permission goes back (another entry of it keeps it)
                     refresh();
                 });
     }
 
-    void launch(Game g) {
-        if (needAccess()) return;
+    /** A game copied into the app: Remove can take the copy too (it is the app's own, and only Remove can free its space short of uninstalling) */
+    private void confirmRemoveCopy(Game g, File save) {
+        Runnable drop = () -> { List<Game> list = Game.load(this); list.removeIf(x -> x.gameDir.equals(g.gameDir)); Game.save(this, list); refresh(); };
+        new AlertDialog.Builder(this).setTitle("Remove " + g.name + "?")
+                .setMessage("This game is a copy in the app's storage (" + g.gameDir + "). Remove the list entry only, or delete the copy as well (it cannot be undone; "
+                        + "your original dump, the pack and your saves" + (save != null ? " (" + save.getPath() + ")" : "") + " stay).")
+                .setPositiveButton("Remove only", (d, w) -> drop.run())
+                .setNeutralButton("Delete the copy", (d, w) -> Ui.confirmDanger(this, "Delete the copy?", "Deleted: " + g.gameDir + ". This cannot be undone.", "Delete", () -> {
+                    drop.run();
+                    if (!GameCopy.deleteCopy(this, new File(g.gameDir))) error("Not all of " + g.gameDir + " could be deleted.");
+                }))
+                .setNegativeButton("Cancel", null).show();
+    }
+
+    void launch(Game card) {
+        if (needAccess(new File(card.gameDir))) return;
+        Game g = Folders.repack(this, card);   // a remembered pack folder that is gone: the usual search instead
+        File saveGone = Folders.goneSave(this, g);
+        if (saveGone != null) { Folders.saveGoneDialog(this, g, saveGone); return; }
+        String gone = gone(g);
+        if (gone != null) {
+            Ui.explain(this, "Game file gone", GameFile.goneText(new File(g.gameDir).getName()), gone)
+                    .setPositiveButton("Pick it again", (d, w) -> relink(g)).setNeutralButton("Remove", (d, w) -> confirmRemove(g)).setNegativeButton("Cancel", null).show();
+            return;
+        }
         String why = Profile.missing(g.titleId, g.name);
         if (why != null) { error(why); return; }
         if (SaveUi.busy(g.titleId)) { error("A save backup or restore of " + g.name + " is still working: Play waits for it."); return; }
@@ -820,14 +1082,32 @@ public final class MainActivity extends Activity {
         try {
             p = Pack.read(new File(g.packDir));
         } catch (IOException e) {
-            if (dump) packProblem(g, "The pack cannot be used: " + e.getMessage(), pickPack);
-            else error(e.getMessage());
+            if (dump) packProblem(g, "This game has no pack that can be used yet.", e.getMessage(), pickPack);
+            else Ui.explain(this, "No pack for this game", "This game has no pack that can be used. ⋯ › Folders picks one.", e.getMessage() + "\nPack: " + g.packDir)
+                    .setPositiveButton("OK", null).show();
             return;
         }
-        // The pack's code must be of the game build in the folder (else the game crashes at once), and of a build this app supports: a plain message, and Prepare
-        // again from the dump, instead of a start that cannot work
+        // The pack's code must be of the game build in the folder (else the game crashes at once): a plain message, and Prepare again from the dump, instead of a
+        // start that cannot work. A build this app has not been tested with (a pack made with Try anyway, or elsewhere) or another version's RomFS can still start:
+        // Play anyway, after a warning
         String bad = PackCheck.blocking(this, p, gd);
-        if (bad != null) { packProblem(g, bad, pickPack); return; }
+        if (bad != null) {
+            BuildCheck.Result b = BuildCheck.build(p, gd);
+            boolean untested = p.unfinishedModule() == null && PackCheck.rewriting(this, p.dir, gd, p.titleId) == null
+                    && (b.kind == BuildCheck.Kind.UNSUPPORTED || b.kind == BuildCheck.Kind.ROMFS);
+            if (!untested) {
+                int cut = bad.indexOf("\n\n");   // BuildCheck: the build IDs that differ follow the sentence
+                packProblem(g, cut > 0 ? bad.substring(0, cut) : bad, cut > 0 ? bad.substring(cut + 2) : "", pickPack);
+                return;
+            }
+            if (!playAnyway.contains(g.gameDir)) {
+                Ui.explain(this, "Untested game version", b.message + "\n\n" + PrepareText.ANYWAY_WARNING, b.detail + "\nPack: " + g.packDir)
+                        .setPositiveButton("Play anyway", (d, w) -> { playAnyway.add(g.gameDir); launch(g); })
+                        .setNegativeButton("Cancel", null).show();
+                return;
+            }
+            android.util.Log.w("nxnative", g.titleId + ": Play anyway: " + b.kind + ": " + b.detail);
+        }
         // The host loads <pack>/shaders/v-<its DMSH_VK_CHAIN>/dmsh_vk.lib: without it the game runs but draws nothing. Say so, and offer to prepare the shaders
         // (a dump) or another pack folder
         String lp = Pack.libraryProblem(new File(g.packDir), g.titleId);
@@ -855,12 +1135,15 @@ public final class MainActivity extends Activity {
         start(g);
     }
 
-    /** A pack that cannot run with this game folder: why, then Prepare again from the dump (the default), or another pack folder */
-    private void packProblem(Game g, String why, Runnable pickPack) {
+    /** The games Play anyway was chosen for in this process (an untested game version): asked once per launcher start, not at every Play */
+    private static final java.util.Set<String> playAnyway = new java.util.HashSet<>();
+
+    /** A pack that cannot run with this game folder: why (its technical part in Details), then Prepare again from the dump (the default), or another pack folder */
+    private void packProblem(Game g, String why, String detail, Runnable pickPack) {
         File gd = new File(g.gameDir);
         boolean dump = Ondevice.isDump(gd);
-        AlertDialog.Builder b = new AlertDialog.Builder(this).setTitle("The pack cannot start this game")
-                .setMessage((dump ? "Prepare again fixes it from your dump, on this phone.\n\n" : "") + why + "\n\nPack: " + g.packDir)
+        AlertDialog.Builder b = Ui.explain(this, "The pack cannot start this game", why + (dump ? "\n\nPrepare again makes a pack from your dump, on this phone." : ""),
+                        (detail.isEmpty() ? "" : detail + "\n") + "Pack: " + g.packDir)
                 .setNegativeButton("Cancel", null).setNeutralButton("Pick pack folder", (d, w) -> pickPack.run());
         if (dump) b.setPositiveButton("Prepare again", (d, w) -> Ondevice.prepare(this, gd, false));
         b.show();
@@ -868,7 +1151,9 @@ public final class MainActivity extends Activity {
 
     private void start(Game g) {
         Game.touch(this, g);   // the entry played last is the one kept if the list ever holds this game twice
-        startActivity(new Intent(this, GameActivity.class).putExtra("title_id", g.titleId).putExtra("name", g.name).putExtra("game", g.gameDir).putExtra("pack", g.packDir));
+        Intent intent = new Intent(this, GameActivity.class).putExtra("title_id", g.titleId).putExtra("name", g.name).putExtra("game", g.gameDir).putExtra("pack", g.packDir);
+        if (getIntent().getBooleanExtra("no_pause", false)) intent.putExtra("no_pause", true);
+        startActivity(intent);
     }
 
     /** The overlay's master switch and its items (Overlay.rows); the main screen's switch follows the master switch */
@@ -920,12 +1205,17 @@ public final class MainActivity extends Activity {
                 }).show();
     }
 
-    private void shareLog() { shareLog(null); }
+    private void shareLog() { shareLog((String) null); }
 
     /** The newest log of a game (titleId), or of any run (null) */
     private void shareLog(String titleId) {
         File log = LogProvider.newest(this, titleId);
         if (log == null) { error(titleId == null ? "No log yet." : "No log of this game yet."); return; }
+        shareLog(log);
+    }
+
+    /** One log file (ExitWatch's notice: the log of the run that ended) */
+    void shareLog(File log) {
         Uri uri = LogProvider.uri(log);
         Intent send = new Intent(Intent.ACTION_SEND).setType("text/plain").putExtra(Intent.EXTRA_STREAM, uri).putExtra(Intent.EXTRA_SUBJECT, "nxnative log " + log.getName());
         send.setClipData(ClipData.newRawUri(log.getName(), uri));

@@ -4,7 +4,7 @@
 # RomFS: a newer RDB than Hyrule Warriors: Age of Calamity's: 0002/root.rdb and system.rdb (indexes, with .rdx beside them) over 296 .fdata files named by KTID (a PDRK header, then
 # IDRK entries) and 0002/data/*.file, 12.6 GB; each entry is LZ4 or zlib in 16 KB chunks (shader_split.py idrk_data). Scenarios, messages and movies sit in loose folders beside it.
 # The update is a multi-program patch: beside the game's patch it carries a whole second program (title ID 0100C2A01A730001, 34 MB, its own control data), which main starts with
-# nn::oe::ExecuteProgram(1) (main+0xa31910); the host runs only program 0 (nx_extract picks program index 0's NCAs)
+# nn::oe::ExecuteProgram(1) (main+0xa31910); the host runs only program 0 (the dump holds program index 0's files)
 
 # ---- Identity ----
 title_id	0100C2A01A730000

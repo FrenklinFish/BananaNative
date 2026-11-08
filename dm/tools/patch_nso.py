@@ -145,7 +145,7 @@ if BUILD_ID not in PATCHES['CUTS']:
     cuts += resolve(IMG, TEXT_END, PATCHES['SDK_MATCH_CUTS'].get(NAME, []), outcomes=sdk_outcomes, red=False)
     if BUILD_ID not in own and (known or outcomes or sdk_outcomes):   # a build the game was brought up on lost nothing
         os.makedirs(outdir, exist_ok=True)
-        with open(os.path.join(outdir, NAME + '.match.tsv'), 'w') as f:
+        with open(os.path.join(outdir, NAME + '.match.tsv'), 'w', encoding='utf-8', newline='\n') as f:
             f.write(f'# {NAME} {BUILD_ID}: not a registered build. registered: build ID, display version, cuts; patch (the game profile\'s) or sdk (SDK-wide): name, cut offsets or -, implementation or why not\n')
             for bid, disp, n in known: f.write(f'registered\t{bid}\t{disp}\t{n}\n')
             for kind, got in (('patch', outcomes), ('sdk', sdk_outcomes)):
@@ -586,7 +586,7 @@ def trinity_completer_sites(img, ranges):
       ldr x20,[x8,#B]; add x9,x20,#C; ldar w8,[x9]; cmp w8,#2; b.ne ..
     It sets the release flag with the plain strb and returns without a wake if the state word (ldar) is 2. A load-acquire does not order an earlier plain store, so the flag can stay
     invisible while main resets the state to 0, reads the flag as 0 and parks for good (GitHub issue #1250, docs/reference/threads.md). The frame holds only the saved registers, so nothing
-    in the function reads x29"""
+    in the function reads x29 (ported from nxnative 7550be15)"""
     out, needle = [], struct.pack('<II', 0x88DFFD28, 0x7100091F)   # ldar w8,[x9]; cmp w8,#2
     for s, e in ranges:
         o = img.find(needle, s, e)
@@ -627,6 +627,8 @@ def in_parallel(fn, jobs):
     The workers are forked on each call, so they see the module's state as it is at that point."""
     if WORKERS < 2 or len(jobs) < 2:
         return [fn(*job) for job in jobs]
+    if 'fork' not in multiprocessing.get_all_start_methods():   # Windows: a spawned worker would import this script, which is the rewrite itself, not a module
+        return [fn(*job) for job in jobs]                          # of functions; the same results, one piece after the other
     with multiprocessing.get_context('fork').Pool(min(WORKERS, len(jobs))) as pool:
         return pool.starmap(fn, jobs)
 
@@ -1705,6 +1707,8 @@ if FAR:   # patch area before the base: file = text + ro + data (padded to 16K) 
     if BIG_TEXT and len(patch) > FRONT - 0x4000 and 'DM_PATCH_FRONT' not in os.environ:
         need = (len(patch) + 0x4000 + 0xFFFF) & ~0xFFFF
         print(f'{NAME}: patch area of {len(patch):#x} bytes does not fit in {FRONT:#x} before the base; rewriting again with {need:#x}', flush=True)
+        if os.name == 'nt':   # Windows has no exec: os.execve starts a new process and ends this one, and the caller would take this one's exit as the rewrite's
+            import subprocess; sys.exit(subprocess.call([sys.executable] + sys.argv, env=dict(os.environ, DM_PATCH_FRONT=hex(need))))
         os.execve(sys.executable, [sys.executable] + sys.argv, dict(os.environ, DM_PATCH_FRONT=hex(need)))
     assert len(patch) <= FRONT - 0x4000, f'patch area of {len(patch):#x} bytes does not fit in the {FRONT:#x} before the base'
     if TWO:
@@ -1715,9 +1719,9 @@ if FAR:   # patch area before the base: file = text + ro + data (padded to 16K) 
 else:
     open(P('patched.bin'), 'wb').write(IMG + bytearray(PATCH_OFF - len(IMG)) + patch)
 import hashlib
-with open(os.path.join(outdir, 'build_src.sha256'), 'w') as f:   # the same for every module: the rewriter and every patch file, by path from dm/tools
-    for src_ in (os.path.abspath(__file__), nso.__file__, nso_code.__file__, nso_asm.__file__, ue_cvar.__file__, ue_malloc.__file__, ue_region.__file__, os.path.join(os.path.dirname(ue_malloc.__file__), 'loader_census.py'), *PATCH_FILES): f.write(hashlib.sha256(open(src_, 'rb').read()).hexdigest() + f'  {os.path.relpath(os.path.abspath(src_), os.path.dirname(os.path.abspath(__file__)))}\n')
-with open(P('fixups.tsv'), 'w') as f:
+with open(os.path.join(outdir, 'build_src.sha256'), 'w', encoding='utf-8', newline='\n') as f:   # the same for every module: the rewriter and every patch file, by path from dm/tools
+    for src_ in (os.path.abspath(__file__), nso.__file__, nso_code.__file__, nso_asm.__file__, ue_cvar.__file__, ue_malloc.__file__, ue_region.__file__, os.path.join(os.path.dirname(ue_malloc.__file__), 'loader_census.py'), *PATCH_FILES): f.write(hashlib.sha256(open(src_, 'rb').read()).hexdigest() + f'  {os.path.relpath(os.path.abspath(src_), os.path.dirname(os.path.abspath(__file__))).replace(os.sep, "/")}\n')
+with open(P('fixups.tsv'), 'w', encoding='utf-8', newline='\n') as f:
     f.write(f'# PATCH_OFF\t{PATCH_OFF:#x}\n# KEY_PAGE_OFF\t{KEY_PAGE_OFF:#x}\n# KEY_PAGE_SIZE\t0x4000\n# TEXT_END\t{TEXT_END:#x}\n# RO_OFF\t{RO_OFF:#x}\n# DATA_OFF\t{DATA_OFF:#x}\n')
     if FAR: f.write(f'# IMAGE_SIZE\t{IMAGE_SIZE:#x}\n# FILE_IMAGE_LEN\t{FILE_IMAGE_LEN:#x}\n')   # patch area before the base (negative PATCH_OFF): whole image size, length of the image part of the file
     if TWO: f.write(f'# BACK_OFF\t{BACK_OFF:#x}\n# BACK_LEN\t{BACK_LEN:#x}\n')   # the back patch area (TWO): its offset in the image, and its length, the last bytes of the file
@@ -1732,16 +1736,16 @@ with open(P('fixups.tsv'), 'w') as f:
             assert re.fullmatch(r'[A-Z][A-Z0-9_]*', capability), f'invalid capability {capability}'
             f.write(f'# {capability}\t1\n')
     f.write(f'# BUILD_ID\t{BUILD_ID}\n')   # the host identifies the build by it: features with hard-coded addresses only run on the build they belong to
-with open(P('gates.tsv'), 'w') as f:
+with open(P('gates.tsv'), 'w', encoding='utf-8', newline='\n') as f:
     for ret, k, arg, orig in gates: f.write(f'{ret:#x}\t{k}\t{arg}\t{orig:#x}\n')
-with open(P('sites.tsv'), 'w') as f:
+with open(P('sites.tsv'), 'w', encoding='utf-8', newline='\n') as f:
     for a in sorted(kinds):
         if a not in done: f.write(f'{a:#x}\t{kinds[a][0]}\n')
     for wseg in windows: f.write(f'{wseg[0].address:#x}\tW\t{wseg[-1].address + 4:#x}\n')
     for a, (b, c) in jumps.items(): f.write(f'{a:#x}\tJ\t{b:#x}\t{c}\n')
     for a, tgt in tabjumps.items(): f.write(f'{a:#x}\tT\t' + ' '.join(f'{t:#x}' for t in tgt) + '\n')   # offset-table jump and all its targets
     for t, bes, n in spin_sites: f.write(f'{t:#x}\tS\t' + ' '.join(f'{b:#x}' for b in bes) + '\n')   # spin wait: its head and the back-edges that enter its copy
-with open(P('cuts.tsv'), 'w') as f:
+with open(P('cuts.tsv'), 'w', encoding='utf-8', newline='\n') as f:
     f.write(f'# BUILD_ID\t{BUILD_ID}\n')
     for off, ob, nb, why in cuts: f.write(f'{off:#x}\t{ob}\t{nb}\t{why}\n')   # Columns: offset, original bytes, new bytes, reason
 # The text words whose instructions no longer run as the file has them: every word this rewriter changed (sites, cuts, lock
@@ -1763,10 +1767,10 @@ def changed_runs():
         if runs and runs[-1][0] + runs[-1][1] == w: runs[-1][1] += 4
         else: runs.append([w, 4])
     return runs
-with open(P('changed.tsv'), 'w') as f:
+with open(P('changed.tsv'), 'w', encoding='utf-8', newline='\n') as f:
     f.write(f'# BUILD_ID\t{BUILD_ID}\n')
     for off, n in changed_runs(): f.write(f'{off:#x}\t{n:#x}\n')   # Columns: offset, length in bytes
-with open(P('obs.tsv'), 'w') as f:
+with open(P('obs.tsv'), 'w', encoding='utf-8', newline='\n') as f:
     f.write(f'# BUILD_ID\t{BUILD_ID}\n')
     for off, oid, ow, why in obs: f.write(f'{off:#x}\t{oid}\t{ow}\t{why}\n')
 print(NAME, stats, 'cuts', len(cuts), 'obs', len(obs), 'patch', len(patch_front) + len(patch_back), 'PATCH_OFF', hex(PATCH_OFF), *(('BACK_OFF', hex(BACK_OFF), 'back', len(patch_back)) if TWO else ()), 'slot_refs', len(fix), 'gates', len(gates))

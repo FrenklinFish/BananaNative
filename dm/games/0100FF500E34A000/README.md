@@ -50,7 +50,7 @@ All 199 shader keys absent during the first title run match this inventory.
 
 ## Running on the Mac
 
-Build with `scripts/build_ipa_from_nsp.py <NSP folder> -k <prod.keys> --platform mac`;
+Build with `scripts/build_ipa_from_nsp.py <dump folder> --platform mac`;
 it prints the run command. The tested interactive runs used `DM_PRESENT_LINK=0`
 for direct presentation. With the default display link, a background window
 stopped presenting; no profile override is retained. `Plus`, then `A`, skips an

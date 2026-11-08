@@ -101,7 +101,6 @@ dm/tools/sdk_patches.py	*:*	the SDK modules' patches (by build ID)
 dm/tools/romfs_image.py	*:*	RomFS image packing: every game's files
 dm/tools/romfs.py	*:*	RomFS image input: every game's build tools
 dm/tools/nro_collect.py	*:*	NRO discovery from game resources during packing
-dm/tools/nx_extract/*	*:*	NSP extraction: every game's resource inputs
 dm/mac/launcher.c	*:*	Mac app resource discovery and host launch
 dm/mac/Launcher.swift	*:*	the Mac settings window, linked into every Mac app
 dm/mac/pack_app.py	*:*	Mac app packaging: every game's bundled resources

@@ -4,8 +4,9 @@
 #   - the entry hash: one shader's library entry as the library stores it (the 64-byte entry with its positions in the file zeroed, its binding records, its c1 bytes, and each
 #     module's variant, SPIR-V size and SPIR-V words), without the header's version fields and without the modules' codec or stored bytes, so a zstd of another version
 #     (the phone's) gives the same hash;
-#   - the manifest (dm/games/<id>/vk_delta.tsv, in the APK's tools): a full Mac build's hash of every shader key, hashes only (no game bytes), checked by manifest_problems
-#     before it goes into the profile;
+#   - the manifest (dm/games/<id>/vk_delta.tsv, in the APK's tools): a full Mac build's hash of every shader key the phone builds (the profile's map, or for a profile with
+#     a selected set, shader_seen.tsv, that set and its paired pixel shaders: phone_keys), hashes only (no game bytes), checked by manifest_problems before it goes into
+#     the profile;
 #   - the ABI digest (DMSH_VK_ABI): what the replay reads of a library and its modules (dmsh_abi_vk.h and dmsh_abi.h without comments). A library whose header carries
 #     the host's ABI digest can be played while its update runs, whatever its versions (vka_shlib_check).
 # This file is one of DMSH_VK_CHAIN's files (vk_android_build.py VK_FILES): it decides which old entries a build reuses.
@@ -222,6 +223,60 @@ def parse_manifest(text):
         elif c[0] == 'stamp' and len(c) == 4: out['stamp'][c[1]] = (c[2], c[3])
         elif len(c) == 2 and _KEY_ROW.fullmatch(l): out['hashes'][c[0]] = c[1]
     return out
+
+
+SELECTED = 'shader_seen.tsv'   # a profile's selected set (android/SHADERS.md "Selected shaders"): rows "key<TAB>stage"
+
+
+def selection(seen_text, map_keys):
+    """The keys of a profile's selected set (SELECTED's text) that its shader map has, sorted, each once: what the phone passes (ShaderLibs.selection) and the Mac's
+    selected build takes"""
+    return sorted({l[:16] for l in seen_text.split('\n') if re.match(r'[0-9a-f]{16}', l)} & set(map_keys))
+
+
+def phone_keys(map_keys, seen_text, pairs, build_keys):
+    """The keys a phone's shaders step builds, which a published manifest must hold exactly: every key of the map, or with a selected set (seen_text, None without one)
+    its keys with the pixel shaders paired with them (build_keys: dmsh_build.py's, as vk_android_build.py takes it). → set; ValueError for a set that names no key of the map
+    (the phone refuses that step)"""
+    if seen_text is None: return set(map_keys)
+    sel = selection(seen_text, map_keys)
+    if not sel: raise ValueError(f'the profile\'s {SELECTED} names none of the shaders of its shader_map.tsv')
+    return set(build_keys(sel, set(map_keys), pairs))
+
+
+def coverage(manifest, keys):
+    """(the keys of a build that the manifest has, those it lacks), in the build's order. A manifest serves the keys it has whatever else it or the build holds: an entry is
+    the key's alone once the tools (the version) and the profile's inputs are fixed, so a manifest of another key set (the profile's selection as published against a build
+    of other keys, or a selection changed since) reuses and checks only the keys both have. The others are translated and not checked"""
+    h = manifest['hashes'] if manifest else {}
+    return [k for k in keys if k in h], [k for k in keys if k not in h]
+
+
+def reuse_candidates(manifest, keys, done):
+    """The keys of a build that a delta may take from an older library: those without a result yet (done) that the manifest has as built (a hash, not "-"). A key the
+    manifest lacks (a key list of another selection) is translated"""
+    h = manifest['hashes'] if manifest else {}
+    return [k for k in keys if k not in done and h.get(k, '-') != '-']
+
+
+def find_entry(manifest, key, libs, zstd):
+    """The entry of the newest library (libs: Library objects, newest first) whose entry for key has the manifest's hash → (Library, the entry as Library.entry gives it,
+    [why an entry could not be read]); (None, None, [...]) when none has it. An entry that cannot be read (damaged zstd, out of range) is passed over"""
+    errs = []
+    for L in libs:
+        i = L.index.get(key)
+        if i is None: continue
+        try: _, h, ent = L.hash_of(i, zstd)
+        except Exception as ex: errs.append(f'{L.version}: {type(ex).__name__}: {ex}'); continue
+        if h == manifest['hashes'][key]: return L, ent, errs
+    return None, None, errs
+
+
+def check(manifest, keys, hashes):
+    """The end of a build with a manifest: (the keys checked: the build's that the manifest has, the build's keys it lacks (not checked), [(key, the manifest's hash,
+    the library's or None)] of the checked keys whose entry is not as the manifest has it)"""
+    inm, outm = coverage(manifest, keys)
+    return inm, outm, [(k, manifest['hashes'][k], hashes.get(k)) for k in inm if not entry_as_manifest(manifest['hashes'][k], hashes.get(k))]
 
 
 def to_translate(old, new):

@@ -61,7 +61,7 @@ Update 1.3.1 (v327680) over the base game, SDK 18.3.5. The Wii game (codename Co
 
 ## Damaged NSP
 
-- The base NSP in hand was damaged: its program NCA hashed differently from its name, with 12 MB runs of zeros near its end (147 MB of damaged RomFS: the two WebM prologue movies, which the storybook prologue does not use), while its update and the small NCAs matched their names. It was packed with `--allow-damaged` ([01, NSP → NCA → ExeFS / RomFS](../../../docs/agents/01-extract.md#nsp--nca--exefs--romfs)).
+- The base game in hand was damaged: 12 MB runs of zeros near the end of its program (147 MB of damaged RomFS: the two WebM prologue movies, which the storybook prologue does not use), while its update was whole. It was packed with the damaged files kept as read.
 
 ## Mac routes
 

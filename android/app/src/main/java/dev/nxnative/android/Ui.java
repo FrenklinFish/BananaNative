@@ -121,7 +121,70 @@ final class Ui {
 
     static void status(TextView t, CharSequence s, int colorRes) {
         t.setText("●  " + s);
+        t.setContentDescription(s);   // the dot is decoration: a screen reader says the state only
+        t.setAccessibilityLiveRegion(View.ACCESSIBILITY_LIVE_REGION_POLITE);   // the state changes while the screen shows (Checking… → Ready): said when it does
         t.setTextColor(col(t.getContext(), colorRes));
+    }
+
+    /**
+     * Details, closed by default: a "Details" text button that opens the technical part of a message (file paths, a tool's last error line, build IDs, the logs'
+     * folder) as selectable text with Copy, so the main text stays short and plain and the rest can still be read, copied and sent with a report. set("") hides it all
+     */
+    static final class Details extends LinearLayout {
+        final Button toggle;
+        final TextView text;
+        final Button copy;
+
+        Details(Context c) {
+            super(c);
+            setOrientation(VERTICAL);
+            toggle = button(c, "Details", Kind.QUIET, v -> open(!isOpen()));
+            toggle.setPadding(dp(c, 4), 0, dp(c, 4), 0);
+            addView(toggle, wrap());
+            text = small(c, "");
+            text.setTextIsSelectable(true);
+            text.setVisibility(GONE);
+            addView(text, fill());
+            copy = button(c, "Copy details", Kind.QUIET, v -> {
+                android.content.ClipboardManager cm = c.getSystemService(android.content.ClipboardManager.class);
+                if (cm != null) cm.setPrimaryClip(android.content.ClipData.newPlainText("Banana Native details", text.getText()));
+                android.widget.Toast.makeText(c, "Details copied", android.widget.Toast.LENGTH_SHORT).show();
+            });
+            copy.setPadding(dp(c, 4), 0, dp(c, 4), 0);
+            copy.setVisibility(GONE);
+            addView(copy, wrap());
+            open(false);
+        }
+
+        boolean isOpen() { return text.getVisibility() == VISIBLE; }
+
+        void open(boolean on) {
+            text.setVisibility(on ? VISIBLE : GONE);
+            copy.setVisibility(on ? VISIBLE : GONE);
+            toggle.setText(on ? "Hide details" : "Details");
+            toggle.setContentDescription(on ? "Hide details" : "Show details");
+        }
+
+        /** The details to show (the view hides when there are none); an open view stays open */
+        Details set(CharSequence s) {
+            boolean none = s == null || s.length() == 0;
+            if (!none && !s.toString().contentEquals(text.getText())) text.setText(s);
+            setVisibility(none ? GONE : VISIBLE);
+            return this;
+        }
+    }
+
+    static Details details(Context c, CharSequence s) { return new Details(c).set(s); }
+
+    /**
+     * A message with its details apart: the plain text (what happened, what to do) and Details below it (closed). The caller adds the buttons; with none it gets OK
+     */
+    static AlertDialog.Builder explain(Activity a, CharSequence title, CharSequence message, CharSequence detail) {
+        LinearLayout box = new LinearLayout(a);
+        box.setOrientation(LinearLayout.VERTICAL);
+        box.addView(body(a, message));
+        if (detail != null && detail.length() > 0) add(box, details(a, detail), 8);
+        return sheet(a, title, box);
     }
 
     /** A small warning chip ("! Pack from other tools") whose tap shows the whole sentence in a small dialog */

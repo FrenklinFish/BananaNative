@@ -10,6 +10,8 @@ $W/run/boot.sh <log name> [seconds] [VAR=value ...]
 
 `boot.sh` runs `dmhost <patched dir>` with `DM_ROMFS`, `DM_SAVE`, `DM_TEMP`, `DM_MSL_DIR` set, under a perl `alarm` (a run that hits the time limit ends with `CRASH sig=14` — that is the alarm, not a crash). Logs go to `run/<name>.log`. Logs may contain non-UTF-8 bytes: use `grep -a` / `LC_ALL=C` when filtering.
 
+This is the Mac loop, the fastest for a new title. On Android the same host runs in the test app: pack with `scripts/pack_android.py`, start the game with adb and read the log by stage ([android/TESTING.md, What the log says at each stage](../../android/TESTING.md#what-the-log-says-at-each-stage)); the markers below are the same.
+
 ## Reading the log
 
 | Marker | Meaning |

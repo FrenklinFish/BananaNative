@@ -29,7 +29,7 @@ Update 1.0.8 (v524288) over the base game, SDK 15.3.2, Unity 2021.3.20f1 IL2CPP 
 
 ## Mac route
 
-Build with `scripts/build_ipa_from_nsp.py <NSP folder> -k <prod.keys> --platform mac`. Use the printed command and a `DM_CTL` file to drive the game: A at the title, A on Pilgrimage, A on the first slot, then A on New Game.
+Build with `scripts/build_ipa_from_nsp.py <dump folder> --platform mac`. Use the printed command and a `DM_CTL` file to drive the game: A at the title, A on Pilgrimage, A on the first slot, then A on New Game.
 
 The title route can start with `DM_KEYS="f1400:A,f1500:A,f1600:A"`, then the final New Game confirmation through `DM_CTL` once the slot screen is ready. Let the opening play, or hold B to skip when it permits. In play: left stick / D-pad to move, B to jump, Y to attack, X to heal, Up to interact. Move right from the awakening room to the three statues and interact beside the left statue for Veredicto. The default 2D touch-pad layout is sufficient.
 

@@ -17,15 +17,20 @@ static int bind(vkz_tab *t, const key *k, uint64_t size, uint64_t *next_h, uint6
 }
 
 int main(void) {
-    // candidates: large, dense, one sample, 2D, uncompressed, not linear or a display texture
-    CHECK(vkz_candidate(341 * MIB, 4 * MIB, 0, 1, 0, 0, 0), "a 16384² R8 target is a candidate");
+    // candidates: at least min_bytes and at most 32 MiB, dense, one sample, 2D, uncompressed, not linear or a display texture. The 32 MiB cap (a319e773) leaves out
+    // Mario Kart World's 16384² R8 terrain targets, which zero-sharing was made for (open: docs/reference/memory.md "Zero-sharing capped at 32 MiB leaves out the
+    // large targets it was made for (Android)")
+    CHECK(!vkz_candidate(341 * MIB, 4 * MIB, 0, 1, 0, 0, 0), "a 16384² R8 target (341 MiB with its levels) is over the 32 MiB cap: not a candidate");
+    CHECK(vkz_candidate(32 * MIB, 4 * MIB, 0, 1, 0, 0, 0), "at the cap: a candidate");
+    CHECK(!vkz_candidate(32 * MIB + 1, 4 * MIB, 0, 1, 0, 0, 0), "a byte over the cap: not");
+    CHECK(vkz_candidate(16 * MIB, 4 * MIB, 0, 1, 0, 0, 0), "a 16 MiB target is a candidate");
     CHECK(!vkz_candidate(3 * MIB, 4 * MIB, 0, 1, 0, 0, 0), "under the size: not");
-    CHECK(!vkz_candidate(341 * MIB, 4 * MIB, 1, 1, 0, 0, 0), "a sparse residency image: not");
-    CHECK(!vkz_candidate(341 * MIB, 4 * MIB, 0, 4, 0, 0, 0), "multisampled: not");
-    CHECK(!vkz_candidate(341 * MIB, 4 * MIB, 0, 1, 1, 0, 0), "3D: not");
-    CHECK(!vkz_candidate(341 * MIB, 4 * MIB, 0, 1, 0, 1, 0), "block-compressed: not");
-    CHECK(!vkz_candidate(341 * MIB, 4 * MIB, 0, 1, 0, 0, 1), "linear or a window texture: not");
-    CHECK(!vkz_candidate(341 * MIB, 0, 0, 1, 0, 0, 0), "a size of 0 turns it off");
+    CHECK(!vkz_candidate(16 * MIB, 4 * MIB, 1, 1, 0, 0, 0), "a sparse residency image: not");
+    CHECK(!vkz_candidate(16 * MIB, 4 * MIB, 0, 4, 0, 0, 0), "multisampled: not");
+    CHECK(!vkz_candidate(16 * MIB, 4 * MIB, 0, 1, 1, 0, 0), "3D: not");
+    CHECK(!vkz_candidate(16 * MIB, 4 * MIB, 0, 1, 0, 1, 0), "block-compressed: not");
+    CHECK(!vkz_candidate(16 * MIB, 4 * MIB, 0, 1, 0, 0, 1), "linear or a window texture: not");
+    CHECK(!vkz_candidate(16 * MIB, 0, 0, 1, 0, 0, 0), "a size of 0 turns it off");
 
     vkz_tab t = {0}; uint64_t nh = 100, h[8];
     key r8 = {0x400, 9, 16384, 16384, 6, 0x17}, rg16 = {0x400, 77, 8192, 8192, 1, 0x17}, r8b = r8; r8b.levels = 5;

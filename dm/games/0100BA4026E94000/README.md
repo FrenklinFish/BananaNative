@@ -28,7 +28,7 @@ Update 1.1.0 (v65536) over the base game, SDK 19.3.16. Unity 2022.3.62f2 IL2CPP 
 
 ## Files and shaders
 
-- The NSP's file names carry `[ERROR]` on the base game and both DLC, but `nx_extract` lists no damaged file and the build does not stop. The merged RomFS has 3,101 files, 3.35 GB: 3,051 UnityFS bundles and 13 FMOD banks. There are no loose movie files: the MP4s are inside the `narration-videos-1080p` (769 MB) and `narration-videos-720p` (375 MB) bundles, and docked the movie module decodes 1920x1080.
+- The RomFS has 3,101 files, 3.35 GB: 3,051 UnityFS bundles and 13 FMOD banks. There are no loose movie files: the MP4s are inside the `narration-videos-1080p` (769 MB) and `narration-videos-720p` (375 MB) bundles, and docked the movie module decodes 1920x1080.
 - Both DLC NSPs are licences with no content; the host reports indices 1 and 2 as owned.
 - `Plugins/cimgui.nro` is registered by `.nrr/dynamic.nrr`, so it is collected and rewritten, but no run loaded it.
 - 19,162 shaders (9,519 vertex, 9,523 pixel, 119 compute, one geometry): 19,151 from `Data/` and the player's 11 GLSLC outputs in `main`. All built for the Mac with no failure.
@@ -37,7 +37,7 @@ Update 1.1.0 (v65536) over the base game, SDK 19.3.16. Unity 2022.3.62f2 IL2CPP 
 
 ## Mac routes
 
-- Build with `scripts/build_ipa_from_nsp.py <NSP folder> -k <prod.keys> --platform mac` and use its printed command.
+- Build with `scripts/build_ipa_from_nsp.py <dump folder> --platform mac` and use its printed command.
 - From a fresh save, the first-run language screen is up by about 40 s. Its **Continue takes a long hold of A**: `A~3` was always enough, `A~1.5` only sometimes, and short presses never. Then A on the confirm button screen, a held A on the brightness screen, A on Start, A on New Game.
 - The opening movie takes about 3.5 minutes, and neither a held A nor Plus skipped it. About 30 presses of A go through the dock dialogue that follows. **Stop pressing A when the HUD appears:** A dashes, and Rose starts at the left edge of the pier facing left, so each press drops her in the water, which costs about 6% of her health and fades to black with only the HUD showing before she respawns on the pier. That is the game, not a rendering fault: frames right after a press show the dash, the fall and the red respawn burst, and A on solid ground costs nothing.
 - L heals only when held (`L~2.5` worked, a 0.3 s tap did nothing).

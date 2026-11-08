@@ -140,7 +140,7 @@ static int thr_in_handoff(const thr_t *t, const thr_t *self) {
 }
 // Holding G. t blocked (a guest wait, a timed sleep, YieldToAnyThread): it gave its core back, so it no longer holds the threads whose handoff made it runnable
 static void hand_leave(thr_t *t) { t->nhand = 0; t->start_by = NULL; }
-// A file system call is a request to fsp-srv on Horizon: svcSendSyncRequest blocks the caller until the service replies, and a lower-priority thread of its core runs meanwhile.
+// A file system call is a request to fsp-srv on Horizon: svcSendSyncRequest blocks the caller until the service replies, and a lower-priority thread of its core runs meanwhile (ported from nxnative 411223c6).
 // The host answers in the caller's own thread, so without this the caller never gives up its core and its waker stays held until it blocks or exits. Digimon Story Cyber Sleuth's
 // save manager (main+0x16cdf0 and its neighbours) sets its busy flag after StartThread returns, and its priority-38 worker clears it last thing: on Horizon the worker's first request lets
 // the priority-44 main thread set the flag long before the worker ends. Held until the worker exited, main set the flag afterwards, for good, and every later slot read was refused.

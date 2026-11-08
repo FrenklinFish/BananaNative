@@ -33,7 +33,7 @@ No game-specific rewriter cut or host change. The general forward-initialized ju
 
 ## Mac route
 
-Build with `scripts/build_ipa_from_nsp.py <NSP folder> -k <prod.keys> --platform mac` and use its printed command. At the title press A, dismiss the first-run patch notes with B, press A on Pilgrimage, then A on the first empty slot. Let the opening advance; B can skip a cinematic segment when enabled.
+Build with `scripts/build_ipa_from_nsp.py <dump folder> --platform mac` and use its printed command. At the title press A, dismiss the first-run patch notes with B, press A on Pilgrimage, then A on the first empty slot. Let the opening advance; B can skip a cinematic segment when enabled.
 
 The opening room initially requires **L to heal** before movement is available. Dismiss the Biliary Flasks tutorial with B. Left stick moves, B jumps and Y swings the sword. The default 2D touch-pad layout exposes these controls.
 

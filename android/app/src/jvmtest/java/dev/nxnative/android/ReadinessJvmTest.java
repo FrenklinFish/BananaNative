@@ -40,6 +40,10 @@ public final class ReadinessJvmTest {
         check(Readiness.compare("49152", "49152") == 0 && Readiness.compare("32768", "49152") < 0 && Readiness.compare("0x10", "15") > 0, "numbers and hex");
         check(Readiness.compare("14.7", "14") > 0 && Readiness.compare("11.2", "14") < 0 && Readiness.compare("yes", "1") < 0, "decimals; text reads as 0");
 
+        // Custom drivers (libadrenotools) only on a GPU whose reported vendor ID is Qualcomm's
+        check(Readiness.customDriversFit(Map.of("gpu.vendor", "0x5143")) && !Readiness.customDriversFit(Map.of("gpu.vendor", "0x13b5"))
+                && Readiness.customDriversFit(Map.of()) && Readiness.customDriversFit(null) && Readiness.customDriversFit(Map.of("gpu.vendor", "?")), "customDriversFit");
+
         // Rows: malformed ones skipped, title and why split at ": "
         List<Readiness.Req> rows = Readiness.parseReqs("required|ram_gib|14|Memory: needs a lot;bogus|x|1|y;degraded|sparse.format.bc6h|1|Sparse BC6H;required||1|no fact");
         check(rows.size() == 2 && rows.get(0).required && rows.get(0).title.equals("Memory") && rows.get(0).why.equals("needs a lot") && !rows.get(1).required
@@ -90,6 +94,16 @@ public final class ReadinessJvmTest {
         check(Readiness.status("playable") == null && Readiness.status("") == null && Readiness.status("bring-up").status == Readiness.Status.WARNING, "status");
         String[] de = Readiness.driverEnv(List.of("DM_SAVE=/x", "DM_VK_DRIVER=/d/turnip", "DM_VK_HOOKDIR=/h", "DM_VK_DRIVER=system"));
         check(de.length == 3 && de[0].equals("DM_VK_DRIVER=/d/turnip") && de[2].equals("DM_VK_DRIVER=system"), "driverEnv keeps the order (the last wins)");
+        // The game's environment for the check (GitHub #40): every line but the paths start sets, in order; unknown DM_ names and the nearest switch
+        java.util.Set<String> paths = new java.util.HashSet<>(List.of("DM_SAVE", "DM_ROMFS", "HOME"));
+        String[] ge = Readiness.gameEnv(List.of("DM_VK_DRIVER=/d/turnip", "DM_SAVE=/x", "FD_DEV_FEATURES=enable_tp_ubwc_flag_hint=1", "TU_DEBUG=startup", "HOME=/h", "DM_VK_DRIVER=system"), paths);
+        check(String.join(",", ge).equals("DM_VK_DRIVER=/d/turnip,FD_DEV_FEATURES=enable_tp_ubwc_flag_hint=1,TU_DEBUG=startup,DM_VK_DRIVER=system"), "gameEnv: " + String.join(",", ge));
+        java.util.Set<String> known = new java.util.HashSet<>(List.of("DM_VK_PSO_ASYNC", "DM_VK_DRIVER", "DM_LANG", "DM_OVERLAY"));
+        check(Readiness.unknownSwitches(List.of("DM_VK_PS0_ASYNC=1", "DM_LANG=fr", "FD_DEV_FEATURES=x", "DM_VK_PS0_ASYNC=2", "DM_NOPE=1"), known).equals(List.of("DM_VK_PS0_ASYNC", "DM_NOPE")),
+                "unknownSwitches: only DM_ names, once each");
+        check("DM_VK_PSO_ASYNC".equals(Readiness.closest("DM_VK_PS0_ASYNC", known)) && Readiness.closest("DM_NOPE", known) == null, "closest");
+        String ul = Readiness.unknownLine("DM_VK_PS0_ASYNC", "the game's settings", known);
+        check(ul.startsWith("[RED] DM_VK_PS0_ASYNC (the game's settings) is not a switch of this build") && ul.contains("did you mean DM_VK_PSO_ASYNC?"), "unknownLine: " + ul);
 
         // The report: header, GPU, the checks, every fact
         String rep = Readiness.report("head", f, Readiness.evaluate(f, game));

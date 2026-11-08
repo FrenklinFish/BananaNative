@@ -1,6 +1,6 @@
 # Playing
 
-How to build and install a game: [README](../README.md#how-to-play).
+How to build and install a game: [nxnative's README](nxnative.md#how-to-play).
 
 - **Settings:** a screen before the game starts sets frame rate, resolution, docked or handheld mode, language, rumble and more. Tap **Play**; your choices are remembered. What each one does: [Settings](settings.md).
 - **Saves and logs** are in the Files app, under the game's name: `save/` and `log.txt` (the previous run is `log.prev.txt`). When something goes wrong, send `log.txt`.

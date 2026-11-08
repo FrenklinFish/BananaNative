@@ -165,5 +165,26 @@ int main(void) {
         CHECK(p > 0 && WIFEXITED(st) && WEXITSTATUS(st) == 0, "DM_GRAPHICS_SCALE=2: scale 2 / parameters 30 in both modes");
         g_opmode = 1;
     }
+    // DM_LANG: the console's codes as they are, BCP-47 style tags mapped to them (fr-FR fell back to Japanese when it went to the game as typed), others en-US
+    static const char *const lang_in[][2] = {
+        {"ja", "ja"}, {"en-US", "en-US"}, {"en-GB", "en-GB"}, {"fr", "fr"}, {"fr-CA", "fr-CA"}, {"de", "de"}, {"it", "it"}, {"es", "es"}, {"es-419", "es-419"}, {"nl", "nl"},
+        {"pt", "pt"}, {"pt-BR", "pt-BR"}, {"ru", "ru"}, {"ko", "ko"}, {"zh-Hans", "zh-Hans"}, {"zh-Hant", "zh-Hant"},
+        {"fr-FR", "fr"}, {"FR-fr", "fr"}, {"fr_BE", "fr"}, {"fr-ca", "fr-CA"}, {"de-DE", "de"}, {"de-AT", "de"}, {"it-IT", "it"}, {"ja-JP", "ja"}, {"ko-KR", "ko"},
+        {"es-ES", "es"}, {"es-MX", "es-419"}, {"es-US", "es-419"}, {"pt-PT", "pt"}, {"pt-br", "pt-BR"}, {"nl-BE", "nl"}, {"ru-RU", "ru"},
+        {"en", "en-US"}, {"en-us", "en-US"}, {"en-AU", "en-GB"}, {"en-IE", "en-GB"}, {"en-CA", "en-US"},
+        {"zh", "zh-Hans"}, {"zh-CN", "zh-Hans"}, {"zh-TW", "zh-Hant"}, {"zh-HK", "zh-Hant"}, {"zh-Hant-HK", "zh-Hant"}, {"zh-Hans-SG", "zh-Hans"},
+    };
+    for (unsigned i = 0; i < sizeof lang_in / sizeof *lang_in; i++) {
+        char out[8]; char msg[64]; snprintf(msg, sizeof msg, "DM_LANG %s is %s", lang_in[i][0], lang_in[i][1]);
+        CHECK(dm_lang_code(lang_in[i][0], out) == 1 && !strcmp(out, lang_in[i][1]) && !out[7], msg);
+    }
+    static const char *const lang_bad[] = {"xx", "pl-PL", "", "e", "english"};
+    for (unsigned i = 0; i < sizeof lang_bad / sizeof *lang_bad; i++) { char out[8]; CHECK(dm_lang_code(lang_bad[i], out) == 0 && !strcmp(out, "en-US"), "an unknown language tag gives en-US"); }
+    setenv("DM_LANG", "fr-FR", 1);
+    { uint64_t v = h_oe_GetLang(); char c[9] = {0}; memcpy(c, &v, 8); CHECK(!strcmp(c, "fr"), "GetDesiredLanguage maps DM_LANG=fr-FR to fr"); }
+    CHECK(h_oe_GetRegion() == 2, "fr-FR is a European console");
+    setenv("DM_LANG", "es-MX", 1); CHECK(h_oe_GetRegion() == 1, "es-MX is an American console");
+    unsetenv("DM_LANG");
+    { uint64_t v = h_oe_GetLang(); char c[9] = {0}; memcpy(c, &v, 8); CHECK(!strcmp(c, "en-US"), "no DM_LANG is en-US"); }
     printf("== oe %d checks, %d failed ==\n", checks, fails); return fails != 0;
 }

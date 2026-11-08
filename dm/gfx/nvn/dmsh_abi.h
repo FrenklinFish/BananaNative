@@ -72,14 +72,13 @@
 // Raw global memory: the translator reserves that table as a storage buffer under this constant buffer slot, which no game has (Ryujinx GlobalToStorage.GmemMapCbSlot), finds the pool
 // holding an address by a binary search over the table's starts and accesses the address plus the pool's delta through a physical storage buffer pointer
 #define DMSH_GMEM_MAP_CB_SLOT 0xFF
-#define DMSH_GMEM_MAP_ENTRIES 4096       // entries of the table (GlobalToStorage.GmemMapLog2 = 12), sorted by start: entry 0 is empty (start 0, end 0) and unused entries start at ~0
-#define DMSH_GMEM_MAP_ENTRY 32           // bytes of an entry: start, end (exclusive) and delta (the pool's Metal GPU address minus its guest address), 64 bits each, then 8 bytes of padding
-// Where such a store or atomic lands is known only when the GPU runs it, so each one also puts its guest page (address >> 12) in a write log, reserved under the same slot at offset 1
-// (Ryujinx GlobalToStorage.GmemLogCbOffset, GmemLogLog2): 32-bit words, word 0 set when a page found no free slot, then a hash set of 1 << DMSH_GMEM_LOG_LOG2 pages (0 = empty).
-// The host learns the pages from it
+#define DMSH_GMEM_MAP_ENTRIES 8192       // entries of the table (GlobalToStorage.GmemMapLog2 = 13), sorted by start: entry 0 is empty (start 0, end 0) and unused entries start at ~0
+#define DMSH_GMEM_MAP_ENTRY 32           // bytes of an entry: start, end (exclusive) and delta (the pool's Metal GPU address minus its guest address), 64 bits each, then a 32-bit lookup hint and 4 bytes of padding
+#define DMSH_GMEM_HINT_SHIFT 21          // the hint in entry (chunk & (entries - 1)) names the entry that holds all of this 2 MiB guest chunk: chunk in the high bits, entry index in the low 13, 0 = none. Tagged, so a colliding chunk searches
+// Where such a store or atomic lands is known only when the GPU runs it, so each one also sets the bit of its table entry in a write log, reserved under the same slot at offset 1
+// (Ryujinx GlobalToStorage.GmemLogCbOffset): a bitmap of the entries of the table bound beside it, bit i in 32-bit word i / 32. The host learns the pools from it
 #define DMSH_KIND_GMEM_LOG "gmem_log"    // that write log: the host gives each draw or dispatch its own, cleared (nvn_mtl.m gml_take)
 #define DMSH_GMEM_LOG_CB_OFFSET 1
-#define DMSH_GMEM_LOG_LOG2 10
 // Android Vulkan only: a compute program's shared memory past the device's limit (job shared_max), reserved under the same slot at offset 2 (Ryujinx GlobalToStorage.SharedSpillCbOffset,
 // StructuredIr/SharedSpillInfo.cs): one slice per workgroup (dmsh_abi_vk.h DMSH_VK_KIND_SHARED_SPILL). The Apple build never sets shared_max (dmsh_build.py shared_spill instead)
 #define DMSH_KIND_SHARED_SPILL "shared_spill"

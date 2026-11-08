@@ -21,7 +21,11 @@ build shader libraries is the same GPL combined work.
 
 Some fixes follow other projects' findings without copying their code: [kartnative](https://github.com/pahorema/kartnative) by pahorema (MIT) for
 GPU-written sparse textures (`dm/gfx/vk_android/vka_tex.c`) and the per-primitive header of mesh programs (`dm/gfx/tools/shader_split.py`), and
-[switch2mac](https://github.com/azmasm/switch2mac) by azmasm (MIT outside `nx2_lower`) for the SPIR-V mesh entry points marked in the translator. Thanks to them.
+[switch2mac](https://github.com/azmasm/switch2mac) by azmasm (MIT outside `nx2_lower`) for the SPIR-V mesh entry points marked in the translator.. The translator's handling of
+atomics in `AstOptimizer.cs`, of else-ifs for SPIR-V and of TMML's negative LOD, and the Android gather bias, follow
+[nx2android](https://github.com/shirai91/nx2android) by Tung Pham (MIT, as nxnative: "Copyright (c) 2026 seedds" and the MIT permission notice in
+[LICENSE](../LICENSE)), with the TMML finding from yuzu #10234 (no yuzu code); the changes are listed in
+[dm/third_party/ryujinx/README.md](../dm/third_party/ryujinx/README.md). Thanks to them.
 
 `Lossless.dll` belongs to Lossless Scaling (proprietary, sold separately). It is never in this repository or in an APK: the user supplies their own copy, which the
 launcher finds on the phone or lets the user pick, and copies into the app's private files.

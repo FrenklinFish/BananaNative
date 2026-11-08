@@ -137,10 +137,10 @@ public final class PackZipJvmTest {
         File packs = new File(t, "app/packs");
         File other = pack(new File(t, "other"), "0100000000010000", "c0ffee", "a");
         String e = error(() -> PackZip.stage(other, packs, null));
-        check(e != null && e.contains("no game profile"), "a title without a profile of this APK is refused: " + e);
+        check(e != null && e.contains("This app version does not include"), "a title without a profile of this APK is refused: " + e);
         File z = PackZip.export(other, new File(t, "out"));
         e = error(() -> PackZip.stage(z, packs, null));
-        check(e != null && e.contains("no game profile"), "the same as a zip: " + e);
+        check(e != null && e.contains("This app version does not include"), "the same as a zip: " + e);
         File dkb = pack(new File(t, "dkb"), ID, "c0ffee", "a");
         e = error(() -> PackZip.stage(dkb, packs, "0400C3F00006E000"));
         check(e != null && e.contains("not 0400C3F00006E000"), "a pack of another game than the sheet's is refused: " + e);

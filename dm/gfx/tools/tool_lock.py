@@ -22,16 +22,29 @@ def tools_now():
         t['metal_' + sdk] = t['metal_' + sdk][0]
     return t
 
+def xlate_command(path):
+    """The command that starts the translator program at path (the apphost dmsh_xlate in dmsh_xlate_bin): [path] where the apphost runs. The apphost in the repository is the
+    Mac's; the dlls beside it are portable, so on Windows it is <path>.exe when there is one (an apphost made for Windows), else `dotnet <path>.dll` (the .NET 10 runtime's
+    dotnet on PATH, or DOTNET_ROOT's)"""
+    if os.name != 'nt' or os.path.splitext(path)[1].lower() in ('.exe', '.cmd', '.bat'): return [path]
+    if os.path.isfile(path + '.exe'): return [path + '.exe']
+    dll = path if path.lower().endswith('.dll') else path + '.dll'
+    root = os.environ.get('DOTNET_ROOT')
+    dotnet = os.path.join(root, 'dotnet.exe') if root and os.path.isfile(os.path.join(root, 'dotnet.exe')) else shutil.which('dotnet') or 'dotnet'
+    return [dotnet, dll]
+
 NO_RUN = 'does not run'
 def xlate_embedded():
     """The source digest the translator embeds (dmsh_xlate --source-sha), or 'does not run (<its first error line>)': without a .NET 10 runtime for the architecture it starts as (a Python
     under Rosetta starts the universal apphost as x86_64) it exits 131 with nothing on stdout, which read as an empty digest and a stale translator (docs/reference/packing.md)"""
-    try: r = subprocess.run([os.path.join(XLATE_DIR, 'dmsh_xlate'), '--source-sha'], capture_output=True, text=True, errors='replace', timeout=60)
+    try: r = subprocess.run(xlate_command(os.path.join(XLATE_DIR, 'dmsh_xlate')) + ['--source-sha'], capture_output=True, text=True, errors='replace', timeout=60)
     except (OSError, subprocess.SubprocessError) as e: return f'{NO_RUN} ({e})'
     if r.returncode == 0 and r.stdout.strip(): return r.stdout.strip()
     return '%s (%s)' % (NO_RUN, (r.stderr.strip().splitlines() or r.stdout.strip().splitlines() or [f'exit code {r.returncode}'])[0])
 
-def no_run_message(embedded): return f'the translator {embedded}: it needs the .NET 10 runtime for this Mac\'s architecture (brew install --cask dotnet-sdk); unset DOTNET_ROOT if it names another one'
+def no_run_message(embedded):
+    if os.name == 'nt': return f'the translator {embedded}: it needs the .NET 10 runtime (x64) and dotnet on PATH (winget install Microsoft.DotNet.Runtime.10); unset DOTNET_ROOT if it names another one'
+    return f'the translator {embedded}: it needs the .NET 10 runtime for this Mac\'s architecture (brew install --cask dotnet-sdk); unset DOTNET_ROOT if it names another one'
 
 def check_tools():
     want = dict(l.rstrip('\n').split('\t', 1) for l in open(LOCK) if '\t' in l and not l.startswith('#'))

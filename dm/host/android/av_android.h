@@ -148,6 +148,13 @@ static inline int nx_yuv_to_nv12(const uint8_t *src, size_t n, const nx_yuv_layo
     }
     return 0;
 }
+#ifdef __ANDROID__   // the Vulkan replay's (vka_present.c), when it is linked in: 1 when the swapchain is BGRA
+__attribute__((weak)) int vka_swap_rb(void);
+#define NX_SWAP_RB() (&vka_swap_rb && vka_swap_rb())
+#else   // Mach-O has no undefined weak reference without -U at link time: the Mac host and the unit tests never swap
+#define NX_SWAP_RB() 0
+#endif
+
 // NV12 (stride w for both planes) into RGBA rows (memory order R G B A), BT.601 or BT.709, limited or full range
 static inline uint8_t nx_clamp8(int v) { return (uint8_t)(v < 0 ? 0 : v > 255 ? 255 : v); }
 static inline void nx_nv12_to_rgba(const uint8_t *y, const uint8_t *uv, int w, int h, int stride, uint8_t *dst, int dstride, int bt709, int full) {
@@ -155,13 +162,17 @@ static inline void nx_nv12_to_rgba(const uint8_t *y, const uint8_t *uv, int w, i
     int ys = full ? 65536 : 76309, cs = full ? 65536 : 74606;   // 255/219, 255/224
     int rv = bt709 ? 103206 : 91881, gu = bt709 ? 12276 : 22553, gv = bt709 ? 30679 : 46802, bu = bt709 ? 121609 : 116130;
     rv = (int)((int64_t)rv * cs >> 16); gu = (int)((int64_t)gu * cs >> 16); gv = (int)((int64_t)gv * cs >> 16); bu = (int)((int64_t)bu * cs >> 16);
+    int swap_rb = NX_SWAP_RB();
     for (int r = 0; r < h; r++) {
         const uint8_t *yr = y + (size_t)r * stride, *cr = uv + (size_t)(r / 2) * stride; uint8_t *o = dst + (size_t)r * dstride;
         for (int x = 0; x < w; x++) {
             int Y = ((yr[x] - (full ? 0 : 16)) * ys), U = cr[x & ~1] - 128, V = cr[(x & ~1) + 1] - 128;
-            o[4 * x] = nx_clamp8((Y + rv * V + 32768) >> 16);
-            o[4 * x + 1] = nx_clamp8((Y - gu * U - gv * V + 32768) >> 16);
-            o[4 * x + 2] = nx_clamp8((Y + bu * U + 32768) >> 16);
+            uint8_t red = nx_clamp8((Y + rv * V + 32768) >> 16);
+            uint8_t green = nx_clamp8((Y - gu * U - gv * V + 32768) >> 16);
+            uint8_t blue = nx_clamp8((Y + bu * U + 32768) >> 16);
+            o[4 * x] = swap_rb ? blue : red;
+            o[4 * x + 1] = green;
+            o[4 * x + 2] = swap_rb ? red : blue;
             o[4 * x + 3] = 255;
         }
     }

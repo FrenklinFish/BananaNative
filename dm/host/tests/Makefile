@@ -12,6 +12,10 @@ QUIET = $(if $(findstring -fsanitize,$(SAN)),,2>/dev/null)
 GINC = $(if $(strip $(GAME)),-I../gen/$(GAME) -I../../games/$(GAME),$(error GAME is not set: make GAME=<base game title ID>: $(shell python3 ../../games/game.py list | awk -F'\t' '{printf "%s (%s)  ", $$1, $$3}')))
 $(B)/t_fs $(B)/t_fs_case $(B)/t_fs_commit_list $(B)/t_fs_commit_list_tsan: ../romfs_image.h
 GAME_H = ../gen/$(GAME)/game_profile.h
+# hle_movie.c and android/av_android.h ask the Vulkan replay whether the swapchain swaps red and blue (vka_swap_rb, a weak reference the Android host defines); Mach-O links a weak
+# reference to an undefined symbol only when it is named as allowed to stay undefined
+WEAK_HOST = -Wl,-U,_vka_swap_rb
+
 run: $(B)/t_language $(B)/t_motion $(B)/t_heap_size $(B)/t_touch $(B)/t_gesture $(B)/t_oe $(B)/t_fs $(B)/t_fs_commit_list $(B)/t_thread_leak $(B)/t_fs_case $(B)/t_audio $(B)/t_audio_spsc $(B)/t_swkbd $(B)/t_altstack $(B)/t_condvar $(B)/t_condvar_old $(B)/t_pollwait $(B)/t_pctl $(B)/t_time $(B)/t_shared_font $(B)/t_vorbis $(B)/t_vorbis_divides $(B)/t_hid $(B)/t_haptics $(B)/t_haptics_apple $(B)/t_cheats $(B)/t_pad_hid
 	$(B)/t_language
 	$(B)/t_heap_size
@@ -67,7 +71,13 @@ run: $(B)/t_language $(B)/t_motion $(B)/t_heap_size $(B)/t_touch $(B)/t_gesture 
 	$(B)/t_android_shlib
 	$(B)/t_android_imgmem
 	$(B)/t_android_zshare
+	$(B)/t_android_texlimit
+	$(B)/t_android_pckeep
+	$(B)/t_android_fmtlist
 	$(B)/t_android_place
+	$(B)/t_android_ovl
+	$(B)/t_android_pace
+	$(B)/t_android_gmem
 run: $(B)/t_nro
 run: $(B)/t_symbols
 $(B)/t_symbols: t_symbols.c ../hle.c ../loader.c ../hle.h ../dm.h $(GAME_H) | $(B)
@@ -242,12 +252,12 @@ run: $(B)/t_movie_vpx
 run: $(B)/t_codec_video
 run: $(B)/t_movie_avc
 $(B)/t_movie_avc: t_movie_avc.c ../hle_movie.c ../hle_movie_avc.c ../hle_movie_avc.h $(GAME_H) ../gen/vpx/libvpx.a | $(B)
-	$(CLANG) -O1 -g -Wno-unused-function -Wno-tautological-compare $(GINC) -I../../third_party/libvpx -I../../third_party/libvpx/config -I../../third_party/stb_vorbis -Wl,-dead_strip -o $@ t_movie_avc.c ../gen/vpx/libvpx.a \
+	$(CLANG) -O1 -g -Wno-unused-function -Wno-tautological-compare $(GINC) -I../../third_party/libvpx -I../../third_party/libvpx/config -I../../third_party/stb_vorbis -Wl,-dead_strip $(WEAK_HOST) -o $@ t_movie_avc.c ../gen/vpx/libvpx.a \
 		-framework AudioToolbox -framework VideoToolbox -framework CoreMedia -framework CoreVideo -framework CoreFoundation
 $(B)/t_movie_vpx: t_movie_vpx.c ../hle_movie.c $(GAME_H) ../gen/vpx/libvpx.a | $(B)
-	$(CLANG) -O1 -g -Wno-unused-function -Wno-tautological-compare $(GINC) -I../../third_party/libvpx -I../../third_party/libvpx/config -I../../third_party/stb_vorbis -Wl,-dead_strip -o $@ t_movie_vpx.c ../gen/vpx/libvpx.a -framework AudioToolbox
+	$(CLANG) -O1 -g -Wno-unused-function -Wno-tautological-compare $(GINC) -I../../third_party/libvpx -I../../third_party/libvpx/config -I../../third_party/stb_vorbis -Wl,-dead_strip $(WEAK_HOST) -o $@ t_movie_vpx.c ../gen/vpx/libvpx.a -framework AudioToolbox
 $(B)/t_codec_video: t_codec_video.c ../hle_codec_video.c ../hle_movie.c ../hle_movie_avc.c ../hle_movie_avc.h ../hle_movie_yuv.h $(GAME_H) ../gen/vpx/libvpx.a | $(B)
-	$(CLANG) -O1 -g -Wall -Werror -Wno-unused-function -Wno-tautological-compare -fsanitize=address,undefined $(GINC) -I../../third_party/libvpx -I../../third_party/libvpx/config -I../../third_party/stb_vorbis -o $@ t_codec_video.c ../gen/vpx/libvpx.a \
+	$(CLANG) -O1 -g -Wall -Werror -Wno-unused-function -Wno-tautological-compare -fsanitize=address,undefined $(GINC) -I../../third_party/libvpx -I../../third_party/libvpx/config -I../../third_party/stb_vorbis $(WEAK_HOST) -o $@ t_codec_video.c ../gen/vpx/libvpx.a \
 		-framework AudioToolbox -framework VideoToolbox -framework CoreMedia -framework CoreVideo -framework CoreFoundation
 ../gen/vpx/libvpx.a: FORCE
 	$(MAKE) -C .. GAME=$(GAME) gen/vpx/libvpx.a
@@ -346,16 +356,16 @@ coverage:
 	LLVM_PROFILE_FILE="$(call cov_profile,$(B)/cov)" $(MAKE) -i B=$(B)/cov SAN="$(COV_FLAGS)" run
 	@$(call cov_export,$(B)/cov)
 # The Android host's pure parts (dm/host/android): resampler, channel map, SPS size, MediaCodec picture layouts; gamepad / touch / sensor mapping
-run: $(B)/t_android_av $(B)/t_android_input $(B)/t_android_shlib $(B)/t_android_spvpatch $(B)/t_android_imgmem $(B)/t_android_zshare $(B)/t_android_place
+run: $(B)/t_android_av $(B)/t_android_input $(B)/t_android_shlib $(B)/t_android_spvpatch $(B)/t_android_imgmem $(B)/t_android_zshare $(B)/t_android_texlimit $(B)/t_android_pckeep $(B)/t_android_fmtlist $(B)/t_android_place $(B)/t_android_ovl $(B)/t_android_pace $(B)/t_android_gmem
 $(B)/t_android_av: t_android_av.c ../android/av_android.h | $(B)
-	$(CLANG) -O1 -g -Wall -Werror -Wno-unused-function -fsanitize=address,undefined -I.. -o $@ t_android_av.c
-$(B)/t_android_input: t_android_input.c ../android/input_map.c ../android/input_map.h ../motion_fusion.h ../dm_input.h | $(B)
+	$(CLANG) -O1 -g -Wall -Werror -Wno-unused-function -fsanitize=address,undefined -I.. $(WEAK_HOST) -o $@ t_android_av.c
+$(B)/t_android_input: t_android_input.c ../android/input_map.c ../android/input_map.h ../../gfx/vk_android/vka_present_fit.h ../motion_fusion.h ../dm_input.h | $(B)
 	$(CLANG) -O1 -g -Wall -Werror -Wno-unused-function -fsanitize=address,undefined -I.. -o $@ t_android_input.c
-# The Android Vulkan replay's shader library reader and binding walker (dm/gfx/vk_android/vka_shlib.c, vka_bind.c) with the vendored zstd decoder; DM_VK_SHLIB=<dmsh_vk.lib> adds the real library
+# The Android Vulkan replay's shader library reader and binding walker (dm/gfx/vk_android/vka_shlib.c, vka_bind.c) with the vendored zstd decoder, the older ABIs it plays (vka_abi_compat.h) and the write log's formats (vka_gml.h); DM_VK_SHLIB=<dmsh_vk.lib> adds the real library
 VKA = ../../gfx/vk_android
 $(B)/zstddeclib.o: ../../third_party/zstd/zstddeclib.c | $(B)
 	$(CLANG) -O2 -w -c -o $@ $<
-$(B)/t_android_shlib: t_android_shlib.c $(VKA)/vka_shlib.c $(VKA)/vka_shlib.h $(VKA)/vka_bind.c $(VKA)/vka_bind.h ../../gfx/nvn/dmsh_abi_vk.h ../../gfx/nvn/dmsh_abi.h $(B)/zstddeclib.o | $(B)
+$(B)/t_android_shlib: t_android_shlib.c $(VKA)/vka_shlib.c $(VKA)/vka_shlib.h $(VKA)/vka_bind.c $(VKA)/vka_bind.h $(VKA)/vka_abi_compat.h $(VKA)/vka_gml.h ../../gfx/nvn/dmsh_abi_vk.h ../../gfx/nvn/dmsh_abi.h ../../gfx/nvn/dmsh_chain_vk.h $(B)/zstddeclib.o | $(B)
 	$(CLANG) -O1 -g -Wall -Werror -Wno-unused-function -fsanitize=address,undefined -I.. -o $@ t_android_shlib.c $(VKA)/vka_shlib.c $(VKA)/vka_bind.c $(B)/zstddeclib.o
 # The image memory blocks' extent allocator (vka_extents.h, vka_imgmem.c)
 $(B)/t_android_imgmem: t_android_imgmem.c $(VKA)/vka_extents.h | $(B)
@@ -363,9 +373,28 @@ $(B)/t_android_imgmem: t_android_imgmem.c $(VKA)/vka_extents.h | $(B)
 # Zero-shared image memory's bookkeeping (vka_zshare.h; vka_imgmem.c vka_imem_bind_zero, vka_tex.c img_own)
 $(B)/t_android_zshare: t_android_zshare.c $(VKA)/vka_zshare.h | $(B)
 	$(CLANG) -O1 -g -Wall -Werror -Wno-unused-function -fsanitize=address,undefined -I.. -o $@ t_android_zshare.c
+# The texture cache's limit and eviction order (vka_texlimit.h; vka_tex.c vka_tex_prune_locked)
+$(B)/t_android_texlimit: t_android_texlimit.c $(VKA)/vka_texlimit.h | $(B)
+	$(CLANG) -O1 -g -Wall -Werror -Wno-unused-function -fsanitize=address,undefined -I.. -o $@ t_android_texlimit.c
+# The pipeline cache stamp: which file a run reads after a shader library update (vka_pckeep.h; vka_pso.c pc_open_once)
+$(B)/t_android_pckeep: t_android_pckeep.c $(VKA)/vka_pckeep.h | $(B)
+	$(CLANG) -O1 -g -Wall -Werror -Wno-unused-function -fsanitize=address,undefined -I.. -o $@ t_android_pckeep.c
+# An image's format list (vka_fmtlist.h; vka_tex.c img_create, img_lists, img_storage_upgrade)
+$(B)/t_android_fmtlist: t_android_fmtlist.c $(VKA)/vka_fmtlist.h | $(B)
+	$(CLANG) -O1 -g -Wall -Werror -Wno-unused-function -fsanitize=address,undefined -I.. -o $@ t_android_fmtlist.c
 # Large memory pools placed by parts: the range arithmetic (vka_place.h; vka_mem.c mtl_pool_need)
 $(B)/t_android_place: t_android_place.c $(VKA)/vka_place.h | $(B)
 	$(CLANG) -O1 -g -Wall -Werror -Wno-unused-function -fsanitize=address,undefined -I.. -o $@ t_android_place.c
+# The launcher's overlay drawn into the swapchain image: where each block goes for every preTransform and corner (vka_ovl.h; vka_present.c ovl_draw)
+$(B)/t_android_ovl: t_android_ovl.c $(VKA)/vka_ovl.h | $(B)
+	$(CLANG) -O1 -g -Wall -Werror -Wno-unused-function -fsanitize=address,undefined -I.. -o $@ t_android_ovl.c
+# Raw global memory's pool table: the lookup hints and the sink (vka_gmem.h; vka_draw.c gmem_map, vka_mem.c vka_mem_sink)
+$(B)/t_android_gmem: t_android_gmem.c $(VKA)/vka_gmem.h ../../gfx/nvn/dmsh_abi.h | $(B)
+	$(CLANG) -O1 -g -Wall -Werror -Wno-unused-function -fsanitize=address,undefined -I.. -o $@ t_android_gmem.c
+# The pace line's parts (vka_pace.h)
+$(B)/t_android_pace: t_android_pace.c $(VKA)/vka_pace.h | $(B)
+	$(CLANG) -O1 -g -Wall -Werror -Wno-unused-function -fsanitize=address,undefined -I.. -o $@ t_android_pace.c -lm
+
 # The replay's SPIR-V rewrite of integer-fed vertex inputs (vka_spvpatch.c): the selftest's vertex shader, validated by spirv-val when it is on the PATH; DM_VK_SPV_DIR=<.spv folder> adds those modules
 $(B)/t_android_spvpatch: t_android_spvpatch.c $(VKA)/vka_spvpatch.c $(VKA)/vka_spvpatch.h $(VKA)/vka_selftest_spv.h | $(B)
 	$(CLANG) -O1 -g -Wall -Werror -Wno-unused-function -fsanitize=address,undefined -I.. -o $@ t_android_spvpatch.c $(VKA)/vka_spvpatch.c

@@ -309,5 +309,29 @@ class Rewrites(unittest.TestCase):
         if text: self.assertIn('Private', text); self.assertNotIn('ViewportMaskNV', text)
 
 
+class Dominance(unittest.TestCase):
+    def test_same_as_set_fixed_point(self):
+        """promote_locals' dominance test (linear memory) answers as the set fixed point it replaced, on random graphs with unreachable cycles, self loops and
+        branches back to the entry"""
+        import random
+        def sets(blks, preds):
+            dom = {b: set(blks) for b in blks}; dom[blks[0]] = {blks[0]}
+            chg = True
+            while chg:
+                chg = False
+                for b in blks[1:]:
+                    d = ({b} | set.intersection(*(dom[p] for p in preds[b]))) if preds[b] else {b}
+                    if d != dom[b]: dom[b] = d; chg = True
+            return dom
+        rnd = random.Random(1)
+        for _ in range(3000):
+            n = rnd.randint(1, 10); blks = rnd.sample(range(100, 200), n)
+            preds = {b: set() for b in blks}
+            for _ in range(rnd.randint(0, 3 * n)): preds[rnd.choice(blks)].add(rnd.choice(blks))
+            d, f = sets(blks, preds), spv._dominance(blks, preds)
+            for a in blks:
+                for b in blks: self.assertEqual(a in d[b], f(a, b), (blks, preds, a, b))
+
+
 if __name__ == '__main__':
     unittest.main()

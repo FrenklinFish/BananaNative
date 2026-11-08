@@ -225,7 +225,7 @@ Most service calls can be found before they crash, before the first boot or the 
 ### Add-on content from `DM_AOC_DIR`
 
 - **Symptom:** DLC the player owns is not unlocked.
-- **Fix:** the host reports add-on content from `DM_AOC_DIR`, one numbered folder per DLC index (title ID − base − 0x1000) holding that DLC's RomFS. `build_ipa_from_nsp.py` extracts the DLC NSPs in the folder with `nx_extract --aoc`, `build_ipa.sh` copies them to `<App>/aoc/`, and the app sets `DM_AOC_DIR`. `aoc::CountAddOnContent` / `ListAddOnContent` report those indices (`hle_misc.c`), and `fs::MountAddOnContent` mounts the folder read-only (`hle_fs.c`). D2R keeps its fixed `{1}` without `DM_AOC_DIR`; `DM_AOC_OWNED=0` reports none.
+- **Fix:** the host reports add-on content from `DM_AOC_DIR`, one numbered folder per DLC index (title ID − base − 0x1000) holding that DLC's RomFS. `build_ipa_from_nsp.py` packs the dump's DLC (`dlc/<DLC title ID>/<n>/romfs`) into one image per index, `build_ipa.sh` copies them to `<App>/aoc/`, and the app sets `DM_AOC_DIR`. `aoc::CountAddOnContent` / `ListAddOnContent` report those indices (`hle_misc.c`), and `fs::MountAddOnContent` mounts the folder read-only (`hle_fs.c`). D2R keeps its fixed `{1}` without `DM_AOC_DIR`; `DM_AOC_OWNED=0` reports none.
 - **Found on:** [Fire Emblem Engage](../../dm/games/0100A6301214E000/README.md): its two DLC packages each hold one empty marker file (`e0`, `h0`), and the content is already in update 2.0.0. `DLCManager.RefreshHasList` marks a content owned when its mount succeeded (probe `main+0x29f3c88`).
 
 ### Owned add-on content lists beyond 64 entries
@@ -641,6 +641,13 @@ Most service calls can be found before they crash, before the first boot or the 
 - **Fix:** hooked: `settings::LanguageCode::Make` and the reversed `operator==(LanguageCode, Language)`.
 - **Found on:** [Super Mario 3D World + Bowser's Fury](../../dm/games/010028600EBDA000/README.md) (SDK 10).
 
+### A language tag such as fr-FR in DM_LANG gives the game's first language
+
+- **Symptom:** with `DM_LANG=fr-FR` (or `de-DE`, `es-ES`, `ja-JP`) the game starts in another language, Japanese in Mario Kart World; `DM_LANG=fr` gives French.
+- **Cause:** `GetDesiredLanguage` handed `DM_LANG` to the game as typed. The console's codes are the 18 of `nn::settings::Language` (`ja`, `en-US`, `fr`, `de`, …, `zh-Hans`, `zh-Hant`, `pt-BR`); a game compares the desired code with them and takes its first language when none matches. A BCP-47 tag, as a phone or a player writes it, is none of them.
+- **Fix:** `dm_lang_code` (`hle_oe.c`) maps a tag to the console's code: the codes themselves in any case, the language subtag with its region or script (`fr-FR` → `fr`, `fr-CA` → `fr-CA`, `es-MX` → `es-419`, `pt-PT` → `pt`, `en-AU` → `en-GB`, `zh-TW` / `zh-Hant-HK` → `zh-Hant`, `zh-CN` → `zh-Hans`), `_` as `-`; any other tag is `en-US` with a `[RED]` line naming the codes. `GetRegionCode` takes the mapped code. The log says what a tag was mapped to (`language: DM_LANG=fr-FR is fr`). The Android launcher's Game settings › **Game language** passes the phone's language (mapped the same way, `GameLanguage.java`) or a picked one. Tests: `dm/host/tests/t_oe.c`, `dm/tools/tests/test_android_gamelanguage.py`.
+- **Found on:** [Mario Kart World](../../dm/games/0400C3F00006E000/README.md#found-on-this-game) (a player's report, GitHub #44). Applies to every game.
+
 ### Chinese language aliases in settings comparisons
 
 - **Symptom:** `DM_LANG=zh-Hans` or `zh-Hant` reaches the game unchanged, but its startup menu falls back to Japanese; the older `zh-CN` or `zh-TW` spelling selects Chinese.
@@ -849,6 +856,22 @@ Most service calls can be found before they crash, before the first boot or the 
 - **Fix:** both hooked (`hle_sdk16.c`, `hle_audren.c`), with the same stand-in fonts and the same never-signaled event as their older names.
 - **Found on:** Splatoon Raiders (upstream nxnative, c8521eeb; its profile is not on this branch).
 
+### No stand-in shared font on Android
+
+- **Symptom:** (Android) `[RED] cannot open the standard shared font` at boot, then a crash in the game's font code (Splatoon Raiders: `CRASH sig=11 addr=0x66637300000100 pc=main+0x8109d8`).
+- **Cause:** the standard shared font falls back to the system's own font when neither `DM_SHARED_FONT` nor `DM_FONT_DIR/standard.ttf` is set, and that fallback was macOS's Arial Unicode only. On the phone nothing opened, so SDK 21's `GetBuiltInFontData` filled no record, and the game, which on the console always has its fonts, used the record anyway.
+- **Fix:** `hle_sdk16.c` `SYSTEM_FONT`: Android's `/system/fonts/Roboto-Regular.ttf`, which every Android has (Latin, Greek, Cyrillic). The CJK fonts there are `.ttc` collections, not one TTF, so Chinese and Korean system text has no glyphs yet (open). The Nintendo extension font (`nintendo_ext.ttf`, button icons) is still missing on the phone, so those icons draw as `?` (open).
+- **Found on:** [Splatoon Raiders](../../dm/games/0400380020056000/README.md) on the phone (Turnip): boots past the font with it, as with `DM_SHARED_FONT=/system/fonts/Roboto-Regular.ttf`.
+- **Check:** `make -C dm/host/tests GAME=<id> build/t_shared_font && dm/host/tests/build/t_shared_font`.
+
+### The system window's text missing with Android's variable Roboto
+
+- **Symptom:** (Android) text in one kind of window does not show while the rest of the game's text does: Splatoon Raiders' Yes / No window. The log has `shared font (standard.ttf): /system/fonts/Roboto-Regular.ttf`.
+- **Cause (probable):** the window's layout (`Layout/Cmn_SystemWindow_00`) sets its text in `Builtin_S.bfcpx`, whose only font is `nintendo_udsg-r_std_003.bfttf`: the standard shared font, which the host serves from a stand-in. The game's other text uses its own fonts (`Font/*.bfarc`: `SpMain`, `SpTreasureBold`, ...). Since Android 12 `/system/fonts/Roboto-Regular.ttf` is a variable font (`fvar`, `gvar`, `avar`, `HVAR`, `STAT`; no `kern`), the only shared font in use that is one, and nn::fontll may not draw it. Not yet confirmed: no log of the window with a static font.
+- **Fix (resolved 2026-11-08):** `SYSTEM_FONT` on Android is a list, `/system/fonts/RobotoStatic-Regular.ttf` (static, Android 13 and later; 305 KB on the Honor's Android 17) before `Roboto-Regular.ttf`; `font_first` takes the first that opens and says in its log line when the font is variable. `h_font_LoadFont` logs once `[RED] shared font: ScalableFontEngine::LoadFont(<name>) of the host's stand-in returned <code>` when the engine refuses the stand-in. `DM_SHARED_FONT=/system/fonts/Roboto-Regular.ttf` gives the old font back for a comparison. On the phone (the v0.2.0 release candidate, shader library `v-0035e16073bf`) the Yes / No text shows correctly; no log was read to confirm that RobotoStatic was the font opened, and the old font was not tried again, so the cause stays probable.
+- **Found on:** [Splatoon Raiders](../../dm/games/0400380020056000/README.md#found-on-this-game) (reported by the user on the Honor, Android 17).
+- **Check:** `t_shared_font` (the list, the first font that opens, the `fvar` test).
+
 ### The Joy-Con mouse pointer
 
 - **Symptom:** `[RED] sf: the game connects to service hid itself, which the host does not serve`, then `game called nn::diag abort: Result 0xe15` in `sdk`, at boot of a Switch 2 game that sets up the Joy-Con's mouse mode.
@@ -890,3 +913,17 @@ Most service calls can be found before they crash, before the first boot or the 
 - **Cause:** `SetGraphicsTargetFrameRate` maps up to 59 fps to mode 1, up to 119 to mode 2 and above to mode 3 (`SetGraphicsTargetFrameRateAuto` to mode 0) and calls `SetGraphicsFrameLengthMode`, which locks the gs graphics server's context and sends it the mode. The host has no graphics server, so the context is null.
 - **Fix:** `SetGraphicsFrameLengthMode` is hooked and logs the mode once per change; both `oe` paths reach it. The host paces by the window's present interval (`hle_oe.c`).
 - **Found on:** Hyrule Warriors: Age of Imprisonment (upstream nxnative, d70ee900; its profile is not on this branch): 60 / its present interval at boot.
+
+### Eventfds served offline
+
+- **Symptom:** gRPC in Nintendo's online library (NPLN) aborts at startup (`main+0x21f0c7c`) because its poll engine's initializer (`main+0x21f1280`) finds no wakeup fd while socket calls fail offline.
+- **Cause:** `nn::socket::EventFd` is Linux's `eventfd` exposed through the bsd service. As a local counter it does not require an active network session, but the offline cut had failed all socket calls indiscriminately.
+- **Fix:** implement eventfd counters (descriptors 512..575) directly in `dm/host/hle_net.c`: tracking counts, nonblocking modes and semaphore semantics with `pthread_cond_timedwait` for poll/select.
+- **Found on:** [The Legend of Zelda: Ocarina of Time](../../dm/games/0400486024DEC000/README.md).
+
+### An asynchronous play report opens prepo:u
+
+- **Symptom:** crash or abort at the first gameplay transition when sending an asynchronous play report (`nn::prepo::PlayReport::Send`).
+- **Cause:** `PlayReport::Send` returns a nontrivial `AsyncContext` in the caller's x8 storage that expects an initialized state and connects to `prepo:u` if unhandled.
+- **Fix:** in `dm/host/hle_offline.c`, `h_prepo_SendU` invokes the guest's `nn::prepo::AsyncContext::AsyncContext(Result)` constructor with `RES_OK` via x8, completing the asynchronous telemetry report offline without requiring a service session.
+- **Found on:** [The Legend of Zelda: Ocarina of Time](../../dm/games/0400486024DEC000/README.md).

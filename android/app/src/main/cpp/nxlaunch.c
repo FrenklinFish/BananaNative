@@ -1,18 +1,23 @@
 // The launcher's JNI shim (dev.nxnative.android.Native): starts the host's nxhost_main on a thread of its own and carries the host's output to a log file and to logcat.
 // It also hands the game screen's Surface, the input events and the Activity lifecycle on to the host, and runs the Vulkan selftest, through the C entry points libnxhost.so
 // exports (dm/host/android/input_android.h, dm/gfx/vk_android/vk_android.h). They are weak, so a host without one still loads, and the call does nothing (android/README.md).
+#define _GNU_SOURCE   // cpu_set_t and sched_setaffinity (thread placement)
 #include <android/log.h>
+#include <dirent.h>
+#include <sched.h>
 #include <android/native_window_jni.h>
 #include <errno.h>
 #include <fcntl.h>
 #include <jni.h>
 #include <pthread.h>
+#include <signal.h>
 #include <stdatomic.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/inotify.h>
 #include <sys/prctl.h>
+#include <ucontext.h>
 #include <time.h>
 #include <unistd.h>
 
@@ -43,6 +48,8 @@ int nxhost_main(int argc, char **argv);
 #pragma weak nxhost_audio_interrupt
 #pragma weak nxhost_audio_route_changed
 #pragma weak nxhost_fps
+#pragma weak nxhost_overlay_set
+#pragma weak nxhost_overlay_state
 #pragma weak nxhost_framegen_set
 #pragma weak nxhost_framegen_status
 #pragma weak nxhost_picture_place
@@ -97,6 +104,64 @@ static int log_open(const char *path) {
     return 0;
 }
 
+// ---- The run's exit record (ExitWatch.java): the launcher wrote "state=running" before the start; how the process ends is appended here, so the launcher can tell
+// the player what happened. A native crash or an abort appends "state=native" from a signal handler installed before the host's own (crash.c on_crash prints the
+// whole crash into the log and then hands the signal on to the handler that was there before: this one, which hands it on to debuggerd for the tombstone). Only
+// async-signal-safe calls in the handler: open, write, close, sigaction, raise; the numbers are formatted by hand ----
+static char g_exit_path[1024];
+static _Atomic int g_exit_written;
+static struct sigaction g_exit_prev[NSIG];
+static const int g_exit_sigs[] = {SIGSEGV, SIGBUS, SIGILL, SIGTRAP, SIGABRT, SIGFPE};
+static size_t rec_str(char *b, size_t n, const char *s) { while (*s) b[n++] = *s++; return n; }
+static size_t rec_num(char *b, size_t n, unsigned long long v, int hex) {
+    char t[24]; int k = 0;
+    if (hex) { n = rec_str(b, n, "0x"); do { t[k++] = "0123456789abcdef"[v & 15]; v >>= 4; } while (v); }
+    else do { t[k++] = (char)('0' + v % 10); v /= 10; } while (v);
+    while (k) b[n++] = t[--k];
+    return n;
+}
+static void exit_append(const char *text, size_t len) {
+    if (!g_exit_path[0]) return;
+    int fd = open(g_exit_path, O_WRONLY | O_APPEND | O_CLOEXEC);
+    if (fd < 0) return;
+    if (write(fd, text, len) < 0) {}
+    close(fd);
+}
+static void on_exit_signal(int sig, siginfo_t *si, void *uc_) {
+    if (!atomic_exchange(&g_exit_written, 1)) {   // the first crashing thread only
+        char b[160]; size_t n = 0;
+        n = rec_str(b, n, "state=native\nsig="); n = rec_num(b, n, (unsigned)sig, 0);
+        n = rec_str(b, n, "\naddr="); n = rec_num(b, n, (unsigned long long)(uintptr_t)si->si_addr, 1);
+#if defined(__aarch64__)
+        n = rec_str(b, n, "\npc="); n = rec_num(b, n, (unsigned long long)((ucontext_t *)uc_)->uc_mcontext.pc, 1);
+#endif
+        n = rec_str(b, n, "\n");
+        exit_append(b, n);
+    }
+    // On to the handler before this one (debuggerd's): a fault returns and runs the instruction again into it, the others are raised again (as crash.c does)
+    sigaction(sig, &g_exit_prev[sig], NULL);
+    if (sig == SIGSEGV || sig == SIGBUS || sig == SIGILL || sig == SIGTRAP || sig == SIGFPE) return;
+    sigset_t un; sigemptyset(&un); sigaddset(&un, sig); pthread_sigmask(SIG_UNBLOCK, &un, NULL);
+    raise(sig);
+}
+static void exit_record_install(const char *path) {
+    if (!path || !*path || g_exit_path[0]) return;
+    snprintf(g_exit_path, sizeof g_exit_path, "%s", path);
+    struct sigaction sa = {.sa_sigaction = on_exit_signal, .sa_flags = SA_SIGINFO | SA_ONSTACK};
+    sigemptyset(&sa.sa_mask);
+    for (size_t i = 0; i < sizeof g_exit_sigs / sizeof *g_exit_sigs; i++) sigaction(g_exit_sigs[i], &sa, &g_exit_prev[g_exit_sigs[i]]);
+    fprintf(stderr, "[nxlaunch] exit record: %s\n", path);
+}
+// DM_TEST_CRASH=native (the test app only: the launcher drops the line in the play app and the release): a fault on a thread of its own 10 s after the start, to try the
+// crash path and the launcher's notice
+static void *test_crash_thread(void *p) {
+    (void)p; prctl(PR_SET_NAME, "nxtestcrash");
+    struct timespec ts = {10, 0}; nanosleep(&ts, NULL);
+    fprintf(stderr, "[RED] [nxlaunch] DM_TEST_CRASH=native: faulting on purpose\n");
+    *(volatile int *)(uintptr_t)8 = 1;
+    return NULL;
+}
+
 // ---- The host thread ----
 static struct { int argc; char **argv; } g_run;
 static _Atomic int g_started;
@@ -105,6 +170,7 @@ static void *host_thread(void *p) {
     fprintf(stderr, "[nxlaunch] nxhost_main starts on its own thread (%u MiB stack)\n", HOST_STACK >> 20);
     int rc = nxhost_main(g_run.argc, g_run.argv);
     fprintf(stderr, "[nxlaunch] nxhost_main returned %d: the game ended\n", rc);
+    { char b[48]; size_t n = rec_str(b, 0, "state=host_exit\nrc="); if (rc < 0) { b[n++] = '-'; n = rec_num(b, n, (unsigned long long)-(long long)rc, 0); } else n = rec_num(b, n, (unsigned)rc, 0); b[n++] = '\n'; exit_append(b, n); }
     struct timespec ts = {0, 300000000}; nanosleep(&ts, NULL);   // logcat_tail's last lines
     _exit(rc);   // the host cannot be started twice in one process: the game process ends with it
 }
@@ -168,6 +234,8 @@ JNIEXPORT jint JNICALL Java_dev_nxnative_android_Native_start(JNIEnv *env, jclas
         if (eq) { *eq = 0; setenv(kv, eq + 1, 1); fprintf(stderr, "[nxlaunch] env %s=%s\n", kv, eq + 1); }
         free(kv);
     }
+    exit_record_install(getenv("NX_EXIT_RECORD"));   // before the host thread: the host's crash handler (crash.c) takes this one as the handler before its own
+    { const char *tc = getenv("DM_TEST_CRASH"); pthread_t ct; if (tc && !strcmp(tc, "native") && !pthread_create(&ct, NULL, test_crash_thread, NULL)) pthread_detach(ct); }
     char *wd = jstr(env, cwd); if (chdir(wd)) fprintf(stderr, "[nxlaunch] chdir %s: %s\n", wd, strerror(errno)); free(wd);
     g_run.argc = (*env)->GetArrayLength(env, args);
     g_run.argv = calloc((size_t)g_run.argc + 1, sizeof *g_run.argv);
@@ -256,6 +324,16 @@ JNIEXPORT jboolean JNICALL Java_dev_nxnative_android_Native_fps(JNIEnv *env, jcl
     return r ? JNI_TRUE : JNI_FALSE;
 }
 
+// The overlay's blocks for the present to draw into the game's images (nxhost_overlay_set): px a direct ByteBuffer of stride-byte rows (an ARGB_8888 bitmap's pixels), null
+// empties the slot; false = the present does not draw it (or a host without it): the launcher's views show it. The state: 1 drawn, 0 not yet, -1 not drawn by the present
+JNIEXPORT jboolean JNICALL Java_dev_nxnative_android_Native_overlaySet(JNIEnv *env, jclass cls, jint slot, jobject px, jint w, jint h, jint stride) {
+    (void)cls; if (!nxhost_overlay_set) return JNI_FALSE;
+    const void *p = px ? (*env)->GetDirectBufferAddress(env, px) : NULL;
+    if (p && (w <= 0 || h <= 0 || stride < w * 4 || (jlong)stride * h > (*env)->GetDirectBufferCapacity(env, px))) p = NULL;
+    return nxhost_overlay_set(slot, p, p ? w : 0, p ? h : 0, stride) ? JNI_TRUE : JNI_FALSE;
+}
+JNIEXPORT jint JNICALL Java_dev_nxnative_android_Native_overlayState(JNIEnv *env, jclass cls) { (void)env; (void)cls; return nxhost_overlay_state ? nxhost_overlay_state() : -1; }
+
 // Frame generation (nxhost_framegen_set / _status): the in-game settings, and the state with its reason as "<state> <reason>" (state 0 off, 1 generating, 2 on and not
 // generating, -1 unavailable; "-2 ..." when this host has no frame generation)
 JNIEXPORT void JNICALL Java_dev_nxnative_android_Native_frameGenSet(JNIEnv *env, jclass cls, jboolean on, jint mult, jint target, jint flow) {
@@ -277,14 +355,15 @@ JNIEXPORT jstring JNICALL Java_dev_nxnative_android_Native_fpsCapStatus(JNIEnv *
     return (*env)->NewStringUTF(env, buf);
 }
 
-// ---- The readiness check (Readiness.java): the Vulkan facts of the driver the game would run on (nxhost_vk_readiness), before the host starts. Of env (KEY=VALUE, the
-// game's environment as start would get it) only the driver's keys are set here, the last of each winning as in start; null when this host has no such entry point ----
+// ---- The readiness check (Readiness.java): the Vulkan facts of the driver the game would run on (nxhost_vk_readiness), before the host starts. env is the game's
+// environment as start will set it (Readiness.gameEnv: KEY=VALUE, the last of each winning as in start, without the paths start sets): all of it is set here, since the
+// check makes the process's first Vulkan device and a driver reads some variables only then (Mesa's FD_DEV_FEATURES, GitHub #40). Null when this host has no such entry point ----
 #pragma weak nxhost_vk_readiness
 JNIEXPORT jstring JNICALL Java_dev_nxnative_android_Native_readiness(JNIEnv *env, jclass cls, jobjectArray envs) {
     (void)cls; if (!nxhost_vk_readiness) return NULL;
     for (jsize i = 0, n = envs ? (*env)->GetArrayLength(env, envs) : 0; i < n; i++) {
         char *kv = jstr(env, (jstring)(*env)->GetObjectArrayElement(env, envs, i)); char *eq = strchr(kv, '=');
-        if (eq && (!strncmp(kv, "DM_VK_DRIVER=", 13) || !strncmp(kv, "DM_VK_HOOKDIR=", 14))) { *eq = 0; setenv(kv, eq + 1, 1); }
+        if (eq && eq > kv) { *eq = 0; setenv(kv, eq + 1, 1); }
         free(kv);
     }
     size_t cap = 16384; char *buf = calloc(1, cap);
@@ -340,4 +419,50 @@ JNIEXPORT jboolean JNICALL Java_dev_nxnative_android_Native_setRumbleListener(JN
 // Whether a player has a vibrator: the host sends that player's vibration only while it has one
 JNIEXPORT void JNICALL Java_dev_nxnative_android_Native_rumbleRoute(JNIEnv *env, jclass cls, jint player, jboolean on) {
     (void)env; (void)cls; if (nxhost_rumble_route) nxhost_rumble_route(player, on);
+}
+
+// ---- Thread placement (Native.pinThreads, every few seconds while the game runs): the replay thread (vk-replay, the most work a frame: 9-18 ms in DKB) gets the
+// fastest cores to itself, and the command encoder (vk-enc: 5-8 ms of work, the rest spinning for the next call, which only heats the core it is on) and the game's own
+// threads (named "0x<id> ...") go to the cores at 75 % of the top clock or more, so none of them runs on the small cores; without such cores they share the fastest. The clusters are the cores' top clocks (cpuinfo_max_freq). Android may reset a thread to all cores,
+// and each call places the ones not where they belong. Returns the number placed by this call ----
+static long cpu_max_khz(int c) {
+    char path[96]; snprintf(path, sizeof path, "/sys/devices/system/cpu/cpu%d/cpufreq/cpuinfo_max_freq", c);
+    FILE *f = fopen(path, "r"); long v = 0; if (f) { if (fscanf(f, "%ld", &v) != 1) v = 0; fclose(f); }
+    return v;
+}
+JNIEXPORT jint JNICALL Java_dev_nxnative_android_Native_pinThreads(JNIEnv *env, jclass cls) {
+    (void)env; (void)cls;
+    static cpu_set_t fast, mid; static int ready;
+    if (!ready) {
+        int n = (int)sysconf(_SC_NPROCESSORS_CONF); if (n > CPU_SETSIZE) n = CPU_SETSIZE;
+        long top = 0;
+        for (int c = 0; c < n; c++) { long k = cpu_max_khz(c); if (k > top) top = k; }
+        if (!top) return -1;   // no cpufreq: leave the scheduler alone
+        // Fast: the cores at the top clock. Middle: the others at 75 % of it or more (a mid cluster: 2.8 of 3.19 GHz on a Snapdragon 8 Gen 2, 3.53 of 4.32 on an
+        // 8 Elite), never the small cores (1.8 of 2.8 on an older big.LITTLE). Without a middle group the encoder and the game share the fast cores
+        CPU_ZERO(&fast); CPU_ZERO(&mid);
+        for (int c = 0; c < n; c++) { long k = cpu_max_khz(c); if (k == top) CPU_SET(c, &fast); else if (k * 4 >= top * 3) CPU_SET(c, &mid); }
+        if (!CPU_COUNT(&mid)) mid = fast;
+        ready = 1;
+        fprintf(stderr, "[nxlaunch] thread placement: the replay thread on %d core(s) at %ld MHz, the encoder and the game on %d%s\n",
+                CPU_COUNT(&fast), top / 1000, CPU_COUNT(&mid), CPU_EQUAL(&mid, &fast) ? " (the same: no middle cluster)" : "");
+    }
+    DIR *d = opendir("/proc/self/task"); if (!d) return 0;
+    int placed = 0; struct dirent *e;
+    while ((e = readdir(d))) {
+        int tid = atoi(e->d_name); if (tid <= 0) continue;
+        char path[64], name[32] = ""; snprintf(path, sizeof path, "/proc/self/task/%d/comm", tid);
+        FILE *f = fopen(path, "r"); if (!f) continue;
+        if (!fgets(name, sizeof name, f)) name[0] = 0; fclose(f);
+        name[strcspn(name, "\n")] = 0;
+        int g = !strcmp(name, "vk-replay") ? 1 : !strcmp(name, "vk-enc") || !strncmp(name, "0x", 2) ? 2 : 0;
+        if (!g) continue;   // not a placed thread; looked at again next time (a thread may be renamed after it starts)
+        // Checked every call, not once: the replay thread starts under the name of the game thread that made it, and Android resets every thread to all cores
+        // when it moves the app between foreground and background
+        const cpu_set_t *to = g == 1 ? &fast : &mid; cpu_set_t cur;
+        if (!sched_getaffinity(tid, sizeof cur, &cur) && CPU_EQUAL(&cur, to)) continue;
+        if (!sched_setaffinity(tid, sizeof *to, to)) placed++;   // fails while a core is parked (core control at low load): the next call places it
+    }
+    closedir(d);
+    return placed;
 }

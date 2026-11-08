@@ -1,6 +1,7 @@
 // The frame rate the launcher's overlay shows (nxhost_fps, vk_android.h): the present thread counts each image it hands to the swapchain (vka_fps_note), the game's own
-// frames apart from frames the frame generation made (vka_framegen.c), and publishes the counts once a second. Nothing is drawn here: the launcher reads the numbers through JNI
-// and draws them in an Android view over the SurfaceView, so the counter costs no GPU work. The log gets the same numbers every 15 s ("[vk] fps: ...")
+// frames apart from frames the frame generation made (vka_framegen.c), and publishes the counts once a second. Nothing is drawn here: the launcher reads the numbers through JNI,
+// draws its text into a bitmap and hands it back (nxhost_overlay_set), and the present draws that into the game's images (vka_present.c ovl_draw). The log gets the same
+// numbers every 15 s ("[vk] fps: ...")
 #if defined(__ANDROID__)
 #include "vka.h"
 #include "vk_android.h"

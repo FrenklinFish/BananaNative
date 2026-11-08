@@ -1,0 +1,5 @@
+# What this game needs of an Android phone, for the launcher's readiness check (android/README.md "Readiness check"; the format in dm/games/README.md "Readiness rows").
+# A status row also marks the game as supported on Android: gradle.properties' nxGames builds every such profile into the APK (dm/tools/tests/test_android_games.py).
+
+# In bring-up on Android: plays on the phone; the picture is over-bright and mesh draws are missing on Turnip (the note, Open)
+status	bring-up

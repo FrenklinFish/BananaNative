@@ -1,7 +1,8 @@
 // nn::oe (application operating environment): on the real device the console state is queried through the am/oe services; the host gives fixed state directly.
 // oe::Initialize is in hle_sdkinit.c, not here.
-// Environment switches: DM_OPMODE=0 handheld / 1 console (default: the profile's op_mode, console unless set; console corresponds to the console-mode render profile); DM_LANG=language code (default en-US; the iOS app sets it from the IPA's DMLanguage, main.m).
+// Environment switches: DM_OPMODE=0 handheld / 1 console (default: the profile's op_mode, console unless set; console corresponds to the console-mode render profile); DM_LANG=language code (default en-US; a BCP-47 style tag such as fr-FR is mapped to the console's code, dm_lang_code; the iOS app sets it from the IPA's DMLanguage, main.m).
 #include "hle.h"
+#include <ctype.h>
 
 // The operation mode is runtime state (the front end can change it: iOS overheat downgrade switches to handheld): the single source is here, taken once from DM_OPMODE at startup, the environment variable is not read again afterwards
 #include <stdatomic.h>
@@ -270,11 +271,56 @@ HLE_FORCE("_ZN2nn2oe28SetResumeNotificationEnabledEb", "resume notification swit
 HLE_FORCE("_ZN2nn2oe42SetOperationModeChangedNotificationEnabledEb", "operation mode change notification switch", void, h_oe_SetOpModeNtf, unsigned on) { g_ntf_opmode = on & 0xff; }
 HLE_FORCE("_ZN2nn2oe44SetPerformanceModeChangedNotificationEnabledEb", "performance mode change notification switch", void, h_oe_SetPerfModeNtf, unsigned on) { g_ntf_perfmode = on & 0xff; }
 
+// The Horizon language code (nn::settings::LanguageCode, the 18 of nn::settings::Language) for a language tag: one of those codes in any letter case, or a BCP-47 style
+// tag as a phone or a player writes it (fr-FR, de_DE, es-MX, pt-PT, zh-TW, zh-Hant-HK). A tag the console has no language for gets en-US, and 0 is returned (1 for a
+// code it knows). Before, DM_LANG went to the game as typed, and fr-FR, which no game knows, fell back to the game's own first language (Japanese in Mario Kart World)
+static int dm_lang_code(const char *tag, char out[8]) {
+    char t[32] = {0}; size_t n = 0;
+    for (; tag && tag[n] && n < sizeof t - 1; n++) t[n] = tag[n] == '_' ? '-' : (char)tolower((unsigned char)tag[n]);
+    char lang[4] = {0}, script[5] = {0}, region[4] = {0};
+    const char *p = t; int part = 0;
+    while (*p) {   // the subtags: language, then a script (4 letters) and a region (2 letters or 3 digits), each optional
+        const char *q = strchr(p, '-'); size_t len = q ? (size_t)(q - p) : strlen(p);
+        if (part == 0) { if (len < 2 || len > 3) break; memcpy(lang, p, len); }
+        else if (len == 4 && !script[0] && !region[0]) memcpy(script, p, 4);
+        else if ((len == 2 || len == 3) && !region[0]) memcpy(region, p, len);
+        part++; p += len; if (*p) p++;
+    }
+    const char *c = NULL;
+    int r = !strcmp(region, "");
+    if (!strcmp(lang, "ja")) c = "ja";
+    else if (!strcmp(lang, "en")) c = r || !strcmp(region, "us") || !strcmp(region, "ca") || !strcmp(region, "ph") ? "en-US" : "en-GB";   // Horizon's two: American and British
+    else if (!strcmp(lang, "fr")) c = !strcmp(region, "ca") ? "fr-CA" : "fr";
+    else if (!strcmp(lang, "de")) c = "de";
+    else if (!strcmp(lang, "it")) c = "it";
+    else if (!strcmp(lang, "es")) c = r || !strcmp(region, "es") ? "es" : "es-419";   // Spain's, else Latin America's (es-MX, es-AR, es-US, es-419 ...)
+    else if (!strcmp(lang, "nl")) c = "nl";
+    else if (!strcmp(lang, "pt")) c = !strcmp(region, "br") ? "pt-BR" : "pt";
+    else if (!strcmp(lang, "ru")) c = "ru";
+    else if (!strcmp(lang, "ko")) c = "ko";
+    else if (!strcmp(lang, "zh"))   // the script decides, else the region: Traditional for Taiwan, Hong Kong and Macao
+        c = !strcmp(script, "hant") || (!script[0] && (!strcmp(region, "tw") || !strcmp(region, "hk") || !strcmp(region, "mo"))) ? "zh-Hant" : "zh-Hans";
+    memset(out, 0, 8);
+    strncpy(out, c ? c : "en-US", 7);
+    return c != NULL;
+}
+
+// The language the game is given: DM_LANG through dm_lang_code (en-US when unset), logged once with what it was mapped from
+static void dm_lang(char out[8]) {
+    const char *e = getenv("DM_LANG");
+    if (!e || !*e) { memset(out, 0, 8); strcpy(out, "en-US"); return; }
+    int ok = dm_lang_code(e, out);
+    static int once;
+    if (!once++) {
+        if (!ok) LOG("[RED] DM_LANG=%s: no console language for it: en-US (the codes: ja, en-US, en-GB, fr, fr-CA, de, it, es, es-419, nl, pt, pt-BR, ru, ko, zh-Hans, zh-Hant)", e);
+        else if (strcmp(e, out)) LOG("language: DM_LANG=%s is %s", e, out);
+    }
+}
+
 // nn::settings::LanguageCode = struct { char string[8]; }, 8 bytes returned by value in x0
 HLE_FORCE("_ZN2nn2oe18GetDesiredLanguageEv", "system language query; value from DM_LANG", uint64_t, h_oe_GetLang, void) {
-    const char *e = getenv("DM_LANG");
-    char code[8] = {0};
-    strncpy(code, e && *e ? e : "en-US", sizeof code - 1);
+    char code[8];
+    dm_lang(code);
     uint64_t v; memcpy(&v, code, 8);
     return v;
 }
@@ -282,7 +328,7 @@ HLE_FORCE("_ZN2nn2oe18GetDesiredLanguageEv", "system language query; value from 
 // The console's region (Animal Crossing: New Horizons 3.0.3): the SDK asks settings::system::GetRegionCode, which reaches set:sys. A region that fits the language the game is given:
 // 0 Japan, 1 the Americas, 2 Europe, 4 Hong Kong / Taiwan / Korea (nn::settings::system::RegionCode; 3 Australia and 5 China are left out, no language points at them alone)
 HLE_FORCE("_ZN2nn2oe13GetRegionCodeEv", "console region (set:sys); from DM_LANG", int, h_oe_GetRegion, void) {
-    const char *e = getenv("DM_LANG"); if (!e || !*e) e = "en-US";
+    char e[8]; dm_lang(e);
     int r = !strncmp(e, "ja", 2) ? 0 : !strncmp(e, "ko", 2) || !strncmp(e, "zh", 2) ? 4 : !strcmp(e, "en-US") || !strcmp(e, "fr-CA") || !strcmp(e, "es-419") || !strcmp(e, "pt-BR") ? 1 : 2;
     static int once; if (!once++) LOG("oe::GetRegionCode: %d for language %s", r, e);
     return r;

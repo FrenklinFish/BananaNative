@@ -35,7 +35,7 @@ final class BuildCheck {
                 case OTHER_BUILD: return "Pack is for another build";
                 case MISSING: return "Pack is for another update";
                 case UNREADABLE: return "Game file cannot be read";
-                case UNSUPPORTED: return "Update not supported";
+                case UNSUPPORTED: return "Untested game version";
                 case ROMFS: return "Game data of another version";
                 default: return null;
             }
@@ -97,7 +97,7 @@ final class BuildCheck {
         /** What changes when it changes (the code check's cache) */
         String stamp() {
             if (file != null) return file.length() + ":" + file.lastModified();
-            return nup == null ? "none" : nup.file.length() + ":" + nup.file.lastModified() + ":" + label;
+            return nup == null ? "none" : nup.identity + ":" + label;
         }
     }
 
@@ -192,8 +192,9 @@ final class BuildCheck {
                 }
                 StringBuilder s = new StringBuilder();
                 for (Long v : sup.keySet()) s.append(s.length() == 0 ? "" : ", ").append(v);
-                return new Result(Kind.UNSUPPORTED, "The pack is for a build of " + name + " this app does not support (" + Profile.versionName(parse(p.version)) + "). " + prof.supported()
-                        + " Dump that build and Prepare it.", row == null ? "pack version " + p.version + ", app supports " + s : bad.toString());
+                // a pack made with Try anyway (or elsewhere) for a build the profile does not list: Play anyway can start it, after a warning (MainActivity.launch)
+                return new Result(Kind.UNSUPPORTED, "The pack is for " + name + " (" + Profile.versionName(parse(p.version)) + "), a version this app has not been tested with (it supports "
+                        + prof.supportedShort() + ").", (row == null ? "pack version " + p.version + ", app supports " + s : bad.toString()) + "\n" + prof.supported());
             }
         }
         // its RomFS is the data of that version (RomfsCheck: game.tsv romfs_check), else the game takes another version's data and may crash

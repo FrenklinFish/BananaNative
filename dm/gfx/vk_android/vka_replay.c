@@ -151,7 +151,10 @@ static void fill_tex(const uint8_t *d, size_t n) {
     vka_img *im = vka_tex_get(&h.t, cb);
     if (!im) { vcap_cb_run(cb); RFAIL("texture ser=%llu %ux%u: the replay made no image for it", (unsigned long long)h.t.serial, h.width, h.height); }
     cap_tsub *subs; uint64_t total; uint32_t ns = vcap_subs(im, &subs, &total);
-    if ((uint32_t)im->f.vk != h.pixfmt || im->w != h.width || im->h != h.height || im->levels != h.levels || im->layers != h.slices || ns != h.nsub) {
+    // Another format of the same texel size: live, the texture shared an image another texture of that memory made first (vka_tex.c same_shape, learned view formats);
+    // here the captured textures are made in another order. The bytes are the same texels (each subresource's size is checked below), so they fill its own image
+    if ((uint32_t)im->f.vk != h.pixfmt) { static int n; if (n++ < 4) VLOG("nxreplay: texture ser=%llu captured as VkFormat %u, made as VkFormat %d: filled with the same bytes", (unsigned long long)h.t.serial, h.pixfmt, im->f.vk); }
+    if (im->w != h.width || im->h != h.height || im->levels != h.levels || im->layers != h.slices || ns != h.nsub) {
         vcap_cb_run(cb);
         RFAIL("texture ser=%llu: captured as %ux%u VkFormat %u, %u levels, %u layers; this build makes it %ux%u VkFormat %d, %u levels, %u layers (the replay's image creation changed)",
               (unsigned long long)h.t.serial, h.width, h.height, h.pixfmt, h.levels, h.slices, im->w, im->h, im->f.vk, im->levels, im->layers);
@@ -271,7 +274,10 @@ __attribute__((visibility("default"))) int nxhost_replay(int argc, char **argv) 
     if (!getenv("DM_VK_PCACHE")) {   // a cache of this replayer's own beside it, seeded once from the live run's (read only: the app's file is left alone)
         char self[1024], pc[1100]; ssize_t sl = readlink("/proc/self/exe", self, sizeof self - 1);
         if (sl > 0) { self[sl] = 0; char *s = strrchr(self, '/'); if (s) *s = 0; snprintf(pc, sizeof pc, "%s/vk_pipelines.bin", self); setenv("DM_VK_PCACHE", pc, 1);
-            if (access(pc, R_OK) && head_get(head, hn, "vk_pcache", v, sizeof v) && copy_file(v, pc)) printf("pipeline cache seeded from the live run's %s\n", v); }
+            if (access(pc, R_OK) && head_get(head, hn, "vk_pcache", v, sizeof v) && copy_file(v, pc)) {
+                printf("pipeline cache seeded from the live run's %s\n", v);
+                char sv[1100], sp[1100]; snprintf(sv, sizeof sv, "%s.lib", v); snprintf(sp, sizeof sp, "%s.lib", pc); copy_file(sv, sp);   // its library stamp (vka_pso.c)
+            } }
     }
     if (!vka_init()) RFAIL("no Vulkan device");
     int origin_ll = head_get(stat, sn, "origin_ll", v, sizeof v) ? atoi(v) : 1;
@@ -447,15 +453,27 @@ __attribute__((visibility("default"))) int nxhost_replay(int argc, char **argv) 
             }
             nvn_hm_clear(&seen, NULL);
         }
-        if (rep == warm - 1 && dump_gpu) {   // every GPU-written colour image alive after the last replay
+        if (rep == warm - 1 && (dump_gpu || dump)) {   // every GPU-written colour image alive after the last replay, and the --dump serials among them (an image no record names: one only texture IDs bind)
             enum { MAXI = 16384 }; vka_img **ims = malloc(MAXI * sizeof *ims); int n = ims ? vka_tex_live_refs(ims, MAXI) : 0;
             for (int i = 0; i < n; i++) { vka_img *im = ims[i];
-                if (im->gpu_owned && im->f.kind < 3 && im->w >= 64 && im->h >= 64) { size_t nb = 0; uint8_t *px = vcap_img_level0(im, &nb); char pp[1300];
+                int named = 0; if (dump) { char sv[32]; snprintf(sv, sizeof sv, "%llu", (unsigned long long)im->serial); size_t l = strlen(sv);
+                    for (const char *p = dump; (p = strstr(p, sv)); p += l) if ((p == dump || p[-1] == ',') && (p[l] == 0 || p[l] == ',')) { named = 1; break; } }
+                if (((dump_gpu && im->gpu_owned) || named) && im->f.kind < 3 && im->w >= 64 && im->h >= 64) { size_t nb = 0; uint8_t *px = vcap_img_level0(im, &nb); char pp[1300];
                     snprintf(pp, sizeof pp, "%s/%s.r%d_g%llu_%ux%u_f%d.png", outdir, cname, index + rep, (unsigned long long)im->serial, im->w, im->h, im->f.vk);
                     if (px && vcap_png(pp, px, im->w, im->h, im->f.vk, flip)) printf("  gpu ser=%llu %ux%u VkFormat %d → %s\n", (unsigned long long)im->serial, im->w, im->h, im->f.vk, pp);
                     else printf("  gpu ser=%llu %ux%u: no picture (VkFormat %d)\n", (unsigned long long)im->serial, im->w, im->h, im->f.vk); free(px); }
                 vka_tex_drop(im); }
             free(ims);
+            for (const char *p = dump; p && *p; ) {   // --dump serials by the serial map (a serial whose image another serial made: im->serial is that one's)
+                char *e; unsigned long long sv = strtoull(p, &e, 10); if (e == p) break; p = *e == ',' ? e + 1 : e;
+                vka_img *im = vka_tex_acquire(sv); if (!im) { printf("  ser=%llu: no image\n", sv); continue; }
+                size_t nb = 0; uint8_t *px = im->f.kind < 3 ? vcap_img_level0(im, &nb) : NULL; char pp[1300];
+                snprintf(pp, sizeof pp, "%s/%s.r%d_s%llu_%ux%u_f%d.png", outdir, cname, index + rep, sv, im->w, im->h, im->f.vk);
+                if (px && vcap_png(pp, px, im->w, im->h, im->f.vk, flip)) printf("  ser=%llu (image of serial %llu%s) %ux%u VkFormat %d → %s\n", sv, (unsigned long long)im->serial, im->gpu_owned ? ", gpu-written" : "", im->w, im->h, im->f.vk, pp);
+                else printf("  ser=%llu: no picture (VkFormat %d)\n", sv, im->f.vk);
+                if (px && nb) { snprintf(pp, sizeof pp, "%s/%s.r%d_s%llu_%ux%u_f%d.raw", outdir, cname, index + rep, sv, im->w, im->h, im->f.vk); FILE *rf = fopen(pp, "wb"); if (rf) { fwrite(px, 1, nb, rf); fclose(rf); printf("  ser=%llu raw level 0 (%zu bytes) → %s\n", sv, nb, pp); } }
+                free(px); vka_tex_drop(im);
+            }
         }
     }
     vka_pso_save(1);

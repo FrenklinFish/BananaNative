@@ -102,6 +102,13 @@ Guest threads, their synchronization and how the host schedules them. Each entry
 - **Fix:** `crash.c` lets only the first crashing thread print (`crash_gate`); the others stop in `pause()`, and a 15 s alarm ends the process if the dump itself stalls.
 - **Found on:** Unity titles in general.
 
+### The game's process ends and the player sees nothing (Android)
+
+- **Symptom:** on Android the game "crashes instantly with no error": its screen goes away and the launcher shows as if nothing happened. The game's log has no line about the end (a Java exception in `dev.nxnative.android:game` is only in logcat's crash buffer), or ends in `CRASH sig=`, `FATAL`, `GPU hang` lines nobody sees; Android's own kills (out of memory, not responding) leave nothing at all.
+- **Cause:** the game runs in a process of its own (`:game`); when it dies its activity goes with it and the launcher's screen comes back, which knew nothing of the end. Android's handler for an uncaught exception writes only to logcat, and its kills write nowhere the app reads unless it asks.
+- **Fix:** the run's exit record, `<app files>/last-exit.txt` (`ExitWatch.java`, keys in `ExitNotice.java`): `state=running` at the start, `state=stopped` on Stop; an uncaught-exception handler installed first in `GameActivity.onCreate` appends `state=java` and writes the trace into the run's log as `[RED] crash:` lines (a log of its own when none was started), then hands on to Android's; `nxlaunch.c` installs a signal handler before the host's (SIGSEGV, SIGBUS, SIGILL, SIGTRAP, SIGABRT, SIGFPE: `crash.c`'s `on_crash` prints the crash into the log and hands the signal on to it, and it to debuggerd's) that appends `state=native`, the signal, the fault address and pc with `open` / `write` only; the host's return appends `state=host_exit`. The launcher reads the record on every resume and every 2 s while it shows and a game runs; once the `:game` process is gone it adds Android's `ApplicationExitInfo` for that pid and the end of the run's log (`GPU hang`, `FATAL`, `CRASH sig=`, `out of memory`), and shows "The game stopped unexpectedly" with one sentence of cause, **Share log** (that run's log) and **OK**, once (`shown=1`). The player's own ends (Stop, swiping it away, an app update, the game's own exit) show nothing. `DM_TEST_CRASH=java|native` in the test app tries it.
+- **Found on:** every game; first an overlay `NullPointerException` (`Overlay$Block.draw` from `GameActivity.fpsTick`, fixed separately).
+
 ## Synchronization and address arbitration
 
 ### `SignalToAddress` type 2 with count ≤ 0

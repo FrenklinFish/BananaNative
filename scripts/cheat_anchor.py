@@ -188,7 +188,7 @@ class Build:
         # data offset + data size + the bss size at 0x3C). where() keeps a data anchor inside its target's segment
         self.data_start, self.bss_start = segs[2][1], segs[2][1] + segs[2][2]
         self.build_id = hdr[0x40:0x48].hex().upper()   # the first 8 bytes, as cheat files are named
-        nacp_path = self.path.parent.parent / 'control.nacp'   # nx_extract writes it beside ExeFS
+        nacp_path = self.path.parent.parent / 'control.nacp'   # control data beside ExeFS, when the extraction has it
         self.version = nacp.version(nacp_path) if nacp_path.is_file() else ''
         self.title = self._title()
         # The rewriter's output of this build, where the NSP script puts it: <id>_build/extract/v<N>/ExeFS/main ->

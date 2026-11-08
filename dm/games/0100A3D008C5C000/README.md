@@ -6,8 +6,8 @@ the native Bink movie, getting up in the bedroom, walking downstairs and
 through the living room and kitchen, camera control, dialogue and save/reload.
 The unsigned 1.0.0 IPA is built (~7.0 GB); iPhone testing is pending.
 Only 1.0.0 is registered, and the profile's shader tables come from v0.
-When the NSP folder also contains updates, build the supported version with
-`scripts/build_ipa_from_nsp.py <NSP folder> -k <prod.keys> -p v0` (add
+When the dump folder also contains updates, build the supported version with
+`scripts/build_ipa_from_nsp.py <dump folder> -p v0` (add
 `--platform mac` for a Mac build). The builder otherwise selects the newest
 supplied version. The supplied 4.0.0 update is damaged and remains unsupported
 (see [Files and builds](#files-and-builds)).
@@ -214,7 +214,7 @@ existing [per-depth-mode entry-point mechanism](../../../docs/reference/shaders.
   extractor checks. Full shader content cannot be certified from this copy.
   Detailed evidence is in the work folder's `update4/integrity/final-evidence.json`.
 
-  User-authorized `--allow-damaged` extraction writes all five ExeFS and
+  An extraction that kept the damaged files as read writes all five ExeFS and
   30 merged RomFS files (9,465.4 MiB of RomFS) under
   `extract-4.0.0-retry-*/unverified/`, retaining `UNVERIFIED.txt` and extraction
   results. Its code builds, `main` `421c5411…` and `sdk` `bb560bdf…`

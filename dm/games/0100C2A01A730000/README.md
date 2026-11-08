@@ -25,7 +25,7 @@ Update 1.1.3 (v851968) over the base game, with its four DLC. SDK 17.5.3 (Ace At
 - A newer RDB than Age of Calamity's: `0002/root.rdb` and `0002/system.rdb` are the indexes (`_DRK0000`, with a `.rdx` beside each) over 296 `0002/0x<KTID>.fdata` files (12.2 GB) and `0002/data/0x<KTID>.file` (and `jaJP/`, `zhCN/` copies); `game.tsv` gives 12.6 GB for the RDB data. An `.fdata` starts with `PDRK0000` and u64 0x10, then the same `IDRK0000` entries (the u32 after the lengths is 1 or 0, the padding 16 bytes).
 - The compression is new: flag 0x400000 = chunks of u16 stored length, 8 bytes, then a zlib stream; with 0x100000 as well (flags 0x500000) the streams are LZ4 blocks. Each chunk inflates to at most 16 KB and a zero length ends. Of the 51,655 entries, 49,620 are LZ4, 2,026 zlib and 9 stored; all decode to the length in their header (`shader_split.py` `idrk_data`; [01](../../../docs/agents/01-extract.md#compressed-romfs-content)).
 - Scenarios, messages, movies and their subtitles sit in loose folders beside the RDB.
-- **The update is a multi-program patch:** beside the game's patch (`…0000`, 1.5 GB) it carries a whole second program (`0100C2A01A730001`, 34 MB, a full NCA, not a patch) with its own Control NCA, which `main` starts with `nn::oe::ExecuteProgram(1)` (`main+0xa31910`). **Resolved:** `nx_extract` took the first Program NCA it found, the second program, and failed with `NCA section 1 does not exist` layering it over the base game; it now takes program index 0's NCAs. The host runs program 0 only (`hle_oe.c` logs the call).
+- **The update is a multi-program patch:** beside the game's patch (`…0000`, 1.5 GB) it carries a whole second program (`0100C2A01A730001`, 34 MB, a full NCA, not a patch) with its own control data, which `main` starts with `nn::oe::ExecuteProgram(1)` (`main+0xa31910`). The dump folder holds program index 0's files; the host runs program 0 only (`hle_oe.c` logs the call).
 - Shaders: 59,363 GLSLC outputs (52,691 pixel, 5,359 vertex, 1,311 compute, 2 geometry): 59,214 in the G2S (`_S2G5000` / `6000` / `7000`) and `_DOK0000` containers of the RDB entries, and 149 in `main`. The vertex shaders are single-stage programs, paired with a cover pixel shader. All build for the Mac (1 h 19 min on a 12-core M6).
 - Three shaders get textures of another type than they declare on some slots (`texture type mismatch … bound as is`, once each: a 2D array where a pixel shader declares 3D, cube and 3D textures where two vertex shaders declare 2D); nothing in the scenes below looks wrong.
 
@@ -43,7 +43,7 @@ Update 1.1.3 (v851968) over the base game, with its four DLC. SDK 17.5.3 (Ace At
 
 General host changes first needed here; each applies to every game:
 
-- **Multi-program updates:** `nx_extract` takes program index 0's NCAs: [01, Compressed RomFS content](../../../docs/agents/01-extract.md#compressed-romfs-content).
+- **Multi-program updates:** the host runs program index 0: [01, Compressed RomFS content](../../../docs/agents/01-extract.md#compressed-romfs-content).
 - **The newer RDB** (`.fdata`, `idrk_data`): [G2S containers in KTGL RDB archives](../../../docs/reference/shaders.md#g2s-containers-in-ktgl-rdb-archives).
 - **`OpenAudioRenderer` calling its no-event form through the PLT** (`t_in_open` in `hle_audren.c`): [The SDK's open with an event calls the open without one (`t_in_open`)](../../../docs/reference/audio.md#the-sdks-open-with-an-event-calls-the-open-without-one-t_in_open).
 

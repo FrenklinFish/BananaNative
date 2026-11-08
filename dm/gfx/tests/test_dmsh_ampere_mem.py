@@ -37,6 +37,27 @@ class Translated(unittest.TestCase):
             return r.stdout
 
 
+class GuardedWrites(Translated):
+    P0 = (0x000fda0003f06070, 0x00c0060005007a0c)   # P0 = R5 >= c3[0x18], R5 an instruction's own
+    MOV_R5 = (0x000fe20000000f00, 0x0100000000057a02)   # R5 = c4[0]
+
+    def test_a_guarded_load_reads_its_address_before_the_false_guards_zero(self):
+        # UR4 = c3[0x10]; LDG.!P0 R5, [R5 + UR4], Unreal Engine 5.4's bounds-checked read of its scene data: zeroing R5 first read at the table's start, every instance with the first one's data
+        ur4, ldg = (0x000fe20000000a00, 0x00c0040000047ab9), (0x000ea200081e890f, 0x0000000405057981)
+        waits = (0x004ea200001ee000, 0x00000c05050c7593)   # waits for the load's barrier, then atomically adds its result at the address it read: both uses of it
+        msl = self.translate(inst(*self.MOV_R5) + inst(*ur4) + inst(*self.P0) + inst(*ldg) + inst(*waits) + inst(*EXIT))
+        self.assertNotIn('_m0[0]);', msl.split('kernel')[1].replace('_m0[0].x', ''))   # no read of the table's first word
+        self.assertRegex(msl, r'_m0\[(int\()?\w+')   # an index from the register
+
+    def test_a_deferred_write_under_a_false_guard_writes_nothing(self):
+        # MUFU.EX2 R17, R32 under P0 (write barrier 3); R17 = R29 * R29 under !P0; R17 = R36 * R17 after waiting on the barrier: Yoshi and the Mysterious Book's local lights' falloff. The wait copied
+        # the old R17 over !P0's value, whatever the guard had been
+        ex2, other, used = (0x000ee20000000800, 0x0000002000170308), (0x000fe20000410000, 0x0000001d1d178220), (0x008fe20000410000, 0x0000001724177220)
+        msl = self.translate(inst(*self.MOV_R5) + inst(*self.P0) + inst(*ex2) + inst(*other) + inst(*used) + inst(SUATOM[0], 0x00000c17030c7593) + inst(*EXIT))
+        self.assertRegex(msl, r'\? 1065353216 : 0;')   # the guard as it was at issue, a word that keeps its bits through a select
+        self.assertRegex(msl, r'bool \w+ = \w+ != 0;\s+float \w+ = \w+;\s+if \(\w+\)')   # the copy only where it held
+
+
 class Suatom(Translated):
     def test_add_u32_on_a_1d_image(self):
         msl = self.translate(inst(*SUATOM) + inst(*EXIT))
@@ -154,6 +175,16 @@ class Shared(Translated):
         msl = self.msl(mov(3, 0x40), inst(*self.LDSM_MT88), sts(0x20, 20))
         self.assertIn('spvSubgroupShuffle(8.96831', msl)   # the address 0x40 as a float's bits; scaled, it would be 0x100 (3.5873e-43)
 
+    # LDSM reads rows other lanes stored, often with no BAR before it (Ocarina of Time's movie networks and its scene's compute: dotted rows, other places each run): a SIMD-group
+    # barrier before its reads, so the stores have landed, and one after, so no lane's next store reaches the rows before every lane has read them (GitHub issue #1537, PR #1376)
+    def test_ldsm_reads_between_subgroup_barriers(self):
+        msl = self.msl(mov(3, 0x40), inst(*self.LDSM_MT88), sts(0x20, 20))
+        barriers = [m.start() for m in re.finditer(r'simdgroup_barrier\(mem_flags::mem_threadgroup\)', msl)]
+        reads = [m.start() for m in re.finditer(r'spvSubgroupShuffle\(', msl)]
+        store = msl.index('[8] = ')   # the STS after it: byte 0x20, word 8
+        self.assertEqual(len(barriers), 2, msl)
+        self.assertTrue(reads and barriers[0] < reads[0] and reads[-1] < barriers[1] < store, msl)
+
 
 class Pokopia(Translated):
     """Pokemon Pokopia's encodings, on the register the atomic reads: F2FP.MERGE_C (22,886 shaders), F2I from a half (1,067), MEMBAR with ERRBAR (144)"""
@@ -268,6 +299,26 @@ class Pokopia(Translated):
 
     def test_membar_orders_memory(self):
         self.assertRegex(self.msl(self.MEMBAR, self.ERRBAR), r'threadgroup_barrier|atomic_thread_fence')
+
+
+class MufuF16(Translated):
+    """MUFU.F16 (Splatoon Raiders' upscaler network, from upstream seedds/nxnative c8521eeb): the source is the half bits 60..61 select (bit 62 its abs, as in every B slot), the result the low half"""
+    LOG2_HIGH = (0x000fe60000000e00, 0x5000000c000c7308)   # MUFU.F16.LOG2 R12, |R12.H1|: the game's encoding (c1b8edc09e3313b1 +0x5970) on the register the atomic reads
+    LOG2_LOW = (0x0002a20000000e00, 0x4000000c000c7308)    # MUFU.F16.LOG2 R12, |R12.H0| (+0x59a0)
+
+    def msl(self, mufu):
+        return self.translate(inst(*mufu) + inst(*SUATOM) + inst(*EXIT))
+
+    def test_high_half(self):
+        msl = self.msl(self.LOG2_HIGH)
+        self.assertRegex(msl, r'as_type<half2>\(.*\)\)\.y;')
+        self.assertIn('log2(abs', re.sub(r'float _\d+ = abs\((_\d+)\);\s*float _\d+ = log2\(_\d+\);', 'log2(abs', msl))
+
+    def test_result_is_the_low_half(self):   # the bits of a half pair, its high half zero: not the float's own bits
+        self.assertRegex(self.msl(self.LOG2_HIGH), r'as_type<uint>\(half2\(float2\(\w+, 0\.0\)\)\)')
+
+    def test_low_half_translates_apart(self):   # R12 is a constant here, so the low half folds away; what is left must not read the high one
+        self.assertNotRegex(self.msl(self.LOG2_LOW), r'as_type<half2>\(.*\)\)\.y;')
 
 
 if __name__ == '__main__':

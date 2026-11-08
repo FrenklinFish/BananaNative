@@ -4,6 +4,7 @@ By Nociif, from 71f6a73a on branch fix/mkw of inazuma2k8/BananaNative, without i
 """
 from pathlib import Path
 import shutil
+import sys
 import subprocess
 import tempfile
 import unittest
@@ -13,6 +14,7 @@ ROOT = Path(__file__).resolve().parents[3]
 
 class EncoderWait(unittest.TestCase):
     @unittest.skipUnless(shutil.which("cc"), "C compiler required")
+    @unittest.skipUnless(sys.platform.startswith("linux"), "needs Linux (linux/futex.h, the encoder's futex)")
     def test_ring_sleep_flush_and_wrap(self):
         src = (ROOT / "dm/gfx/vk_android/vka_enc.c").read_text()
         ring = src[src.index("enum { RING ="):src.index("// ---------- The records:")]

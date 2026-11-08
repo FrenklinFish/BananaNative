@@ -10,7 +10,7 @@ import java.util.Arrays;
 import java.util.List;
 
 /**
- * A game's own settings (its Manage sheet › Game settings…): resolution, frame rate cap, GPU driver, GPU timing and extra environment lines, stored per title ID (Prefs.gameKey,
+ * A game's own settings (its Manage sheet › Game settings…): resolution, frame rate cap, GPU driver, GPU timing, language and extra environment lines, stored per title ID (Prefs.gameKey,
  * GpuDriver.choice). Each starts as "Default", which follows the main screen's Settings (global); a value set here wins for this game only. The in-game panel's frame
  * rate cap is this game's too. GameActivity reads them at start.
  */
@@ -33,9 +33,12 @@ final class GameSettings {
             fixed.view.setAlpha(0.6f);
             Ui.add(box, fixed.view, 0);
         } else Ui.add(box, new Ui.Setting(a, "⏱️", "Frame rate cap", v -> cap(a, g, again)).value(capLabel(a, id)).chevron(a).view, 0);
+        Ui.add(box, new Ui.Setting(a, "📐", "Display", v -> display(a, g, again)).value(Prefs.DISPLAY_NAMES[Prefs.stretch(a, id) ? 1 : 0]).chevron(a).view, 0);
         Ui.add(box, new Ui.Setting(a, "🎮", "GPU driver", v -> driver(a, g, again)).value(driverLabel(a, id)).chevron(a).view, 0);
         Ui.add(box, new Ui.Setting(a, "⏲️", "GPU timing", v -> gpuTiming(a, g, again)).value(gpuTsLabel(a, id)).chevron(a).view, 0);
-        // Speed-ups that pay off most on Qualcomm's driver (fewer draws for the GPU, less CPU a render pass); on by default, each one can be turned off alone
+        Ui.add(box, new Ui.Setting(a, "🌐", "Game language", v -> language(a, g, again)).value(GameLanguage.label(Prefs.gameLang(a, id), phoneTag())).chevron(a).view, 0);
+        // Speed-ups that pay off most on Qualcomm's driver (fewer draws for the GPU, less CPU a render pass); off by default (with either on, a tester lost the GPU on Adreno 830
+        // with Turnip in 1-2 of 5 starts: open), each one can be turned on alone
         Ui.Setting inst = new Ui.Setting(a, "🧩", "Instanced draws", null).toggle(a, Prefs.instancedDraws(a, id), (b, on) -> Prefs.instancedDraws(a, id, on));
         inst.value("Draws that repeat one mesh become one instanced draw (fewer draws for the GPU)");
         Ui.add(box, inst.view, 0);
@@ -48,6 +51,12 @@ final class GameSettings {
         Ui.Setting rum = new Ui.Setting(a, "📳", "Rumble", null).toggle(a, Prefs.rumble(a, id), (b, on) -> Prefs.rumble(a, id, on));
         rum.value("On the controller, or the phone without one");
         Ui.add(box, rum.view, 0);
+        Ui.Setting fast = new Ui.Setting(a, "🚀", "Use fast cores", null).toggle(a, Prefs.pinThreads(a, id), (b, on) -> Prefs.pinThreads(a, id, on));
+        fast.value("Keeps the busiest threads off the small cores");
+        Ui.add(box, fast.view, 0);
+        Ui.add(box, new Ui.Setting(a, "🅰️", "Xbox button label swap", v -> xbox(a, g, again))
+                .value((Prefs.ownXboxButtons(a, id) ? "" : "Default · ") + Prefs.xboxLabel(Prefs.xboxButtons(a, id))).chevron(a).view, 0);
+        Ui.add(box, new Ui.Setting(a, "🕹️", "Button mapping", v -> PadMapUi.forGame(a, g, again)).value(PadMapUi.label(a, id)).chevron(a).view, 0);
         String env = Prefs.gameEnv(a, id);
         Ui.add(box, new Ui.Setting(a, "🧪", "Extra environment", v -> env(a, g, again))
                 .value(env.isEmpty() ? "None (KEY=VALUE lines for the host, after env.txt)" : env.split("\n").length + " line(s): " + env.replace('\n', ' ')).chevron(a).view, 0);
@@ -113,6 +122,22 @@ final class GameSettings {
         d[0] = Ui.sheet(a, "GPU timing · " + g.name, box).setNegativeButton("Cancel", null).show();
     }
 
+    static String phoneTag() { return java.util.Locale.getDefault().toLanguageTag(); }
+
+    /** Game language (DM_LANG, GameLanguage): the phone's language first (the default), then the console's languages; a game without the one picked uses one it has */
+    static void language(android.app.Activity a, Game g, Runnable done) {   // the in-game panel's shortcut too
+        String[] labels = new String[GameLanguage.CODES.length + 1];
+        labels[0] = GameLanguage.label(null, phoneTag());
+        System.arraycopy(GameLanguage.NAMES, 0, labels, 1, GameLanguage.NAMES.length);
+        String m = Prefs.gameLang(a, g.titleId);
+        int checked = m == null ? 0 : 1 + Math.max(0, Arrays.asList(GameLanguage.CODES).indexOf(m));
+        new AlertDialog.Builder(a).setTitle("Game language · " + g.name).setSingleChoiceItems(labels, checked, (x, w) -> {
+            Prefs.gameLang(a, g.titleId, w == 0 ? null : GameLanguage.CODES[w - 1]);
+            x.dismiss();
+            done.run();
+        }).setNegativeButton("Cancel", null).show();
+    }
+
     private static void resolution(MainActivity a, Game g, Runnable done) {
         String[] labels = new String[Prefs.WINDOWS.length + 1];
         labels[0] = "Default (" + Prefs.windowName(Prefs.defaultWindow(a, g.titleId), false) + ")";
@@ -120,6 +145,27 @@ final class GameSettings {
         int checked = Prefs.ownWindow(a, g.titleId) ? 1 + Math.max(0, Arrays.asList(Prefs.WINDOWS).indexOf(Prefs.gameWindow(a, g.titleId))) : 0;
         new AlertDialog.Builder(a).setTitle("Game resolution · " + g.name).setSingleChoiceItems(labels, checked, (x, w) -> {
             Prefs.gameWindow(a, g.titleId, w == 0 ? null : Prefs.WINDOWS[w - 1]);
+            x.dismiss();
+            done.run();
+        }).setNegativeButton("Cancel", null).show();
+    }
+
+    /** Display: Fit keeps the game's 16:9 picture with bars on a screen of another shape; Stretch fills the screen (DM_VK_STRETCH), the touch mapping with it */
+    private static void display(MainActivity a, Game g, Runnable done) {
+        new AlertDialog.Builder(a).setTitle("Display · " + g.name).setSingleChoiceItems(Prefs.DISPLAY_NAMES, Prefs.stretch(a, g.titleId) ? 1 : 0, (x, w) -> {
+            Prefs.stretch(a, g.titleId, w == 1);
+            x.dismiss();
+            done.run();
+        }).setNegativeButton("Cancel", null).show();
+    }
+
+    private static void xbox(MainActivity a, Game g, Runnable done) {   // Default first: the game follows Settings again
+        String[] labels = new String[Prefs.XBOX_NAMES.length + 1];
+        labels[0] = "Default (Settings: " + Prefs.xboxLabel(Prefs.xboxButtons(a)) + ")";
+        System.arraycopy(Prefs.XBOX_NAMES, 0, labels, 1, Prefs.XBOX_NAMES.length);
+        int checked = Prefs.ownXboxButtons(a, g.titleId) ? Prefs.xboxButtons(a, g.titleId) + 1 : 0;
+        new AlertDialog.Builder(a).setTitle("Xbox button label swap · " + g.name).setSingleChoiceItems(labels, checked, (x, w) -> {
+            Prefs.xboxButtons(a, g.titleId, w == 0 ? null : w - 1);
             x.dismiss();
             done.run();
         }).setNegativeButton("Cancel", null).show();

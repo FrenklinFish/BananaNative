@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Collect what the bug report form asks for into one zip file to attach to an issue, and never any game data.
 
-    python3 scripts/bug_report.py <title ID | path to the .app | NSP folder> [--ios-log FILE] [--out FILE]
+    python3 scripts/bug_report.py <title ID | path to the .app | dump folder> [--ios-log FILE] [--out FILE]
 
 The zip holds report.md (one section per field of the bug form, filled in where the script can know it) and the text files below.
 ALLOWED is the whole list of what can go in; nothing else is read. Every text file is redacted (home folder -> ~, lines that look like key material dropped) and cut to a size cap.
@@ -22,21 +22,21 @@ TOTAL_CAP = 20 * 1024 * 1024    # the zip's text content, before compression
 FILE_CAP = 4 * 1024 * 1024      # one file: longer ones keep the first and last half of this
 CRASH_MAX, CRASH_DAYS = 3, 7
 
-# The allow-list: the only things this script reads into the bundle. Anything else (RomFS, NSO, NSP, NCA, .metallib, .metal, shader .json, saves, pso_*, screenshots, keys)
+# The allow-list: the only things this script reads into the bundle. Anything else (RomFS, NSO, .metallib, .metal, shader .json, saves, pso_*, screenshots, keys)
 # is not on it, so it cannot get in by a new file type turning up.
 ALLOWED = (
     '~/Library/Logs/nxnative/<title ID>.log and .prev.log (the Mac app\'s log)',
     '~/Library/Application Support/nxnative/<title ID>/env.txt (the player\'s settings file)',
     'Contents/Resources/dm/env.txt of the app (settings baked in with --env-file)',
     'the app\'s saved choices: launcher.* keys and dataFolder of its preferences domain',
-    '<NSP folder>/<title ID>_build/logs/*.log and *.txt (the NSP script\'s step logs; regular text files directly in logs/, nothing else under the NSP folder)',
+    '<dump folder>/<title ID>_build/logs/*.log and *.txt (the NSP script\'s step logs; regular text files directly in logs/, nothing else under the dump folder)',
     'the file given with --ios-log (a text file other than .keys)',
     '~/Library/Logs/DiagnosticReports/ crash reports (.ips, .crash) of dmhost or the app, the newest 3 of the last 7 days',
     'Info.plist of the app (a few keys), game.tsv of the profile (name and build rows), dm/gfx/nvn/dmsh_chain.h, the names of the b-<V> folders in the app\'s Contents/Resources/msl/ or the build\'s shader/, shader/cache/ and shader/ios/',
 )
 
 HEX = r'[0-9a-fA-F]'
-# "key" (title_key, master_key_00, prod.keys line "aes_kek_generation_source = ...") followed by only separators and then 32 or more hex characters
+# "key" (title_key, master_key_00, "aes_kek_generation_source = ...") followed by only separators and then 32 or more hex characters: dropped, whatever wrote them
 KEY_LINE = re.compile(rf'(?i)key\w*[\s=:"\'\[\],]*{HEX}{{32,}}')
 KEY_LINE2 = re.compile(rf'(?i)(?:title|master|prod|common|aes|kek|rights)[\w ]*[=:]\s*"?{HEX}{{32,}}\b')   # "titlekek_source = <hex>" and the like
 SECRET_NAME = re.compile(r'(?i)(key|secret|token|password)')
@@ -94,7 +94,7 @@ def read_prefs(bundle_id):
 
 
 def resolve(target, base=None):
-    """the target as {title_id, app, nsp, build}; None when it is none of a title ID, an .app or an NSP folder"""
+    """the target as {title_id, app, nsp, build}; None when it is none of a title ID, an .app or a dump folder"""
     t: dict = {'title_id': None, 'app': None, 'nsp': None, 'build': None}
     if re.fullmatch(r'(?i)[0-9a-f]{16}', target):
         t['title_id'] = target.upper(); return t
@@ -225,7 +225,7 @@ def collect(target, ios_log=None, home=None, total_cap=TOTAL_CAP, file_cap=FILE_
         if not names: b.notes.append(f'NSP script logs: none found in {b.short(ld)}')
         for n in names: b.add_file(f'logs/build/{n}', ld / n, f'build log {n}')
     else:
-        b.notes.append('NSP script logs: skipped, no NSP folder given')
+        b.notes.append('NSP script logs: skipped, no dump folder given')
     exe = [plist.get('CFBundleExecutable') or '', 'dmhost']
     cr = crash_reports(home, [e for e in exe if e])
     if not cr: b.notes.append('Crash reports: none of dmhost or the app in the last 7 days')
@@ -274,13 +274,13 @@ def write_zip(out, b, report):
 
 def main(argv=None):
     ap = argparse.ArgumentParser(description='Collect logs, versions and settings into one zip to attach to a bug report. Never includes game files or keys.')
-    ap.add_argument('target', help='title ID (16 hex digits), path to the .app, or the NSP folder (or its <title ID>_build folder)')
+    ap.add_argument('target', help='title ID (16 hex digits), path to the .app, or the dump folder (or its <title ID>_build folder)')
     ap.add_argument('--ios-log', metavar='FILE', help='log.txt from the iPhone or iPad (Files app)')
     ap.add_argument('--out', metavar='FILE', help='output zip (default nxnative-report-<title ID>-<date>.zip here)')
     a = ap.parse_args(argv)
     t = resolve(a.target)
     if not t:
-        print('bug_report: the target is not a title ID, a Mac .app made by the NSP script, or an NSP folder with one <title ID>_build folder', file=sys.stderr); return 2
+        print('bug_report: the target is not a title ID, a Mac .app made by the NSP script, or a dump folder with one <title ID>_build folder', file=sys.stderr); return 2
     b, report = collect(t, a.ios_log)
     out = Path(a.out) if a.out else Path(f'nxnative-report-{t["title_id"]}-{datetime.date.today().isoformat()}.zip')
     try: write_zip(out, b, report)

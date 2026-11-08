@@ -18,6 +18,13 @@ void hle_clear_system_event(void *e) { g_ev[ev_slot(e)].set = 0; }
 static int ev_set(void *e) { return g_ev[ev_slot(e)].set; }
 static void destroy_ev(void *e) { g_ev[ev_slot(e)].bound = g_ev[ev_slot(e)].set = 0; }   // nn::os::DestroySystemEvent: closing the handle unbinds the event
 void *guest_sym(const char *n) { return !strcmp(n, "_ZN2nn2os18DestroySystemEventEPNS0_15SystemEventTypeE") ? (void *)destroy_ev : NULL; }
+// AV1 (hle_movie_av1.c, VideoToolbox or dav1d) is not linked here: its decoders are made and freed through these stand-ins, and decode nothing
+static int g_av1_live;
+mav1 *mav1_new(void) { g_av1_live++; return (mav1 *)&g_av1_live; }
+void mav1_free(mav1 *a) { assert(a == (mav1 *)&g_av1_live); g_av1_live--; }
+void mav1_reset(mav1 *a) { (void)a; }
+int mav1_decode(mav1 *a, const uint8_t *data, size_t n, mav1_picture *out) { (void)a; (void)data; (void)n; (void)out; return 0; }
+const char *mav1_backend(const mav1 *a) { (void)a; return "none (test)"; }
 
 static const uint8_t vp8[] = {
     0xf0,0x02,0x00,0x9d,0x01,0x2a,0x10,0x00,0x10,0x00,0x00,0x47,0x08,0x85,0x85,0x88,
@@ -42,7 +49,7 @@ int main(void) {
 
     // Pools: one picture each, NV12 (format 3, as Bananza asks)
     cv_pref pref = h_cv_pref(16, 16, 3, 0);
-    assert(!h_cv_poolsize(&size, &align, &pref, 1) && size >= 16 * 16 * 4 && align == 0x1000);
+    assert(!h_cv_poolsize(&size, &align, &pref, 1) && size >= 16 * 16 * 4 && align == CV_NATIVE_ALIGN);   // a native image's picture on its own 16 KB page
     for (int i = 0; i < 3; i++) assert(!h_cv_pool(pool[i], mem, size, &pref, 1, 0) && pool_of(pool[i]));
 
     // Decoder: the submission-ready event is bound in its type and signalled
@@ -72,12 +79,13 @@ int main(void) {
     assert(!h_cv_rgba(pool[0], 0, 0, 0, 16, 16, rgba, 64, sizeof rgba));
     for (int i = 0; i < 1024; i += 4) assert(rgba[i] >= 250 && rgba[i + 1] <= 5 && rgba[i + 2] <= 5 && rgba[i + 3] == 255);
 
-    // No released buffer: pictures wait (4), then packets are refused (3603) and the event is cleared; a release takes the oldest and signals again
-    for (int i = 0; i < CV_HOLD; i++) assert(!h_cv_vp9submit(&id, dec, vp9, sizeof vp9, 2000 + i, false));
+    // No released buffer: pictures wait; the event goes down at CV_READY waiting, packets are refused (3603) at CV_HOLD; a release takes the oldest, and the event stays
+    // down until fewer than CV_READY wait
+    for (int i = 0; i < CV_HOLD; i++) { assert(!h_cv_vp9submit(&id, dec, vp9, sizeof vp9, 2000 + i, false)); assert(ev_set(ev) == (d->nheld < CV_READY)); }
     assert(d->nheld == CV_HOLD && !ev_set(ev));
     assert(h_cv_vp9submit(&id, dec, vp9, sizeof vp9, 9999, false) == CV_BUSY);
     h_cv_vp9rel(dec, 1, sync);
-    assert(d->nheld == CV_HOLD - 1 && ev_set(ev));
+    assert(d->nheld == CV_HOLD - 1 && !ev_set(ev));
     assert(!h_cv_vp9acq(&idx, &sync, dec) && idx == 1 && h_gs_trywait(&sync));
     assert(!h_cv_vp9props(&w, &h, &cw, &ch, &ts, &eos, dec, 1) && ts == 2000);
 
@@ -87,7 +95,7 @@ int main(void) {
     assert(!h_cv_vp9acq(&idx, &sync, dec) && idx == 0);
     assert(!h_spt_request(spt, &sync) && ev_set(spt) && !SPT(spt)->armed);
     assert(!h_cv_vp9reg(dec, 2, pool[2], 0) && !h_cv_vp9acq(&idx, &sync, dec) && idx == 2);
-    for (int i = 0; i < 2; i++) { h_cv_vp9rel(dec, (uint32_t)i, sync); assert(!h_cv_vp9acq(&idx, &sync, dec)); }   // the last two waiting pictures go out
+    for (uint32_t i = 0; d->nheld; i ^= 1) { h_cv_vp9rel(dec, i, sync); assert(!h_cv_vp9acq(&idx, &sync, dec) && idx == i); assert(ev_set(ev) == (d->nheld < CV_READY)); }   // the other waiting pictures go out; below CV_READY the event is up again
     h_cv_vp9rel(dec, 2, sync); assert(!h_cv_vp9acq(&idx, &sync, dec) && idx == 2 && !h_gs_trywait(&sync));
     assert(!h_spt_request(spt, &sync) && !ev_set(spt) && SPT(spt)->armed);
     assert(!h_cv_vp9submit(&id, dec, vp9, sizeof vp9, 3000, false) && ev_set(spt) && !SPT(spt)->armed && h_gs_trywait(&sync));
@@ -108,6 +116,34 @@ int main(void) {
     // A decoder initialised again in the same memory, cleared in between (Donkey Kong Bananza's second movie): its event is bound anew
     memset(dec, 0, sizeof dec);
     assert(!h_cv_vp9init2(dec, 0x10000, 16, 16, 1, 1, 3) && cv_of(dec) && g_ev[ev_slot(ev)].bound && ev_set(ev));
+    // The session's second decoder and later (Donkey Kong Bananza's guide movies): every packet gives its picture, and the decoder reports no end of stream the player did not
+    // send. Ended by the host after 4 packets (the default before), and again at every later packet, the second movie's player aborted (main+0xe1ae94)
+    d = cv_of(dec); assert(d->seq >= 2 && !getenv("DM_MOVIE_SKIP"));
+    for (int i = 0; i < 2; i++) assert(!h_cv_vp9reg(dec, i, pool[2 * i], 0) && !h_cv_vp9acq(&idx, &sync, dec) && idx == (uint32_t)i);
+    for (int i = 0; i < 8; i++) {
+        uint32_t k = (uint32_t)i & 1; h_cv_vp9rel(dec, k, sync); assert(!h_cv_vp9acq(&idx, &sync, dec) && idx == k && !h_gs_trywait(&sync));
+        assert(!h_cv_vp9submit(&id, dec, vp9, sizeof vp9, 10000 + i, false) && h_gs_trywait(&sync));
+        assert(!h_cv_vp9props(&w, &h, &cw, &ch, &ts, &eos, dec, k) && w == 16 && ts == 10000 + i && !eos);
+    }
+    assert(!d->eos_pending && !d->skipped && d->pictures == 8);
+    // DM_MOVIE_SKIP=all (a diagnostic): the stream ends once, on the 5th packet; the packets the player still sends are dropped with no picture and no second end of stream;
+    // a flush starts a new stream
+    setenv("DM_MOVIE_SKIP", "all", 1);
+    assert(!h_cv_vp9flush(dec) && !d->skipped && !d->stream_pkts);
+    for (int i = 0; i < 5; i++) {
+        uint32_t k = (uint32_t)i & 1; h_cv_vp9rel(dec, k, sync); assert(!h_cv_vp9acq(&idx, &sync, dec) && idx == k);
+        assert(!h_cv_vp9submit(&id, dec, vp9, sizeof vp9, 20000 + i, false) && h_gs_trywait(&sync));
+        assert(!h_cv_vp9props(&w, &h, &cw, &ch, &ts, &eos, dec, k) && w == 16 && ts == 20000 + i && eos == (i == 4));
+    }
+    assert(d->skipped);
+    h_cv_vp9rel(dec, 1, sync); assert(!h_cv_vp9acq(&idx, &sync, dec) && idx == 1);
+    for (int i = 0; i < 3; i++) assert(!h_cv_vp9submit(&id, dec, vp9, sizeof vp9, 30000 + i, false));
+    assert(!h_gs_trywait(&sync) && h_cv_vp9props(&w, &h, &cw, &ch, &ts, &eos, dec, 1) == CV_NONE && !d->eos_pending && !d->nheld);
+    assert(!h_cv_vp9flush(dec) && !d->skipped);
+    assert(!h_cv_vp9submit(&id, dec, vp9, sizeof vp9, 40000, false) && h_gs_trywait(&sync));
+    assert(!h_cv_vp9props(&w, &h, &cw, &ch, &ts, &eos, dec, 1) && ts == 40000 && !eos);
+    unsetenv("DM_MOVIE_SKIP");
+    for (int i = 0; i < 2; i++) assert(!h_cv_vp9unreg(dec, i));
     assert(!h_cv_vp9fin(dec) && !cv_of(dec) && !g_ev[ev_slot(ev)].bound);
     for (int i = 0; i < 3; i += 2) { h_cv_poolfin(pool[i]); assert(!pool_of(pool[i])); }
     // VP8 (libvpx) and H.264 (VideoToolbox) take the same protocol: one released buffer, one key frame, its picture read back red
@@ -125,22 +161,24 @@ int main(void) {
         h_cv_vp8rel(d8, 0, sync); assert(!h_cv_vp8unreg(d8, 0) && h_cv_vp8acq(&idx, &sync, d8) == CV_NONE && !cv_of(d8)->buf[0].reg);
         assert(!h_cv_vp8fin(d8) && !cv_of(d8)); h_cv_poolfin(p8);
     }
-    // SDK 21 names (Mario Kart World 1.8.0): preference with a tiling mode in a 0x40-byte slot, pool without a codec mode, Initialize…ByTransferMemory / ByRemoteMemory,
+    // SDK 21 / 22 names (Mario Kart World 1.8.0, hle_codec_video.c's "SDK 22" forms): preference with a tiling mode in a 0x40-byte slot, pool without a codec mode, Initialize…ByTransferMemory / ByRemoteMemory,
     // the submission-ready event returned; a VP9 picture goes through as with the older names. (Called from C here: the AAPCS64 stack slots of out / mode, which the hooks take
     // as uint64_t so that Apple's arm64 ABI reads them at sp+0 / sp+8 too, are checked against the SDK's prologues, not by this test)
     {   _Alignas(16) static uint8_t d9[0x400], p9[0x40], m9[16 * 16 * 4]; _Alignas(16) uint8_t slot[0x40]; memset(slot, 0xee, sizeof slot);
-        cv_pref p21 = h_cv_pref21(16, 16, 3, 1); assert(sizeof p21 <= sizeof slot); memcpy(slot, &p21, sizeof p21);
-        assert(!h_cv_poolsize(&size, &align, (const cv_pref *)slot, 1) && size >= 16 * 16 * 4 && !h_cv_pool21(p9, m9, size, (const cv_pref *)slot, 1) && pool_of(p9));
-        assert(!h_cv_vp9init21(d9, m9, 0, 0x10000, 16, 16, 1, 1, 3, 0) && cv_of(d9) && cv_of(d9)->codec == CV_VP9 && cv_of(d9)->vpx_ok);
-        void *e21 = h_cv_vp9event21(d9); assert(e21 == d9 + CV_EVENT_OFF && ev_set(e21));
+        cv_pref p21 = h_cv_pref22(16, 16, 3, 1); assert(sizeof p21 <= sizeof slot); memcpy(slot, &p21, sizeof p21);
+        assert(!h_cv_poolsize(&size, &align, (const cv_pref *)slot, 1) && size >= 16 * 16 * 4 && !h_cv_pool22(p9, m9, size, (const cv_pref *)slot, 1) && pool_of(p9));
+        assert(!h_cv_vp9tm(d9, m9, 0, 0x10000, 16, 16, 1, 1, 3, 0) && cv_of(d9) && cv_of(d9)->codec == CV_VP9 && cv_of(d9)->vpx_ok);
+        void *e21 = h_cv_vp9ev22(d9); assert(e21 == d9 + CV_EVENT_OFF && ev_set(e21));
         assert(!h_cv_vp9reg(d9, 0, p9, 0) && !h_cv_vp9acq(&idx, &sync, d9) && idx == 0);
         h_cv_vp9rel(d9, 0, sync); assert(!h_cv_vp9acq(&idx, &sync, d9) && !h_gs_trywait(&sync));
         assert(!h_cv_vp9submit(&id, d9, vp9, sizeof vp9, 8000, false) && h_gs_trywait(&sync));
         assert(!h_cv_vp9props(&w, &h, &cw, &ch, &ts, &eos, d9, 0) && w == 16 && h == 16 && ts == 8000);
         assert(!h_cv_vp9fin(d9) && !cv_of(d9));
-        memset(d9, 0, sizeof d9); assert(!h_cv_vp9init21r(d9, 0x10000, 16, 16, 1, 1, 3, 0) && cv_of(d9) && h_cv_vp9event21(d9) == d9 + CV_EVENT_OFF);
-        assert(!h_cv_vp9fin(d9) && !cv_of(d9) && h_cv_vp9event21(d9) == NULL);
-        memset(d9, 0, sizeof d9); assert(h_cv_av1init21(d9) == CV_R(2004) && h_cv_av1init21r(d9) == CV_R(2004));
+        memset(d9, 0, sizeof d9); assert(!h_cv_vp9rm(d9, 0x10000, 16, 16, 1, 1, 3, 0) && cv_of(d9) && h_cv_vp9ev22(d9) == d9 + CV_EVENT_OFF);
+        assert(!h_cv_vp9fin(d9) && !cv_of(d9) && h_cv_vp9ev22(d9) == NULL);
+        memset(d9, 0, sizeof d9); assert(!h_cv_av1tm(d9, m9, 0, 0x10000, 16, 16, 1, 1, 3, 0) && cv_of(d9) && cv_of(d9)->codec == CV_AV1 && cv_of(d9)->av1 && h_cv_av1ev22(d9) == d9 + CV_EVENT_OFF);
+        assert(!h_cv_av1fin(d9) && !cv_of(d9) && !g_av1_live);
+        memset(d9, 0, sizeof d9); assert(!h_cv_av1rm(d9, 0x10000, 16, 16, 1, 1, 3, 0) && cv_of(d9) && cv_of(d9)->codec == CV_AV1 && !h_cv_av1fin(d9) && !g_av1_live);
         _Alignas(16) uint8_t pa[0x40]; memset(pa, 0x55, sizeof pa); assert(h_cv_aliaspool(pa) == CV_R(2004) && !pool_of(pa));
         h_cv_poolfin(p9);
     }
@@ -157,8 +195,8 @@ int main(void) {
         for (int i = 4096; i < 6144; i += 2) { assert(abs(yuv[i] - 90) <= 6); assert(abs(yuv[i + 1] - 240) <= 6); }
         assert(!h_cv_h264fin(dh) && !cv_of(dh)); h_cv_poolfin(ph);
     }
-    {   uint8_t da[0x400]; memset(da, 0xab, sizeof da);   // AV1: no decoder on the host, Initialize fails and leaves no host decoder
-        assert(h_cv_av1init(da) != 0 && !cv_of(da) && !h_cv_av1fin(da)); }
+    {   _Alignas(16) uint8_t da[0x400]; memset(da, 0xab, sizeof da);   // AV1: a host decoder (VideoToolbox or dav1d; the stand-ins here), freed with it
+        assert(!h_cv_av1init2(da, 0x10000, 16, 16, 1, 1, 3) && cv_of(da) && cv_of(da)->codec == CV_AV1 && !h_cv_av1fin(da) && !cv_of(da) && !g_av1_live); }
     printf("t_codec_video: all passed\n");
     return 0;
 }

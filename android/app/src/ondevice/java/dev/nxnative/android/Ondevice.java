@@ -78,6 +78,19 @@ final class Ondevice {
         panel.picked(dump, true, packDir, false, true);
     }
 
+    /** Whether a job (any game's) runs now, so a background shader update of another card waits for it (autoUpdate starts none while one is alive) */
+    static boolean busy(MainActivity a) { return panel != null && panel.a == a && panel.alive(); }
+
+    /** The shader update job of this game's card (its dump and pack): the card's job when it has one, else the remembered job.json; null when none is for this game */
+    static Job cardJob(MainActivity a, Game g) {
+        Job j = panel != null && panel.a == a ? panel.job : null;
+        if (j == null) {
+            File f = Job.remembered(a);
+            try { j = f != null && f.isFile() ? Job.read(f) : null; } catch (IOException e) { j = null; }
+        }
+        return j != null && GameList.samePath(g.gameDir, j.dump().getPath()) && GameList.samePath(g.packDir, j.pack().getPath()) ? j : null;
+    }
+
     /** Whether a folder or .nup is a dump Prepare can start from: an update, or a base game with its code and RomFS (Pack.isDump; DumpCheck checks it fully) */
     static boolean isDump(File dir) { return Pack.isDump(dir); }
     static void resume(MainActivity a) { if (panel != null && panel.a == a) panel.resume(); }
@@ -105,7 +118,7 @@ final class Ondevice {
         return true;
     }
 
-    /** adb: am start -n dev.nxnative.android/.MainActivity (play app: dev.nxnative.android.play/dev.nxnative.android.MainActivity) --es ondevice_dump <dump folder> [--ez ondevice_start true] [--ez ondevice_pause true]
+    /** adb: am start -n dev.nxnative.android/.MainActivity (play app: dev.nxnative.android.play/dev.nxnative.android.MainActivity) --es ondevice_dump <dump folder> [--ez ondevice_start true] [--ez ondevice_pause true] [--ez ondevice_go_on true]
      *  [--es ondevice_pack <pack folder>] [--ez show_when_locked true] (TESTING.md). ondevice_pack: the job writes its pack there instead of the app's
      *  packs/<id> (AppStorage.pack), and a pack already there or beside the dump is not adopted (agents' test runs: <work>/ondevice/test-pack, so the user's pack is never written) */
     static void fromIntent(MainActivity a, Intent i) {
@@ -116,6 +129,7 @@ final class Ondevice {
         String pack = i.getStringExtra("ondevice_pack");
         if (dump != null && panel != null) panel.picked(new File(dump), i.getBooleanExtra("ondevice_start", false), pack == null ? null : new File(pack));
         if (i.getBooleanExtra("ondevice_pause", false) && panel != null) panel.pauseJob("adb");
+        if (i.getBooleanExtra("ondevice_go_on", false) && panel != null) panel.goOnAnyway("adb");
     }
 
     private static final class Panel implements ServiceConnection {
@@ -123,7 +137,8 @@ final class Ondevice {
         final LinearLayout view, card;
         final TextView head, title, status, detail, tile;
         final ProgressBar bar;
-        final Button go;
+        final Button go, goOn, anyway;
+        final Ui.Details why;   // a failed job's technical part (the tool's error, the folders, the logs), closed by default
         final Ui.Action play;
         final View more;
         /** The job (file and creation time) whose game this app put into the list ("added" in the ondevice prefs): once per job, so a game the user removed stays removed */
@@ -165,19 +180,29 @@ final class Ondevice {
             top.addView(more, mp);
             card.addView(top);
             status = Ui.body(a, "");
+            status.setAccessibilityLiveRegion(View.ACCESSIBILITY_LIVE_REGION_POLITE);   // what the job does, said when it changes (step, pause, stop)
             Ui.add(card, status, 10);
             bar = Ui.progress(a);
             bar.setMax(1000);
             Ui.add(card, bar, 10);
             detail = Ui.small(a, "");
-            detail.setTextSize(12);
             Ui.add(card, detail, 8);
+            why = Ui.details(a, "");
+            Ui.add(card, why, 4);
             go = Ui.button(a, "", Ui.Kind.TONAL, v -> goOrPause());
             go.setPadding(dp(12), 0, dp(12), 0);   // "Prepare again" fits half a narrow card
             go.setMinHeight(dp(56));
             go.setMinimumHeight(dp(56));
             play = Ui.action(a, R.drawable.ic_play, "Play", Ui.Kind.PRIMARY, v -> play());
             Ui.add(card, Ui.pair(a, go, play), 16);
+            // a heat pause (PackPolicy): the phone may report heat it does not have (a thermal HAL that says SEVERE on a cool handheld, GitHub #38)
+            goOn = Ui.button(a, "Go on anyway", Ui.Kind.SOFT, v -> goOnAnyway("launcher"));
+            goOn.setVisibility(View.GONE);
+            Ui.add(card, goOn, 8);
+            // a failed job whose check can be relaxed (PrepareText.FIX_ANYWAY): asked first, with what may go wrong
+            anyway = Ui.button(a, "Try anyway…", Ui.Kind.SOFT, v -> tryAnyway());
+            anyway.setVisibility(View.GONE);
+            Ui.add(card, anyway, 8);
             load();
             show();
         }
@@ -185,7 +210,18 @@ final class Ondevice {
         int dp(int v) { return Math.round(v * a.getResources().getDisplayMetrics().density); }
 
         void detach() {
+            keepScreen(false);
             pause();
+        }
+
+        /** Settings › Keep the screen on while preparing: the window's FLAG_KEEP_SCREEN_ON while the job runs (or waits to go on by itself) and Home shows its card */
+        private boolean screenKept;
+        void keepScreen(boolean on) {
+            if (on == screenKept) return;
+            screenKept = on;
+            if (on) a.getWindow().addFlags(android.view.WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
+            else a.getWindow().clearFlags(android.view.WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
+            android.util.Log.i("nxpack", "keep screen on while preparing: " + (on ? "on" : "off"));
         }
 
         void resume() {
@@ -268,7 +304,7 @@ final class Ondevice {
             // A finished job: its game goes into the list with its pack (once), and the card goes: Play is on the game's card
             if (ready && !alive && !addedKey(job).equals(Prefs.open(a, "ondevice").getString("added", ""))) addGame(job);
             boolean was = view.getVisibility() == View.VISIBLE;
-            if (job == null || ready && listed(job)) { view.setVisibility(View.GONE); if (was) a.refresh(); return; }
+            if (job == null || ready && listed(job)) { keepScreen(false); view.setVisibility(View.GONE); if (was) a.refresh(); return; }
             view.setVisibility(View.VISIBLE);
             if (!was) a.refresh();   // the games' empty card hides while this one shows
             String st = job.state();
@@ -276,14 +312,49 @@ final class Ondevice {
             head.setText(job.name());
             String n = job.name().trim();
             tile.setText(n.isEmpty() ? "?" : n.substring(0, n.offsetByCodePoints(0, 1)).toUpperCase(Locale.ROOT));
-            title.setText(("done".equals(st) ? "Prepared" : "pending".equals(st) ? "Ready to prepare" : "failed".equals(st) ? "Could not prepare" : "Preparing") + " · update " + job.version() + sim);
-            status.setText(job.statusText(alive));
-            bar.setProgress((int) Math.round(job.overall() * 1000));
-            detail.setText(String.format(Locale.getDefault(), "%d %%  ·  shaders %,d of %,d", Math.round(job.overall() * 100), job.shadersDone(), job.shadersTotal()));
+            // A job of a game this app version does not include (made by an APK that had it): one sentence, nothing to press but ⋯ (Forget, the deletes)
+            String notIncluded = Profile.missing(job.titleId(), job.name());
+            boolean failed = "failed".equals(st);
+            title.setText((notIncluded != null ? "Not in this app version" : "done".equals(st) ? "Prepared" : "pending".equals(st) ? "Ready to prepare" : failed ? "Could not prepare"
+                    : "paused".equals(st) ? "Paused" : "Preparing") + (job.tryAnyway() ? " · tried anyway" : "") + sim);
+            status.setText(notIncluded != null ? notIncluded : job.statusText(alive));
+            int pct = (int) Math.round(job.overall() * 1000);
+            bar.setProgress(pct);
+            bar.setStateDescription((pct / 10) + " percent");
+            detail.setText(job.detailText());
+            bar.setVisibility(notIncluded != null ? View.GONE : View.VISIBLE);
+            detail.setVisibility(notIncluded != null ? View.GONE : View.VISIBLE);
+            why.set(failed || notIncluded != null ? job.errorDetail() : "");
             boolean running = alive && ("running".equals(st) || "paused".equals(st) && !"user".equals(job.reason()) && !"timeout".equals(job.reason()));
-            go.setText(running ? "Pause" : "done".equals(st) && !job.apkChanged() ? "Prepare again" : "failed".equals(st) ? "Retry" : "pending".equals(st) ? "Start" : "Resume");
+            boolean noFix = notIncluded != null || failed && PrepareText.FIX_NONE.equals(job.fix());   // nothing in this app can make it work: no Retry that cannot succeed
+            go.setText(running ? "Pause" : "done".equals(st) && !job.apkChanged() ? "Prepare again" : failed ? "Retry" : "pending".equals(st) ? "Start" : "Resume");
             go.setEnabled(!"done".equals(st) || job.apkChanged());
+            go.setVisibility(noFix ? View.GONE : View.VISIBLE);
+            goOn.setVisibility(alive && job.canGoOn() ? View.VISIBLE : View.GONE);
+            anyway.setVisibility(!alive && failed && !noFix && PrepareText.FIX_ANYWAY.equals(job.fix()) && !job.tryAnyway() ? View.VISIBLE : View.GONE);
+            keepScreen(running && Prefs.keepScreenPreparing(a));
             play.setEnabled(ready && !running || !ready && playsOld(job));
+            play.setVisibility(noFix ? View.GONE : View.VISIBLE);   // Play stays (disabled while it cannot start) so the card's layout does not jump; gone only when it never can
+        }
+
+        /** Try anyway…: the warning first, then the job goes on with its checks relaxed (Job.tryAnyway) from where it stopped */
+        void tryAnyway() {
+            Job j = job;
+            if (j == null || alive()) return;
+            new AlertDialog.Builder(a).setTitle("Try anyway?").setMessage(PrepareText.ANYWAY_WARNING)
+                    .setPositiveButton("Try anyway", (d, w) -> {
+                        if (a.needAccess(j.dump())) return;
+                        try {
+                            j.tryAnyway(true);
+                            j.save();
+                        } catch (IOException e) {
+                            a.error("Could not save the job: " + e.getMessage());
+                            return;
+                        }
+                        show();
+                        startService(j);
+                    })
+                    .setNegativeButton("Cancel", null).show();
         }
 
         // A listed game whose shaders are being updated plays with its older library of the same ABI meanwhile (Pack.playableLibrary), as its own card did: the list
@@ -351,19 +422,26 @@ final class Ondevice {
         void picked(File dump, boolean start, File packOverride, boolean again) { picked(dump, start, packOverride, again, false); }
 
         /** card: an automatic update of a game card's pack (autoUpdate): packOverride is that pack, checked as the pack to keep; nothing else is started or asked */
-        void picked(File dump, boolean start, File packOverride, boolean again, boolean card) {
-            if (a.needAccess()) return;
-            android.widget.Toast.makeText(a, "Checking " + dump + "…", android.widget.Toast.LENGTH_SHORT).show();
+        void picked(File dump, boolean start, File packOverride, boolean again, boolean card) { picked(dump, start, packOverride, again, card, false); }
+
+        /** anyBuild: Try anyway for a dump of a build this app does not list (asked first: untested); a job beside the dump that was tried anyway keeps it */
+        void picked(File dump, boolean start, File packOverride, boolean again, boolean card, boolean anyBuild) {
+            if (a.needAccess(dump)) return;
+            android.widget.Toast.makeText(a, "Checking " + dump.getName() + "…", android.widget.Toast.LENGTH_SHORT).show();
             new Thread(() -> {
                 Found f = new Found();
+                boolean any = anyBuild;
                 try {
-                    String id = Nup.isNup(dump) ? Pack.titleIdOf(dump) : Pack.programId(new File(dump, "base/exefs/main.npdm"));
+                    String id = Pack.titleIdOf(dump);   // a .nup, a folder's base, or an update-only dump's newest update
                     File jf = Job.fileOf(DumpCheck.workOf(dump, id));
-                    if (jf.isFile()) f.existing = jf;
+                    if (jf.isFile()) {
+                        f.existing = jf;
+                        try { any |= Job.read(jf).tryAnyway(); } catch (IOException e) { /* another format: a new job replaces it */ }
+                    }
                 } catch (IOException e) {
                     // DumpCheck says what is wrong
                 }
-                f.r = DumpCheck.check(dump, f.existing == null);
+                f.r = DumpCheck.check(dump, f.existing == null, any);
                 if (f.r.ok() && (packOverride == null || card)) {
                     f.packDir = card ? packOverride : Folders.packFor(a, f.r.dump, f.r.titleId);
                     try {
@@ -383,7 +461,13 @@ final class Ondevice {
 
         void checked(Found f, boolean start, File packOverride, boolean again, boolean card) {
             DumpCheck.Result r = f.r;
-            if (!r.ok()) { if (!card) { a.error(r.error); show(); } return; }
+            if (!r.ok()) {
+                if (card) return;
+                if (r.otherBuild) untested(r, start, packOverride, again);   // a build this app does not list: say so, and offer Try anyway
+                else Ui.explain(a, "Cannot prepare this dump", r.error, r.detail).setPositiveButton("OK", null).show();
+                show();
+                return;
+            }
             // A job in progress for this dump is resumed
             if (f.existing != null) {
                 try {
@@ -400,8 +484,9 @@ final class Ondevice {
                     }
                     if (!s.equals("done") && !s.isEmpty()) {   // unfinished, for another pack folder: never written over (its job.json is this dump's)
                         if (card) return;   // an automatic update leaves it to the user
-                        a.error("An unfinished job for this dump writes to " + j.pack() + ": " + j.statusText(false) + "\n\nResume it from the card, or delete its working files "
-                                + "(⋯ › Delete working files) before preparing into another folder.");
+                        Ui.explain(a, "Preparing is not finished", "This dump is already being prepared into another pack folder. Resume it from its card, or delete its "
+                                + "working files (⋯ › Delete working files) before preparing into another folder.", j.statusText(false) + "\n\n" + j.errorDetail())
+                                .setPositiveButton("OK", null).show();
                         Job.remember(a, f.existing);
                         job = j;
                         show();
@@ -431,16 +516,20 @@ final class Ondevice {
                         : code ? "Rewrites the game code from your dump (a few minutes, in the background). The shaders are kept."
                         : shadersText(pd, r.titleId);
                 String why = (f.build != null ? f.build + "\n\n" : again && code ? "The pack's game code was made by other tools than this app's.\n\n" : "") + (lp != null ? lp + "\n\n" : "");
-                new AlertDialog.Builder(a).setTitle(code ? "Update the pack?" : "Prepare shaders?").setMessage(what + "\n\n" + why + "Pack: " + pd)
+                Ui.explain(a, code ? "Update the pack?" : "Prepare shaders?", what, why + "Pack: " + pd)
                         .setPositiveButton(code ? "Prepare again" : "Prepare", (d, w) -> redo.run())
                         .setNeutralButton("Pick another pack folder", (d, w) -> Folders.pickPack(a))
                         .setNegativeButton("Cancel", null).show();
                 return;
             }
             Profile prof = Profile.of(r.titleId);   // DumpCheck refused a dump without one
-            String text = String.format(Locale.getDefault(), "%s, %d DLC.\n\nThe app builds the game's pack and %,d shaders from your dump, once: %s "
-                    + "in the background, best on the charger. You can pause any time.\n\nNeeds about 1.5 GB (%.1f GB free): working files in %s, the pack in the app's storage (%s).",
-                    (r.version == 0 ? "Base game" : "Update " + r.version) + (r.build >= 0 && r.build != r.version ? " (the code of " + prof.buildName(r.build) + ")" : ""), r.dlc, prof.shaderTotal, ShaderLibs.jobMinutesText(prof.shaderTotal), r.free / 1073741824.0, r.work, AppStorage.pack(a, r.titleId));
+            // what it makes, how long, and the space it needs, plainly; where the files go is in Details
+            String text = String.format(Locale.getDefault(), "%s, %d DLC.\n\nThe app makes the game's pack and %,d shaders from your dump, once: %s "
+                    + "in the background, best on the charger. You can pause any time.\n\nNeeds about 1.5 GB of free space (%.1f GB free now).",
+                    (r.version == 0 ? "Base game" : "Update " + r.version) + (r.untested ? " (untested version: Try anyway)" : ""), r.dlc, prof.shaderTotal,
+                    ShaderLibs.jobMinutesText(prof.shaderTotal), r.free / 1073741824.0);
+            String where = "Dump: " + r.dump + "\nWorking files: " + r.work + "\nPack: " + AppStorage.pack(a, r.titleId)
+                    + (r.build >= 0 && r.build != r.version ? "\nIts code is " + prof.buildName(r.build) : "") + (r.buildIds.isEmpty() ? "" : "\nBuild IDs: " + r.buildIds);
             Runnable go = () -> {
                 try {
                     Job j = Job.create(r, AppStorage.pack(a, r.titleId));
@@ -455,7 +544,7 @@ final class Ondevice {
                 }
             };
             if (start) go.run();
-            else askPrepare(r, prof, text, go);
+            else askPrepare(r, prof, text, where, go);
         }
 
         /**
@@ -463,10 +552,11 @@ final class Ondevice {
          * picker; the picked folder becomes the game's, MainActivity.pickPackFor) and "Import pack…" (a .zip from Export pack… or a pack folder into the app's
          * storage, PackUi; the game gets its card first, so the import has a game to go to)
          */
-        void askPrepare(DumpCheck.Result r, Profile prof, String text, Runnable go) {
+        void askPrepare(DumpCheck.Result r, Profile prof, String text, String where, Runnable go) {
             LinearLayout box = new LinearLayout(a);
             box.setOrientation(LinearLayout.VERTICAL);
             Ui.add(box, Ui.body(a, text), 0);
+            Ui.add(box, Ui.details(a, where), 8);
             Ui.add(box, Ui.small(a, "Have a pack made elsewhere (on a computer, or exported from another phone)?"), 16);
             AlertDialog[] d = new AlertDialog[1];
             Ui.add(box, Ui.button(a, "Use an existing pack…", Ui.Kind.SOFT, v -> { d[0].dismiss(); a.pickPackFor(r.dump, r.titleId); }), 8);
@@ -494,6 +584,18 @@ final class Ondevice {
             }
         }
 
+        /**
+         * A dump of a build this app does not list (DumpCheck otherBuild): what it holds and what this app supports, plainly, with the build IDs in Details; then
+         * Try anyway (the warning says what may go wrong; the job prepares its newest version untested), a pack made elsewhere, or Cancel
+         */
+        void untested(DumpCheck.Result r, boolean start, File packOverride, boolean again) {
+            Profile p = Profile.of(r.titleId);
+            Ui.explain(a, "Untested version" + (p != null ? " of " + p.name : ""), r.error + "\n\n" + PrepareText.ANYWAY_WARNING, r.detail)
+                    .setPositiveButton("Try anyway", (d, w) -> picked(r.dump, start, packOverride, again, false, true))
+                    .setNeutralButton("Use a pack…", (d, w) -> a.pickPackFor(r.dump, r.titleId))
+                    .setNegativeButton("Cancel", null).show();
+        }
+
         void confirm(String t, String msg, String yes, Runnable r) {
             new AlertDialog.Builder(a).setTitle(t).setMessage(msg).setPositiveButton(yes, (d, w) -> r.run()).setNegativeButton("Cancel", null).show();
         }
@@ -512,10 +614,17 @@ final class Ondevice {
             a.startService(new Intent(a, PackService.class).setAction(PackService.ACTION_PAUSE).putExtra(PackService.EXTRA_FROM, from));
         }
 
+        /** Go on anyway (PackService.ACTION_GO_ON): the heat pause is lifted while the service runs this job; from: launcher or adb, for the logs */
+        void goOnAnyway(String from) {
+            a.startService(new Intent(a, PackService.class).setAction(PackService.ACTION_GO_ON).putExtra(PackService.EXTRA_FROM, from));
+        }
+
         void goOrPause() {
             if (job == null) return;
             if (go.getText().toString().equals("Pause")) { pauseJob("launcher"); return; }
-            if (a.needAccess()) return;
+            String missing = Profile.missing(job.titleId(), job.name());
+            if (missing != null) { a.error(missing); return; }   // the button is hidden then; a click queued before it was is answered the same way
+            if (a.needAccess(job.dump())) return;
             startService(job);
         }
 

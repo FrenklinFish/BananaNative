@@ -14,7 +14,7 @@ TEST = REPO / 'android/app/src/jvmtest/java/dev/nxnative/android/PackZipJvmTest.
 STUB = '''package dev.nxnative.android;
 public final class BuildConfig {
     public static final String NX_PROFILES = "040074A01BF12000\\tDonkey Kong Bananza\\t22852\\tabcdef012345\\t458752 main=aa\\n0400C3F00006E000\\tMario Kart World\\t0\\tunknown\\t";
-    public static final String NX_DMSH_VK_CHAIN = "c0ffee", NX_DMSH_VK_ABI = "abi1";
+    public static final String NX_DMSH_VK_CHAIN = "c0ffee", NX_DMSH_VK_ABI = "abi1", NX_DMSH_VK_ABI_COMPAT = "";
 }
 '''
 

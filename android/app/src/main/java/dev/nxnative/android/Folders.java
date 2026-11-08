@@ -57,6 +57,44 @@ final class Folders {
         return picked != null ? picked : oldDefault(a, game, id);
     }
 
+    /**
+     * A card whose remembered pack folder is gone (GameFile.packFix): the pack the usual search finds instead (app storage first), else the app's packs/&lt;id&gt;; a
+     * picked pack folder that is gone is forgotten. The list entry is updated; returns the card as it is now. Reads packs: off the main thread
+     */
+    static Game repack(Context a, Game g) {
+        File pd = new File(g.packDir);
+        boolean there = new File(pd, "pack.tsv").isFile();
+        if (there || !android.os.Environment.isExternalStorageManager() && !CopyPlan.inApp(AppStorage.root(a), g.packDir)) return g;   // there, or not to be told without access
+        String picked = Prefs.folder(a, "pack_" + g.titleId);
+        if (picked != null && !new File(picked).exists()) pickedPack(a, g.titleId, null);   // a picked pack folder that is gone: the search below takes over
+        File found = packFor(a, new File(g.gameDir), g.titleId);
+        String fix = GameFile.packFix(g.packDir, false, found != null && isPackOf(found, g.titleId) ? found.getPath() : null, AppStorage.pack(a, g.titleId).getPath());
+        if (fix == null) return g;
+        android.util.Log.i("nxnative", g.titleId + ": the pack folder " + g.packDir + " is gone; using " + fix);
+        Game n = new Game(g.titleId, g.name, g.gameDir, fix, g.used);
+        synchronized (Game.class) {
+            List<Game> list = Game.load(a);
+            int i = GameFile.index(list, g.gameDir);
+            if (i >= 0 && list.get(i).packDir.equals(g.packDir)) { list.set(i, new Game(g.titleId, g.name, g.gameDir, fix, list.get(i).used)); Game.save(a, list); }
+        }
+        return n;
+    }
+
+    /** A picked save folder that is gone (GameFile.saveGone), else null */
+    static File goneSave(Context a, Game g) {
+        String s = Prefs.folder(a, "save_" + g.titleId);
+        boolean readable = android.os.Environment.isExternalStorageManager() || (s != null && CopyPlan.inApp(AppStorage.root(a), s));
+        return GameFile.saveGone(s, s != null && new File(s).isDirectory(), readable) ? new File(s) : null;
+    }
+
+    /** The picked save folder that is gone: the app's own save from now on (the picked one is forgotten), or the folder picker */
+    static void saveGoneDialog(MainActivity a, Game g, File gone) {
+        Ui.explain(a, "Save folder gone", GameFile.saveGoneText(gone.getName()), gone.getPath())
+                .setPositiveButton("Use the app's save", (x, w) -> { Prefs.folder(a, "save_" + g.titleId, null); a.refresh(); })
+                .setNeutralButton("Pick the folder", (x, w) -> { current = g; a.pickFolder(PICK_SAVE, "Pick the folder for " + g.name + "'s save"); })
+                .setNegativeButton("Cancel", null).show();
+    }
+
     /** The default pack folder (the Folders "Default" button): packFor without the picked folder */
     static File defaultPack(Context a, File game, String id) {
         PackFind.Found f = find(a, null, game, id);
@@ -102,7 +140,8 @@ final class Folders {
                 + app + ", and plays it from there; this folder is never changed)";
         String from = Prefs.migratedFrom(a, g.titleId);
         return " (default: in the app's storage" + (from != null ? "; copied from " + from + ", which is kept as it was" : "")
-                + "). Back up saves puts copies in " + Prefs.backupsDir(new File(g.gameDir), g.titleId) + ", on shared storage: they stay when the app is uninstalled.";
+                + ")." + (SaveUi.exports(a, g) ? " Back up saves makes a .zip in a place you pick, so it stays when the app is uninstalled."
+                : " Back up saves puts copies in " + SaveUi.backups(g) + ", on shared storage: they stay when the app is uninstalled.");
     }
 
     /** Settings › Folders: the only game's folders, else the user picks the game first */
@@ -196,7 +235,7 @@ final class Folders {
             a.error("Not a pack folder: " + e.getMessage());
             return;
         }
-        String why = Profile.missing(p.titleId, "That pack's game");
+        String why = Profile.missing(p.titleId, p.name);
         if (why != null) { a.error(why); return; }
         Game g = current;
         if (g != null && !p.titleId.equals(g.titleId)) { a.error("That pack is for " + p.titleId + ", not " + g.name + " (" + g.titleId + ")."); return; }

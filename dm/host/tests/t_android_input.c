@@ -1,5 +1,6 @@
 // The Android host's pure input part (android/input_map.c), on the Mac: gamepad key and axis mapping, the on-screen controls and touchscreen routing, the sensor frame, shakes
 #include "android/input_map.c"
+#include "../../gfx/vk_android/vka_present_fit.h"
 #include <stdio.h>
 
 static int fails;
@@ -10,6 +11,8 @@ static void t_keys(void) {
     CHECK(nxin_key_button(AK_BUTTON_A, 0) == DM_BTN_B && nxin_key_button(AK_BUTTON_B, 0) == DM_BTN_A, "A / B by position");
     CHECK(nxin_key_button(AK_BUTTON_X, 0) == DM_BTN_Y && nxin_key_button(AK_BUTTON_Y, 0) == DM_BTN_X, "X / Y by position");
     CHECK(nxin_key_button(AK_BUTTON_A, 1) == DM_BTN_A && nxin_key_button(AK_BUTTON_Y, 1) == DM_BTN_Y, "by label");
+    CHECK(nxin_key_button(AK_BUTTON_A, 2) == DM_BTN_A && nxin_key_button(AK_BUTTON_B, 2) == DM_BTN_B
+          && nxin_key_button(AK_BUTTON_X, 2) == DM_BTN_Y && nxin_key_button(AK_BUTTON_Y, 2) == DM_BTN_X, "A / B by label, X / Y by position");
     static const struct { int k; uint64_t b; } m[] = {
         {AK_BUTTON_L1, DM_BTN_L}, {AK_BUTTON_R1, DM_BTN_R}, {AK_BUTTON_L2, DM_BTN_ZL}, {AK_BUTTON_R2, DM_BTN_ZR}, {AK_BUTTON_THUMBL, DM_BTN_LS}, {AK_BUTTON_THUMBR, DM_BTN_RS},
         {AK_BUTTON_START, DM_BTN_PLUS}, {AK_BUTTON_SELECT, DM_BTN_MINUS}, {AK_DPAD_UP, DM_BTN_UP}, {AK_DPAD_DOWN, DM_BTN_DOWN}, {AK_DPAD_LEFT, DM_BTN_LEFT}, {AK_DPAD_RIGHT, DM_BTN_RIGHT},
@@ -149,7 +152,43 @@ static void t_shake(void) {
     CHECK(!nxin_shake_feed(&s, (float[]){0, 0, -1}, t + 200000000), "over 120 ms after the last hit");
     CHECK(!nxin_shake_feed(&s, (float[]){0.8f, 0, -1}, t + 210000000), "0.8 G is no shake");
 }
+static void t_map(void) {
+    nxin_map m; char bad[64];
+    CHECK(nxin_map_parse(&m, "BUTTON_A=A, BUTTON_B=B,BUTTON_L2=NONE,BUTTON_C=ZR,BUTTON_Q=A,DPAD_UP=xx", bad, sizeof bad) == 4, "four entries");
+    CHECK(!strcmp(bad, "BUTTON_Q=A"), "the first unreadable entry: %s", bad);
+    nxin_pad p = {.map = &m}; uint64_t b; int32_t lx, ly, rx, ry;
+    CHECK(nxin_pad_button(&p, AK_BUTTON_A, 0) == DM_BTN_A && nxin_pad_button(&p, AK_BUTTON_B, 0) == DM_BTN_B, "A / B by the map, not by position");
+    CHECK(nxin_pad_button(&p, AK_BUTTON_X, 0) == DM_BTN_Y && nxin_pad_button(&p, AK_DPAD_UP, 0) == DM_BTN_UP, "unmapped keys keep the default");
+    CHECK(nxin_pad_button(&p, AK_BUTTON_A, 2) == DM_BTN_A && nxin_pad_button(&p, AK_BUTTON_X, 1) == DM_BTN_X, "the map wins over labelled; the rest follow it");
+    CHECK(nxin_pad_key(&p, AK_BUTTON_L2, 1, 0) == 1 && p.keys == 0, "NONE: consumed, nothing pressed");
+    CHECK(nxin_pad_key(&p, AK_BUTTON_C, 1, 0) == 1 && p.keys == DM_BTN_ZR, "BUTTON_C mapped to ZR");
+    nxin_pad_key(&p, AK_BUTTON_C, 0, 0); CHECK(p.keys == 0, "released");
+    CHECK(nxin_pad_key(&p, AK_BUTTON_Z, 1, 0) == 0, "BUTTON_Z unmapped: not the pad's");
+    nxin_pad_axis(&p, AA_LTRIGGER, 1); nxin_pad_axis(&p, AA_RTRIGGER, 1); nxin_pad_out(&p, 0.1f, &b, &lx, &ly, &rx, &ry);
+    CHECK(b == DM_BTN_ZR, "the analog L2 follows BUTTON_L2=NONE, R2 stays ZR: %#llx", (unsigned long long)b);
+    nxin_map_parse(&m, "DPAD_LEFT=Y,BUTTON_R2=MINUS", bad, sizeof bad);
+    nxin_pad q = {.map = &m}; nxin_pad_axis(&q, AA_HAT_X, -1); nxin_pad_axis(&q, AA_RTRIGGER, 1); nxin_pad_out(&q, 0.1f, &b, &lx, &ly, &rx, &ry);
+    CHECK(b == (DM_BTN_Y | DM_BTN_MINUS) && !*bad, "the hat and the analog trigger by the map: %#llx", (unsigned long long)b);
+    CHECK(nxin_map_parse(&m, "", bad, sizeof bad) == 0 && m.set == 0 && nxin_map_parse(&m, NULL, NULL, 0) == 0, "empty");
+    for (int i = 0; i < NXIN_SRC_N; i++) CHECK(nxin_src_of_key(src_keys[i]) == i, "source %s", nxin_src_names[i]);
+    for (int i = 0; i < 16; i++) { char spec[32]; snprintf(spec, sizeof spec, "BUTTON_A=%s", nxin_switch_names[i]); nxin_map_parse(&m, spec, bad, sizeof bad); CHECK(m.to[0] == 1ull << i, "%s", spec); }
+}
+static void t_fit(void) {
+    int r[4];
+    vka_fit_rect(2400, 1080, 1920, 1080, 0, 100, 5000, 5000, r); CHECK(r[0] == 240 && r[1] == 0 && r[2] == 1920 && r[3] == 1080, "fit, centred: %d %d %d %d", r[0], r[1], r[2], r[3]);
+    vka_fit_rect(2400, 1080, 1920, 1080, 0, 100, 0, 5000, r); CHECK(r[0] == 0, "placed left");
+    vka_fit_rect(1200, 900, 1920, 1080, 0, 100, 5000, 5000, r); CHECK(r[0] == 0 && r[1] == 112 && r[2] == 1200 && r[3] == 675, "4:3, bars top and bottom: %d %d %d %d", r[0], r[1], r[2], r[3]);
+    vka_fit_rect(1200, 900, 1920, 1080, 1, 100, 5000, 5000, r); CHECK(r[0] == 0 && r[1] == 0 && r[2] == 1200 && r[3] == 900, "stretch fills");
+    vka_fit_rect(1920, 1080, 0, 0, 0, 100, 5000, 5000, r); CHECK(r[2] <= 1920 && r[3] <= 1080, "no crop: inside the display");
+    // Picture size: a share of the fitted (or stretched) rectangle, its aspect kept, placed in the larger free space (PictureFit.rect is the launcher's twin)
+    vka_fit_rect(2400, 1080, 1920, 1080, 0, 80, 5000, 5000, r); CHECK(r[0] == 432 && r[1] == 108 && r[2] == 1536 && r[3] == 864, "80 %%, centred: %d %d %d %d", r[0], r[1], r[2], r[3]);
+    vka_fit_rect(2400, 1080, 1920, 1080, 0, 80, 5000, 0, r); CHECK(r[1] == 0 && r[0] == 432, "80 %%, top: %d %d", r[0], r[1]);
+    vka_fit_rect(1200, 900, 1920, 1080, 1, 50, 5000, 5000, r); CHECK(r[0] == 300 && r[1] == 225 && r[2] == 600 && r[3] == 450, "stretch at 50 %%: %d %d %d %d", r[0], r[1], r[2], r[3]);
+    vka_fit_rect(2400, 1080, 1920, 1080, 0, 10, 5000, 5000, r); CHECK(r[2] == 960 && r[3] == 540, "below 50 %% reads as 50: %d %d", r[2], r[3]);
+    vka_fit_rect(2400, 1080, 1920, 1080, 0, 0, 5000, 5000, r); CHECK(r[2] == 1920 && r[3] == 1080, "0 (unset) reads as 100");
+}
 int main(void) {
+    t_map(); t_fit();
     t_keys(); t_pad(); t_touch(); t_layout(); t_motion(); t_shake();
     if (fails) { printf("t_android_input: %d failures\n", fails); return 1; }
     printf("t_android_input: ok\n");

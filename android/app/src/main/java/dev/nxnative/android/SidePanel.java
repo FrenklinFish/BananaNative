@@ -4,21 +4,27 @@ import android.app.Activity;
 import android.app.AlertDialog;
 import android.graphics.Color;
 import android.graphics.Typeface;
+import android.util.TypedValue;
 import android.view.Gravity;
 import android.view.KeyEvent;
 import android.view.View;
+import android.view.ViewGroup;
 import android.widget.Button;
+import android.widget.CompoundButton;
 import android.widget.FrameLayout;
 import android.widget.LinearLayout;
 import android.widget.RadioButton;
 import android.widget.RadioGroup;
 import android.widget.ScrollView;
+import android.widget.SeekBar;
 import android.widget.TextView;
 
 /**
  * The in-game panel: slides in from the right over the running game, which goes on behind it. It holds the frame rate cap (Native.fpsCapSet), frame generation
- * (Lsfg.rows, Native.frameGenSet), FSR 1 upscaling (Fsr.rows), the overlay's items (Overlay.rows), the on-screen controls' rows (TouchControls.controlRows) and Stop. Every change applies at once,
- * without going back to the launcher, and is kept for the next start. Opened by Back (the phone's button or its edge swipe), a long press on the on-screen controls'
+ * (Lsfg.rows, Native.frameGenSet), FSR 1 upscaling (Fsr.rows), the picture (Fit / Stretch, its size and position: GameActivity.picture, TouchControls.positionRows),
+ * the overlay's items (Overlay.rows), the on-screen controls' rows (TouchControls.controlRows), the panel's own size and text size (PanelLook), a shortcut to this
+ * game's Button mapping (which applies at the next start) and Stop. Every other change applies at once, without going back to the launcher, and is
+ * kept for the next start. Opened by Back (the phone's button or its edge swipe), a long press on the on-screen controls'
  * show / hide button, or a gamepad's Home / guide button (KEYCODE_BUTTON_MODE); closed the same ways, by a tap beside it, or by B on a gamepad, whose D-pad and A move
  * through it meanwhile (GameActivity.dispatchKeyEvent).
  */
@@ -26,16 +32,25 @@ final class SidePanel extends FrameLayout {
     private final Activity act;
     private final LinearLayout box;
     private final View sheet;
-    private final java.util.function.Consumer<LinearLayout> fill;
+    private final Rows rows;
     private TextView fpsNow, lsfgNow;
     private RadioGroup caps;
     private boolean open;
     private final Runnable tick = this::refresh;
 
-    SidePanel(Activity a, java.util.function.Consumer<LinearLayout> fill) {
+    /** The rows GameActivity adds from its on-screen controls (TouchControls) */
+    interface Rows {
+        void controls(LinearLayout box);   // TouchControls.controlRows
+        void position(LinearLayout box);   // TouchControls.positionRows: the picture's position on this screen
+    }
+
+    // The ids of the choices a rebuild gives the focus back to (restyle)
+    private static final int ID_SIZE = 5000, ID_TEXT = 5100, ID_FIT = 5200, ID_MAP = 5300;
+
+    SidePanel(Activity a, Rows rows) {
         super(a);
         act = a;
-        this.fill = fill;
+        this.rows = rows;
         float dp = getResources().getDisplayMetrics().density;
         View scrim = new View(a);
         scrim.setBackgroundColor(0x66000000);
@@ -48,8 +63,7 @@ final class SidePanel extends FrameLayout {
         ScrollView sv = new ScrollView(a);
         sv.setBackgroundColor(0xF0202124);
         sv.addView(box);
-        int w = Math.round(Math.min(420 * dp, a.getResources().getDisplayMetrics().widthPixels * 0.55f));
-        addView(sv, new LayoutParams(w, LayoutParams.MATCH_PARENT, Gravity.END));
+        addView(sv, new LayoutParams(PanelLook.widthPx(Prefs.panelSize(a), dp, a.getResources().getDisplayMetrics().widthPixels), LayoutParams.MATCH_PARENT, Gravity.END));
         sheet = sv;
         setVisibility(GONE);
     }
@@ -62,6 +76,7 @@ final class SidePanel extends FrameLayout {
         open = true;
         box.removeAllViews();
         build();
+        look();
         setVisibility(VISIBLE);
         sheet.setTranslationX(sheet.getLayoutParams().width);
         sheet.animate().translationX(0).setDuration(180).start();
@@ -86,6 +101,39 @@ final class SidePanel extends FrameLayout {
             return true;
         }
         return false;
+    }
+
+    /** The panel's size and text size (Prefs.panelSize / panelText): its width, and every row's least height and text size, over what build() made */
+    private void look() {
+        float dp = getResources().getDisplayMetrics().density;
+        int size = Prefs.panelSize(act), w = PanelLook.widthPx(size, dp, getResources().getDisplayMetrics().widthPixels);
+        if (sheet.getLayoutParams().width != w) { sheet.getLayoutParams().width = w; sheet.requestLayout(); }
+        look(box, PanelLook.textScale(Prefs.panelText(act)), PanelLook.rowPx(size, dp));
+    }
+    private static void look(View v, float text, int row) {
+        if (v instanceof TextView) {
+            TextView t = (TextView) v;
+            if (text != 1f) t.setTextSize(TypedValue.COMPLEX_UNIT_PX, t.getTextSize() * text);
+            if (v instanceof Button || v instanceof CompoundButton) t.setMinHeight(row);
+        } else if (v instanceof SeekBar) v.setMinimumHeight(row);
+        if (v instanceof ViewGroup) for (int i = 0; i < ((ViewGroup) v).getChildCount(); i++) look(((ViewGroup) v).getChildAt(i), text, row);
+    }
+
+    /** Built again with the new look or labels, at once (from a choice's listener: after it returns), the focus back on the choice that was pressed */
+    private void restyle(int focusId) {
+        post(() -> {
+            if (!open) return;
+            int y = sheet.getScrollY();
+            box.removeAllViews();
+            build();
+            look();
+            sheet.post(() -> {
+                sheet.scrollTo(0, y);
+                View f = focusId != 0 ? box.findViewById(focusId) : null;
+                if (f != null) f.requestFocus();
+            });
+            refresh();
+        });
     }
 
     private TextView head(String t) {
@@ -116,7 +164,7 @@ final class SidePanel extends FrameLayout {
         title.setTypeface(Typeface.DEFAULT_BOLD);
         title.setTextSize(20);
         box.addView(title);
-        note("The game runs on behind this panel; every change applies now and is kept.");
+        note("The game runs on behind this panel; every change applies now and is kept, except those marked for the next start.");
 
         head("Frame rate cap");   // the game's own frame rate; frame generation (below, its own heading) adds frames on top
         caps = new RadioGroup(act);
@@ -142,11 +190,23 @@ final class SidePanel extends FrameLayout {
 
         Fsr.rows(act, box);
 
+        picture();
+
         head("Overlay");
         Overlay.rows(act, box, null);
 
         head("On-screen controls");
-        fill.accept(box);   // GameActivity: TouchControls.controlRows
+        rows.controls(box);
+        // Rumble: the game's vibration on the controller or the phone, this game's setting (Game settings › Rumble), applied at once (GameActivity.rumble)
+        android.widget.CheckBox rum = new android.widget.CheckBox(act);
+        rum.setText("Rumble (the game's vibration)");
+        rum.setChecked(Prefs.rumble(act, game()));
+        rum.setOnCheckedChangeListener((b, on) -> { if (act instanceof GameActivity) ((GameActivity) act).rumble(on); else Prefs.rumble(act, game(), on); });
+        box.addView(rum);
+
+        panelRows();
+
+        nextStartRows();
 
         Button pause = new Button(act);   // the game suspended (clock, graphics, threads, audio) until a tap on the screen, or A / Start: GameActivity.pause
         pause.setText("Pause the game");
@@ -162,7 +222,7 @@ final class SidePanel extends FrameLayout {
         Button stop = new Button(act);
         stop.setText("Stop the game");
         stop.setOnClickListener(v -> new AlertDialog.Builder(act).setTitle("Stop the game?").setMessage("The game ends; unsaved progress is lost. The log stays for Share log.")
-                .setPositiveButton("Stop", (d, w) -> { Native.note("stopped by the user"); if (act instanceof GameActivity) ((GameActivity) act).backToFrontend(); android.os.Process.killProcess(android.os.Process.myPid()); })
+                .setPositiveButton("Stop", (d, w) -> { Native.note("stopped by the user"); ExitWatch.stopped(); if (act instanceof GameActivity) ((GameActivity) act).backToFrontend(); android.os.Process.killProcess(android.os.Process.myPid()); })
                 .setNegativeButton("Keep running", null).show());
         LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT);
         lp.topMargin = Math.round(24 * getResources().getDisplayMetrics().density);
@@ -171,6 +231,96 @@ final class SidePanel extends FrameLayout {
         done.setText("Back to the game");
         done.setOnClickListener(v -> close());
         box.addView(done, new LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT));
+    }
+
+    /** Picture: Fit / Stretch and the size (GameActivity.picture: live through DM_CTL, kept for this game), then the position on this screen (TouchControls) */
+    private void picture() {
+        head("Picture");
+        GameActivity ga = act instanceof GameActivity ? (GameActivity) act : null;
+        boolean live = ga != null && ga.live();
+        boolean st = live ? ga.runStretch() : Prefs.stretch(act, game());   // what the game shows now (an env.txt line may have set it), else what the next start uses
+        int sz = live ? ga.runPictureSize() : Prefs.pictureSize(act, game());
+        RadioGroup fit = new RadioGroup(act);
+        fit.setOrientation(RadioGroup.HORIZONTAL);
+        String[] names = {"Fit", "Stretch"};
+        for (int i = 0; i < names.length; i++) { RadioButton b = new RadioButton(act); b.setId(ID_FIT + i); b.setText(names[i]); fit.addView(b); }
+        fit.check(ID_FIT + (st ? 1 : 0));
+        box.addView(fit);
+        TextView sl = new TextView(act);
+        SeekBar ss = new SeekBar(act);
+        ss.setMax(PictureFit.steps());
+        ss.setProgress(PictureFit.stepOfSize(sz));
+        ss.setKeyProgressIncrement(1);   // the D-pad's left / right: 5 % a press
+        Runnable label = () -> sl.setText("Size " + PictureFit.sizeOfStep(ss.getProgress()) + " %" + (ss.getProgress() == PictureFit.steps() ? " (full)" : ""));
+        label.run();
+        Runnable send = () -> { if (ga != null) ga.picture(fit.getCheckedRadioButtonId() == ID_FIT + 1, PictureFit.sizeOfStep(ss.getProgress())); };
+        fit.setOnCheckedChangeListener((g, id) -> send.run());
+        ss.setOnSeekBarChangeListener(new SeekBar.OnSeekBarChangeListener() {
+            @Override public void onProgressChanged(SeekBar b, int v, boolean user) { label.run(); send.run(); }
+            @Override public void onStartTrackingTouch(SeekBar b) {}
+            @Override public void onStopTrackingTouch(SeekBar b) {}
+        });
+        box.addView(sl);
+        box.addView(ss);
+        note(live ? "Fit keeps the game's shape, Stretch fills the screen; below 100 % the picture is smaller, with black around it. Applies now, kept for this game."
+                : "Applies at the next start (this run takes no live changes: DM_CTL is off).");
+        rows.position(box);
+    }
+
+    /** The panel itself: its size (width, row height) and its text size, for every game, applied at once */
+    private void panelRows() {
+        head("Panel");
+        String[] what = {"Size", "Text size"};
+        int[] ids = {ID_SIZE, ID_TEXT}, cur = {Prefs.panelSize(act), Prefs.panelText(act)};
+        for (int k = 0; k < 2; k++) {
+            TextView l = new TextView(act); l.setText(what[k]); box.addView(l);
+            RadioGroup g = new RadioGroup(act);
+            g.setOrientation(RadioGroup.HORIZONTAL);
+            for (int i = 0; i < PanelLook.NAMES.length; i++) { RadioButton b = new RadioButton(act); b.setId(ids[k] + i); b.setText(PanelLook.NAMES[i]); g.addView(b); }
+            g.check(ids[k] + cur[k]);
+            int base = ids[k];
+            g.setOnCheckedChangeListener((gr, id) -> {
+                if (base == ID_SIZE) Prefs.panelSize(act, id - base); else Prefs.panelText(act, id - base);
+                restyle(id);
+            });
+            box.addView(g);
+        }
+    }
+
+    /**
+     * A shortcut to this game's Button mapping (DM_PAD_MAP), which the host reads only at its start: one compact row under the "Next start" heading, "Button mapping"
+     * then the mapping's summary in grey and a chevron. A borderless Button, so that look() gives it the panel's row height and text size and the D-pad can focus it.
+     * Game language is set in the launcher only (Game settings › Game language).
+     */
+    private void nextStartRows() {
+        if (!(act instanceof GameActivity)) return;
+        GameActivity ga = (GameActivity) act;
+        head("Next start");
+        Button map = new Button(act);
+        map.setId(ID_MAP);
+        map.setAllCaps(false);
+        TypedValue bg = new TypedValue();
+        act.getTheme().resolveAttribute(android.R.attr.selectableItemBackground, bg, true);
+        map.setBackgroundResource(bg.resourceId);   // a list row with the focus and press highlight, not a raised default Button
+        map.setStateListAnimator(null);
+        map.setGravity(Gravity.START | Gravity.CENTER_VERTICAL);
+        map.setTextColor(new TextView(act).getTextColors());   // the colour of the panel's other rows
+        map.setTextSize(14);
+        map.setSingleLine(true);
+        map.setEllipsize(android.text.TextUtils.TruncateAt.END);
+        map.setMinWidth(0);
+        map.setMinimumWidth(0);
+        int pv = Math.round(4 * getResources().getDisplayMetrics().density);
+        map.setPadding(0, pv, 0, pv);
+        String sum = PadMapUi.label(act, game());
+        android.text.SpannableStringBuilder t = new android.text.SpannableStringBuilder("Button mapping  ");
+        int from = t.length();
+        t.append(sum).append("  ›");
+        t.setSpan(new android.text.style.ForegroundColorSpan(Color.LTGRAY), from, t.length(), android.text.Spanned.SPAN_EXCLUSIVE_EXCLUSIVE);
+        map.setText(t);
+        map.setContentDescription("Button mapping: " + sum + ", applies at the next start");
+        map.setOnClickListener(v -> PadMapUi.forGame(act, ga.game(), () -> restyle(ID_MAP)));
+        box.addView(map, new LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT));
     }
 
     /** Twice a second while open: what the game runs at, which caps it can hold, and the frame generation's state */

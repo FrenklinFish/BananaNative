@@ -85,7 +85,7 @@ class SumoTests(unittest.TestCase):
                 _, keys, _, extra = split.scan_file((str(path), path.name))
                 self.assertEqual(extra, {})
                 self.assertTrue(keys)
-                self.assertTrue(all(not split.check(w, s, c, k) for w, s, c, k in keys.values()))
+                self.assertTrue(all(not split.check(w, s, c, k) for w, s, c, k, *_ in keys.values()))
 
     def test_nested_streams_keep_the_depth_limit(self):
         d = descriptor('vs')

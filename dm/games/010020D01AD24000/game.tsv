@@ -19,7 +19,7 @@ shader_versions	v655360
 # ---- Files ----
 # every module main imports from
 modules	main sdk
-# Empty marker: nx_extract creates an empty RomFS directory for a program without a data section.
+# Empty marker: a program without a data section has an empty RomFS.
 romfs_marker	
 zip_store	.metallib
 

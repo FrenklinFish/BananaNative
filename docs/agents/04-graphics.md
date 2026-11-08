@@ -2,6 +2,8 @@
 
 The graphics layer records NVN commands into its own command format (`dm/gfx/nvn/hle_nvn.c`) and replays them as Metal 4 at submit time (`nvn_mtl.m`). Shaders are never translated at run time: the original Maxwell shader binaries are translated offline (Ryujinx's translator → SPIR-V → spirv-cross → metallib) and looked up by key. See `dm/gfx/README.md` for the full pipeline; this page lists what changes per title.
 
+This page describes nxnative's Metal path. Banana Native replays the same recorded commands on Vulkan (`dm/gfx/vk_android`) and loads the same translator's output as SPIR-V instead of metallibs: the shader keys, containers and binding census below hold for both; the Vulkan side (library, descriptor ABI, what the replay does) is in [android/SHADERS.md](../../android/SHADERS.md).
+
 ## 1. Find every shader container
 
 Do not stop at the obvious archive. In Mario the main `bfsha` held 4,888 of the 12,811 shaders the game actually uses.

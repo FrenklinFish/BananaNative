@@ -178,7 +178,7 @@ public final class ReadinessActivity extends Activity {
             }
             String name = p.titleId;   // a game is named as the user's dump names it (its card), else by its title ID
             for (Game g : added) if (g.titleId.equals(p.titleId)) { name = g.name; break; }
-            for (Game g : added) if (g.titleId.equals(p.titleId)) l.add(gameFiles(g));
+            for (Game g : added) if (g.titleId.equals(p.titleId)) l.add(gameFiles(c, g));
             r.sections.add(new Section(name, l));
             boolean fail = Readiness.any(l, Readiness.Status.FAIL), warn = Readiness.any(l, Readiness.Status.WARNING);
             if (fail) fails++; else if (warn) warns++;
@@ -311,8 +311,20 @@ public final class ReadinessActivity extends Activity {
      * Whether the dump of an added game can be read: a folder (readable, with base/exefs/main.npdm or exefs/main.npdm), or a .nup (Nup.open: its header and the
      * SHA-256 of its table of contents; its packages listed)
      */
-    static Readiness.Check gameFiles(Game g) {
+    static Readiness.Check gameFiles(Context c, Game g) {
         File f = new File(g.gameDir);
+        if (PickedNup.is(c, g.gameDir)) {   // a .nup used where it is: read through the picker's permission, no All files access needed
+            try {
+                Nup n = Nup.open(f);
+                return new Readiness.Check("Game files", Readiness.Status.PASS, f.getName() + ": a .nup used where it is (picked with the file picker; " + n.packages.size()
+                        + " packages, its table of contents checked). It needs no All files access.", null);
+            } catch (IOException e) {
+                return new Readiness.Check("Game files", Readiness.Status.FAIL, e instanceof PickedNup.Lost ? GameFile.goneText(f.getName()) + " (its card's button picks it.)"
+                        : f.getName() + " cannot be used: " + e.getMessage(), null);
+            }
+        }
+        if (GameFile.gone(f.exists(), Environment.isExternalStorageManager() || CopyPlan.inApp(AppStorage.root(c), g.gameDir)))
+            return new Readiness.Check("Game files", Readiness.Status.FAIL, GameFile.goneText(f.getName()) + " (" + f + "; its card's button picks it.)", null);
         if (Nup.isNup(f)) {
             try {
                 Nup n = Nup.open(f);
@@ -363,8 +375,9 @@ public final class ReadinessActivity extends Activity {
         l.add(new Readiness.Check("Memory", Readiness.Status.INFO, String.format(Locale.ROOT, "%.1f GiB as Android reports it (less than the label), %.1f GiB free now%s.",
                 m.totalMem / (double) (1L << 30), m.availMem / (double) (1L << 30), m.lowMemory ? ", which Android counts as low" : ""), null));
         boolean access = Environment.isExternalStorageManager();
-        l.add(new Readiness.Check("All files access", access ? Readiness.Status.PASS : Readiness.Status.FAIL,
-                access ? "Granted." : "Not granted: the app cannot read your dump.", "access"));
+        l.add(new Readiness.Check("All files access", access ? Readiness.Status.PASS : Readiness.Status.WARNING,   // games copied into the app (GameCopy) run without it
+                access ? "Granted." : "Not granted: the app reads .nup files picked with the file picker and dump folders copied into it, not a dump folder elsewhere "
+                        + "on the phone.", "access"));
         try {
             File ext = c.getExternalFilesDir(null);
             long free = new StatFs((ext != null ? ext : c.getFilesDir()).getPath()).getAvailableBytes();

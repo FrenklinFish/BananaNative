@@ -26,12 +26,14 @@ public final class FrontendLaunch extends Activity {
         super.onCreate(saved);
         if (saved != null) { finish(); return; }   // recreated after it handed the game on
         Intent i = getIntent();
-        if (!Environment.isExternalStorageManager()) {
+        String tid = Frontend.titleId(i.getStringExtra("title_id"));
+        Game pg = tid == null ? pickedGame(i) : null;   // a .nup used where it is, named by its document or by a path the app cannot open
+        if (pg != null) { byGame(pg); return; }
+        if (!Environment.isExternalStorageManager() && !copiedGame(tid)) {   // a game copied into the app (GameCopy) needs no All files access
             Toast.makeText(this, "Turn on All files access for " + getString(R.string.app_name) + ", then start the game again.", Toast.LENGTH_LONG).show();
             home(null);
             return;
         }
-        String tid = Frontend.titleId(i.getStringExtra("title_id"));
         if (tid != null) { byTitleId(tid); return; }
         String path = pathOf(i);
         if (path == null) {
@@ -56,6 +58,29 @@ public final class FrontendLaunch extends Activity {
                 else home(game);
             });
         }, "nx-frontend").start();
+    }
+
+    /**
+     * The card of a .nup used where it is (PickedNup) that the intent names: its document URI as the picker gave it, or a path or URI ending in its file name that
+     * the app cannot open itself (no All files access); null when none, or when two picked games have that name
+     */
+    private Game pickedGame(Intent i) {
+        Uri u = i.getData();
+        if (u != null && "content".equalsIgnoreCase(u.getScheme()))
+            for (Game g : Game.load(this)) if (u.toString().equals(PickedNup.uriOf(this, new File(g.gameDir)))) return g;
+        String p = pathOf(i);
+        if (p == null && u != null) p = u.getLastPathSegment();
+        if (p == null) return null;
+        File f = new File(Frontend.normal(p));
+        if (Environment.isExternalStorageManager() && f.canRead()) return null;   // a path the app reads: as any game
+        return PickedNup.byName(this, f.getName());
+    }
+
+    /** Whether the game of this title ID on the list lies in app storage (Copy into the app) */
+    private boolean copiedGame(String tid) {
+        if (tid == null) return false;
+        for (Game g : Game.load(this)) if (g.titleId.equals(tid) && CopyPlan.inApp(AppStorage.root(this), g.gameDir)) return true;
+        return false;
     }
 
     /** The game's path: the intent's data (file://, a storage document, or a provider URI that carries a /storage path), else the extra "game" */
@@ -103,14 +128,19 @@ public final class FrontendLaunch extends Activity {
     private void byTitleId(String tid) {
         for (Game g : Game.load(this)) {
             if (!g.titleId.equalsIgnoreCase(tid)) continue;
-            File game = new File(g.gameDir);
-            new Thread(() -> {
-                Game r = ready(game, g.titleId);
-                runOnUiThread(() -> { if (isFinishing()) return; if (r != null) play(r); else home(game); });
-            }, "nx-frontend").start();
+            byGame(g);
             return;
         }
         fail("No game with title ID " + tid + " is on Home. Add it in " + getString(R.string.app_name) + " first, or send the game's file instead.");
+    }
+
+    /** A card on the list: played when it can start now, else Home shows it (its Play says what is missing: a lost .nup offers to pick it again) */
+    private void byGame(Game g) {
+        File game = new File(g.gameDir);
+        new Thread(() -> {
+            Game r = PickedNup.is(this, g.gameDir) && PickedNup.problem(this, game) != null ? null : ready(game, g.titleId);
+            runOnUiThread(() -> { if (isFinishing()) return; if (r != null) play(r); else home(game); });
+        }, "nx-frontend").start();
     }
 
     private void play(Game g) {

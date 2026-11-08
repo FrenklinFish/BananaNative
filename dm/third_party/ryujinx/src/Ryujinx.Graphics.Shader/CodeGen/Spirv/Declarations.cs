@@ -116,8 +116,9 @@ namespace Ryujinx.Graphics.Shader.CodeGen.Spirv
                 }
 
                 StorageClass memoryStorage = SharedStorageClass(storage, memory);
-                SpvInstruction pointerType = context.TypePointer(memoryStorage, context.GetType(memory.Type, memory.ArrayLength));
-                SpvInstruction variable = context.Variable(pointerType, memoryStorage);
+                SpvInstruction type = context.GetType(memory.Type, memory.ArrayLength);
+                SpvInstruction pointerType = context.TypePointer(memoryStorage, type);
+                SpvInstruction variable = context.Variable(pointerType, memoryStorage, memory.ZeroInit ? context.ConstantNull(type) : null);
 
                 context.AddGlobalVariable(variable);
 

@@ -528,7 +528,9 @@ typedef struct { const uint8_t *mem; uint64_t size; tex_t t; uint64_t stamp; con
 static flush_tex *g_ft; static size_t g_nft, g_cft; static pthread_mutex_t g_ft_mu = PTHREAD_MUTEX_INITIALIZER;
 static void ft_add(const tex_t *t) {
     // Buffer textures are views onto the pool buffer the GPU reads directly (tex_mtl in nvn_mtl.m); an upload would push Age of Calamity's 1,048,576-texel R32F one through tex_desc, past Metal's 2D limit
-    if (!DM_GAME_TEX_FLUSH_UPLOAD || !t->mem || !t->pool || t->has_layout || t->d.target == NVN_TEXTURE_TARGET_BUFFER || (t->pool->flags & NVN_MEMORY_POOL_FLAGS_CPU_NO_ACCESS) ||
+    // A sparse pool's addresses are no memory the CPU writes or flushes, and no range nvn_dirty tracks, so they read as dirty at once: every texture in one, a render target too, came out CPU-written at its first
+    // use in a profile with tex_dirty_upload. What the CPU wrote into the physical pages behind one is seen through the page table instead (tex_from_storage, sparse_look)
+    if (!DM_GAME_TEX_FLUSH_UPLOAD || !t->mem || !t->pool || t->pool->vp || t->has_layout || t->d.target == NVN_TEXTURE_TARGET_BUFFER || (t->pool->flags & NVN_MEMORY_POOL_FLAGS_CPU_NO_ACCESS) ||
         (t->d.flags & (NVN_TEXTURE_FLAGS_LINEAR | NVN_TEXTURE_FLAGS_LINEAR_RENDER_TARGET | NVN_TEXTURE_FLAGS_COMPRESSIBLE))) return;
     pthread_mutex_lock(&g_ft_mu);
     if (g_nft == g_cft && !(g_ft = realloc(g_ft, (g_cft = g_cft ? 2 * g_cft : 1024) * sizeof *g_ft))) die("flush_tex allocation failed");
@@ -644,6 +646,7 @@ int nvn_flushed(const void *p, uint64_t n) {   // whether the CPU flushed any of
     pthread_mutex_unlock(&g_fl_mu);
     return r;
 }
+__attribute__((weak)) int dm_codec_is_video_mem(const void *mem, uint64_t size, uint32_t *stride) { (void)mem; (void)size; (void)stride; return 0; }
 NVN(nvnTextureInitialize, NVNboolean, NVNtexture *t, const NVNtextureBuilder *b) {
     const tex_builder_t *s = (const tex_builder_t *)b; tex_t *o = TX(t);
     // Re-initializing a texture object that is still live (without a Finalize first): release the host texture of the old serial first. SMBW re-initializes its transient render targets on the same object every frame and never Finalizes them;
@@ -654,6 +657,13 @@ NVN(nvnTextureInitialize, NVNboolean, NVNtexture *t, const NVNtextureBuilder *b)
     o->has_layout = s->has_layout; memcpy(o->layout, s->layout, 8); o->set_swz = s->set_swz; o->stencil = s->stencil; o->swz = s->swz;
     nvn_tex_layout(&o->d, &o->L);
     o->mem = s->pool && s->pool->mem ? s->pool->mem + s->off : NULL;
+    uint32_t vstride = 0;
+    if (o->mem && !(o->d.flags & (NVN_TEXTURE_FLAGS_LINEAR | NVN_TEXTURE_FLAGS_LINEAR_RENDER_TARGET)) &&
+        dm_codec_is_video_mem(o->mem, o->L.size, &vstride)) {
+        o->d.flags |= NVN_TEXTURE_FLAGS_LINEAR;
+        if (!o->d.stride) o->d.stride = vstride ? vstride : 7680;
+        nvn_tex_layout(&o->d, &o->L);
+    }
     o->serial = nvn_new_serial(); mtl_tex_init(o);
     if (o->mem) pc_use(o->pool, 't', o->off, o->L.size);
     if (o->mem && o->d.flags & (NVN_TEXTURE_FLAGS_LINEAR | NVN_TEXTURE_FLAGS_LINEAR_RENDER_TARGET)) mtl_pool_need(o->mem, o->L.size, "a linear texture");   // its GPU content is copied back into the storage (vka_tex_writeback)
@@ -1140,8 +1150,9 @@ static void rec_draw_idx(NVNcommandBuffer *c, p_draw_idx d) { size_t n = d.ind |
 #if defined(__ANDROID__)
 // NVN2 mesh draw: count task workgroups (or mesh workgroups when the program has no task shader) from first, with the bound program's task and mesh shaders. A draw like the
 // others (it opens and joins render passes the same way); the Vulkan replay draws it with vkCmdDrawMeshTasksEXT (vka_draw.c). The signature is the game's calls' (switch2mac
-// hle_nvn.c, MIT: x1 = 0, x2 = workgroups in Mario Kart World). The indirect, 3D and multi-draw variants keep the unimplemented stub (a red line when one is called)
+// hle_nvn.c, MIT: x1 = 0, x2 = workgroups in Mario Kart World). Indirect draw: arguments (groupCountX, Y, Z) read from ind by GPU. The 3D and multi-draw variants keep the unimplemented stub.
 NVN_NOPROTO(nvnCommandBufferDrawMeshTasks, void, NVNcommandBuffer *c, int first, int count) { rec_draw(c, (p_draw){NVN_PRIM_MESH, first, count, 1, 0, 0}); }
+NVN_NOPROTO(nvnCommandBufferDrawMeshTasksIndirect, void, NVNcommandBuffer *c, NVNbufferAddress ind) { rec_draw(c, (p_draw){NVN_PRIM_MESH, 0, 0, 1, 0, ind}); }
 #endif
 static void copy_view(view_t *dst, uint8_t *has, const NVNtextureView *v) { *has = v != NULL; if (v) *dst = *(const view_t *)v; }
 // Records with textures snapshot the texture objects (0x80 bytes each, after the record struct) and replay reads the snapshots: an NVN command no longer depends on the API object once recorded, and the game may finalize, free or reuse it before submitting.
@@ -1479,6 +1490,11 @@ static const char *const g_nops[] = {
     "nvnCommandBufferPopDebugGroupId",
     "nvnCommandBufferInsertDebugMarkerStatic",
     "nvnCommandBufferWaitEvent",
+    "nvnCommandBufferSetComputeWorkloadPriority",
+    "nvnCommandBufferSetGraphicsWorkloadPriority",
+    "nvnCommandBufferBindShadingRateImage",
+    "nvnCommandBufferSetShadingRatePaletteMode",
+    "nvnCommandBufferShadingRateImagePalette",
     "nvnWindowFinalize",
 };
 __attribute__((constructor)) static void nvn_nops_register(void) {

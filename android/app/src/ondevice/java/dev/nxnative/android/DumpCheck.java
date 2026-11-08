@@ -29,11 +29,16 @@ final class DumpCheck {
         Map<String, String> buildIds = new LinkedHashMap<>();   // module → its NSO build ID (32 hex digits)
         int dlc;
         long free;
+        boolean otherBuild;   // refused only for its build (DumpLayout.Found.otherBuild): Try anyway can prepare it
+        boolean untested;     // checked with Try anyway: a build the profile does not list
+        String detail = "";   // the technical part of error, for Details
 
         boolean ok() { return error == null; }
     }
 
     private DumpCheck() {}
+
+    static Result check(File dump, boolean needFree) { return check(dump, needFree, false); }
 
     /**
      * A path inside one version of a dump, as the tools take it: a folder's &lt;dump&gt;/updates/&lt;version&gt;/&lt;sub&gt; (base/ for 0), a .nup's
@@ -47,18 +52,21 @@ final class DumpCheck {
         return new File(parent != null ? parent : dump, titleId + "-work");
     }
 
-    /** needFree: check the free space too (a fresh job; a resumed one has written most of what it needs already) */
-    static Result check(File dump, boolean needFree) {
+    /** needFree: check the free space too (a fresh job; a resumed one has written most of what it needs already); anyBuild: Try anyway (DumpLayout.find) */
+    static Result check(File dump, boolean needFree, boolean anyBuild) {
         Result r = new Result();
         r.dump = dump;
-        r.error = check(r, needFree);
+        r.error = check(r, needFree, anyBuild);
         return r;
     }
 
     /** The dump's layout and builds (DumpLayout.find: the base, an update, or both; the version whose modules are a profile build), then the free space */
-    private static String check(Result r, boolean needFree) {
-        DumpLayout.Found f = DumpLayout.find(r.dump);
+    private static String check(Result r, boolean needFree, boolean anyBuild) {
+        DumpLayout.Found f = DumpLayout.find(r.dump, anyBuild);
         r.titleId = f.titleId;
+        r.otherBuild = f.otherBuild;
+        r.untested = f.untested;
+        r.detail = f.detail;
         if (f.error != null) return f.error;
         r.version = f.version;
         r.build = f.build;

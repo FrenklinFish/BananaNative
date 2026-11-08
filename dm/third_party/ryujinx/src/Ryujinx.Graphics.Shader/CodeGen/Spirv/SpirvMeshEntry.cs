@@ -1,4 +1,5 @@
 using Ryujinx.Graphics.Shader.StructuredIr;
+using Ryujinx.Graphics.Shader.Translation;
 using System;
 using System.Collections.Generic;
 using System.Linq;
@@ -14,10 +15,18 @@ namespace Ryujinx.Graphics.Shader.CodeGen.Spirv
     // stay legal. The entry point, "main", calls it between two workgroup barriers and hands its stage memory over:
     //   task (TaskEXT): before the body the task memory's word 1 (mesh workgroups to launch) is 0; after it OpEmitMeshTasksEXT(word 1, 1, 1, payload) ends every
     //     invocation (switch2mac also cleared word 0, which a mesh workgroup reads as its own index: InstEmitAmpereMesh.cs)
-    //   mesh (MeshEXT): OpSetMeshOutputsEXT(max vertices, max primitives) first (no output is written before it), then the outputs that start as (0, 0, 0, 1) set,
-    //     the body (its plane stores land in the outputs at once, MeshPlaneStore below), then every triangle's indices from the primitive area: the program's
-    //     indices (each clamped below max vertices) for t below the primitive count (byte 3), (0, 0, 0), a degenerate triangle, from there to max primitives;
-    //     with a GL depth constant (MeshShaderInfo.GlDepthSpecId), z' = z / 2 + w / 2 of every vertex when it is true, as vk_android_spv.gl_depth does a vertex shader's
+    //   mesh (MeshEXT): OpSetMeshOutputsEXT(max vertices, max primitives) first (no output is written before it), then the plane copy's defaults set (below), the
+    //     body (its plane stores go to the plane copy, MeshPlaneStore below), then every triangle's indices from the primitive area: the program's indices (each
+    //     clamped below max vertices) for t below the primitive count (byte 3), (0, 0, 0), a degenerate triangle, from there to max primitives; then each invocation
+    //     copies its own vertices and primitives (lid, lid + threads, ...) from the plane copy to the outputs, one vec4 per output, with a GL depth constant
+    //     (MeshShaderInfo.GlDepthSpecId) z' = z / 2 + w / 2 of every vertex when it is true, as vk_android_spv.gl_depth does a vertex shader's
+    // The plane copy: one workgroup u32 array per side, word v x planes + n for vertex v's plane n (MeshShaderInfo.Planes order; the per-primitive values the same),
+    // starting as (0, 0, 0, 1) per output component as an unwritten one reads on the hardware. A plane store is then one dynamic store, and the outputs are written
+    // once, after the last barrier. Before it (2026-11-07), each plane store went straight to the outputs: a chain of one guarded store per plane into the output
+    // arrays at a vertex the lane decides, inlined at every store of the body (56 times in a 28-plane mesh program of Ocarina of Time); Qualcomm's compiler ran out
+    // of memory on it once the lane was not constant (docs/reference/shaders.md, "Mesh plane stores into outputs exhaust Qualcomm's compiler"). The copy takes
+    // 4 x (max vertices x planes + max primitives x values) bytes of workgroup memory; a program for which it and its own shared memory and payload exceed
+    // MeshSharedBudget keeps the direct stores (MeshPlaneStore's old form, with the z / w copy for the GL depth rewrite)
     // Outputs: the position in a per-vertex block array (BuiltIn Position), one vec4 array per per-vertex generic location at Location g (as this translator's vertex
     // shaders number theirs), one vec4 array per per-primitive location at Location g decorated PerPrimitiveEXT, PrimitiveTriangleIndicesEXT uvec3[max primitives].
     // SPIR-V 1.4: the entry point lists every global variable.
@@ -28,6 +37,28 @@ namespace Ryujinx.Graphics.Shader.CodeGen.Spirv
     static class SpirvMeshEntry
     {
         private const uint MaxMeshWorkgroups = 65535;
+
+        // Workgroup memory a mesh program may use with its task payload: VK_EXT_mesh_shader's guaranteed minimum of maxMeshSharedMemorySize and
+        // maxMeshPayloadAndSharedMemorySize (28 KB; Adreno 840 / Qualcomm's driver: 32 KB). The minimum, so that a library is the same for every device
+        private const int MeshSharedBudget = 28672;
+
+        // Workgroup bytes the program declares itself (its shared memory, the primitive area; not the task payload or memory moved to the spill buffer)
+        private static int SharedBytes(CodeGenContext context)
+        {
+            int bytes = 0;
+            foreach ((int id, MemoryDefinition memory) in context.Properties.SharedMemories)
+            {
+                if (context.Properties.SharedSpill?.MemoryId != id && memory.Name != MeshShaderInfo.PayloadName)
+                {
+                    bytes += memory.Type.GetSizeInBytes() * Math.Max(1, memory.ArrayLength);
+                }
+            }
+
+            return bytes;
+        }
+
+        // The value an output component holds before the program writes it: (0, 0, 0, 1) (plane code: 0-3 position, 4 + 4 g + c generic g component c)
+        private static float DefaultComponent(int code) => (code & 3) == 3 ? 1f : 0f;
 
         public static void Generate(CodeGenContext context, MeshShaderInfo mesh)
         {
@@ -100,8 +131,28 @@ namespace Ryujinx.Graphics.Shader.CodeGen.Spirv
 
             // The GL depth rewrite reads z and w back, which a mesh program cannot do with its outputs (VUID-StandaloneSpirv-MeshEXT-07107): their plane stores
             // also go to a workgroup copy, z then w of each vertex, starting as (0, 1)
+            // The plane copy (see the header), when it fits
+            int vertexSlots = mesh.Planes.Length, primSlots = mesh.PrimitivePlanes.Length;
+            int copyBytes = 4 * (mesh.MaxVertices * vertexSlots + mesh.MaxPrimitives * primSlots);
+            int payloadBytes = mesh.PayloadMemoryId >= 0 ? 4 * mesh.PayloadWords : 0;
+            bool copied = mesh.IsMesh && context.HasMeshPlaneStore && SharedBytes(context) + copyBytes + payloadBytes <= MeshSharedBudget;
+            SpvInstruction vertexCopy = null, primCopy = null;
+            if (copied && vertexSlots != 0)
+            {
+                vertexCopy = context.Variable(context.TypePointer(StorageClass.Workgroup, context.TypeArray(tU32, U((uint)(mesh.MaxVertices * vertexSlots)))), StorageClass.Workgroup);
+                context.Name(vertexCopy, "mesh_vertex_copy");
+                context.AddGlobalVariable(vertexCopy);
+            }
+
+            if (copied && primSlots != 0)
+            {
+                primCopy = context.Variable(context.TypePointer(StorageClass.Workgroup, context.TypeArray(tU32, U((uint)(mesh.MaxPrimitives * primSlots)))), StorageClass.Workgroup);
+                context.Name(primCopy, "mesh_primitive_copy");
+                context.AddGlobalVariable(primCopy);
+            }
+
             SpvInstruction zw = null;
-            if (glDepth != null && mesh.Planes.Contains(2) && mesh.Planes.Contains(3))
+            if (!copied && glDepth != null && mesh.Planes.Contains(2) && mesh.Planes.Contains(3))
             {
                 zw = context.Variable(context.TypePointer(StorageClass.Workgroup, context.TypeArray(tU32, U((uint)mesh.MaxVertices * 2))), StorageClass.Workgroup);
                 context.Name(zw, "mesh_position_zw");
@@ -159,11 +210,35 @@ namespace Ryujinx.Graphics.Shader.CodeGen.Spirv
                 SpvInstruction prims = context.SharedMemories[mesh.PrimitiveMemoryId];
                 Guarded(first, () => context.Store(context.AccessChain(pWg, prims, U(3)), U(0)));
 
-                // Outputs start as (0, 0, 0, 1), as an unwritten component reads on the hardware (vk_android_spv.init_outputs gives a vertex shader's the same): the
-                // position and the generic locations whose components the planes do not all name, and every per-primitive location
+                // The plane copy starts as the outputs' defaults; its copy-out writes every output whole
+                void InitCopy(SpvInstruction copy, int count, int[] codes)
+                {
+                    ForEach(lid, count, i =>
+                    {
+                        SpvInstruction b = context.IMul(tU32, i, U((uint)codes.Length));
+                        for (int n = 0; n < codes.Length; n++)
+                        {
+                            uint bits = DefaultComponent(codes[n]) == 1f ? 0x3f800000u : 0u;
+                            context.Store(context.AccessChain(pWg, copy, n == 0 ? b : context.IAdd(tU32, b, U((uint)n))), U(bits));
+                        }
+                    });
+                }
+
+                if (vertexCopy != null)
+                {
+                    InitCopy(vertexCopy, mesh.MaxVertices, mesh.Planes);
+                }
+
+                if (primCopy != null)
+                {
+                    InitCopy(primCopy, mesh.MaxPrimitives, mesh.PrimitivePlanes);
+                }
+
+                // Without the plane copy, outputs start as (0, 0, 0, 1), as an unwritten component reads on the hardware (vk_android_spv.init_outputs gives a vertex
+                // shader's the same): the position and the generic locations whose components the planes do not all name, and every per-primitive location
                 bool posFull = Enumerable.Range(0, 4).All(c => mesh.Planes.Contains(c));
                 List<SpvInstruction> vertexInit = generics.Where(kv => !Enumerable.Range(0, 4).All(c => mesh.Planes.Contains(4 + 4 * kv.Key + c))).Select(kv => kv.Value).ToList();
-                if (vertexInit.Count != 0 || !posFull)
+                if (!copied && (vertexInit.Count != 0 || !posFull))
                 {
                     ForEach(lid, mesh.MaxVertices, v =>
                     {
@@ -189,7 +264,7 @@ namespace Ryujinx.Graphics.Shader.CodeGen.Spirv
                     });
                 }
 
-                if (primGenerics.Count != 0)
+                if (!copied && primGenerics.Count != 0)
                 {
                     ForEach(lid, mesh.MaxPrimitives, t =>
                     {
@@ -246,12 +321,67 @@ namespace Ryujinx.Graphics.Shader.CodeGen.Spirv
                     });
                 }
 
+                // The plane copy to the outputs (after the barrier that follows the body: every plane store is in), one vec4 per output of each own vertex / primitive
+                if (copied)
+                {
+                    SpvInstruction Component(SpvInstruction copy, int[] codes, SpvInstruction b, int code)
+                    {
+                        int n = Array.IndexOf(codes, code);
+                        if (n < 0)
+                        {
+                            return context.Constant(tF32, DefaultComponent(code));
+                        }
+
+                        return context.Bitcast(tF32, context.Load(tU32, context.AccessChain(pWg, copy, n == 0 ? b : context.IAdd(tU32, b, U((uint)n)))));
+                    }
+
+                    SpvInstruction Vec4(SpvInstruction copy, int[] codes, SpvInstruction b, int code0) =>
+                        context.CompositeConstruct(tVec4, Component(copy, codes, b, code0), Component(copy, codes, b, code0 + 1), Component(copy, codes, b, code0 + 2), Component(copy, codes, b, code0 + 3));
+
+                    bool depth = glDepth != null && mesh.Planes.Contains(2) && mesh.Planes.Contains(3);
+                    ForEach(lid, mesh.MaxVertices, v =>
+                    {
+                        SpvInstruction b = context.IMul(tU32, v, U((uint)vertexSlots));
+                        SpvInstruction pos;
+                        if (depth)
+                        {
+                            SpvInstruction x = Component(vertexCopy, mesh.Planes, b, 0), y = Component(vertexCopy, mesh.Planes, b, 1);
+                            SpvInstruction z = Component(vertexCopy, mesh.Planes, b, 2), w = Component(vertexCopy, mesh.Planes, b, 3);
+                            SpvInstruction half = context.Constant(tF32, 0.5f);
+                            z = context.Select(tF32, glDepth, context.GlslFma(tF32, z, half, context.FMul(tF32, w, half)), z);
+                            pos = context.CompositeConstruct(tVec4, x, y, z, w);
+                        }
+                        else
+                        {
+                            pos = Vec4(vertexCopy, mesh.Planes, b, 0);
+                        }
+
+                        context.Store(context.AccessChain(pOutVec4, posVar, v, U(0)), pos);
+                        foreach ((int g, SpvInstruction output) in generics)
+                        {
+                            context.Store(context.AccessChain(pOutVec4, output, v), Vec4(vertexCopy, mesh.Planes, b, 4 + 4 * g));
+                        }
+                    });
+
+                    if (primGenerics.Count != 0)
+                    {
+                        ForEach(lid, mesh.MaxPrimitives, t =>
+                        {
+                            SpvInstruction b = context.IMul(tU32, t, U((uint)primSlots));
+                            foreach ((int g, SpvInstruction output) in primGenerics)
+                            {
+                                context.Store(context.AccessChain(pOutVec4, output, t), Vec4(primCopy, mesh.PrimitivePlanes, b, 4 + 4 * g));
+                            }
+                        });
+                    }
+                }
+
                 context.Return();
             }
 
             context.FunctionEnd();
 
-            // The plane stores (MeshShaderInfo), straight into the outputs: word w below the per-primitive base is vertex (w / chunk) x 32 + w % 32, plane (w % chunk) / 32
+            // The plane stores (MeshShaderInfo), into the plane copy (one store) or, without it, straight into the outputs: word w below the per-primitive base is vertex (w / chunk) x 32 + w % 32, plane (w % chunk) / 32
             // (chunk = 32 x planes); above it the same for the primitives and their values. Words outside both, and planes of no output, are dropped
             if (mesh.IsMesh && context.HasMeshPlaneStore)
             {
@@ -282,28 +412,52 @@ namespace Ryujinx.Graphics.Shader.CodeGen.Spirv
                     });
                 }
 
-                SpvInstruction isVertex = context.ULessThan(tBool, word, U((uint)mesh.PrimitiveBaseWord));
-                Guarded(isVertex, () => Scatter(word, mesh.VertexChunkWords, mesh.MaxVertices, mesh.Planes, (v, plane) =>
+                // Into the plane copy: element index x slots + plane, one dynamic store whatever the plane
+                void ToCopy(SpvInstruction w, int chunkWords, int count, int slots, SpvInstruction copy)
                 {
-                    context.Store(plane < 4
-                        ? context.AccessChain(pOutF32, posVar, v, U(0), U((uint)plane))
-                        : context.AccessChain(pOutF32, generics[(plane - 4) >> 2], v, U((uint)(plane & 3))), f);
+                    SpvInstruction rem = context.UMod(tU32, w, U((uint)chunkWords));
+                    SpvInstruction index = context.IAdd(tU32, context.IMul(tU32, context.UDiv(tU32, w, U((uint)chunkWords)), U(32)), context.BitwiseAnd(tU32, rem, U(31)));
+                    Guarded(context.ULessThan(tBool, index, U((uint)count)), () =>
+                        context.Store(context.AccessChain(pWg, copy, context.IAdd(tU32, context.IMul(tU32, index, U((uint)slots)), context.ShiftRightLogical(tU32, rem, U(5)))), value));
+                }
 
-                    if (zw != null && plane is 2 or 3)
-                    {
-                        context.Store(context.AccessChain(pWg, zw, context.IAdd(tU32, context.IMul(tU32, v, U(2)), U((uint)plane - 2))), value);
-                    }
-                }));
-                if (mesh.PrimitivePlanes.Length != 0)
+                SpvInstruction isVertex = context.ULessThan(tBool, word, U((uint)mesh.PrimitiveBaseWord));
+                if (copied)
                 {
-                    Guarded(context.LogicalNot(tBool, isVertex), () => Scatter(context.ISub(tU32, word, U((uint)mesh.PrimitiveBaseWord)), mesh.PrimitiveChunkWords, mesh.MaxPrimitives,
-                        mesh.PrimitivePlanes, (t, plane) =>
+                    if (vertexCopy != null)
+                    {
+                        Guarded(isVertex, () => ToCopy(word, mesh.VertexChunkWords, mesh.MaxVertices, vertexSlots, vertexCopy));
+                    }
+
+                    if (primCopy != null)
+                    {
+                        Guarded(context.LogicalNot(tBool, isVertex), () => ToCopy(context.ISub(tU32, word, U((uint)mesh.PrimitiveBaseWord)), mesh.PrimitiveChunkWords, mesh.MaxPrimitives, primSlots, primCopy));
+                    }
+                }
+                else
+                {
+                    Guarded(isVertex, () => Scatter(word, mesh.VertexChunkWords, mesh.MaxVertices, mesh.Planes, (v, plane) =>
+                    {
+                        context.Store(plane < 4
+                            ? context.AccessChain(pOutF32, posVar, v, U(0), U((uint)plane))
+                            : context.AccessChain(pOutF32, generics[(plane - 4) >> 2], v, U((uint)(plane & 3))), f);
+
+                        if (zw != null && plane is 2 or 3)
                         {
-                            if (plane != MeshShaderInfo.NoOutput)
+                            context.Store(context.AccessChain(pWg, zw, context.IAdd(tU32, context.IMul(tU32, v, U(2)), U((uint)plane - 2))), value);
+                        }
+                    }));
+                    if (mesh.PrimitivePlanes.Length != 0)
+                    {
+                        Guarded(context.LogicalNot(tBool, isVertex), () => Scatter(context.ISub(tU32, word, U((uint)mesh.PrimitiveBaseWord)), mesh.PrimitiveChunkWords, mesh.MaxPrimitives,
+                            mesh.PrimitivePlanes, (t, plane) =>
                             {
-                                context.Store(context.AccessChain(pOutF32, primGenerics[(plane - 4) >> 2], t, U((uint)(plane & 3))), f);
-                            }
-                        }));
+                                if (plane != MeshShaderInfo.NoOutput)
+                                {
+                                    context.Store(context.AccessChain(pOutF32, primGenerics[(plane - 4) >> 2], t, U((uint)(plane & 3))), f);
+                                }
+                            }));
+                    }
                 }
 
                 context.Return();

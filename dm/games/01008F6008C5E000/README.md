@@ -12,9 +12,9 @@ Playable on the Mac: language, look and name selection, the academy settings,
 the opening, the Paldea flyover, getting up in the bedroom, walking, camera
 control, the main menu and autosave, and reloading that save. iPhone testing
 is pending; no IPA has been built yet.
-Only 1.0.0 is registered. The NSP folder also holds update 4.0.0
-(`v786432`), so build with `scripts/build_ipa_from_nsp.py <NSP folder> -k
-<prod.keys> -p v0` (add `--platform mac` for a Mac build); without `-p` the
+Only 1.0.0 is registered. The dump folder also holds update 4.0.0
+(`v786432`), so build with `scripts/build_ipa_from_nsp.py <dump folder>
+-p v0` (add `--platform mac` for a Mac build); without `-p` the
 builder takes the newest version and derives a profile without these checks.
 
 ## What it needs

@@ -167,12 +167,13 @@ static class SwshXlate
         public (int Slice, int Workgroup)? SharedSpill;   // the res.json's "shared_spill": {"bytes": a workgroup's slice, "workgroup": bytes left in workgroup memory}
         public void RecordSharedSpill(int sliceBytes, int workgroupBytes) => SharedSpill = (sliceBytes, workgroupBytes);
         public int QueryHostSubgroupSize() => _job["subgroup_size"] is JsonNode sg ? (int)sg : 32;
-        // Job "gather_bias" (the Android build, vk_android_build.py gather_bias: 8 on an Adreno): bits of the host's gather coordinate precision; the translator moves gather
-        // coordinates by 1 / (size x 2^(bits + 1)) off the texel edge, where Adreno rounds to the neighbouring footprint. 0 (the Apple jobs, other GPUs): none
+        // Job "gather_bias" (the Android build, vk_android_build.py GATHER_BIAS: 8 in every Android library, whatever machine builds it): bits of the host's gather coordinate precision; the translator moves gather
+        // coordinates by 1 / (size x 2^(bits + 1)) off the texel edge, where Adreno rounds to the neighbouring footprint. 0 (the Apple jobs): none
         public int QueryHostGatherBiasPrecision() => _job["gather_bias"] is JsonNode gb ? (int)gb : 0;
         // Job ssbo_align: the device's storage buffer offset alignment. Set, the host binds each storage buffer at its address rounded down to it, and the shader adds the
         // difference (GlobalToStorage: offset = address − (base & −align)); unset, a storage buffer starts exactly at its c0 address
         public bool QueryHasUnalignedStorageBuffer() => _job["ssbo_align"] != null;
+        public bool QueryHasConstantBufferDrawParameters() => _job["ssbo_align"] != null;   // Android Vulkan: c0 + 0x644 reads BaseInstance, which holds an indirect draw's (Metal: dmsh_build.py vs_base_instance)
         public int QueryHostStorageBufferOffsetAlignment() => _job["ssbo_align"] is JsonNode al ? (int)al : 16;
         public GpuGraphicsState QueryGraphicsState()
         {
@@ -273,12 +274,12 @@ static class SwshXlate
                     ["uses_frag_coord"] = p.Info.UsesFragCoord, ["frag_out_map"] = p.Info.FragmentOutputMap,
                 };
                 if ((string)job["stage"] == "ms") res["mesh"] = MeshOutputs(job["mesh"].AsArray().Select(v => (int)v).ToArray());
-                foreach (var b in p.Info.CBuffers) res["cbufs"].AsArray().Add(new JsonObject { ["binding"] = b.Binding, ["slot"] = b.Slot });
-                foreach (var b in p.Info.SBuffers) res["sbufs"].AsArray().Add(new JsonObject { ["binding"] = b.Binding, ["slot"] = b.Slot, ["cb_slot"] = b.SbCbSlot, ["cb_offset"] = b.SbCbOffset, ["flags"] = (int)b.Flags });
+                foreach (var b in p.Info.CBuffers) res["cbufs"].AsArray().Add((JsonNode)new JsonObject { ["binding"] = b.Binding, ["slot"] = b.Slot });
+                foreach (var b in p.Info.SBuffers) res["sbufs"].AsArray().Add((JsonNode)new JsonObject { ["binding"] = b.Binding, ["slot"] = b.Slot, ["cb_slot"] = b.SbCbSlot, ["cb_offset"] = b.SbCbOffset, ["flags"] = (int)b.Flags });
                 foreach (var (list, name) in new[] { (p.Info.Textures, "textures"), (p.Info.Images, "images") })
-                    foreach (var t in list) res[name].AsArray().Add(new JsonObject { ["binding"] = t.Binding, ["type"] = (int)t.Type, ["format"] = t.Format.ToString(), ["cbuf_slot"] = t.CbufSlot, ["handle"] = t.HandleIndex, ["array"] = t.ArrayLength, ["separate"] = t.Separate, ["flags"] = (int)t.Flags });
+                    foreach (var t in list) res[name].AsArray().Add((JsonNode)new JsonObject { ["binding"] = t.Binding, ["type"] = (int)t.Type, ["format"] = t.Format.ToString(), ["cbuf_slot"] = t.CbufSlot, ["handle"] = t.HandleIndex, ["array"] = t.ArrayLength, ["separate"] = t.Separate, ["flags"] = (int)t.Flags });
                 if (acc.SharedSpill is (int slice, int wg)) res["shared_spill"] = new JsonObject { ["bytes"] = slice, ["workgroup"] = wg };
-                if (acc.Fetch1D.Count > 0) { var f1 = new JsonArray(); foreach (int h in acc.Fetch1D) f1.Add(h); res["fetch1d"] = f1; }
+                if (acc.Fetch1D.Count > 0) { var f1 = new JsonArray(); foreach (int h in acc.Fetch1D) f1.Add((JsonNode)h); res["fetch1d"] = f1; }
                 File.WriteAllText(Path.Combine(outDir, key + ".res.json"), res.ToJsonString(new JsonSerializerOptions { WriteIndented = true }));
                 ok++;
             }

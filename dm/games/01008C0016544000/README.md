@@ -39,7 +39,7 @@ No code of the game is cut. The game asks for present interval 1, so it needs no
 
 ## Mac routes
 
-- Build with `scripts/build_ipa_from_nsp.py <NSP folder> -k <prod.keys> --platform mac`; its last line runs the game.
+- Build with `scripts/build_ipa_from_nsp.py <dump folder> --platform mac`; its last line runs the game.
 - From a fresh save, through `DM_CTL`: `Plus` at the title (about 45 s after boot), `A` (New Game), `A`, `A`, `Left`, `A` (Zale leads), `A` (Adventure), then `A` every 1.5 s through the Great Archives and the Mooncradle dialogue (about 3 minutes) to the camp, where the player has control.
 - The camp: the save pedestal is at its west end, the path south leads to the Mooncradle cliff, whose climbing holds lead back to the pedestal.
 

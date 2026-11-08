@@ -15,7 +15,7 @@ STUB = '''package dev.nxnative.android;
 public final class BuildConfig {
     public static final String NX_PROFILES = "040074A01BF12000\\tDonkey Kong Bananza\\t22852\\tabcdef012345\\t458752 main=aa\\t\\t\\t0ld000000001=500\\t"
             + "57a000000001:%s:%s\\t\\n0400C3F00006E000\\tMario Kart World\\t0\\tunknown\\t";
-    public static final String NX_DMSH_VK_CHAIN = "c0ffee000001", NX_DMSH_VK_ABI = "abc123abc123";
+    public static final String NX_DMSH_VK_CHAIN = "c0ffee000001", NX_DMSH_VK_ABI = "abc123abc123", NX_DMSH_VK_ABI_COMPAT = "";
 }
 ''' % ('1' * 64, '2' * 64)
 

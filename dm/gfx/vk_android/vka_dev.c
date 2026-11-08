@@ -129,6 +129,8 @@ static int init_once(void) {
     if (x_mesh) dext[ndext++] = VK_EXT_MESH_SHADER_EXTENSION_NAME;
     int x_ph = has_ext(de, nde, "VK_QCOM_queue_perf_hint");
     if (x_ph) dext[ndext++] = "VK_QCOM_queue_perf_hint";
+    V.mem_budget = has_ext(de, nde, VK_EXT_MEMORY_BUDGET_EXTENSION_NAME);   // the image heap's budget, for the texture cache's limit (vka_tex.c img_limit_update)
+    if (V.mem_budget) dext[ndext++] = VK_EXT_MEMORY_BUDGET_EXTENSION_NAME;
     free(de);
 
     // Every feature the device has, but robustness and capture-replay (they cost and nothing needs them); the shader side takes what it needs from the same device
@@ -160,6 +162,7 @@ static int init_once(void) {
     V.tess = f2.features.tessellationShader; V.depth_clamp = f2.features.depthClamp; V.fill_lines = f2.features.fillModeNonSolid; V.depth_bias_clamp = f2.features.depthBiasClamp;
     V.multi_vp = f2.features.multiViewport; V.a2c = 1; V.mesh = x_mesh && fmesh.meshShader; V.task = V.mesh && fmesh.taskShader;
     if (!f12.timelineSemaphore || !f13.dynamicRendering) { VRED("the device lacks timeline semaphores (%d) or dynamic rendering (%d)", f12.timelineSemaphore, f13.dynamicRendering); return 0; }
+    V.imageless = f12.imagelessFramebuffer;   // (enabled with the rest of f12)
     V.bda = f12.bufferDeviceAddress; V.uab = f12.descriptorBindingSampledImageUpdateAfterBind && f12.descriptorBindingPartiallyBound && f12.runtimeDescriptorArray;
     V.placed = placed && fmp.memoryMapPlaced; V.placed_range = placed && fmp.memoryMapRangePlaced; V.unmap_reserve = placed && fmp.memoryUnmapReserve;
     float prio = 1.f;
@@ -295,7 +298,7 @@ uint64_t vka_fence_queued(void) { return __atomic_load_n(&V.tl_queued, __ATOMIC_
 // ---------- Fences ----------
 // Fence n is reserved by the submission that signals timeline value n. The completion thread waits for the timeline, then runs that submission's CPU-side effects in order
 // and only then publishes n as done: a SyncWait that returns has seen the events and counters of everything before it, as nvn_mtl.m's post_complete does
-enum { POST_RING = 1024 };
+enum { POST_RING = 4096 };
 typedef struct { uint64_t fence; void *ops; int n; void (*run)(void *, int); } post_rec;
 static post_rec g_post[POST_RING];
 typedef struct after_rec { struct after_rec *next; uint64_t fence; void (*fn)(void *); void *arg; } after_rec;
@@ -385,7 +388,7 @@ static void *completion_main(void *arg) {
                 hang_declare(want, v, st, "no progress");
             } else if (r && r != VK_TIMEOUT) {
                 char w[64]; snprintf(w, sizeof w, "vkWaitSemaphores %d (the device is lost)", r);
-                hang_declare(want, v, 0, w);
+                hang_declare(want, v > done ? v : done, 0, w);   // (a lost device reads its timeline as 0: the last value published done instead)
             } else stall_t0 = 0;
         }
         if (vka_hung()) v = sub;   // every fence submitted so far is taken as done: its CPU-side effects run, the guest's waits return
@@ -506,7 +509,9 @@ static int up_wait(uint64_t v) {   // 1 = the upload timeline reached v
     VkSemaphoreWaitInfo wi = {VK_STRUCTURE_TYPE_SEMAPHORE_WAIT_INFO, .semaphoreCount = 1, .pSemaphores = &g_utl, .pValues = &v};
     uint64_t t0 = now_ns(); VkResult r = vk.vkWaitSemaphores(V.dev, &wi, vka_hang_ns());
     g_n_uwait++; g_uwait_ns += now_ns() - t0;
-    if (r && !vka_hung()) { static _Atomic int n; if (atomic_fetch_add(&n, 1) < 4) VRED("upload batch %llu not done in %.1f s (%d)", (unsigned long long)v, vka_hang_ns() / 1e9, r); }
+    if (r && !vka_hung()) { static _Atomic int n; if (atomic_fetch_add(&n, 1) < 4) {
+        if (r == VK_TIMEOUT) VRED("upload batch %llu not done in %.1f s", (unsigned long long)v, vka_hang_ns() / 1e9);
+        else VRED("upload batch %llu: the wait failed after %.2f s (%d%s)", (unsigned long long)v, (now_ns() - t0) / 1e9, r, r == VK_ERROR_DEVICE_LOST ? ": the device is lost" : ""); } }
     return !r || vka_hung();
 }
 int vka_up_on(void) { return VKA_ENV("DM_VK_UPLOAD_BATCH", 1) != 0; }
@@ -559,6 +564,7 @@ void vka_up_flush(void) {
     unsigned k = (unsigned)g_ui; g_ui = -1;
     VkCommandBuffer cb = g_ub[k].cb;
     vka_barrier(cb);   // everything the batch wrote, for every later submission on the queue
+    vka_xp_ts(cb, 2);
     VkResult r = vk.vkEndCommandBuffer(cb);
     uint64_t v = ++g_uval;
     VkSemaphore ws[1]; uint64_t wv[1]; VkPipelineStageFlags wst[1]; uint32_t nw = 0;   // the sparse binds queued before it (vks_queue_locked)
@@ -740,6 +746,14 @@ static VkResult kg_apply(int s) {   // the floor s % (0: none) on the queue's co
 static _Atomic int g_tail_n;   // DM_VK_GPU_FLOOR_AUTO=2: submissions with draws counted at their commit and not yet completed
 // The queue's hint (any thread: the replay's, the completion thread's). tail: the floor is s while a counted submission is pending, else 0, decided under the queue lock, so
 // a commit and a completion racing cannot apply their floors in the wrong order (before 2026-11-03 a completion's 0 could land after the next commit's floor)
+static _Atomic int g_floor_cur = -1, g_floor_res;   // the floor last given to the queue and the driver's or kernel's answer (the pace line, vka_perf.c)
+// The GPU clock floor for the pace line: its way ("queue hint", "KGSL", "ADPF", "off"), the % last given (-1: none yet) and that call's result (0 = taken)
+const char *vka_floor_state(int *pct, int *res) {
+    int vka_floor_adpf(void);
+    if (pct) *pct = atomic_load(&g_floor_cur);
+    if (res) *res = atomic_load(&g_floor_res);
+    return V.perf_hint ? "queue hint" : g_kg_n ? "KGSL" : vka_floor_adpf() ? "ADPF" : "off";
+}
 static void floor_set_(int s, int tail, int again) {   // again: send it even if unchanged (the KGSL rule, see kg_apply)
     static _Atomic int cur = -1;
     if (!tail && !again && atomic_load(&cur) == s) return;
@@ -751,7 +765,7 @@ static void floor_set_(int s, int tail, int again) {   // again: send it even if
         struct { VkStructureType sType; void *pNext; uint32_t type, scale; } h = {(VkStructureType)1000302000, NULL, s >= 100 ? 2u : s > 0 ? 3u : 0u, s > 0 && s < 100 ? (uint32_t)s : 0u};
         r = ((VkResult (*)(VkQueue, const void *))V.perf_hint)(V.q, &h);
     } else r = kg_apply(s);
-    int was = atomic_exchange(&cur, s);
+    int was = atomic_exchange(&cur, s); atomic_store(&g_floor_cur, s); atomic_store(&g_floor_res, (int)r);
     pthread_mutex_unlock(&V.qmu);
     if (was < 0 || (was != s && VKA_ENV("DM_VK_GPU_FLOOR_LOG", 0) > 1)) VLOG("GPU clock floor%s: %d %% (%s): %d", V.perf_hint ? "" : " (KGSL)", s, s >= 100 ? "highest" : s ? "scaled" : "default governor", r);
 }

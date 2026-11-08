@@ -16,6 +16,7 @@ enum { OpExtInst = 12, OpName = 5, OpMemberName = 6, OpEntryPoint = 15, OpTypeIn
        OpVariable = 59, OpLoad = 61, OpAccessChain = 65, OpInBoundsAccessChain = 66, OpDecorate = 71, OpMemberDecorate = 72, OpBitcast = 124,
        OpDecorateId = 332, OpDecorateString = 5632, OpMemberDecorateString = 5633 };
 enum { DecLocation = 30, SCInput = 1 };
+enum { OpConstantFalse = 42, OpSpecConstantTrue = 48, OpSpecConstantFalse = 49, OpSpecConstant = 50, OpSpecConstantComposite = 51, OpSpecConstantOp = 52, DecSpecId = 1 };
 
 typedef struct { uint32_t *w; size_t n, cap; } vec_t;
 static int put(vec_t *v, uint32_t x) {
@@ -489,13 +490,214 @@ fail:
 #undef FAIL
 }
 
+// vka_spv_spec_freeze: Qualcomm's Adreno 840 driver (Vulkan 1.4, driver 2150932524) reads SubgroupLocalInvocationId as 0 in every invocation of a compute or mesh shader
+// whose module has a specialization constant (any SpecId, used or not, with or without VkSpecializationInfo), and the subgroup masks derived from it (Eq/Ge/Gt/Le/Lt) as
+// those of lane 0; the subgroup operations themselves (shuffle, ballot, scans) still use the real lanes, and pixel shaders are not affected. Such a module with its
+// specialization constants made plain constants reads its lanes right: SpecId spec_id takes value (a bool one: nonzero is true), the others keep their defaults, and the SpecId
+// decorations are dropped. A malloc'd copy (*out_nw words); NULL when the module reads no lane built-in or has no SpecId (nothing to do), or has a specialization constant
+// composite or operation (not folded here)
+uint32_t *vka_spv_spec_freeze(const uint32_t *w, size_t nw, uint32_t spec_id, uint32_t value, size_t *out_nw) {
+    if (nw < 5 || w[0] != 0x07230203) return NULL;
+    enum { MAXSPEC = 16 }; uint32_t sid[MAXSPEC], sval[MAXSPEC]; int ns = 0, lane = 0;
+    for (size_t i = 5; i < nw;) {
+        uint32_t op = w[i] & 0xffff, len = w[i] >> 16;
+        if (!len || i + len > nw) return NULL;
+        if (op == OpDecorate && len >= 4 && w[i + 2] == DecSpecId) { if (ns == MAXSPEC) return NULL; sid[ns] = w[i + 1]; sval[ns++] = w[i + 3]; }
+        else if (op == OpDecorate && len >= 4 && w[i + 2] == DecBuiltIn && (w[i + 3] == BISubgroupLocalInvocationId || (w[i + 3] >= BIEq && w[i + 3] <= BILt))) lane = 1;
+        else if (op == OpSpecConstantComposite || op == OpSpecConstantOp) return NULL;
+        i += len;
+    }
+    if (!lane || !ns) return NULL;
+    uint32_t *o = malloc(nw * 4); if (!o) return NULL;
+    size_t n = 0; memcpy(o, w, 5 * 4); n = 5;
+    for (size_t i = 5; i < nw;) {
+        uint32_t op = w[i] & 0xffff, len = w[i] >> 16;
+        if (op == OpDecorate && len >= 4 && w[i + 2] == DecSpecId) { i += len; continue; }
+        memcpy(o + n, w + i, len * 4);
+        if ((op == OpSpecConstantTrue || op == OpSpecConstantFalse || op == OpSpecConstant) && len >= 3) {
+            int k = 0; while (k < ns && sid[k] != w[i + 2]) k++;
+            int mine = k < ns && sval[k] == spec_id;
+            if (op == OpSpecConstant) { o[n] = len << 16 | OpConstant; if (mine && len == 4) o[n + 3] = value; }
+            else o[n] = len << 16 | (mine ? (value ? OpConstantTrue : OpConstantFalse) : op == OpSpecConstantTrue ? OpConstantTrue : OpConstantFalse);
+        }
+        n += len; i += len;
+    }
+    *out_nw = n; return o;
+}
+
+// vka_spv_img_retype: shader images and textures the translator types as float, bound to textures of an integer format. On Maxwell / Ampere a formatted surface access
+// (SULD.P / SUST.P) and a texture fetch move 32-bit registers, and the bound texture's format decides how their bits are read and written: a float typed shader that packs RGB9E5
+// or R11G11B10 texels into integer bits and stores them through an R32_UINT texture view writes those bits (Ocarina of Time's agl_ndsr_vr_light compute shader a335c1db6270c355),
+// and one that samples an R16G16_UINT, R32_UINT or RGBA8_UINT view gets the integers in its registers. The translator knows an image's format and a texture's class only from
+// the shader facts, and without them (no PC pairing) it declares every formatted image a float image of unknown format and every texture a float texture. Vulkan leaves another
+// class than the view's undefined, and a float view of the same size in its place (vka_tex.c class_twin) converts: an R16G16 or R8G8B8A8 one as floats or normalized values,
+// and even an R32 float view may flush the bits that make a denormal or NaN. So for a pipeline that binds integer textures there, the module's UniformConstant image and
+// sampled image variables at set 0 bindings base + n (n in umask / smask) become images of uint / int sampled type, each read, fetch, sample or gather is bit-cast back to
+// the float vector the body expects and each texel written is the bit-cast of its float vector: the bits pass unchanged, as on the Switch. Taken: non-arrayed bindings of an
+// unknown-format float storage image, a float sampled image or a combined float image and sampler (not a depth image); any other use of them (a depth comparison, a sparse
+// read, an atomic through a texel pointer, a copy, a call argument) refuses the module
+enum { OpConstantNull = 46, OpTypeImage = 25, OpTypeSampledImage = 27, OpSampledImage = 86, OpImageSampleImplicitLod = 87, OpImageSampleExplicitLod = 88,
+       OpImageSampleProjImplicitLod = 91, OpImageSampleProjExplicitLod = 92, OpImageFetch = 95, OpImageGather = 96, OpImageRead = 98, OpImage = 100,
+       OpImageQuerySizeLod = 103, OpImageQuerySize = 104, OpImageQueryLod = 105, OpImageQueryLevels = 106, OpImageQuerySamples = 107, SCUniformConstant = 0 };
+static int texel_read_op(uint32_t op) {   // a read whose result is the texel vector (operand 3 the image or sampled image)
+    return op == OpImageSampleImplicitLod || op == OpImageSampleExplicitLod || op == OpImageSampleProjImplicitLod || op == OpImageSampleProjExplicitLod
+        || op == OpImageFetch || op == OpImageGather || op == OpImageRead;
+}
+uint32_t *vka_spv_img_retype(const uint32_t *w, size_t nw, uint32_t base, uint64_t umask, uint64_t smask, size_t *out_nw, char *err, size_t errn) {
+#define FAIL(...) do { snprintf(err, errn, __VA_ARGS__); goto fail; } while (0)
+    uint32_t *cls = NULL, *bind = NULL, *set = NULL, *ty = NULL, *rt = NULL, *ptee = NULL, *si_of = NULL, *limg = NULL; vec_t o = {0};
+    // cls[id]: 1 uint / 2 int (bit 4: a retyped variable, else a loaded image; bit 5: a sampled image); ty[id]: components of a float scalar / vector type; rt[id]: an id's
+    // result type; si_of[id]: the image type of sampled image type id
+    if (nw < 5 || w[0] != 0x07230203) { snprintf(err, errn, "not SPIR-V"); return NULL; }
+    uint32_t bound = w[3];
+    if ((umask | smask) == 0 || (umask & smask)) { snprintf(err, errn, "no image, or an image both uint and int"); return NULL; }
+    if (!(cls = calloc(bound, 4)) || !(bind = calloc(bound, 4)) || !(set = calloc(bound, 4)) || !(ty = calloc(bound, 4)) || !(rt = calloc(bound, 4)) || !(ptee = calloc(bound, 4))
+        || !(si_of = calloc(bound, 4)) || !(limg = calloc(bound, 4))) FAIL("out of memory");
+    for (uint32_t i = 0; i < bound; i++) bind[i] = set[i] = ~0u;
+    enum { MAXIMG = 16 };
+    struct { uint32_t f[8]; } img[MAXIMG]; uint32_t img_id[MAXIMG]; int nimg = 0;   // every OpTypeImage: its 8 operand words after the result (sampled type .. format)
+    uint32_t t_f32 = 0, t_int[2] = {0}, t_ivec[2][5] = {{0}};
+    size_t first_fn = nw;
+    for (size_t i = 5; i < nw;) {
+        uint32_t op = w[i] & 0xffff, len = w[i] >> 16;
+        if (!len || i + len > nw) FAIL("bad instruction at word %zu", i);
+        if (op == OpDecorate && len >= 4 && w[i + 1] < bound) { if (w[i + 2] == DecBinding) bind[w[i + 1]] = w[i + 3]; else if (w[i + 2] == DecDescriptorSet) set[w[i + 1]] = w[i + 3]; }
+        else if (op == OpTypeFloat && len >= 3 && w[i + 2] == 32 && w[i + 1] < bound) { t_f32 = w[i + 1]; ty[t_f32] = 1; }
+        else if (op == OpTypeInt && len >= 4 && w[i + 2] == 32) t_int[w[i + 3] ? 1 : 0] = w[i + 1];
+        else if (op == OpTypeVector && len >= 4 && w[i + 3] >= 2 && w[i + 3] <= 4 && w[i + 1] < bound) {
+            if (w[i + 2] == t_f32 && t_f32) ty[w[i + 1]] = w[i + 3];
+            for (int c = 0; c < 2; c++) if (w[i + 2] == t_int[c] && t_int[c]) t_ivec[c][w[i + 3]] = w[i + 1];
+        }
+        else if (op == OpTypeImage && len >= 9 && w[i + 1] < bound) { if (nimg == MAXIMG) FAIL("more than %d image types", MAXIMG); img_id[nimg] = w[i + 1]; memset(img[nimg].f, 0, 32); memcpy(img[nimg].f, w + i + 2, 7 * 4); nimg++; }
+        else if (op == OpTypeSampledImage && len >= 3 && w[i + 1] < bound) si_of[w[i + 1]] = w[i + 2];
+        else if (op == OpTypePointer && len >= 4 && w[i + 2] == SCUniformConstant && w[i + 1] < bound) ptee[w[i + 1]] = w[i + 3];
+        else if (op == OpFunction && first_fn == nw) first_fn = i;
+        if ((i >= first_fn || op == OpConstant || op == OpConstantComposite || op == OpConstantNull || op == OpUndef) && len >= 3 && w[i + 1] < bound && w[i + 2] < bound
+            && op != OpStore && op != OpImageWrite && op != OpDecorate && op != OpName && op != OpFunction) rt[w[i + 2]] = w[i + 1];
+        i += len;
+    }
+    for (int c = 0; c < 2; c++) t_ivec[c][1] = t_int[c];
+    // The variables to retype: set 0, binding base + n of a mask, a pointer to a float, non-arrayed, unknown-format storage image (Sampled 2), a float sampled image (Sampled 1)
+    // or a sampled image type of one (a combined image and sampler)
+    enum { MAXV = 64 };
+    uint32_t vid[MAXV], vimg[MAXV]; int nv = 0; uint64_t found = 0;
+    for (size_t i = 5; i < first_fn;) {
+        uint32_t op = w[i] & 0xffff, len = w[i] >> 16;
+        if (op == OpVariable && len >= 4 && w[i + 3] == SCUniformConstant && w[i + 2] < bound && w[i + 1] < bound) {
+            uint32_t id = w[i + 2], b = bind[id];
+            if (set[id] == 0 && b >= base && b - base < 64 && ((umask | smask) >> (b - base) & 1)) {
+                uint32_t pt = ptee[w[i + 1]]; int comb = 0;
+                if (pt && pt < bound && si_of[pt]) { pt = si_of[pt]; comb = 1; }
+                int k = 0; while (k < nimg && img_id[k] != pt) k++;
+                if (k == nimg) FAIL("binding %u is not an image (or an array of them)", b);
+                const uint32_t *f = img[k].f;   // sampled type, dim, depth, arrayed, ms, sampled, format
+                int storage = f[5] == 2 && f[6] == 0 && !comb, sampled = f[5] == 1 && f[2] != 1;
+                if (f[0] != t_f32 || !(storage || sampled)) FAIL("binding %u is not a float storage image of unknown format or a float texture", b);
+                if (nv == MAXV) FAIL("too many images");
+                int c = umask >> (b - base) & 1 ? 0 : 1;
+                cls[id] = (uint32_t)(c + 1) | 16 | (comb ? 32 : 0); vid[nv] = id; vimg[nv++] = (uint32_t)k;
+                found |= 1ull << (b - base);
+            }
+        }
+        i += len;
+    }
+    if (found != (umask | smask)) FAIL("bindings %#llx are not image or texture variables", (unsigned long long)((umask | smask) & ~found));
+    // New ids: the integer scalar / vector types the module lacks, an integer twin of each image type taken (or the existing one), its sampled image type (for a texture),
+    // and pointers to them
+    uint32_t nb = bound, mk_t[2][5] = {{0}}, need[2] = {0};
+    for (int k = 0; k < nv; k++) need[(cls[vid[k]] & 3) - 1] = 1;
+    for (int c = 0; c < 2; c++) if (need[c]) for (int n = 1; n <= 4; n++) if (!t_ivec[c][n]) t_ivec[c][n] = mk_t[c][n] = nb++;
+    uint32_t twin[MAXIMG][2] = {{0}}, mk_twin[MAXIMG][2] = {{0}}, ptwin[MAXIMG][2] = {{0}}, mk_ptwin[MAXIMG][2] = {{0}};
+    uint32_t stwin[MAXIMG][2] = {{0}}, mk_stwin[MAXIMG][2] = {{0}}, pstwin[MAXIMG][2] = {{0}}, mk_pstwin[MAXIMG][2] = {{0}};
+    for (int k = 0; k < nv; k++) {
+        int c = (cls[vid[k]] & 3) - 1, m = (int)vimg[k], comb = (cls[vid[k]] & 32) != 0;
+        if (!twin[m][c]) {
+            for (int j = 0; j < nimg; j++) if (img[j].f[0] == t_int[c] && t_int[c] && !memcmp(img[j].f + 1, img[m].f + 1, 6 * 4)) twin[m][c] = img_id[j];
+            if (!twin[m][c]) twin[m][c] = mk_twin[m][c] = nb++;
+            if (img[m].f[5] == 1) {   // a texture: its sampled image type (OpSampledImage of a separate one makes it too)
+                for (uint32_t x = 0; x < bound && !mk_twin[m][c] && !stwin[m][c]; x++) if (si_of[x] == twin[m][c]) stwin[m][c] = x;
+                if (!stwin[m][c]) stwin[m][c] = mk_stwin[m][c] = nb++;
+            }
+        }
+        uint32_t (*pt)[2] = comb ? pstwin : ptwin, (*mk)[2] = comb ? mk_pstwin : mk_ptwin, pointee = comb ? stwin[m][c] : twin[m][c];
+        if (pt[m][c]) continue;
+        for (uint32_t p = 0; p < bound && !pt[m][c]; p++) if (ptee[p] == pointee && pointee < bound) pt[m][c] = p;
+        if (!pt[m][c]) pt[m][c] = mk[m][c] = nb++;
+    }
+    // Pass 2: copy, retyping (the new types and the moved variables go right before the first function)
+    if (!put_n(&o, w, 5)) FAIL("out of memory");
+    for (size_t i = 5; i < nw;) {
+        uint32_t op = w[i] & 0xffff, len = w[i] >> 16; const uint32_t *in = w + i;
+        if (i == first_fn) {
+            for (int c = 0; c < 2; c++) {
+                if (mk_t[c][1]) { uint32_t x[4] = {4u << 16 | OpTypeInt, mk_t[c][1], 32, (uint32_t)c}; if (!put_n(&o, x, 4)) FAIL("out of memory"); }
+                for (int n = 2; n <= 4; n++) if (mk_t[c][n]) { uint32_t x[4] = {4u << 16 | OpTypeVector, mk_t[c][n], t_ivec[c][1], (uint32_t)n}; if (!put_n(&o, x, 4)) FAIL("out of memory"); }
+            }
+            for (int m = 0; m < nimg; m++) for (int c = 0; c < 2; c++) {
+                if (mk_twin[m][c]) { uint32_t x[9] = {9u << 16 | OpTypeImage, mk_twin[m][c], t_ivec[c][1]}; memcpy(x + 3, img[m].f + 1, 6 * 4); if (!put_n(&o, x, 9)) FAIL("out of memory"); }
+                if (mk_stwin[m][c]) { uint32_t x[3] = {3u << 16 | OpTypeSampledImage, mk_stwin[m][c], twin[m][c]}; if (!put_n(&o, x, 3)) FAIL("out of memory"); }
+                if (mk_ptwin[m][c]) { uint32_t x[4] = {4u << 16 | OpTypePointer, mk_ptwin[m][c], SCUniformConstant, twin[m][c]}; if (!put_n(&o, x, 4)) FAIL("out of memory"); }
+                if (mk_pstwin[m][c]) { uint32_t x[4] = {4u << 16 | OpTypePointer, mk_pstwin[m][c], SCUniformConstant, stwin[m][c]}; if (!put_n(&o, x, 4)) FAIL("out of memory"); }
+            }
+            for (int k = 0; k < nv; k++) { int c = (cls[vid[k]] & 3) - 1; uint32_t x[4] = {4u << 16 | OpVariable, cls[vid[k]] & 32 ? pstwin[vimg[k]][c] : ptwin[vimg[k]][c], vid[k], SCUniformConstant};
+                                           if (!put_n(&o, x, 4)) FAIL("out of memory"); }
+        }
+        if (op == OpVariable && len >= 4 && w[i + 2] < bound && cls[w[i + 2]] && i < first_fn) { i += len; continue; }   // re-emitted above
+        if (op == OpLoad && len >= 4 && w[i + 3] < bound && (cls[w[i + 3]] & 16) && w[i + 2] < bound) {
+            uint32_t v = w[i + 3], c = (cls[v] & 3) - 1; int k = 0; while (vid[k] != v) k++;
+            cls[w[i + 2]] = (c + 1) | (cls[v] & 32); limg[w[i + 2]] = vimg[k] + 1;
+            if (!put_n(&o, in, len)) FAIL("out of memory");
+            o.w[o.n - len + 1] = cls[v] & 32 ? stwin[vimg[k]][c] : twin[vimg[k]][c];
+            i += len; continue;
+        }
+        if ((op == OpSampledImage || op == OpImage) && len >= 4 && w[i + 3] < bound && cls[w[i + 3]] && w[i + 2] < bound) {   // a texture and a sampler combined, or the image of a combined one
+            uint32_t x3 = w[i + 3], c = (cls[x3] & 3) - 1, m = limg[x3] - 1;
+            if (!limg[x3] || (op == OpSampledImage) == ((cls[x3] & 32) != 0)) FAIL("opcode %u on a retyped image of the other kind (id %u)", op, x3);
+            if (op == OpSampledImage && !stwin[m][c]) FAIL("a storage image combined with a sampler (id %u)", x3);
+            cls[w[i + 2]] = (c + 1) | (op == OpSampledImage ? 32 : 0); limg[w[i + 2]] = m + 1;
+            if (!put_n(&o, in, len)) FAIL("out of memory");
+            o.w[o.n - len + 1] = op == OpSampledImage ? stwin[m][c] : twin[m][c];
+            i += len; continue;
+        }
+        if (texel_read_op(op) && len >= 5 && w[i + 3] < bound && cls[w[i + 3]]) {
+            uint32_t c = (cls[w[i + 3]] & 3) - 1, ft = w[i + 1], r = w[i + 2], n = ft < bound ? ty[ft] : 0, tmp = nb++;
+            if (!n) FAIL("a read of a retyped image into a non-float type %u", ft);
+            if (!put_n(&o, in, len)) FAIL("out of memory");
+            o.w[o.n - len + 1] = t_ivec[c][n]; o.w[o.n - len + 2] = tmp;
+            uint32_t x[4] = {4u << 16 | OpBitcast, ft, r, tmp}; if (!put_n(&o, x, 4)) FAIL("out of memory");
+            i += len; continue;
+        }
+        if (op == OpImageWrite && len >= 4 && w[i + 1] < bound && cls[w[i + 1]]) {
+            uint32_t c = (cls[w[i + 1]] & 3) - 1, tx = w[i + 3], ft = tx < bound ? rt[tx] : 0, n = ft && ft < bound ? ty[ft] : 0, tmp = nb++;
+            if (!n) FAIL("a write of a non-float texel (id %u) into a retyped image", tx);
+            uint32_t x[4] = {4u << 16 | OpBitcast, t_ivec[c][n], tmp, tx}; if (!put_n(&o, x, 4)) FAIL("out of memory");
+            if (!put_n(&o, in, len)) FAIL("out of memory");
+            o.w[o.n - len + 3] = tmp;
+            i += len; continue;
+        }
+        int query = op == OpImageQuerySize || op == OpImageQuerySizeLod || op == OpImageQueryLevels || op == OpImageQuerySamples || op == OpImageQueryLod;   // (the image operand only: their results are integers, or the LOD)
+        if (!query && op != OpName && op != OpMemberName && op != OpEntryPoint && op != OpDecorate && op != OpMemberDecorate && op != OpDecorateId && op != OpDecorateString
+            && op != OpMemberDecorateString && i >= first_fn)
+            for (uint32_t k = 1; k < len; k++) if (!(op == OpExtInst && k == 4) && w[i + k] < bound && cls[w[i + k]]) FAIL("opcode %u uses a retyped image (id %u)", op, w[i + k]);
+        if (!put_n(&o, in, len)) FAIL("out of memory");
+        i += len;
+    }
+    o.w[3] = nb;
+    free(cls); free(bind); free(set); free(ty); free(rt); free(ptee); free(si_of); free(limg);
+    *out_nw = o.n; return o.w;
+fail:
+    free(cls); free(bind); free(set); free(ty); free(rt); free(ptee); free(si_of); free(limg); free(o.w);
+    return NULL;
+#undef FAIL
+}
+
 // vka_spv_instance: an instanced variant of a vertex or pixel shader (vka_draw.c's instanced runs, DM_VK_INSTANCE). Draws that repeat one mesh with only one uniform
 // block's offset changed become one instanced draw: every read of the block at `binding` (the translator's vec4 data[4096] constant buffer) goes to data[i + d],
 // d (vec4 units) a uint vertex input at location `loc`, fed per instance by the replay, and passed on as a flat uint output at the same location; in the pixel shader a
 // flat uint input at `loc`. Checked against a Python reference built on SPIRV-Tools (for Donkey Kong Bananza's 14 most used
 // pairs both give the same module byte for byte once reassembled, and spirv-val accepts it), made at pipeline time. Where a read of the block could not be moved (a chain with one index, a load of the whole
 // block, the block handed to a function) this refuses the shader instead
-enum { OpTypeVoid = 19, OpTypeForwardPointerX = 39, OpSpecConstant = 50, OpFunctionCall = 57, OpIAdd = 128, DecFlat = 14, BIInstanceIndex = 43 };
+enum { OpTypeVoid = 19, OpTypeForwardPointerX = 39, OpFunctionCall = 57, OpIAdd = 128, DecFlat = 14, BIInstanceIndex = 43 };
 static int no_result(uint32_t op) {   // function-body instructions without a result type (the rest carry [type, result] in words 1-2)
     return op == OpStore || op == OpBranch || op == OpBranchConditional || op == OpSwitch || op == OpReturn || op == OpReturnValue || op == OpKill || op == OpUnreachable
         || op == OpSelectionMerge || op == OpLoopMerge || op == OpLabel || op == OpCopyMemory || op == OpCopyMemorySized || op == OpImageWrite || op == OpAtomicStore
@@ -589,4 +791,221 @@ uint32_t *vka_spv_instance(const uint32_t *w, size_t nw, uint32_t binding, uint3
 fail:
     free(type_of); free(o.w); return NULL;
 #undef FAIL
+}
+
+// vka_spv_gs_link: the pixel shader's inputs a geometry shader does not write. A passthrough geometry shader (SPH word 0 bit 24) hands the rasterizer its input primitive
+// with every vertex attribute as the vertex shader wrote it; the device has no SPV_NV_geometry_shader_passthrough, so the translator emits the vertices itself
+// (EmitterContext gs_passthrough false) and copies the attributes the next stage reads, which it learns only from a linked pixel shader (AttributeUsage.PassthroughAttributes,
+// set by TranslatorContext.SetNextStage). The library translates each shader alone, so those copies are missing: DKB's terrain culling geometry shader 5d537f7630ec3671
+// writes only gl_Position while the ground's pixel shader 7f7781d3621f0ce6 reads location 19. Turnip links that (the input reads undefined values); Qualcomm's Adreno
+// driver (build 718a07726a) refuses the whole pipeline with VK_ERROR_UNKNOWN (-13), so the breakable ground was never drawn. Here, at pipeline time, where the three modules
+// are known: each scalar or vector pixel input (32-bit float, int or uint) at a location the geometry shader has no output for gets an output, written before every
+// OpEmitVertex from the vertex shader's output at that location for the vertex being emitted (the gl_in index of that vertex's position read, as the translator writes it
+// right before; else vertex 0), or a null value when the vertex shader does not write that location either (undefined on the hardware too). *copied / *nulled: the locations.
+// NULL with err empty: nothing to add
+enum { OpTypeArrayL = 28, OpConstantNullL = 46, OpEmitVertexL = 218, OpEmitStreamVertexL = 220, OpMemberDecorateL = 72, BIPositionL = 0, DecComponentL = 2 };
+typedef struct { const uint32_t *w; size_t n; uint32_t bound, *op, *a1, *a2, *a3; } spvmod_t;   // per id declared before the first function: its opcode and operands (smod_open)
+static int smod_open(spvmod_t *m, const uint32_t *w, size_t n) {
+    memset(m, 0, sizeof *m); m->w = w; m->n = n;
+    if (n < 5 || w[0] != 0x07230203) return 0;
+    m->bound = w[3];
+    if (!(m->op = calloc(m->bound, 4)) || !(m->a1 = calloc(m->bound, 4)) || !(m->a2 = calloc(m->bound, 4)) || !(m->a3 = calloc(m->bound, 4))) return 0;
+    for (size_t i = 5; i < n;) {
+        uint32_t op = w[i] & 0xffff, len = w[i] >> 16;
+        if (!len || i + len > n) return 0;
+        if (op == OpFunction) break;
+        // a type: its operands after the result; a variable or constant: its type, then the operands after the result (storage class; value)
+        uint32_t r = 0, a[3] = {0};
+        if (op == OpTypeFloat || op == OpTypeInt || op == OpTypeVector || op == OpTypePointer || op == OpTypeArrayL || op == OpTypeStruct) {
+            r = w[i + 1]; for (int k = 0; k < 3; k++) a[k] = 2u + k < len ? w[i + 2 + k] : 0; }
+        else if ((op == OpVariable || op == OpConstant) && len >= 4) { r = w[i + 2]; a[0] = w[i + 1]; a[1] = w[i + 3]; a[2] = len > 4 ? w[i + 4] : 0; }
+        if (r && r < m->bound) { m->op[r] = op; m->a1[r] = a[0]; m->a2[r] = a[1]; m->a3[r] = a[2]; }
+        i += len;
+    }
+    return 1;
+}
+static void smod_close(spvmod_t *m) { free(m->op); free(m->a1); free(m->a2); free(m->a3); }
+// A type's signature: kind (1 float, 2 int, 3 uint, all 32-bit) << 4 | components; 0 = not a 32-bit scalar or vector
+static uint32_t smod_sig(const spvmod_t *m, uint32_t t) {
+    if (t >= m->bound) return 0;
+    uint32_t n = 1;
+    if (m->op[t] == OpTypeVector) { n = m->a2[t]; t = m->a1[t]; if (t >= m->bound || n < 2 || n > 4) return 0; }
+    if (m->op[t] == OpTypeFloat && m->a1[t] == 32) return 1u << 4 | n;
+    if (m->op[t] == OpTypeInt && m->a1[t] == 32) return (m->a2[t] ? 2u : 3u) << 4 | n;
+    return 0;
+}
+// The user Input or Output variables (sc) by Location: sig[loc] their type's signature (0 none, 0xff a location whose variable has another type or a Component)
+static void smod_io(const spvmod_t *m, uint32_t sc, uint8_t sig[32]) {
+    memset(sig, 0, 32);
+    uint8_t *comp = calloc(m->bound, 1); uint32_t *loc = malloc(m->bound * 4); if (!comp || !loc) { free(comp); free(loc); return; }
+    for (uint32_t i = 0; i < m->bound; i++) loc[i] = ~0u;
+    for (size_t i = 5; i < m->n;) {
+        uint32_t op = m->w[i] & 0xffff, len = m->w[i] >> 16;
+        if (op == OpFunction) break;
+        if (op == OpDecorate && len >= 4 && m->w[i + 1] < m->bound) { if (m->w[i + 2] == DecLocation) loc[m->w[i + 1]] = m->w[i + 3]; else if (m->w[i + 2] == DecComponentL) comp[m->w[i + 1]] = 1; }
+        i += len;
+    }
+    for (uint32_t v = 0; v < m->bound; v++) {
+        if (m->op[v] != OpVariable || m->a2[v] != sc || loc[v] >= 32) continue;
+        uint32_t pt = m->a1[v], s = pt < m->bound && m->op[pt] == OpTypePointer ? smod_sig(m, m->a2[pt]) : 0;
+        sig[loc[v]] = comp[v] || !s ? 0xff : (uint8_t)s;
+    }
+    free(comp); free(loc);
+}
+uint32_t *vka_spv_gs_link(const uint32_t *gw, size_t gn, const uint32_t *vw, size_t vn, const uint32_t *fw, size_t fn, uint32_t *copied, uint32_t *nulled, size_t *out_nw, char *err, size_t errn) {
+#define FAIL(...) do { snprintf(err, errn, __VA_ARGS__); goto fail; } while (0)
+    spvmod_t G, Vm, F; vec_t o = {0}, decl = {0}, annot = {0}; uint8_t *isconst = NULL;   // isconst: 2 a Position block, then 1 an integer constant
+    *copied = *nulled = 0; err[0] = 0;
+    int okg = smod_open(&G, gw, gn), okv = smod_open(&Vm, vw, vn), okf = smod_open(&F, fw, fn);
+    if (!okg || !okv || !okf) FAIL("not SPIR-V (%s)", !okg ? "geometry" : !okv ? "vertex" : "pixel");
+    uint8_t fin[32], vout[32], gout[32]; smod_io(&F, SCInput, fin); smod_io(&Vm, SCOutput, vout); smod_io(&G, SCOutput, gout);
+    uint32_t need = 0;
+    for (int l = 0; l < 32; l++) if (fin[l] && fin[l] != 0xff && !gout[l]) need |= 1u << l;
+    if (!need) goto none;
+    // gl_in: the Input array of a block whose member 0 is BuiltIn Position; its length; constant ids (indexes taken from its access chains)
+    uint32_t glin = 0, nvert = 0, ep_at = 0, first_fn = 0, first_annot = 0;
+    if (!(isconst = calloc(G.bound, 1))) FAIL("out of memory");   // first: the blocks with a Position member 0 (gl_PerVertex in and out), then the integer constants
+    for (size_t i = 5; i < gn;) {
+        uint32_t op = gw[i] & 0xffff, len = gw[i] >> 16;
+        if (op == OpFunction) { first_fn = (uint32_t)i; break; }
+        if (op == OpEntryPoint) ep_at = (uint32_t)i;
+        if (is_annot(op) && !first_annot) first_annot = (uint32_t)i;
+        if (op == OpMemberDecorateL && len >= 5 && gw[i + 2] == 0 && gw[i + 3] == DecBuiltIn && gw[i + 4] == BIPositionL && gw[i + 1] < G.bound) isconst[gw[i + 1]] = 2;
+        i += len;
+    }
+    if (!first_fn || !ep_at || !first_annot) FAIL("no function, entry point or decoration");
+    for (uint32_t v = 0; v < G.bound; v++) {
+        if (G.op[v] != OpVariable || G.a2[v] != SCInput) continue;
+        uint32_t pt = G.a1[v], at = pt < G.bound ? G.a2[pt] : 0;
+        if (at < G.bound && G.op[at] == OpTypeArrayL && G.a1[at] < G.bound && isconst[G.a1[at]] == 2 && G.a2[at] < G.bound && G.op[G.a2[at]] == OpConstant) { glin = v; nvert = G.a2[G.a2[at]]; }
+    }
+    if (!glin || !nvert || nvert > 6) FAIL("no gl_in array");
+    for (uint32_t v = 0; v < G.bound; v++) isconst[v] = G.op[v] == OpConstant && G.a1[v] < G.bound && G.op[G.a1[v]] == OpTypeInt;
+    // Types: reused when the module has them (a second declaration of a scalar, vector or pointer type is invalid), else declared before the first function
+    uint32_t nb = G.bound;
+    #define FIND(cond) ({ uint32_t _r = 0; for (uint32_t _t = 1; _t < G.bound && !_r; _t++) if (cond) _r = _t; _r; })
+    uint32_t sc_t[4] = {0}, vec_t_[4][5] = {{0}};
+    uint32_t mkp_sc[64], mkp_pt[64], mkp_id[64]; int nmkp = 0;   // pointer types made here
+    uint32_t outv[32] = {0}, inv[32] = {0}, pin[32] = {0}, nul[32] = {0}, ty[32] = {0};
+    for (int l = 0; l < 32; l++) if (need >> l & 1) {
+        uint32_t s = fin[l], k = s >> 4, n = s & 15;
+        if (!sc_t[k]) {
+            sc_t[k] = k == 1 ? FIND(G.op[_t] == OpTypeFloat && G.a1[_t] == 32) : FIND(G.op[_t] == OpTypeInt && G.a1[_t] == 32 && G.a2[_t] == (k == 2));
+            if (!sc_t[k]) { sc_t[k] = nb++; uint32_t x[4] = {(k == 1 ? 3u : 4u) << 16 | (k == 1 ? OpTypeFloat : OpTypeInt), sc_t[k], 32, k == 2}; if (!put_n(&decl, x, k == 1 ? 3 : 4)) FAIL("out of memory"); }
+        }
+        uint32_t t = sc_t[k];
+        if (n > 1) {
+            if (!vec_t_[k][n]) { vec_t_[k][n] = FIND(G.op[_t] == OpTypeVector && G.a1[_t] == sc_t[k] && G.a2[_t] == n);
+                                 if (!vec_t_[k][n]) { vec_t_[k][n] = nb++; uint32_t x[4] = {4u << 16 | OpTypeVector, vec_t_[k][n], sc_t[k], n}; if (!put_n(&decl, x, 4)) FAIL("out of memory"); } }
+            t = vec_t_[k][n];
+        }
+        ty[l] = t;
+        for (int pass = 0; pass < 2; pass++) {   // the Output pointer, then (a copy) the Input pointer to the same type
+            uint32_t sc = pass ? SCInput : SCOutput;
+            if (pass && vout[l] != s) break;
+            uint32_t p = FIND(G.op[_t] == OpTypePointer && G.a1[_t] == sc && G.a2[_t] == t);
+            for (int q = 0; q < nmkp && !p; q++) if (mkp_sc[q] == sc && mkp_pt[q] == t) p = mkp_id[q];
+            if (!p) { if (nmkp == 64) FAIL("too many types"); p = nb++; mkp_sc[nmkp] = sc; mkp_pt[nmkp] = t; mkp_id[nmkp++] = p; uint32_t x[4] = {4u << 16 | OpTypePointer, p, sc, t}; if (!put_n(&decl, x, 4)) FAIL("out of memory"); }
+            if (!pass) { outv[l] = nb++; uint32_t x[4] = {4u << 16 | OpVariable, p, outv[l], SCOutput}; if (!put_n(&decl, x, 4)) FAIL("out of memory"); }
+            else pin[l] = p;
+        }
+        uint32_t d[4] = {4u << 16 | OpDecorate, outv[l], DecLocation, (uint32_t)l}; if (!put_n(&annot, d, 4)) FAIL("out of memory");
+        if (pin[l]) {   // uint length, the array type, its Input pointer, the variable
+            uint32_t u = FIND(G.op[_t] == OpTypeInt && G.a1[_t] == 32 && G.a2[_t] == 0);
+            if (!u) { if (!sc_t[3]) { sc_t[3] = nb++; uint32_t x[4] = {4u << 16 | OpTypeInt, sc_t[3], 32, 0}; if (!put_n(&decl, x, 4)) FAIL("out of memory"); } u = sc_t[3]; }
+            uint32_t len_c = nb++, arr = nb++, parr = nb++; inv[l] = nb++;
+            uint32_t x[] = {4u << 16 | OpConstant, u, len_c, nvert, 4u << 16 | OpTypeArrayL, arr, t, len_c, 4u << 16 | OpTypePointer, parr, SCInput, arr, 4u << 16 | OpVariable, parr, inv[l], SCInput};
+            if (!put_n(&decl, x, sizeof x / 4)) FAIL("out of memory");
+            uint32_t y[4] = {4u << 16 | OpDecorate, inv[l], DecLocation, (uint32_t)l}; if (!put_n(&annot, y, 4)) FAIL("out of memory");
+            *copied |= 1u << l;
+        } else { nul[l] = nb++; uint32_t x[3] = {3u << 16 | OpConstantNullL, t, nul[l]}; if (!put_n(&decl, x, 3)) FAIL("out of memory"); *nulled |= 1u << l; }
+    }
+    #undef FIND
+    uint32_t zero = 0;   // vertex 0 when no gl_in read names the vertex: a uint constant
+    { uint32_t u = sc_t[3]; if (!u) for (uint32_t t = 1; t < G.bound && !u; t++) if (G.op[t] == OpTypeInt && G.a1[t] == 32 && G.a2[t] == 0) u = t;
+      if (!u) { u = sc_t[3] = nb++; uint32_t x[4] = {4u << 16 | OpTypeInt, u, 32, 0}; if (!put_n(&decl, x, 4)) FAIL("out of memory"); }
+      zero = nb++; uint32_t x[4] = {4u << 16 | OpConstant, u, zero, 0}; if (!put_n(&decl, x, 4)) FAIL("out of memory"); }
+    // Copy: annotations before the first one, declarations before the first function, the entry point's interface grown, the copies before each vertex emitted
+    if (!put_n(&o, gw, 5)) FAIL("out of memory");
+    uint32_t vtx = zero;
+    for (size_t i = 5; i < gn;) {
+        uint32_t op = gw[i] & 0xffff, len = gw[i] >> 16; const uint32_t *in = gw + i;
+        if (i == first_annot && !put_n(&o, annot.w, annot.n)) FAIL("out of memory");
+        if (i == first_fn && !put_n(&o, decl.w, decl.n)) FAIL("out of memory");
+        if (i == ep_at) {
+            size_t at = o.n; if (!put_n(&o, in, len)) FAIL("out of memory");
+            for (int l = 0; l < 32; l++) { if (outv[l] && !put(&o, outv[l])) FAIL("out of memory"); if (inv[l] && !put(&o, inv[l])) FAIL("out of memory"); }
+            o.w[at] = (uint32_t)(o.n - at) << 16 | OpEntryPoint; i += len; continue;
+        }
+        if (op == OpFunction) vtx = zero;
+        if ((op == OpAccessChain || op == OpInBoundsAccessChain) && len >= 5 && gw[i + 3] == glin && gw[i + 4] < G.bound && isconst[gw[i + 4]]) vtx = gw[i + 4];
+        if (op == OpEmitVertexL || op == OpEmitStreamVertexL)
+            for (int l = 0; l < 32; l++) {
+                if (!outv[l]) continue;
+                uint32_t val = nul[l];
+                if (inv[l]) { uint32_t p = nb++; val = nb++; uint32_t x[] = {5u << 16 | OpAccessChain, pin[l], p, inv[l], vtx, 4u << 16 | OpLoad, ty[l], val, p}; if (!put_n(&o, x, 9)) FAIL("out of memory"); }
+                uint32_t s[3] = {3u << 16 | OpStore, outv[l], val}; if (!put_n(&o, s, 3)) FAIL("out of memory");
+            }
+        if (!put_n(&o, in, len)) FAIL("out of memory");
+        i += len;
+    }
+    o.w[3] = nb;
+    smod_close(&G); smod_close(&Vm); smod_close(&F); free(decl.w); free(annot.w); free(isconst);
+    *out_nw = o.n; return o.w;
+none:
+fail:
+    smod_close(&G); smod_close(&Vm); smod_close(&F); free(decl.w); free(annot.w); free(isconst); free(o.w);
+    *copied = *nulled = 0;
+    return NULL;
+#undef FAIL
+}
+
+// A pixel shader's colour outputs by location: the components it can write (bit c of comp[loc], loc < 8), for the colour write mask (vka_draw.c). A whole-variable store
+// writes all of the variable's components, a chain with a constant index its component, any other use of the variable (a chain with a variable index, a copy, a call) all
+// of them; a component the variable does not have (a vec3 output at an RGBA target) is never written. 0 = done; -1 when the module is not read (outputs split by Component
+// decorations, not SPIR-V): the caller then masks nothing more than before
+int vka_spv_fout_comps(const uint32_t *w, size_t nw, uint8_t comp[8]) {
+    enum { DecComponent = 2 };
+    memset(comp, 0, 8);
+    if (nw < 5 || w[0] != 0x07230203) return -1;
+    uint32_t bound = w[3];
+    uint32_t *loc = calloc(bound, 4), *ty = calloc(bound, 4), *ptee = calloc(bound, 4), *cval = calloc(bound, 4); uint8_t *isc = calloc(bound, 1), *var = calloc(bound, 1);
+    int rc = -1;
+    if (!loc || !ty || !ptee || !cval || !isc || !var) goto out;
+    for (uint32_t i = 0; i < bound; i++) loc[i] = ~0u;
+    uint32_t t_f32 = 0, ncomp_of[8] = {0}, var_of[8] = {0};
+    for (size_t i = 5; i < nw;) {
+        uint32_t op = w[i] & 0xffff, len = w[i] >> 16;
+        if (!len || i + len > nw) goto out;
+        if (op == OpDecorate && len >= 4 && w[i + 1] < bound) { if (w[i + 2] == DecLocation) loc[w[i + 1]] = w[i + 3]; else if (w[i + 2] == DecComponent) goto out; }
+        else if (op == OpTypeFloat && len >= 3 && w[i + 2] == 32 && w[i + 1] < bound) { t_f32 = w[i + 1]; ty[t_f32] = 1; }
+        else if (op == OpTypeInt && len >= 4 && w[i + 2] == 32 && w[i + 1] < bound) ty[w[i + 1]] = 1;   // (an integer output: its components count the same)
+        else if (op == OpTypeVector && len >= 4 && w[i + 2] < bound && ty[w[i + 2]] && w[i + 1] < bound) ty[w[i + 1]] = w[i + 3];
+        else if (op == OpTypePointer && len >= 4 && w[i + 2] == SCOutput && w[i + 1] < bound) ptee[w[i + 1]] = w[i + 3];
+        else if (op == OpConstant && len >= 4 && w[i + 2] < bound) { isc[w[i + 2]] = 1; cval[w[i + 2]] = w[i + 3]; }
+        else if (op == OpVariable && len >= 4 && w[i + 3] == SCOutput && w[i + 1] < bound && w[i + 2] < bound) {
+            uint32_t id = w[i + 2], l = loc[id], pt = ptee[w[i + 1]], n = pt < bound ? ty[pt] : 0;
+            if (l < 8 && n >= 1 && n <= 4) { var[id] = 1; var_of[l] = id; ncomp_of[l] = n; if (len > 4) comp[l] = (uint8_t)((1u << n) - 1); }   // (an initializer writes them all)
+        }
+        i += len;
+    }
+    (void)t_f32;
+    for (size_t i = 5; i < nw;) {
+        uint32_t op = w[i] & 0xffff, len = w[i] >> 16;
+        if (op != OpVariable && op != OpDecorate && op != OpName && op != OpEntryPoint && op != OpLoad && op != OpConstant && op > 17) {   // (not the literals of debug, mode and constant instructions)
+            int chain = (op == OpAccessChain || op == OpInBoundsAccessChain) && len >= 5;
+            for (uint32_t k = 1; k < len; k++) {
+                uint32_t id = w[i + k]; if (id >= bound || !var[id]) continue;
+                uint32_t l = loc[id], all = (1u << ncomp_of[l]) - 1;
+                if (chain && k == 3) { uint32_t x = w[i + 4]; comp[l] |= (uint8_t)(x < bound && isc[x] && cval[x] < ncomp_of[l] ? 1u << cval[x] : all); }
+                else comp[l] |= (uint8_t)all;
+            }
+        }
+        i += len;
+    }
+    (void)var_of;
+    rc = 0;
+out:
+    free(loc); free(ty); free(ptee); free(cval); free(isc); free(var);
+    return rc;
 }
