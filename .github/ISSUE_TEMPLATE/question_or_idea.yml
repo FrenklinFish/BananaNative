@@ -1,0 +1,38 @@
+name: Question, idea or development topic
+description: Ask how something works, suggest a game or a feature, or discuss how to build or contribute something
+body:
+  - type: markdown
+    attributes:
+      value: |
+        For something that crashes, hangs, draws wrong, runs slowly or will not prepare a game, use the **Android bug report** form instead: its log and phone details are what a problem is traced with.
+        **No game files, keys, firmware or links to them**: don't share them, offer them or ask where to get them. Banana Native works with your own dump of a game you own. Posts that break this are edited or removed.
+  - type: dropdown
+    id: kind
+    attributes:
+      label: What is this?
+      options:
+        - A question about using Banana Native
+        - A feature or game idea
+        - A development topic (how to build, change or contribute something)
+        - Something else
+    validations:
+      required: true
+  - type: textarea
+    id: body
+    attributes:
+      label: Your post
+      description: "What you want to know, build or suggest, and why. For a game request, its name and title ID (no files). For development, the part of the code you are looking at and what you have read or tried so far."
+    validations:
+      required: true
+  - type: input
+    id: context
+    attributes:
+      label: Phone, app version and game, if they matter
+      description: "For example: AYN Thor, 16 GB, Banana Native 0.2.2, Pokopia."
+  - type: checkboxes
+    id: rules
+    attributes:
+      label: Rules
+      options:
+        - label: My post has no game files, keys, firmware or links to them, and doesn't ask for any.
+          required: true
