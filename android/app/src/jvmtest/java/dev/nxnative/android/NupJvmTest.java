@@ -107,10 +107,36 @@ public final class NupJvmTest {
 
     static byte[] bytes(File f) throws IOException { return Files.readAllBytes(f.toPath()); }
 
+    /** Builds a meta block from type and data pairs */
+    static byte[] tlvs(Object... tp) throws IOException {
+        java.io.ByteArrayOutputStream o = new java.io.ByteArrayOutputStream();
+        for (int i = 0; i < tp.length; i += 2) {
+            byte[] p = tp[i + 1] instanceof String ? ((String) tp[i + 1]).getBytes(StandardCharsets.UTF_8) : (byte[]) tp[i + 1];
+            int t = (Integer) tp[i];
+            o.write(new byte[] {(byte) t, (byte) (t >> 8), 0, 0, (byte) p.length, (byte) (p.length >> 8), (byte) (p.length >> 16), (byte) (p.length >>> 24)});
+            o.write(p);
+        }
+        return o.toByteArray();
+    }
+
+    /** Meta blocks with the spec's numbers and with the packer's shifted ones, an "icon" that isn't an image, and a record cut off at the end */
+    static void meta() throws IOException {
+        byte[] jpg = {(byte) 0xFF, (byte) 0xD8, (byte) 0xFF, (byte) 0xE0, 1, 2, 3}, npdm = "META".getBytes(StandardCharsets.UTF_8);
+        Nup.Meta m = Nup.Meta.parse(tlvs(1, npdm, 3, jpg, 4, "1.8.0", 5, "Mario Kart World", 6, "Nintendo", 0x8001, "private"));
+        check(m.icon != null && m.icon.length == jpg.length && "1.8.0".equals(m.version) && "Mario Kart World".equals(m.title) && "Nintendo".equals(m.publisher), "meta: the spec's types");
+        m = Nup.Meta.parse(tlvs(0, npdm, 2, jpg, 3, "3.0.0", 4, "Donkey Kong Bananza", 5, "Nintendo", 6, new byte[32]));
+        check(m.icon != null && "3.0.0".equals(m.version) && "Donkey Kong Bananza".equals(m.title) && "Nintendo".equals(m.publisher), "meta: the packer's types, one lower (a type 0 record)");
+        m = Nup.Meta.parse(tlvs(1, npdm, 3, "not an image", 5, "Zelda"));
+        check(m.icon == null && "Zelda".equals(m.title) && m.version == null, "meta: an icon that is no JPEG or PNG is not taken");
+        m = Nup.Meta.parse(java.util.Arrays.copyOf(tlvs(5, "Cut"), 10));
+        check(m.title == null, "meta: a record past the block's end is not read");
+    }
+
     public static void main(String[] args) throws Exception {
         if (args[0].equals("real")) { real(new File(args[1]), new File(args[2])); System.out.println("ok " + n); return; }
         File repo = new File(args[0]), t = new File(args[1]);
         names();
+        meta();
         Zstd.contentSize(new byte[] {(byte) 0x28, (byte) 0xB5, 0x2F, (byte) 0xFD, 0x20, 0x05, 0x01, 0, 0});   // a header alone parses
         File d = new File(t, "Game");
         dump(d);

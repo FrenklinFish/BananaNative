@@ -404,7 +404,8 @@ public final class MainActivity extends Activity {
         LinearLayout c = Ui.card(this);
         c.setPadding(dp(16), dp(16), dp(16), dp(16));
         LinearLayout top = Ui.row(this);
-        top.addView(Ui.tile(this, g.name, 52));
+        TextView tile = Ui.tile(this, g.name, 52);
+        top.addView(tile);
         LinearLayout info = new LinearLayout(this);
         info.setOrientation(LinearLayout.VERTICAL);
         info.setPadding(dp(14), 0, dp(4), 0);
@@ -412,6 +413,13 @@ public final class MainActivity extends Activity {
         name.setMaxLines(2);
         name.setEllipsize(TextUtils.TruncateAt.END);
         info.addView(name);
+        TextView about = Ui.small(this, "");   // the version and publisher from the .nup; its icon goes in the tile
+        about.setVisibility(View.GONE);
+        info.addView(about);
+        GameMeta.load(new File(g.gameDir), m -> {
+            if (m.icon != null) Ui.tileIcon(tile, m.icon);
+            if (m.line() != null) { about.setText(m.line()); about.setVisibility(View.VISIBLE); }
+        });
         boolean other = Profile.of(g.titleId) == null;   // no profile in this APK: it cannot run here (Profile.missing says why)
         TextView st = other ? Ui.status(this, "Not in this app version", R.color.bn_danger) : Ui.status(this, "Checking…", R.color.bn_text_2);
         LinearLayout.LayoutParams sp = Ui.wrap();

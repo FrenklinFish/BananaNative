@@ -211,6 +211,19 @@ final class Ui {
         return t;
     }
 
+    /** Shows a picture (the game's icon) in a tile made by tile(), in place of its letter and with the same rounded corners. Pass null to get the letter back */
+    static void tileIcon(TextView t, android.graphics.Bitmap b) {
+        Context c = t.getContext();
+        if (b == null) { t.setTextColor(col(c, R.color.bn_on_banana)); t.setBackground(round(col(c, R.color.bn_banana), dp(c, 16), 0, 0)); return; }
+        android.graphics.drawable.Drawable d = new android.graphics.drawable.BitmapDrawable(c.getResources(), b);
+        t.setBackground(d);
+        t.setTextColor(android.graphics.Color.TRANSPARENT);   // only hidden, so the letter is still there if the tile is reused for another game
+        t.setOutlineProvider(new android.view.ViewOutlineProvider() {
+            @Override public void getOutline(View v, android.graphics.Outline o) { o.setRoundRect(0, 0, v.getWidth(), v.getHeight(), dp(c, 16)); }
+        });
+        t.setClipToOutline(true);
+    }
+
     // ---- Containers ----
 
     /** A card: rounded, a hairline peel edge, vertical, 18 dp inside */

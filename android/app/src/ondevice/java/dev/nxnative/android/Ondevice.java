@@ -149,6 +149,8 @@ final class Ondevice {
         boolean bound, resumed;
         long resumedAt;
         Job job;
+        private String placedFor;   // which job (dump and pack) the list was last built for
+        private String metaLine;   // the game's version and publisher from its .nup, shown before the state
         boolean jobAlive;   // the service said its worker runs this job
 
         Panel(MainActivity a) {
@@ -304,9 +306,24 @@ final class Ondevice {
             // A finished job: its game goes into the list with its pack (once), and the card goes: Play is on the game's card
             if (ready && !alive && !addedKey(job).equals(Prefs.open(a, "ondevice").getString("added", ""))) addGame(job);
             boolean was = view.getVisibility() == View.VISIBLE;
-            if (job == null || ready && listed(job)) { keepScreen(false); view.setVisibility(View.GONE); if (was) a.refresh(); return; }
+            if (job == null || ready && listed(job)) { keepScreen(false); view.setVisibility(View.GONE); placedFor = null; if (was) a.refresh(); return; }
             view.setVisibility(View.VISIBLE);
-            if (!was) a.refresh();   // the games' empty card hides while this one shows
+            // The list puts this card where its game's card would be. When the card switches to another game's job, the list has to be rebuilt too.
+            // That happens after an APK update: the card first shows another game's finished job, then a background shader update takes it over,
+            // and without a rebuild the card stays in the first game's spot, hiding that game's card while the updated game shows twice
+            String key = job.dump().getPath() + "\n" + job.pack().getPath();
+            if (!was || !key.equals(placedFor)) {
+                placedFor = key;
+                a.refresh();   // this also hides the "no games yet" card while this one shows
+                Ui.tileIcon(tile, null);   // like the game card: the icon from the .nup if it has one, and its version and publisher before the state
+                metaLine = null;
+                GameMeta.load(job.dump(), m -> {
+                    if (!key.equals(placedFor)) return;
+                    if (m.icon != null) Ui.tileIcon(tile, m.icon);
+                    metaLine = m.line();
+                    if (metaLine != null) show();
+                });
+            }
             String st = job.state();
             String sim = "fake".equals(BuildConfig.NX_PACK_ENGINE) ? "  (simulated engine)" : "";
             head.setText(job.name());
@@ -315,7 +332,7 @@ final class Ondevice {
             // A job of a game this app version does not include (made by an APK that had it): one sentence, nothing to press but ⋯ (Forget, the deletes)
             String notIncluded = Profile.missing(job.titleId(), job.name());
             boolean failed = "failed".equals(st);
-            title.setText((notIncluded != null ? "Not in this app version" : "done".equals(st) ? "Prepared" : "pending".equals(st) ? "Ready to prepare" : failed ? "Could not prepare"
+            title.setText((metaLine != null ? metaLine + " \u00b7 " : "") + (notIncluded != null ? "Not in this app version" : "done".equals(st) ? "Prepared" : "pending".equals(st) ? "Ready to prepare" : failed ? "Could not prepare"
                     : "paused".equals(st) ? "Paused" : "Preparing") + (job.tryAnyway() ? " · tried anyway" : "") + sim);
             status.setText(notIncluded != null ? notIncluded : job.statusText(alive));
             int pct = (int) Math.round(job.overall() * 1000);

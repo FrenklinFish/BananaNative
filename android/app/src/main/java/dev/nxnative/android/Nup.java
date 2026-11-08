@@ -41,6 +41,7 @@ final class Nup {
     static final class Pkg {
         final int index, kind, flags;
         final long titleId, version, rootDir, exefsDir, romfsDir;
+        long metaOffset, metaSize;   // where its meta block is (icon, name, version...), 0 if it has none
 
         Pkg(int index, long titleId, long rootDir, long exefsDir, long romfsDir, long version, int kind, int flags) {
             this.index = index;
@@ -295,6 +296,8 @@ final class Nup {
                 for (long d : new long[] {p.rootDir, p.exefsDir, p.romfsDir})
                     if (d != NONE && d >= dirs) throw new IOException(f.getName() + ": package " + i + " names a directory past the table");
                 if (p.rootDir == NONE) throw new IOException(f.getName() + ": package " + i + " has no root");
+                long mo = u64(head, o + 0x20), ms = u32(head, o + 0x28);
+                if (mo != 0 && ms != 0 && ms <= META_MAX && mo + ms <= len) { p.metaOffset = mo; p.metaSize = ms; }   // a block that doesn't fit is just ignored, it's only used for display
                 if (kind == BASE) bases++;
                 pk.add(p);
             }
@@ -440,6 +443,90 @@ final class Nup {
     }
 
     // ---- Little-endian fields ----
+
+    // ---- The meta block (SPEC section 5): the icon, version and publisher the game cards show ----
+
+    static final int META_MAX = 8 << 20;
+    /** The parts of a meta block the cards use. The icon is the image file's bytes (a JPEG or PNG, 256x256 like on the console). Anything missing is null */
+    static final class Meta {
+        byte[] icon;
+        String version, title, publisher;
+
+        /**
+         * Reads a meta block: a list of records, each a type, a size and the data. In the spec the icon is type 3, the version 4, the title 5 and the publisher 6.
+         * Since 2026-11-04 the nup packer writes every type one too low (a55uka/nup 1d904e10 made its constants an enum starting at 0). The spec has no type 0,
+         * so if a file has a type 0 record anywhere, we read it with the shifted numbers. Types we don't know are skipped.
+         */
+        static Meta parse(byte[] b) { return parse(b, shifted(b)); }
+
+        /** True if the block has a type 0 record, which means it was written by the packer version with the shifted numbers */
+        static boolean shifted(byte[] b) {
+            if (b == null) return false;
+            for (int o = 0; o + 8 <= b.length; ) {
+                long n = u32(b, o + 4);
+                if (n > b.length - o - 8) break;
+                if (u16(b, o) == 0) return true;
+                o += 8 + (int) n;
+            }
+            return false;
+        }
+
+        static Meta parse(byte[] b, boolean shifted) {
+            int shift = shifted ? 1 : 0;
+            Meta m = new Meta();
+            for (int o = 0; o + 8 <= b.length; ) {
+                int t = u16(b, o) + shift; long n = u32(b, o + 4);
+                if (n > b.length - o - 8) break;
+                int at = o + 8, len = (int) n;
+                switch (t) {
+                    case 3: if (len > 4 && (b[at] & 0xff) == 0xFF && (b[at + 1] & 0xff) == 0xD8 || len > 8 && (b[at] & 0xff) == 0x89 && b[at + 1] == 'P') m.icon = Arrays.copyOfRange(b, at, at + len); break;   // the spec asks to check the image's first bytes rather than trust the type
+                    case 4: m.version = text(b, at, len); break;
+                    case 5: m.title = text(b, at, len); break;
+                    case 6: m.publisher = text(b, at, len); break;
+                    default: break;
+                }
+                o = at + len;
+            }
+            return m;
+        }
+
+        private static String text(byte[] b, int at, int len) {
+            String s = new String(b, at, len, StandardCharsets.UTF_8).trim();
+            return s.isEmpty() ? null : s;
+        }
+    }
+
+    /** The raw bytes of a package's meta block, or null if it has none */
+    byte[] metaBlock(Pkg p) throws IOException {
+        if (p.metaSize == 0) return null;
+        byte[] b = new byte[(int) p.metaSize];
+        try (Source r = source(file)) { r.read(p.metaOffset, b, 0, b.length); }
+        return b;
+    }
+
+    /**
+     * The game's details as the cards show them. The icon, title and publisher come from the base package (or the first package if there's no base, as the spec
+     * says), the version from the newest update (or the base). If one package lacks something, the other one is used.
+     */
+    Meta gameMeta() throws IOException {
+        Pkg app = null, upd = null;
+        for (Pkg p : packages) {
+            if (p.kind == BASE && app == null) app = p;
+            if (p.kind == UPDATE && (upd == null || p.version > upd.version)) upd = p;
+        }
+        if (app == null && !packages.isEmpty()) app = packages.get(0);
+        byte[] ab = app == null ? null : metaBlock(app), ub = upd == null || upd == app ? null : metaBlock(upd);
+        boolean shifted = Meta.shifted(ab) || Meta.shifted(ub);   // the shifted numbering applies to the whole file, also to blocks without a type 0 record
+        Meta out = new Meta(), a = ab == null ? null : Meta.parse(ab, shifted), u = ub == null ? null : Meta.parse(ub, shifted);
+        for (Meta m : new Meta[] {a, u}) {
+            if (m == null) continue;
+            if (out.icon == null) out.icon = m.icon;
+            if (out.title == null) out.title = m.title;
+            if (out.publisher == null) out.publisher = m.publisher;
+        }
+        out.version = u != null && u.version != null ? u.version : a != null ? a.version : null;
+        return out;
+    }
 
     static MessageDigest sha256() {
         try {
