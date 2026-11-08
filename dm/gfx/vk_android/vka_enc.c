@@ -23,7 +23,7 @@
 #define ENC_FNS(X) \
     X(vkCmdPipelineBarrier) X(vkCmdCopyBuffer) X(vkCmdUpdateBuffer) X(vkCmdFillBuffer) X(vkCmdCopyBufferToImage) X(vkCmdCopyImageToBuffer) \
     X(vkCmdCopyImage) X(vkCmdBlitImage) X(vkCmdResolveImage) X(vkCmdClearColorImage) X(vkCmdClearDepthStencilImage) X(vkCmdClearAttachments) \
-    X(vkCmdBeginRendering) X(vkCmdEndRendering) \
+    X(vkCmdBeginRendering) X(vkCmdEndRendering) X(vkCmdBeginRenderPass) X(vkCmdEndRenderPass) \
     X(vkCmdBindPipeline) X(vkCmdBindDescriptorSets) X(vkCmdBindVertexBuffers2) X(vkCmdBindIndexBuffer) \
     X(vkCmdDraw) X(vkCmdDrawIndexed) X(vkCmdDrawIndirect) X(vkCmdDrawIndexedIndirect) X(vkCmdDispatch) X(vkCmdDispatchIndirect) X(vkCmdDispatchBase) \
     X(vkCmdSetViewport) X(vkCmdSetScissor) X(vkCmdSetCullMode) X(vkCmdSetFrontFace) X(vkCmdSetPrimitiveTopology) \
@@ -113,7 +113,8 @@ static void *rec_alloc(uint32_t id, size_t n) {
 // cycles in its own loop: power and heat). Nothing reaches the GPU before a part's submit, which flushes, so the batch only delays when the encoder starts on a call
 static uint64_t g_pub;        // the head published last
 static uint32_t g_batch = 4096;
-static inline void rec_done(size_t n) { g_ph += n; g_n_calls++; if (g_ph - g_pub >= g_batch) { g_pub = g_ph; publish(); } }
+static uint64_t g_n_total;   // every call recorded, never reset (vka_enc_total: the instanced runs' "nothing recorded in between")
+static inline void rec_done(size_t n) { g_ph += n; g_n_calls++; g_n_total++; if (g_ph - g_pub >= g_batch) { g_pub = g_ph; publish(); } }
 static inline void flush_pub(void) { if (g_pub != g_ph) { g_pub = g_ph; publish(); } }
 
 // ---------- The records: each holds the call's arguments, pointers aimed at copies inside the record ----------
@@ -127,6 +128,7 @@ typedef struct { CB_FIELD VkImage s, d; VkImageLayout sl, dl; uint32_t n; const 
 typedef struct { CB_FIELD VkImage im; VkImageLayout l; VkClearValue v; uint32_t n; const VkImageSubresourceRange *r; } r_clr;
 typedef struct { CB_FIELD uint32_t na, nr; const VkClearAttachment *a; const VkClearRect *r; } r_clra;
 typedef struct { CB_FIELD VkRenderingInfo ri; } r_rend;
+typedef struct { CB_FIELD VkRenderPassBeginInfo rb; VkRenderPassAttachmentBeginInfo ab; VkSubpassContents sc; } r_rpb;
 typedef struct { CB_FIELD VkPipelineBindPoint bp; VkPipeline p; } r_pipe;
 typedef struct { CB_FIELD VkPipelineBindPoint bp; VkPipelineLayout l; uint32_t first, n, nd; const VkDescriptorSet *s; const uint32_t *d; } r_sets;
 typedef struct { CB_FIELD uint32_t first, n; const VkBuffer *b; const VkDeviceSize *o, *sz, *st; } r_vb;
@@ -145,7 +147,7 @@ static inline uint8_t *cpy(uint8_t **at, const void *src, size_t n) { uint8_t *d
 #define BEGIN(T, id, extra) T *r = rec_alloc(id, A8(sizeof(T)) + (extra)); uint8_t *at = (uint8_t *)r + A8(sizeof(T)); (void)at; r->cb = cb;
 #define END() rec_done(r->h.size)
 #define DIRECT(f, ...) do { if (!mine(cb)) { R.f(__VA_ARGS__); return; } } while (0)
-#define FALLBACK(f, ...) do { g_n_direct++; vka_enc_sync(); R.f(__VA_ARGS__); return; } while (0)
+#define FALLBACK(f, ...) do { g_n_direct++; g_n_total++; vka_enc_sync(); R.f(__VA_ARGS__); return; } while (0)
 
 static void VKAPI_CALL e_vkCmdPipelineBarrier(VkCommandBuffer cb, VkPipelineStageFlags s, VkPipelineStageFlags d, VkDependencyFlags f, uint32_t nm, const VkMemoryBarrier *m, uint32_t nb, const VkBufferMemoryBarrier *b, uint32_t ni, const VkImageMemoryBarrier *i) {
     DIRECT(vkCmdPipelineBarrier, cb, s, d, f, nm, m, nb, b, ni, i);
@@ -217,6 +219,19 @@ static void VKAPI_CALL e_vkCmdBeginRendering(VkCommandBuffer cb, const VkRenderi
     r->ri.pStencilAttachment = ri->pStencilAttachment ? (void *)cpy(&at, ri->pStencilAttachment, one) : NULL;
     END();
 }
+static void VKAPI_CALL e_vkCmdBeginRenderPass(VkCommandBuffer cb, const VkRenderPassBeginInfo *rb, VkSubpassContents sc) {   // (with or without one VkRenderPassAttachmentBeginInfo)
+    DIRECT(vkCmdBeginRenderPass, cb, rb, sc);
+    const VkRenderPassAttachmentBeginInfo *ab = rb->pNext;
+    if (ab && (ab->sType != VK_STRUCTURE_TYPE_RENDER_PASS_ATTACHMENT_BEGIN_INFO || ab->pNext)) FALLBACK(vkCmdBeginRenderPass, cb, rb, sc);
+    size_t nv = ab ? ab->attachmentCount * sizeof(VkImageView) : 0, nc = rb->clearValueCount * sizeof(VkClearValue);
+    BEGIN(r_rpb, E_vkCmdBeginRenderPass, A8(nv) + A8(nc));
+    r->rb = *rb; r->sc = sc;
+    r->rb.pClearValues = nc ? (void *)cpy(&at, rb->pClearValues, nc) : NULL;
+    if (ab) { r->ab = *ab; r->ab.pAttachments = (void *)cpy(&at, ab->pAttachments, nv); r->rb.pNext = NULL; }   // (pNext set at the replay: the record moves)
+    else r->ab.sType = 0;
+    END();
+}
+static void VKAPI_CALL e_vkCmdEndRenderPass(VkCommandBuffer cb) { DIRECT(vkCmdEndRenderPass, cb); BEGIN(r_val, E_vkCmdEndRenderPass, 0); END(); }
 static void VKAPI_CALL e_vkCmdEndRendering(VkCommandBuffer cb) { DIRECT(vkCmdEndRendering, cb); BEGIN(r_val, E_vkCmdEndRendering, 0); END(); }
 static void VKAPI_CALL e_vkCmdBindPipeline(VkCommandBuffer cb, VkPipelineBindPoint bp, VkPipeline p) {
     DIRECT(vkCmdBindPipeline, cb, bp, p); BEGIN(r_pipe, E_vkCmdBindPipeline, 0); r->bp = bp; r->p = p; END();
@@ -338,6 +353,8 @@ static void run(const hdr *h) {
     case E_vkCmdClearAttachments: { C(r_clra); R.vkCmdClearAttachments(r->cb, r->na, r->a, r->nr, r->r); break; }
     case E_vkCmdBeginRendering: { C(r_rend); R.vkCmdBeginRendering(r->cb, &r->ri); break; }
     case E_vkCmdEndRendering: { C(r_val); R.vkCmdEndRendering(r->cb); break; }
+    case E_vkCmdBeginRenderPass: { C(r_rpb); VkRenderPassBeginInfo rb = r->rb; if (r->ab.sType) rb.pNext = &r->ab; R.vkCmdBeginRenderPass(r->cb, &rb, r->sc); break; }
+    case E_vkCmdEndRenderPass: { C(r_val); R.vkCmdEndRenderPass(r->cb); break; }
     case E_vkCmdBindPipeline: { C(r_pipe); R.vkCmdBindPipeline(r->cb, r->bp, r->p); break; }
     case E_vkCmdBindDescriptorSets: { C(r_sets); R.vkCmdBindDescriptorSets(r->cb, r->bp, r->l, r->first, r->n, r->s, r->nd, r->d); break; }
     case E_vkCmdBindVertexBuffers2: { C(r_vb); R.vkCmdBindVertexBuffers2(r->cb, r->first, r->n, r->b, r->o, r->sz, r->st); break; }
@@ -451,6 +468,7 @@ void vka_enc_stop(void) {
     vka_enc_sync();
     atomic_store(&g_ecb, VK_NULL_HANDLE);
 }
+uint64_t vka_enc_total(void) { return g_n_total; }
 int vka_enc_on(void) { return atomic_load_explicit(&g_ecb, memory_order_relaxed) != VK_NULL_HANDLE; }
 // fn(arg copy) on the encoder thread, in order with the deferred calls (1); 0 = the encoder is off: the caller makes the call itself
 int vka_enc_call(void (*fn)(const void *), const void *arg, size_t n) {
