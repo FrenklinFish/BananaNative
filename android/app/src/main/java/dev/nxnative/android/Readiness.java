@@ -143,6 +143,11 @@ final class Readiness {
             String key = r.fact + " " + r.min + " " + r.title;
             if (seen.contains(key)) continue;   // the same requirement twice (the host's and a profile's)
             seen.add(key);
+            if ("1".equals(facts.get("memory.fdAlias")) && compare("1", r.min) >= 0 &&
+                    (r.fact.equals("ext.VK_EXT_map_memory_placed") || r.fact.equals("feature.memoryMapPlaced") || r.fact.equals("ext.VK_KHR_map_memory2"))) {
+                out.add(new Check(r.title, Status.PASS, "Guest-address memory is available through a tested exported-memory alias (memory.fdAlias=1).", null));
+                continue;
+            }
             boolean ok = have != null && compare(have, r.min) >= 0;
             String shown = have == null ? "not reported" : "reports " + have;
             if (ok) out.add(new Check(r.title, Status.PASS, "Present (" + label(r.fact) + " " + have + ", needs " + r.min + ").", null));
