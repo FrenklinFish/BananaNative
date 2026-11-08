@@ -53,7 +53,8 @@ import javax.net.ssl.HttpsURLConnection;
 /**
  * The in-app updater (release app only, dev.bananative.android). Once per app start (a new process: not on a resume or a rotation), Home asks every release source
  * at once, with short timeouts (UpdateCheck.SOURCES: GitHub's releases API for moceure/BananaNative, the list, not /releases/latest: every release is a
- * pre-release, which /latest skips; then the same releases on git.eden-emu.dev's Forgejo API). A source that fails is left out (a log line); when a release in
+ * pre-release, which /latest skips; then the same releases on git.eden-emu.dev's Forgejo API), each list through a URL with a fresh cache-busting query
+ * parameter and Cache-Control: no-cache, so no shared cache in front of a host can answer with an old list (releases(Source)). A source that fails is left out (a log line); when a release in
  * any answer is newer than this app (UpdateCheck.pickAll: the highest version) a popup offers Update or Later. Update downloads the release's own APK through its
  * browser_download_url (only on that source's own hosts; the source counts the download) into the cache, checks its size and, when the API gives a digest, its
  * SHA-256, and installs it with PackageInstaller (limited to this package; Android itself refuses an update signed with another certificate); Android asks the player to confirm, and first to allow installs from this app when that is off. A check that fails says nothing (a log line).
@@ -126,13 +127,21 @@ final class Updater {
     private static final int DL_CONNECT_MS = 15000, DL_READ_MS = 30000;   // a download
     private static final int MAX_LIST = 4 << 20;   // a releases list larger than this is not read
 
-    /** An https GET of url; label (the source's name) names the server in the messages */
-    private static HttpsURLConnection open(String url, String accept, String label, int connectMs, int readMs) throws IOException {
+    /**
+     * An https GET of url; label (the source's name) names the server in the messages. fresh asks every cache on the way (Cache-Control: no-cache, Pragma:
+     * no-cache for the old ones) to revalidate with the origin rather than answer from a stored copy; the releases lists are fetched so, downloads are not.
+     */
+    private static HttpsURLConnection open(String url, String accept, String label, int connectMs, int readMs, boolean fresh) throws IOException {
         URL u = new URL(url);
         if (!"https".equals(u.getProtocol())) throw new Failure("not an https link: " + url);
         HttpsURLConnection c = (HttpsURLConnection) u.openConnection();
         c.setRequestProperty("User-Agent", "BananaNative-updater");
         c.setRequestProperty("Accept", accept);
+        if (fresh) {
+            c.setRequestProperty("Cache-Control", "no-cache");
+            c.setRequestProperty("Pragma", "no-cache");
+            c.setUseCaches(false);
+        }
         c.setConnectTimeout(connectMs);
         c.setReadTimeout(readMs);
         c.setInstanceFollowRedirects(true);   // GitHub's release assets redirect to its object storage (https to https: HttpURLConnection never follows a change of protocol)
@@ -150,9 +159,16 @@ final class Updater {
         return e.getMessage() != null ? e.getMessage() : e.getClass().getSimpleName();
     }
 
-    /** One source's releases (network) */
+    /**
+     * One source's releases (network). The list is asked through a URL that no cache has seen: UpdateCheck.busted appends a fresh query parameter at request
+     * time, so each check is its own cache key, and the request says Cache-Control: no-cache. A shared cache in front of git.eden-emu.dev (Cloudflare and/or
+     * the server's, cache-control: public, max-age=180, x-cache-enabled: true) kept answering s.api with the list as of two hours before v0.2.3 was published
+     * while the same URL with another query gave the current list, so every phone said up to date; the headers alone cannot be relied on (that cache ignored
+     * max-age), the parameter can. The APK download is left as it is: an asset's URL is new with each release, and the file is checked by size and, when
+     * the API gives a digest, SHA-256 (fetch).
+     */
     private static List<UpdateCheck.Release> releases(UpdateCheck.Source s) throws IOException {
-        HttpsURLConnection c = open(s.api, s.accept, s.name, API_CONNECT_MS, API_READ_MS);
+        HttpsURLConnection c = open(UpdateCheck.busted(s.api, Long.toString(System.currentTimeMillis())), s.accept, s.name, API_CONNECT_MS, API_READ_MS, true);
         String body;
         try (InputStream in = c.getInputStream()) {
             byte[] b = in.readNBytes(MAX_LIST + 1);
@@ -394,7 +410,7 @@ final class Updater {
         try { md = MessageDigest.getInstance("SHA-256"); } catch (NoSuchAlgorithmException e) { throw new Failure("no SHA-256"); }
         long n = 0;
         if (!UpdateCheck.allowedAsset(u.apk.url, u.release.source)) throw new Failure("the download link is not on " + u.release.source.name + ": " + u.apk.url);   // UpdateCheck.apk checked it already
-        HttpsURLConnection conn = open(u.apk.url, "application/octet-stream", u.release.source.name, DL_CONNECT_MS, DL_READ_MS);   // the asset's own browser_download_url: the source counts the download
+        HttpsURLConnection conn = open(u.apk.url, "application/octet-stream", u.release.source.name, DL_CONNECT_MS, DL_READ_MS, false);   // the asset's own browser_download_url, as it is: the source counts the download; no cache-busting (the link is new per release, the file is checked below)
         try (InputStream in = conn.getInputStream(); OutputStream out = new FileOutputStream(part)) {
             byte[] b = new byte[1 << 16]; int k; long shown = 0;
             while ((k = in.read(b)) > 0) {

@@ -69,6 +69,21 @@ final class UpdateCheck {
         Release(String tag, boolean draft, boolean prerelease, String body, List<Asset> assets) { this(tag, draft, prerelease, body, assets, SOURCES.get(0)); }
     }
 
+    /**
+     * url with a cache-busting query parameter, {@code _=token}, appended with {@code ?} or {@code &} as the URL needs (a URL with a fragment gets it
+     * before the {@code #}). Updater asks a source's releases list through such a URL, one token per request, so each check is its own cache key: a shared
+     * cache in front of git.eden-emu.dev (Cloudflare and/or the server's own, {@code cache-control: public, max-age=180}, {@code x-cache-enabled: true})
+     * served the list as of two hours before v0.2.3's publication to every phone for hours, while the same URL with another query answered the current
+     * list; the updater said up to date. Source.api itself stays the plain URL (the docs, update.txt and allowedAsset know it as such).
+     */
+    static String busted(String url, String token) {
+        if (url == null) return null;
+        int hash = url.indexOf('#');
+        String base = hash < 0 ? url : url.substring(0, hash), frag = hash < 0 ? "" : url.substring(hash);
+        String sep = base.indexOf('?') < 0 ? "?" : base.endsWith("?") || base.endsWith("&") ? "" : "&";
+        return base + sep + "_=" + token + frag;
+    }
+
     /** A releases API's answer (a JSON array of releases) as Releases of source s; IllegalArgumentException when it is not one */
     static List<Release> parse(String json, Source s) {
         Object root = Json.parse(json);

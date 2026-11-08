@@ -1,7 +1,7 @@
 """The Android launcher's in-app updater (Updater, android/README.md "Updates"): UpdateCheck.java's decisions on the JVM with android/app/src/jvmtest's
 UpdateCheckJvmTest (version numbers, the release it picks, the asset digest, the release notes' Markdown: ReleaseNotes.java, also on the real v0.1.3
 body; the release sources: GitHub and git.eden-emu.dev, both APIs' JSON with Json.java, also on a recorded Forgejo answer, the newest across sources,
-a source that fails, the asset host allow-list), and the manifest's install permission. Skipped without a JDK."""
+a source that fails, the asset host allow-list; the cache-busting of the list's URL), and the manifest's install permission. Skipped without a JDK."""
 import shutil
 import subprocess
 import tempfile
@@ -60,6 +60,15 @@ class UpdaterSource(unittest.TestCase):
         self.assertIn('/api/v1/repos/', src)
         self.assertNotIn('/releases/latest"', src)   # in a string, not the comment that says why
         self.assertIn('browser_download_url', src)
+
+    def test_list_not_cached(self):
+        """The releases list is asked through a URL with a fresh query parameter and Cache-Control: no-cache (a shared cache in front of git.eden-emu.dev
+        served a two-hour-old list after v0.2.3); the download is not (the asset link is new per release and the file is checked)"""
+        src = (SRC / 'Updater.java').read_text()
+        self.assertIn('open(UpdateCheck.busted(s.api, Long.toString(System.currentTimeMillis())), s.accept, s.name, API_CONNECT_MS, API_READ_MS, true)', src)
+        self.assertIn('c.setRequestProperty("Cache-Control", "no-cache")', src)
+        self.assertIn('c.setRequestProperty("Pragma", "no-cache")', src)
+        self.assertIn('open(u.apk.url, "application/octet-stream", u.release.source.name, DL_CONNECT_MS, DL_READ_MS, false)', src)
 
     def test_install_checks(self):
         """The download is checked against its source's hosts; the install session is limited to this package (Android checks the signer)"""

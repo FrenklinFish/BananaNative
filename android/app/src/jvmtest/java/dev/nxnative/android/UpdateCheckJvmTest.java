@@ -6,7 +6,7 @@ import java.util.List;
 
 /**
  * The in-app updater's decisions (UpdateCheck) on the JVM (no Android): version numbers and their order, the release it picks (drafts, pre-releases, tags that are
- * not vX.Y.Z, releases without an APK, the list's order), the asset digest and the popup's notes. Run by dm/tools/tests/test_android_update.py; prints "ok &lt;n&gt;"
+ * not vX.Y.Z, releases without an APK, the list's order), the asset digest, the cache-busting of the list's URL and the popup's notes. Run by dm/tools/tests/test_android_update.py; prints "ok &lt;n&gt;"
  * and exits 0, or the first failure and exits 1.
  */
 public final class UpdateCheckJvmTest {
@@ -236,6 +236,19 @@ public final class UpdateCheckJvmTest {
         eq(UpdateCheck.BAD_DIGEST, UpdateCheck.sha256("sha256:" + HEX.substring(1)), "63 digits");
         eq(UpdateCheck.BAD_DIGEST, UpdateCheck.sha256("sha256:" + HEX.substring(1) + "g"), "not hex");
         eq(UpdateCheck.BAD_DIGEST, UpdateCheck.sha256("sha256:"), "no value");
+
+        // cache-busting of the releases list's URL (Updater.releases asks UpdateCheck.busted(source.api, <now>))
+        String fj = "https://git.eden-emu.dev/api/v1/repos/moceure/BananaNative/releases?limit=10", gh = "https://api.github.com/repos/moceure/BananaNative/releases?per_page=10";
+        eq(fj + "&_=1762600000000", UpdateCheck.busted(fj, "1762600000000"), "a URL with a query: & and the token");
+        eq(gh + "&_=t", UpdateCheck.busted(gh, "t"), "GitHub's too");
+        eq("https://example.test/releases?_=t", UpdateCheck.busted("https://example.test/releases", "t"), "a URL without a query: ?");
+        eq("https://example.test/releases?_=t", UpdateCheck.busted("https://example.test/releases?", "t"), "a bare ? gets no &");
+        eq("https://example.test/r?a=1&_=t", UpdateCheck.busted("https://example.test/r?a=1&", "t"), "a trailing & gets no second one");
+        eq("https://example.test/r?a=1&_=t#x", UpdateCheck.busted("https://example.test/r?a=1#x", "t"), "before a fragment");
+        eq(true, UpdateCheck.busted(FJ.api, "1").startsWith(FJ.api), "the source's URL is a prefix");
+        eq(true, UpdateCheck.busted(GH.api, "1").startsWith(GH.api), "GitHub's as well");
+        eq(FJ.api, UpdateCheck.SOURCES.get(1).api, "the source's own URL is unchanged");
+        eq(null, UpdateCheck.busted(null, "t"), "null");
 
         // release notes (ReleaseNotes)
         notes();
