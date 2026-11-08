@@ -81,7 +81,17 @@ body:
     id: log
     attributes:
       label: Log
-      description: Settings › Share log (or the game's ⋯ › Share log) right after the problem, then drag the file here.
+      description: |
+        Settings › Share log (or the game's ⋯ › Share log) right after the problem. Best: save the file and drag it into this box, where it shows as one link. Or paste the whole log between the lines inside the block below (it is collapsed in the issue), and keep the `<details>` lines.
+      value: |
+        <details>
+        <summary>Log (click to expand)</summary>
+
+        ```text
+        paste the log here
+        ```
+
+        </details>
     validations:
       required: true
   - type: textarea
