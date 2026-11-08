@@ -305,7 +305,15 @@ public final class MainActivity extends Activity {
         add.setCompoundDrawablePadding(dp(6));
         top.addView(add);
         gameBox.addView(top);
-        for (Game g : games) Ui.add(gameBox, gameCard(g), gameBox.getChildCount() == 1 ? 4 : Ui.GAP);
+        // One card per game: while a game is being prepared its card is the progress card (Ondevice), at the game's place, or first for a game not listed yet
+        View pc = Ondevice.cardView();
+        if (pc != null && pc.getParent() instanceof ViewGroup) ((ViewGroup) pc.getParent()).removeView(pc);
+        boolean placed = false;
+        if (pc != null) { for (Game g : games) placed |= Ondevice.shows(g); if (!placed) { Ui.add(gameBox, pc, 4); placed = true; pc = null; } }
+        for (Game g : games) {
+            if (pc != null && Ondevice.shows(g)) { Ui.add(gameBox, pc, gameBox.getChildCount() == 1 ? 4 : Ui.GAP); pc = null; continue; }
+            Ui.add(gameBox, gameCard(g), gameBox.getChildCount() == 1 ? 4 : Ui.GAP);
+        }
     }
 
     /** No game yet: the banana, the three steps, and Add game */
@@ -455,6 +463,9 @@ public final class MainActivity extends Activity {
      * A game's Manage sheet (⋯ on its card, or a long press): a list of actions (its folders, its settings, its log, its saves, Prepare again for a dump), its facts
      * (title ID, folders) below, and, apart at the bottom, Remove from the list (asked first; it deletes nothing on the storage). Play never sits next to it.
      */
+    /** The game's Manage sheet, also from its progress card's ⋯ while it is being prepared (Ondevice) */
+    void manageGame(Game g) { manage(g); }
+
     private void manage(Game g) {
         LinearLayout box = new LinearLayout(this);
         box.setOrientation(LinearLayout.VERTICAL);
@@ -475,6 +486,8 @@ public final class MainActivity extends Activity {
         Ui.add(box, new Ui.Setting(this, "📦", "Export pack…", v -> { d[0].dismiss(); PackUi.exportPick(this, g); }).value("One .zip, into a folder you pick").chevron(this).view, 0);
         if (noProfile == null)
             Ui.add(box, new Ui.Setting(this, "📲", "Import pack…", v -> { d[0].dismiss(); PackUi.importPick(this, g); }).value("A .zip or a pack folder").chevron(this).view, 0);
+        if (Ondevice.shows(g))   // its card is the progress card: the job's own Manage (Forget, the deletes)
+            Ui.add(box, new Ui.Setting(this, "⏳", "Preparing", v -> { d[0].dismiss(); Ondevice.manageJob(this); }).value("Forget the job or delete its working files").chevron(this).view, 0);
         Ui.add(box, new Ui.Setting(this, "📨", "Share log", v -> { d[0].dismiss(); shareLog(g.titleId); }).chevron(this).view, 0);
         TextView info = Ui.small(this, "Title ID: " + g.titleId + "\nGame: " + g.gameDir + (Nup.isNup(new File(g.gameDir)) ? " (.nup)" : "") + "\nPack: " + g.packDir
                 + "\nShaders: " + (lp == null ? "present (" + BuildConfig.NX_DMSH_VK_CHAIN + ")" : lp) + "\nSaves: " + (save != null ? save.getPath() : "not set"));
