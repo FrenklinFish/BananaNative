@@ -25,12 +25,12 @@ final class Prefs {
     static boolean overlayItem(Context c, String key) { return of(c).getBoolean("overlay_" + key, true); }
     static void overlayItem(Context c, String key, boolean on) { of(c).edit().putBoolean("overlay_" + key, on).commit(); }
 
-    /** The game's window size (Game resolution): DM_WINDOW_SIZE for the host (loader.c window_apply), "1920x1080" (Phone 1080p, the default), "original" (the game's own, 2880x1620 in Donkey Kong Bananza), "1280x720" (Phone 720p: less GPU time a frame), "2560x1440" (Phone 1440p: for QHD screens) or "960x540" (Phone 540p: for weaker GPUs). DM_WINDOW_SIZE in env.txt overrides it for a run.
+    /** The game's window size (Game resolution): DM_WINDOW_SIZE for the host (loader.c window_apply), "1920x1080" (Phone 1080p, the default), "original" (the game's own, 2880x1620 in Donkey Kong Bananza), "1280x720" (Phone 720p: less GPU time a frame), "2560x1440" (Phone 1440p: for QHD screens), "960x540" (Phone 540p: for weaker GPUs) or "848x480" (Phone 480p). DM_WINDOW_SIZE in env.txt overrides it for a run.
      *  A game whose profile has graphics_scale rows gets the graphics scale and operation mode that give the size instead (Profile.resolutionEnv).
      *  Listed from the largest. The stored value is the size itself, so the order can change; the default is WINDOW_DEFAULT. */
-    static final String[] WINDOWS = {"original", "2560x1440", "1920x1080", "1280x720", "960x540"},
-            WINDOW_NAMES = {"Original (the game's own size)", "Phone 1440p (2560x1440)", "Phone 1080p (1920x1080)", "Phone 720p (1280x720)", "Phone 540p (960x540)"},
-            WINDOW_SHORT = {"Original", "1440p", "1080p", "720p", "540p"};
+    static final String[] WINDOWS = {"original", "2560x1440", "1920x1080", "1280x720", "960x540", "848x480"},
+            WINDOW_NAMES = {"Original (the game's own size)", "Phone 1440p (2560x1440)", "Phone 1080p (1920x1080)", "Phone 720p (1280x720)", "Phone 540p (960x540)", "Phone 480p (848x480)"},
+            WINDOW_SHORT = {"Original", "1440p", "1080p", "720p", "540p", "480p"};
     static final String WINDOW_DEFAULT = "1920x1080";   // Phone 1080p
     /** A window size's name in the lists, its short name for a settings row (short); the value itself when it is none of WINDOWS (an env.txt-style size) */
     static String windowName(String v, boolean shortName) {
