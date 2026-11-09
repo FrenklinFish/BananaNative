@@ -123,8 +123,10 @@ enum { NSLOT = 8, MAXPOOLS = 64 };
 static VkDescriptorPool g_dp[NSLOT][MAXPOOLS]; static int g_ndp[NSLOT], g_cur_dp[NSLOT];
 void vka_dyn_invalidate(void);
 static void drv_memo_reset(void);
+static void rp_miss_reset(void);   // g_miss_n, below: a submission's draws start the render-area miss count again
 void vka_draw_sub_begin(VkCommandBuffer cb, unsigned slot) {
     g_cb = cb; g_slot = slot % NSLOT; vka_dyn_invalidate();
+    rp_miss_reset();
     { void vka_mem_rec_thread(void); vka_mem_rec_thread(); }   // the address lookups' cache outside TLS for the recording thread (vka_mem.c)
     drv_memo_reset();   // the last submission's scratch spans go with its fence
     g_prof_all = VKA_ENV("DM_VK_PROF", 0) != 0; g_prof = g_prof_all; g_prof_every = VKA_ENV("DM_VK_PACE_LOG", 5000) > 0 ? VKA_ENV("DM_VK_PACE_PROF", 16) : 0; g_dyn_filter = VKA_ENV("DM_VK_DYN_FILTER", 1); g_pass_keep = VKA_ENV("DM_VK_PASS_KEEP", 1); g_vb_filter = VKA_ENV("DM_VK_VB_FILTER", 1); g_inst_on = VKA_ENV("DM_VK_INSTANCE", 0);   // live: from this submission
@@ -202,7 +204,7 @@ static void ub_flush(void) {
     for (int i = 0; i < n; i++) {
         uint64_t dst = UB.e[i].dst, sz = UB.e[i].n; const uint8_t *data = UB.e[i].data;
         for (int j = 0; j < i; j++) if (UB.e[j].dst < dst + sz && dst < UB.e[j].dst + UB.e[j].n) { vka_barrier(g_cb); break; }
-        vka_span s; if (!sz || !vka_scratch(sz, 16, &s)) continue;
+        vka_span s; if (!sz || !vka_scratch(sz, 16, &s)) { VRED_ONCE("inline uniform update at %#llx (%llu bytes): no staging memory, the update is lost", (unsigned long long)dst, (unsigned long long)sz); continue; }
         memcpy(s.ptr, data, (size_t)sz);
         for (uint64_t done = 0; done < sz;) {
             VkBuffer b; VkDeviceSize o; uint64_t k = vka_addr_run(dst + done, sz - done, &b, &o);
@@ -486,7 +488,8 @@ static void rt_range(const vka_img *im, const view_t *v, int has_v, uint32_t *lv
     if (*l0 + *nl > all) *nl = *l0 < all ? all - *l0 : 0;
 }
 // Whether a draw's scissor fits inside a narrowed renderArea (R.area_cut): a draw outside it ends the pass so the next one opens over its own area
-static p_set_rt g_miss_rt; static int g_miss_n;   // draws that did not fit a narrowed area, over the same targets in a row: from the 2nd the area is not narrowed again (each of the ink map's ~600 occlusion queries has its own scissor: a pass ended for every one)
+static p_set_rt g_miss_rt; static int g_miss_n;   // draws that did not fit a narrowed area, over the same targets: from the 2nd, those targets keep the full area for the rest of the submission (each of the ink map's ~600 occlusion queries has its own scissor, so narrowing again would end the pass for every one); a miss on another 16M-pixel target replaces the record
+static void rp_miss_reset(void) { g_miss_n = 0; }   // a new submission starts the count again (a later pass on those targets may narrow once more)
 static int rp_area_fits(const p_scissor *sc, int has_sc, const vka_dstate *d, const p_set_rt *rt, int has_rt) {
     if (!R.area_cut || d->rast_discard) return 1;
     if (!has_sc) return 0;
