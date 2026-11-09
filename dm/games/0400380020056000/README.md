@@ -10,6 +10,7 @@ A Switch 2 game: update v65536 over the base game, SDK 21.4.4 built for the Swit
 | `mem_stack 0x10000000`, `app_pool 0x240000000` | `game.tsv` | as Donkey Kong Bananza, the Switch 2's 9 GB |
 | `sys_resource 0x2000000` | `game.tsv` | the NPDM declares 32 MB, so virtual address memory is on |
 | `render_cond on` | `game.tsv` | agl wraps its clears in render conditions; when those clears ran, the lit scene was wiped: the black dialogue scene ([Report tables that dropped entries](../../../docs/reference/rendering.md#report-tables-that-dropped-entries)) |
+| `gpu_timestamps segment` | `game.tsv` | agl's `MaintainGpuPercentage` dynamic resolution controller reads GPU segment timestamps |
 | `pad_layout full` | `game.tsv` | the game asks for most of the controller at once |
 
 ## Files
