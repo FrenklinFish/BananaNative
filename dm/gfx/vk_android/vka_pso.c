@@ -965,7 +965,7 @@ static _Atomic uint64_t g_pw_memwait_ns, g_pw_heavywait_ns;
 // maps outside the guest block from 6,000 to 59,662 in 10 s, past vm.max_map_count (65,530); the driver's next allocation failed (SIGSEGV at 0, std::bad_alloc).
 // Open: why these shaders take Turnip 8-22 s and that much memory (a driver matter); the hold only keeps them from piling up
 // A key known to be long (heavy_has: an earlier build of it took heavy_ns or more, this run or an earlier one) also holds while any other known one is being built, from
-// its first millisecond: the age check alone let three start together
+// its first millisecond: the age check alone let three start together. (Prewarm builds themselves never overlap: g_pw_one, in pw_main)
 static int pw_heavy_hold(uint64_t key, uint64_t heavy_ns) {
     uint64_t t = now_ns(); int mine = key && heavy_has(key);
     for (int i = 0; i < NBUILD; i++) {
@@ -975,6 +975,10 @@ static int pw_heavy_hold(uint64_t key, uint64_t heavy_ns) {
     }
     return 0;
 }
+// One prewarm build at a time (DM_VK_PREWARM_OVERLAP=1: as before, one a thread). A build's cost is known only after it, and four unknown ones that started within one
+// second (Ocarina of Time on Turnip: e963ef2241a51be8, cf04467527cbcf8f, 171409a493cf5268, 11-12 s each) took the process past vm.max_map_count again with the hold
+// above in place. The threads still look up and prepare their keys in parallel; a warm run's cache hits take milliseconds each
+static pthread_mutex_t g_pw_one = PTHREAD_MUTEX_INITIALIZER;
 static void *pw_main(void *a) {
     (void)a; pthread_setname_np(pthread_self(), "vk-prewarm");
     setpriority(PRIO_PROCESS, 0, 10);   // this thread (Linux: per-thread nice), under the game's threads
@@ -995,6 +999,7 @@ static void *pw_main(void *a) {
     uint32_t mem_mb = (uint32_t)VKA_ENV("DM_VK_PREWARM_MEM_MB", 2048);
     // Each thread holds its next compile while a long one runs (DM_VK_PREWARM_HEAVY_MS, default 1000; 0 never), or another build of the same shader (pw_heavy_hold)
     int heavy_ms = VKA_ENV("DM_VK_PREWARM_HEAVY_MS", 1000); uint64_t heavy_ns = heavy_ms > 0 ? (uint64_t)heavy_ms * 1000000ull : 0;
+    int overlap = VKA_ENV("DM_VK_PREWARM_OVERLAP", 0) != 0;   // 1: each thread builds on its own, as before g_pw_one
     for (;;) {
         pause_point();
         if (me > 0 && mem_mb) { uint64_t t0 = 0, av; while ((av = mem_avail_mb()) && av < mem_mb && atomic_load(&g_pw_next) < n) { if (!t0) t0 = now_ns(); usleep(250000); pause_point(); }
@@ -1019,6 +1024,7 @@ static void *pw_main(void *a) {
         int skip = 0;   // an instanced run's pipeline with instancing off: not made, kept in the list
         for (int s = 0; s < 2 && !bad && !skip && r.kind == VKA_PW_GFX; s++) if (r.inst[s] && !(sh[s] = vka_inst_variant(sh[s], sh[s]->e->stage * DMSH_VK_STAGE_BINDINGS + r.inst[s] - 1u))) skip = 1;
         if (skip) continue;
+        int one = !bad && !overlap; if (one) pthread_mutex_lock(&g_pw_one);   // one prewarm build at a time (g_pw_one)
         if (!bad && heavy_ns) {   // hold while a long compile runs, or another of this shader (pw_heavy_hold)
             const vka_shader *pre = r.kind == VKA_PW_CS ? sh[5] : r.kind == VKA_PW_MESH ? sh[7] : sh[0];
             uint64_t key = pre ? pre->key : 0, t0 = 0;
@@ -1037,6 +1043,7 @@ static void *pw_main(void *a) {
                 gfx_obtain(&fk, fnv(&fk, len, 1469598103934665603ull), len, sh, &lay, &k, 1, &made);
             }
         }
+        if (one) pthread_mutex_unlock(&g_pw_one);
         if (made) atomic_fetch_add(&g_pw_made, 1); else if (!bad) atomic_fetch_add(&g_pw_had, 1);
         setpriority(PRIO_PROCESS, 0, 10);   // back under the game's threads if a waiting frame path raised it (busy_wait)
     }
