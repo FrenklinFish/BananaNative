@@ -65,6 +65,7 @@ run: $(B)/t_language $(B)/t_motion $(B)/t_heap_size $(B)/t_touch $(B)/t_gesture 
 	$(B)/t_haptics_apple
 	TMPDIR="$(abspath $(B))" $(B)/t_cheats $(QUIET)
 	$(B)/t_nro
+	$(B)/t_pack_modules
 	$(B)/t_symbols
 	$(B)/t_android_av
 	$(B)/t_android_input
@@ -81,6 +82,7 @@ run: $(B)/t_language $(B)/t_motion $(B)/t_heap_size $(B)/t_touch $(B)/t_gesture 
 	$(B)/t_android_pace
 	$(B)/t_android_gmem
 run: $(B)/t_nro
+run: $(B)/t_pack_modules
 run: $(B)/t_symbols
 $(B)/t_symbols: t_symbols.c ../hle.c ../loader.c ../hle.h ../dm.h $(GAME_H) | $(B)
 	$(CLANG) -O1 -g -Wall -Werror -Wno-unused-function -Wno-deprecated-declarations -I.. $(GINC) -o $@ t_symbols.c
@@ -119,6 +121,9 @@ cheats: $(B)/t_cheats
 # Regenerated on every make (FORCE), by the host Makefile: a header from an older game.py lacks newer defines; game.py writes it only when it changes, so an unchanged header rebuilds no test
 $(GAME_H): FORCE
 	$(MAKE) -C .. game_profile GAME=$(GAME)
+$(B)/t_pack_modules: t_pack_modules.c ../pack_modules.h | $(B)
+	$(CLANG) -O1 -Wall -Werror -fsanitize=undefined -I.. -o $@ t_pack_modules.c
+
 $(B)/t_heap_size: t_heap_size.c ../hle_svc.c ../dm.h $(GAME_H) | $(B)
 	$(CLANG) -O1 -Wall -Werror -Wno-unused-function -fsanitize=undefined -I.. $(GINC) -o $@ t_heap_size.c
 .PHONY: heap_size
