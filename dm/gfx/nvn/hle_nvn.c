@@ -1800,7 +1800,8 @@ static void tsummary(uint64_t frame) {
       pi = ci; pc = cc; pd = dr_; pf = frame; }
     uint64_t up, re, es = mtl_pkg_edge_skips(), fa, pr, miss = mtl_pkg_miss(); mtl_pkg_stats(&up, &re); nvn_dirty_stats(&fa, &pr);
     unsigned cpu_tex = mtl_cpu_tex_count();   // (read before LOG: its arguments are read with stderr's lock held, and this takes the replay's texture lock)
-    LOG("[nvn] packaged textures: first uploads %llu, re-uploads on pool content change %llu, writes beside a texture only (not re-uploaded) %llu; write-protection faults %llu, pages unprotected before host writes %llu; missed %llu (cumulative); CPU-written textures alive %u", up, re, es, fa, pr, miss, cpu_tex);
+    uint64_t mpf; int mpe; nvn_dirty_mp_fail(&mpf, &mpe);
+    LOG("[nvn] packaged textures: first uploads %llu, re-uploads on pool content change %llu, writes beside a texture only (not re-uploaded) %llu; write-protection faults %llu, pages unprotected before host writes %llu; missed %llu (cumulative); CPU-written textures alive %u; mprotect failures %llu (last errno %d)", up, re, es, fa, pr, miss, cpu_tex, (unsigned long long)mpf, mpe);
     memset(g_tn, 0, sizeof g_tn);
 }
 // DM_SLOWFRAME=1 (test switch, read over the log port on a real device): per-frame timings are first stored in a ring of the last 16 frames; dropped frames are judged 8 frames late (GPU / on-screen present times are back by then),

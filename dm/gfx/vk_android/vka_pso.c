@@ -128,7 +128,10 @@ static int layout_slow(vka_shader *const sh[VKA_NSTAGE], int compute, vka_layout
 
 
 // ---------- The pipeline cache ----------
-// DM_VK_PCACHE (restart): unset = $DM_TEMP/vk_pipelines[-<driver>].bin; a path = that file; 0 = no file (the run starts empty and keeps nothing: a cold run). Before 2026-11-03 "0"
+// DM_VK_PCACHE (restart): unset = $DM_TEMP/vk_pipelines[-<driver>]-fp0.bin (-fp0: the cache's generation, vka_fpenv.h VKA_PCACHE_GEN); a path = that file, as named; 0 = no
+// file (the run starts empty and keeps nothing: a cold run). DM_VK_GUEST_FPCR=1 keeps no file either: its pipelines are compiled with the game's FPCR, and no later run
+// may read them (vka_fpenv.h). The files of the generation before (vk_pipelines[-<driver>].bin, pipelines compiled with the game's flush-to-zero FPCR before 2026-11-08)
+// are removed when the default file is opened, with their stamps. Before 2026-11-03 "0"
 // was taken as a file named 0 in the working folder, so a second "cold" run read the first one's pipelines back (stutter-agent cold2gpl: 10 MB read, warm)
 // The file is kept for one shader library at a time: its stamp <file>.lib (vka_pckeep.h; written with each save) names the library it was saved with (vka_shader_lib_id) and
 // lists the shaders whose pipelines it holds with their entry hashes. A file of another library is read when its shaders are mostly byte for byte the same in this one
@@ -153,11 +156,15 @@ static pthread_mutex_t g_save_mu = PTHREAD_MUTEX_INITIALIZER;   // one save at a
 static pthread_mutex_t g_sv_mu = PTHREAD_MUTEX_INITIALIZER; static pthread_cond_t g_sv_cv = PTHREAD_COND_INITIALIZER; static int g_sv_want, g_sv_up;
 static void pc_open_once(void) {
     const char *e = getenv("DM_VK_PCACHE"), *t = getenv("DM_TEMP"), *home = getenv("HOME");
-    if (e && !strcmp(e, "0")) g_pc_path[0] = 0;
+    if ((e && !strcmp(e, "0")) || vka_fp_guest()) g_pc_path[0] = 0;
     else if (e && *e) snprintf(g_pc_path, sizeof g_pc_path, "%s", e);
     else if ((t && *t) || (home && *home)) {   // a custom driver (DM_VK_DRIVER) keeps its own file, so switching drivers leaves the system driver's cache alone
-        const char *dt = vka_driver_tag();
-        snprintf(g_pc_path, sizeof g_pc_path, "%s/vk_pipelines%s%s.bin", t && *t ? t : home, dt ? "-" : "", dt ? dt : "");
+        const char *dt = vka_driver_tag(), *dir = t && *t ? t : home;
+        vka_pcache_name(g_pc_path, sizeof g_pc_path, dir, dt, VKA_PCACHE_GEN);
+        char old[1024], olds[1100]; vka_pcache_name(old, sizeof old, dir, dt, "");   // the generation before: never read again
+        snprintf(olds, sizeof olds, "%s.lib", old);
+        if (!unlink(old)) VLOG("pipeline cache %s of the generation before " VKA_PCACHE_GEN " (compiled with the game's FPCR) removed", old);
+        unlink(olds);
     }
     // The prewarm list (pw_*): the pipeline keys of earlier runs, whatever the driver (a key names shaders and state, not driver code). DM_VK_PREWARM_FILE overrides
     const char *pf = getenv("DM_VK_PREWARM_FILE");
@@ -211,7 +218,7 @@ static void pc_open_once(void) {
     VkResult r = vk.vkCreatePipelineCache(V.dev, &ci, NULL, &g_pc);
     if (r && n) { ci.initialDataSize = 0; ci.pInitialData = NULL; r = vk.vkCreatePipelineCache(V.dev, &ci, NULL, &g_pc); vka_pck_free(&g_pck); n = 0; }   // (started empty after all)
     if (r) { g_pc = VK_NULL_HANDLE; VRED("vkCreatePipelineCache %d: pipelines are built without a cache", r); }
-    else VLOG("pipeline cache %s: %zu bytes read (its stamp lists %zu shaders, %llu stale)", g_pc_path[0] ? g_pc_path : e && !strcmp(e, "0") ? "(none: DM_VK_PCACHE=0)" : "(not kept: no DM_TEMP or HOME)", n,
+    else VLOG("pipeline cache %s: %zu bytes read (its stamp lists %zu shaders, %llu stale)", g_pc_path[0] ? g_pc_path : e && !strcmp(e, "0") ? "(none: DM_VK_PCACHE=0)" : vka_fp_guest() ? "(none: DM_VK_GUEST_FPCR=1)" : "(not kept: no DM_TEMP or HOME)", n,
               g_pck.n, (unsigned long long)g_pck.dead);
     free(data);
     pw_load();
@@ -260,7 +267,7 @@ static void save_now(void) {
     free(d);
 }
 static void *saver_main(void *a) {
-    (void)a; pthread_setname_np(pthread_self(), "vk-pcache");
+    (void)a; pthread_setname_np(pthread_self(), "vk-pcache"); vka_fp_host("vk-pcache");
     for (;;) {
         pthread_mutex_lock(&g_sv_mu); while (!g_sv_want) pthread_cond_wait(&g_sv_cv, &g_sv_mu); g_sv_want = 0; pthread_mutex_unlock(&g_sv_mu);
         pthread_mutex_lock(&g_save_mu); save_now(); pthread_mutex_unlock(&g_save_mu);
@@ -754,7 +761,7 @@ typedef struct opt_job { struct opt_job *next; gval *g; vka_shader *sh[VKA_NSTAG
 static opt_job *g_opt_head, **g_opt_tail = &g_opt_head; static pthread_mutex_t g_opt_mu = PTHREAD_MUTEX_INITIALIZER; static pthread_cond_t g_opt_cv = PTHREAD_COND_INITIALIZER;
 static uint64_t g_opt_waiting;
 static void *opt_main(void *a) {
-    (void)a; pthread_setname_np(pthread_self(), "vk-psopt");
+    (void)a; pthread_setname_np(pthread_self(), "vk-psopt"); vka_fp_host("vk-psopt");
     for (;;) {
         pause_point();
         pthread_mutex_lock(&g_opt_mu);
@@ -981,7 +988,7 @@ static int pw_heavy_hold(uint64_t key, uint64_t heavy_ns) {
 // milliseconds each. Qualcomm's driver's compiler does not take the maps with it (21,450 at most, same phone and game), so its threads keep building side by side
 static pthread_mutex_t g_pw_one = PTHREAD_MUTEX_INITIALIZER;
 static void *pw_main(void *a) {
-    (void)a; pthread_setname_np(pthread_self(), "vk-prewarm");
+    (void)a; pthread_setname_np(pthread_self(), "vk-prewarm"); vka_fp_host("vk-prewarm");
     setpriority(PRIO_PROCESS, 0, 10);   // this thread (Linux: per-thread nice), under the game's threads
     uint32_t max = (uint32_t)VKA_ENV("DM_VK_PREWARM_MAX", 8192);
     size_t *offs = NULL;   // walked once by each thread to find the record of index i: built here (the list is small)
@@ -1092,7 +1099,7 @@ static as_job *g_as_head, **g_as_tail = &g_as_head; static pthread_mutex_t g_as_
 static _Atomic uint64_t g_as_queued, g_as_made, g_as_skips, g_as_ns, g_as_lat_max_ns; static _Atomic int g_as_depth, g_as_depth_max;
 static void gfx_build(gval *g, size_t len, vka_shader *const sh[VKA_NSTAGE], const vka_layout *lay, const vka_gkey *k, int prewarm, int async, uint64_t t_make);
 static void *as_main(void *a) {
-    (void)a; pthread_setname_np(pthread_self(), "vk-psoasync");
+    (void)a; pthread_setname_np(pthread_self(), "vk-psoasync"); vka_fp_host("vk-psoasync");
     setpriority(PRIO_PROCESS, 0, 10);   // under the game's threads, as the prewarm threads: no frame waits for these builds (their draws are skipped instead)
     for (;;) {
         pause_point();

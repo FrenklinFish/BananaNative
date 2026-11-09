@@ -1087,4 +1087,10 @@ static void maps_start(void) { static pthread_once_t o = PTHREAD_ONCE_INIT; pthr
 
 // The hook hle_svc.c calls when it gives guest memory back (weak no-op there for the Apple builds; its region and open hooks stay the weak no-ops)
 int dm_gfx_guest_release(uintptr_t lo, uintptr_t hi) { return vka_mem_release(lo, hi); }
+// A guest code address as module and offset (log lines; vka_draw.c's dispatch census): 0 = in no module
+int vka_mod_off(uint64_t addr, const char **name, uint64_t *off) {
+    module_t *m = addr ? module_of((const void *)(uintptr_t)addr) : NULL;
+    if (!m) return 0;
+    *name = m->name; *off = addr - (uint64_t)(uintptr_t)m->base; return 1;
+}
 #endif

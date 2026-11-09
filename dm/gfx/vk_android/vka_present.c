@@ -89,6 +89,9 @@ static int rk_load(void) {
 #define ROT_LOAD(f) rk.f = (PFN_##f)vk.vkGetDeviceProcAddr(V.dev, #f); if (!rk.f) { VRED("present: no %s", #f); return ok = 0; }
     ROT_FNS(ROT_LOAD)
 #undef ROT_LOAD
+    // The compiling calls through the replay's table: its wrappers compile with the host's FPCR on any thread, an inline present's on the game's included (vka_dev.c)
+    if (vk.vkCreateShaderModule) rk.vkCreateShaderModule = vk.vkCreateShaderModule;
+    if (vk.vkCreateGraphicsPipelines) rk.vkCreateGraphicsPipelines = vk.vkCreateGraphicsPipelines;
     return ok = 1;
 }
 // The rotated copy's pipeline for a swapchain format (g_rot's layout): blend 0 writes the picture as it is, 1 draws a premultiplied source over the image (the overlay)
@@ -823,7 +826,7 @@ static int present_one(const pq_item *it) {
 
 void vka_perf_thread(int nice); void vka_perf_frame(double period_s);   // vka_perf.c
 static void *present_main(void *arg) {
-    (void)arg; pthread_setname_np(pthread_self(), "vk-present"); vka_perf_thread(-8);
+    (void)arg; pthread_setname_np(pthread_self(), "vk-present"); vka_fp_host("vk-present"); vka_perf_thread(-8);
     pthread_mutex_lock(&g_pmu);
     for (;;) {
         while (g_pq_read == g_pq_fill && g_win_ack == g_win_gen) pthread_cond_wait(&g_pcv, &g_pmu);
@@ -907,5 +910,5 @@ int mtl_link_wait_ticks(int ticks, uint64_t timeout_ns) { (void)ticks; (void)tim
 int mtl_snap_on(void) { return 0; }
 uint64_t mtl_snap_acquire_wait(void) { return 0; }
 
-static void *selftest_main(void *arg) { int r = nxhost_vk_selftest(NULL, (int)(intptr_t)arg); VLOG("selftest (NXHOST_VK_SELFTEST) ended: %s", r ? "FAILED" : "passed"); return NULL; }
+static void *selftest_main(void *arg) { vka_fp_host("vk-selftest"); int r = nxhost_vk_selftest(NULL, (int)(intptr_t)arg); VLOG("selftest (NXHOST_VK_SELFTEST) ended: %s", r ? "FAILED" : "passed"); return NULL; }
 #endif

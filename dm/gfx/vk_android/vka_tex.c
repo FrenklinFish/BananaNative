@@ -20,6 +20,7 @@
 #include "vka_zshare.h"
 #include "vka_gml.h"
 #include "vka_texlimit.h"
+#include "game_profile.h"
 
 __attribute__((weak)) int dm_codec_is_video_mem(const void *mem, uint64_t size, uint32_t *stride) { (void)mem; (void)size; (void)stride; return 0; }
 __attribute__((weak)) uint64_t dm_codec_video_gen(const void *mem) { (void)mem; return 0; }
@@ -147,6 +148,7 @@ void vka_xp_ts(VkCommandBuffer cb, int site) {
 }
 void vka_barrier_at(VkCommandBuffer cb, const char *file, int line) {
     vka_n_bar++;
+    { extern uint64_t vka_disp_cleared; VkCommandBuffer p = cb; if (cb && atomic_compare_exchange_strong(&vka_disp_pend, &p, VK_NULL_HANDLE)) vka_disp_cleared++; }   // this barrier also orders the dispatches before it (vka_disp_settle)
     VkMemoryBarrier mb = {VK_STRUCTURE_TYPE_MEMORY_BARRIER, .srcAccessMask = VK_ACCESS_MEMORY_WRITE_BIT, .dstAccessMask = VK_ACCESS_MEMORY_READ_BIT | VK_ACCESS_MEMORY_WRITE_BIT};
     vk.vkCmdPipelineBarrier(cb, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, 0, 1, &mb, 0, NULL, 0, NULL);
     if (vka_gp_active) vka_gp_mark(cb, file, line);
@@ -167,6 +169,7 @@ static vka_img **g_live; static int g_nlive, g_livecap; static uint64_t g_live_g
 static uint64_t *g_cpuw; static size_t g_cpuwcap, g_cpuwn;   // serials the CPU wrote before their image existed (a set, open addressing)
 static pthread_mutex_t g_tmu = PTHREAD_MUTEX_INITIALIZER;
 static uint64_t g_img_bytes;
+static vksoft_set g_soft_hard; static uint64_t g_soft_n, g_soft_bytes, g_soft_made, g_soft_whole;   // (under g_tmu) soft textures ("Soft textures" below): live, the storage bytes left out, made, made whole
 static int g_zwant;   // (under g_tmu) img_create_ may make a zero-shared image: vka_tex_get's new image whose content is ST_ZERO ("Zero-shared images" below)
 
 // The images' memory for the stats line: all of it, and the part whose content the GPU wrote (render targets, copy and storage destinations); the rest was filled from the
@@ -263,6 +266,7 @@ static void unref_locked(vka_img *im) {
     for (int i = 0; i < g_nlive; i++) if (g_live[i] == im) { g_live[i] = g_live[--g_nlive]; g_live_gen++; break; }
     for (int i = 0; i < g_nbig; i++) if (g_big[i] == im) { g_big[i] = g_big[--g_nbig]; break; }
     g_img_bytes -= im->bytes;
+    if (im->soft) { g_soft_n--; g_soft_bytes -= im->soft_saved; }
     uint64_t f = im->last_fence ? im->last_fence : (vka_fence_last() + 1);
     vka_after(f, img_destroy, im);
 }
@@ -1014,10 +1018,11 @@ static int upload_bands_tracked(vka_img *im, const tex_t *t, VkCommandBuffer cb,
     for (uint32_t lv = 0; lv < im->levels; lv++) {
         uint32_t w = im->w >> lv ? im->w >> lv : 1, h = im->h >> lv ? im->h >> lv : 1;
         uint32_t bx = (w + f->bw - 1) / f->bw, by = (h + f->bh - 1) / f->bh; size_t pitch = (size_t)bx * f->bpb;
+        uint32_t tl = lv + im->base;   // (the texture's level: image level lv is texture level lv + base, a soft texture's)
         uint32_t band_rows = by; uint64_t band_bytes = 0;
-        if (nvn_deswizzle_block_rows(d, lv) != (int)by || nvn_deswizzle_bands(d, lv, &band_rows, &band_bytes)) band_rows = by, band_bytes = 0;
+        if (nvn_deswizzle_block_rows(d, tl) != (int)by || nvn_deswizzle_bands(d, tl, &band_rows, &band_bytes)) band_rows = by, band_bytes = 0;
         for (uint32_t ly = 0; ly < im->layers; ly++) {
-            uint64_t off, len; sub_range(d, &im->L, lv, ly, &off, &len);
+            uint64_t off, len; sub_range(d, &im->L, tl, ly, &off, &len);
             if (!len || off + len <= lo || off >= hi) continue;
             uint32_t nb = band_bytes ? (by + band_rows - 1) / band_rows : 1;
             if (bst_cap < nb) { free(bst); bst_cap = nb; if (!(bst = malloc(bst_cap))) { bst_cap = 0; return 0; } }
@@ -1037,7 +1042,7 @@ static int upload_bands_tracked(vka_img *im, const tex_t *t, VkCommandBuffer cb,
                 uint32_t y0 = k * band_rows, y1 = k1 * band_rows < by ? k1 * band_rows : by;
                 size_t sz = (size_t)(y1 - y0) * pitch;
                 vka_span s; if (!vka_scratch(sz, 16, &s)) { free(bst); return 0; }
-                if (nvn_deswizzle_rows(d, lv, ly, t->mem, s.ptr - (size_t)y0 * pitch, pitch, y0, y1)) {
+                if (nvn_deswizzle_rows(d, tl, ly, t->mem, s.ptr - (size_t)y0 * pitch, pitch, y0, y1)) {
                     VRED_ONCE("texture serial %llu format %#x target %d: no CPU deswizzle", (unsigned long long)t->serial, d->format, d->target); free(bst); return 0; }
                 uint32_t py0 = y0 * f->bh, py1 = y1 * f->bh > h ? h : y1 * f->bh;
                 VkBufferImageCopy cp = {s.off, bx * f->bw, (y1 - y0) * f->bh, {im->aspect, lv, ly, 1}, {0, (int32_t)py0, 0}, {w, py1 - py0, 1}};
@@ -1392,6 +1397,83 @@ void vka_tex_own(vka_img *im, VkCommandBuffer cb) {
     pthread_mutex_lock(&g_tmu); img_own(im, cb); pthread_mutex_unlock(&g_tmu);
 }
 
+// ---------- Soft textures (vka_soft.h; profile tex_soft) ----------
+// A large block-compressed texture from the game's files (vksoft_candidate, with content from its storage: ST_TRACK / ST_FILL) is an image from texture level 1 (img_create's
+// base, the mechanism a sparse texture's left-out levels use): uploads deswizzle texture level image level + base (upload_, upload_mt), views, render targets and copies map
+// texture levels through vka_img_lv / vksoft_view, and a view of level 0 starts at level 1 while a copy of level 0 is skipped. What the game sees differently: softer texels
+// where level 0 would be sampled, and a size query, an explicit level of detail or a texel fetch with a level in a shader sees the image's numbering (one level lower, half
+// the size), as for sparse textures. A copy out of a soft texture, or into its level 0, makes it whole first (soft_harden: a new image from level 0, uploaded from its
+// storage, swapped in place as img_own does), and its storage stays whole for every texture made over it from then on. Ported from plumber-racer-2 (MIT, copyright seedds:
+// nvn_mtl.m tex_soft, tex_soft_level, soft_harden). Not ported: tex_soft_release / soft_sweep, which give the guest pages only level 0 holds back to the system. On Android
+// a texture's pool is placed Vulkan memory once the GPU has an address in it (vka_mem.c): one VkDeviceMemory, committed when allocated, mapped at the pool's address, so
+// dropping those pages (madvise) frees nothing; releasing them would take splitting the pool's allocation (open). DM_VK_TEX_SOFT=0 / 1 overrides the profile (live: images made from then on)
+static int soft_on(void) {
+    int on = VKA_ENV("DM_VK_TEX_SOFT", DM_GAME_TEX_SOFT) != 0;
+    static _Atomic int logged; if (on && !atomic_exchange(&logged, 1)) VLOG("soft textures: large block-compressed textures from the game's files kept without their finest level (profile tex_soft; DM_VK_TEX_SOFT=0 turns it off)");
+    return on;
+}
+static int soft_want(const tex_t *t, const vka_fmt *f, int mode) {   // caller holds g_tmu
+    if (mode != ST_TRACK && mode != ST_FILL) return 0;
+    const nvn_texdesc *d = &t->d;
+    vksoft_tex c = {(uint32_t)d->width, (uint32_t)d->height, (uint32_t)d->levels, d->samples > 1 ? (uint32_t)d->samples : 1, f->bw, t->has_layout, t->mem != NULL,
+                    d->target == NVN_TEXTURE_TARGET_2D || d->target == NVN_TEXTURE_TARGET_2D_ARRAY, t->pool && pool_sparse(t->pool),
+                    (d->flags & (NVN_TEXTURE_FLAGS_LINEAR | NVN_TEXTURE_FLAGS_LINEAR_RENDER_TARGET)) != 0};
+    return f->kind < 3 && vksoft_candidate(&c) && !vksoft_has(&g_soft_hard, (uint64_t)(uintptr_t)t->mem) && soft_on();
+}
+static void soft_line(char *b, size_t n) {   // caller holds g_tmu
+    snprintf(b, n, "soft textures: %llu now without their finest level, %.1f MiB of storage left out of their images (%llu made, %llu made whole again: the game copied from them)",
+             (unsigned long long)g_soft_n, g_soft_bytes / 1048576.0, (unsigned long long)g_soft_made, (unsigned long long)g_soft_whole);
+}
+static void soft_note(vka_img *im, const tex_t *t) {   // a new soft image (caller holds g_tmu)
+    if (im->base != 1) return;   // (img_create_ starts it at 0 when it could not)
+    im->soft = 1; im->soft_saved = vksoft_saved(nvn_tex_level_offset(&t->d, 1), im->layers);
+    g_soft_n++; g_soft_bytes += im->soft_saved; g_soft_made++;
+    if (g_soft_made <= 4) VLOG("soft texture serial %llu %ux%u layers %u levels %u format %#x: an image of its levels 1-%u (%.1f MiB of storage left out)", (unsigned long long)t->serial,
+                               t->d.width, t->d.height, im->layers, t->d.levels, t->d.levels - 1, im->soft_saved / 1048576.0);
+    if (!(g_soft_made & (g_soft_made - 1)) || !(g_soft_made % 1024)) { char b[300]; soft_line(b, sizeof b); VLOG("%s", b); }   // (1, 2, 4, ... and every 1024th; the ctl stats print it too)
+}
+void vka_tex_soft_stats(char *b, size_t n) { pthread_mutex_lock(&g_tmu); soft_line(b, n); pthread_mutex_unlock(&g_tmu); }
+// The image of a soft texture made again from level 0 and uploaded whole from its storage, swapped in place (every serial and view that shares it follows; the texture IDs
+// that name it are written again); the old image goes after the submission being recorded, or once its holders let it go. Caller holds nvn_pool_use and g_tmu; 1 = whole
+static int soft_harden(vka_img *im, VkCommandBuffer cb, const char *why) {
+    if (!im->soft) return 1;
+    vksoft_add(&g_soft_hard, (uint64_t)(uintptr_t)im->mem);   // (textures made over this storage from now on are whole)
+    if (img_pool_dead(im)) { static _Atomic int k; if (atomic_fetch_add(&k, 1) < 4) VRED("soft texture serial %llu %ux%u format %#x: %s, but its pool was finalized: its finest level cannot be read again (that copy of it is skipped)",
+                                                                                   (unsigned long long)im->serial, im->d.width, im->d.height, im->d.format, why); return 0; }
+    tex_t t = {0}; t.serial = im->serial; t.mem = (uint8_t *)im->mem; t.d = im->d; t.L = im->L;
+    VkCommandBuffer ucb = !vka_scr_up && cb && cb == vka_rp_cb() && vka_up_on() ? vka_up_begin() : VK_NULL_HANDLE, rc = ucb ? ucb : cb;
+    vka_img *n = rc ? img_create(&t, &im->f, 0) : NULL;
+    if (!n) { if (ucb) vka_up_end();
+        static _Atomic int k; if (atomic_fetch_add(&k, 1) < 4) VRED("soft texture serial %llu %ux%u format %#x: %s, but no whole image was made%s: its finest level stays out (that copy of it is skipped)",
+                                                                  (unsigned long long)im->serial, im->d.width, im->d.height, im->d.format, why, rc ? "" : " (no command buffer)");
+        return 0; }
+    if (im->gpu_owned) { static _Atomic int k; if (atomic_fetch_add(&k, 1) < 4) VRED("soft texture serial %llu: %s after the GPU wrote it: made whole from its storage, which does not hold those writes (open)", (unsigned long long)im->serial, why); }
+    VkImage oi = im->img; vka_imem om = im->m; void *ov = im->views; uint64_t ob = im->bytes; uint32_t ow = im->w, oh = im->h;
+    im->img = n->img; im->m = n->m; im->views = NULL; im->usage = n->usage; im->bytes = n->bytes; im->w = n->w; im->h = n->h; im->levels = n->levels; im->base = 0;
+    im->cflags = n->cflags; im->nvf = n->nvf; memcpy(im->vf, n->vf, sizeof im->vf); im->fl = n->fl; im->pool_fit = n->pool_fit;   // (the new image's format list, as img_storage_upgrade takes it)
+    n->img = oi; n->m = om; n->views = ov; n->bytes = 0; g_img_bytes -= ob;
+    if (im->holds) { n->zold = im->zold; im->zold = n; }   // (a holder may read im->img unlocked: the old image stays until it lets go, vka_tex_drop)
+    else vka_after(vka_fence_last() + 1, img_destroy, n);   // (after the submission being recorded, which may hold commands that read it)
+    im->soft = 0; g_soft_n--; g_soft_bytes -= im->soft_saved; g_soft_whole++;
+    atomic_fetch_add_explicit(&g_tgen, 1, memory_order_release);
+    unsigned nid = redirty_ids(im);
+    vka_img_barrier(rc, im->img, im->aspect, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_GENERAL);
+    if (im->track) upload_tracked(im, &t, rc); else upload_fill(im, &t, rc);
+    VkCommandBuffer ec = vka_up_cur(rc); if (ec) vka_barrier(ec);
+    if (ucb) { vka_up_point(vka_up_cur(ucb)); vka_up_end(); }
+    if (g_soft_whole <= 4 || !(g_soft_whole & (g_soft_whole - 1)))
+        VLOG("soft texture serial %llu %ux%u layers %u format %#x: %s: made whole (%ux%u → %ux%u, %.1f → %.1f MiB, %u texture IDs written again; %llu so far)", (unsigned long long)im->serial,
+             im->d.width, im->d.height, im->layers, im->d.format, why, ow, oh, im->w, im->h, ob / 1048576.0, im->bytes / 1048576.0, nid, (unsigned long long)g_soft_whole);
+    return 1;
+}
+void vka_tex_soft_copy(vka_img *im, int dst_level, VkCommandBuffer cb) {
+    if (!im || !im->soft || dst_level > 0) return;   // (soft changes on the recording thread only; a copy into level 1 or coarser goes into the image's levels: vka_img_lv)
+    if (!vka_up_on() && cb && cb == vka_rp_cb() && vka_rp_is_open()) vka_rp_end();   // (no upload batch: the upload goes into cb, outside a pass)
+    nvn_pool_use(1); pthread_mutex_lock(&g_tmu);   // (the upload reads guest storage: no pool is finalized under it; taken before g_tmu, as vka_tex_prepare does)
+    soft_harden(im, cb, dst_level < 0 ? "the game copies from it" : "the game copies into its finest level");
+    pthread_mutex_unlock(&g_tmu); nvn_pool_use(0);
+}
+
 // The content a new image of t starts with (storage_mode), decided before the image is made (vka_tex_get: a zero-shared image is made only for ST_ZERO)
 static int first_mode(const tex_t *t, const vka_fmt *f, int cpu) {
     int samples = t->d.samples > 1 ? t->d.samples : 1, vpool = t->pool && pool_sparse(t->pool);
@@ -1547,12 +1629,15 @@ vka_img *vka_tex_get(const tex_t *t, VkCommandBuffer cb) {
         if (im) big_share(im, t);   // (another texture object of the same storage and shape: DM_VK_BIGIMG_MB diagnostic)
         uint32_t vmin = 0, base = sparse_sampled(t, &f) ? sparse_base(t->pool, t->mem, &t->d, &t->L, &vmin) : 0;
         int mode = 0;
+        int soft = 0;
         if (!im) {
             vka_tex_prune_locked();
             mode = first_mode(t, &f, cpuw_take(t->serial, 0));
+            soft = !base && soft_want(t, &f, mode);
             g_zwant = mode == ST_ZERO && !(t->d.flags & NVN_TEXTURE_FLAGS_IMAGE) && (t->L.size <= 32ull * 1024 * 1024);
-            im = img_create(t, &f, base);
+            im = img_create(t, &f, soft ? 1 : base);
             g_zwant = 0;
+            if (im && soft) soft_note(im, t);   // (a soft texture: from level 1, "Soft textures" above)
         }
         if (im && !im->inited) {
             im->vmin = vmin;
@@ -1670,7 +1755,7 @@ static void up_run(void) {   // take parts until none is left
     }
 }
 static void *up_main(void *a) {
-    (void)a; pthread_setname_np(pthread_self(), "vk-upload");
+    (void)a; pthread_setname_np(pthread_self(), "vk-upload"); vka_fp_host("vk-upload");
     uint64_t seen = 0;
     for (;;) {
         pthread_mutex_lock(&UP.mu); while (UP.gen == seen) pthread_cond_wait(&UP.cv, &UP.mu); seen = UP.gen; pthread_mutex_unlock(&UP.mu);
@@ -1714,7 +1799,7 @@ static int upload_mt(vka_img *im, const tex_t *t, VkCommandBuffer cb, uint64_t *
     for (uint32_t lv = 0; lv < im->levels; lv++) {
         uint32_t w = im->w >> lv ? im->w >> lv : 1, h = im->h >> lv ? im->h >> lv : 1, z = is3d ? (im->depth >> lv ? im->depth >> lv : 1) : 1;
         uint32_t bx = (w + f->bw - 1) / f->bw, by = (h + f->bh - 1) / f->bh; size_t pitch = (size_t)bx * f->bpb, piece = pitch * by * z;
-        int rows = nvn_deswizzle_block_rows(d, lv);
+        int rows = nvn_deswizzle_block_rows(d, lv + im->base);   // (the texture's level: image level lv is texture level lv + base, a soft texture's)
         if (rows < 0 || (uint32_t)rows != by) { free(pc); free(parts); return 0; }   // (a shape the serial path reports)
         for (uint32_t ly = 0; ly < im->layers; ly++, k++) {
             piece_t *q = &pc[k]; *q = (piece_t){{0}, lv, ly, w, h, z, bx, by, pitch, 0};
@@ -1723,7 +1808,7 @@ static int upload_mt(vka_img *im, const tex_t *t, VkCommandBuffer cb, uint64_t *
             uint32_t per = (uint32_t)((65536 + pitch * z - 1) / (pitch * z)); if (!per) per = 1;
             for (uint32_t y = 0; y < by; y += per) {
                 if (np == cap) { cap = cap ? cap * 2 : 64; up_part *n2 = realloc(parts, cap * sizeof *parts); if (!n2) { free(pc); free(parts); return 0; } parts = n2; }
-                parts[np++] = (up_part){d, t->mem, q->s.ptr, pitch, lv, ly, y, y + per < by ? y + per : by, &q->bad};
+                parts[np++] = (up_part){d, t->mem, q->s.ptr, pitch, lv + im->base, ly, y, y + per < by ? y + per : by, &q->bad};
             }
         }
     }
@@ -1768,7 +1853,7 @@ static void upload_(vka_img *im, const tex_t *t, VkCommandBuffer cb, uint64_t *n
         for (uint32_t ly = 0; ly < (linear ? 1 : im->layers); ly++) {
             vka_span s; if (!vka_scratch(piece, 16, &s)) { free(part); return; }
             if (linear) { size_t st = im->d.stride ? im->d.stride : d->stride ? d->stride : pitch; for (uint32_t y = 0; y < by; y++) memcpy(s.ptr + y * pitch, src + y * st, pitch); }
-            else if (nvn_deswizzle(d, lv, ly, src, s.ptr, pitch)) { VRED_ONCE("texture serial %llu format %#x target %d: no CPU deswizzle", (unsigned long long)t->serial, d->format, d->target); free(part); return; }
+            else if (nvn_deswizzle(d, lv + im->base, ly, src, s.ptr, pitch)) { VRED_ONCE("texture serial %llu format %#x target %d: no CPU deswizzle", (unsigned long long)t->serial, d->format, d->target); free(part); return; }   // (image level lv is texture level lv + base: a soft texture's; a sparse pool's go above)
             if (d->format >= 0x79 && d->format <= 0x94 && vka_nan_on()) {   // DM_VK_NANSCAN: all-zero blocks of ASTC textures (an all-zero ASTC block is an error block)
                 uint64_t zb = 0, nb = piece / 16; for (uint64_t k = 0; k < nb; k++) if (!mem_any(s.ptr + 16 * k, 16)) zb++;
                 const char *dm = getenv("DM_VK_NANSCAN_DUMP"); static _Atomic int nd;   // <format>x<w>: level 0 of such textures written to DM_TEMP (diagnostic, at most 64)
@@ -1903,7 +1988,8 @@ void mtl_tex_write_region(const tex_t *t, unsigned level, unsigned layer0, const
     // The raw guest bytes are only the image's texels when no conversion lies between them (depth/stencil, video, a mapped format: the whole-image upload handles those),
     // and only valid Vulkan usage inside the image: otherwise the storage holds the write and the next prepare reads all of it
     uint32_t lw = im->w >> level ? im->w >> level : 1, lh = im->h >> level ? im->h >> level : 1;
-    if (f->kind >= 3 || im->m.z || im->is_video || level >= im->levels || layer0 + (unsigned)r->zoffset + (unsigned)nz > im->layers ||
+    // (an image from a finer texture level, a soft or sparse texture's: im->base, its levels are not the texture's; the whole re-upload maps them)
+    if (f->kind >= 3 || im->m.z || im->is_video || im->base || level >= im->levels || layer0 + (unsigned)r->zoffset + (unsigned)nz > im->layers ||
         r->xoffset < 0 || r->yoffset < 0 || r->width <= 0 || r->height <= 0 ||
         (uint64_t)r->xoffset + (uint64_t)r->width > lw || (uint64_t)r->yoffset + (uint64_t)r->height > lh) {
         redo_add_locked(im);
@@ -2074,7 +2160,7 @@ static VkImageView view_of(const treg_ent *e, vka_img *im, int vt_want, int stor
     if (!vka_fmt_of(v && v->set_format ? v->format : e->t.d.format, &f)) f = im->f;
     uint32_t tl = im->base + im->levels, l0 = v && v->set_levels ? v->base_level : 0, nl = v && v->set_levels && v->nlevels ? v->nlevels : tl > l0 ? tl - l0 : 1;
     if (im->vtrack && !storage && l0 < im->vmin) { uint32_t cut = im->vmin - l0; nl = nl > cut ? nl - cut : 1; l0 = im->vmin; }   // a sparse texture: from its wholly mapped levels
-    if (l0 < im->base) { uint32_t cut = im->base - l0; nl = nl > cut ? nl - cut : 1; l0 = 0; } else l0 -= im->base;   // texture levels → the image's (a sparse texture's left-out levels)
+    vksoft_view(im->base, &l0, &nl);   // texture levels → the image's (a sparse texture's left-out levels, a soft texture's level 0)
     uint32_t a0 = v && v->set_layers ? v->min_layer : 0, na = v && v->set_layers && v->nlayers ? v->nlayers : im->layers - a0;
     if (im->d.target == NVN_TEXTURE_TARGET_3D) { a0 = 0; na = 1; }   // a 3D texture's view range names slices (a render target view's), which a 3D view does not take
     if (l0 >= im->levels || a0 >= im->layers) return VK_NULL_HANDLE;

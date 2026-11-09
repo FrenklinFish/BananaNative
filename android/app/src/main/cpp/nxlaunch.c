@@ -398,6 +398,8 @@ JNIEXPORT jboolean JNICALL Java_dev_nxnative_android_Native_hasSelftest(JNIEnv *
 JNIEXPORT jint JNICALL Java_dev_nxnative_android_Native_selftest(JNIEnv *env, jclass cls, jobject surface, jint frames) {
     (void)cls; if (!nxhost_vk_selftest) return -1;
     ANativeWindow *w = surface ? ANativeWindow_fromSurface(env, surface) : NULL;
+    // The selftest never calls Native.start: let setSurface forward its resizes and the null on leaving to the host, as start does for a game
+    pthread_mutex_lock(&g_win_mu); g_win_ready = 1; pthread_mutex_unlock(&g_win_mu);
     fprintf(stderr, "[nxlaunch] graphics selftest: nxhost_vk_selftest(%p, %d)\n", (void *)w, frames);
     int r = nxhost_vk_selftest(w, frames);
     fprintf(stderr, "[nxlaunch] graphics selftest returned %d: %s\n", r, r ? "FAIL" : "PASS");
