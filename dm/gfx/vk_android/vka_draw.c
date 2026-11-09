@@ -1571,12 +1571,18 @@ static int depth_sampled(vka_shader *const sh[VKA_NSTAGE], const vka_dstate *d) 
     }
     return 0;
 }
-// When inline updates are deferred in UB: a draw whose storage, vertex, index or indirect buffer overlaps UB, or whose overlapping UBO has an uncompleted opaque GPU write, ends the pass first
+// When inline updates are deferred in UB: a draw with raw global memory access, or whose storage, vertex, index or indirect buffer overlaps UB, or whose overlapping UBO has an uncompleted opaque GPU write, ends the pass first
 static int ub_hazard(const vka_dstate *d, vka_shader *const sh[VKA_NSTAGE], int mesh, const p_draw *dw, const p_draw_idx *di) {
     for (int st = 0; st < VKA_NSTAGE; st++) {
         if (!sh[st] || (st == 1 && d->rast_discard)) continue;
         if (g_wk.n[st] < 0) return 1;
         const vka_res *r = g_wk.r[st];
+        // Raw global memory (loads or stores through guest addresses, no descriptor: the address table is bound) could read or write the range of a deferred update, which is only
+        // in guest RAM at the pass end: its addresses are not known here, so such a draw ends the pass first
+        for (int i = 0; i < g_wk.n[st]; i++) if (r[i].what == VKA_R_GMEM_MAP) {
+            static int n_gm; if (n_gm++ < 8) VLOG("pass ended: a draw with raw global memory access while inline uniform updates are deferred (%d so far)", n_gm);
+            return 1;
+        }
         for (int i = 0; i < g_wk.n[st]; i++) {
             if (r[i].what != VKA_R_BUF) continue;
             if (r[i].desc == VK_DESCRIPTOR_TYPE_STORAGE_BUFFER) {
