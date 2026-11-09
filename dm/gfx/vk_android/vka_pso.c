@@ -975,9 +975,10 @@ static int pw_heavy_hold(uint64_t key, uint64_t heavy_ns) {
     }
     return 0;
 }
-// One prewarm build at a time (DM_VK_PREWARM_OVERLAP=1: as before, one a thread). A build's cost is known only after it, and four unknown ones that started within one
-// second (Ocarina of Time on Turnip: e963ef2241a51be8, cf04467527cbcf8f, 171409a493cf5268, 11-12 s each) took the process past vm.max_map_count again with the hold
-// above in place. The threads still look up and prepare their keys in parallel; a warm run's cache hits take milliseconds each
+// One prewarm build at a time on VK_DRIVER_ID_MESA_TURNIP (DM_VK_PREWARM_OVERLAP=1: as before, one a thread; the default on other drivers). A build's cost is known only
+// after it, and four unknown ones that started within one second (Ocarina of Time on Turnip: e963ef2241a51be8, cf04467527cbcf8f, 171409a493cf5268, 11-12 s each) took
+// the process past vm.max_map_count again with the hold above in place. The threads still look up and prepare their keys in parallel; a warm run's cache hits take
+// milliseconds each. Qualcomm's driver's compiler does not take the maps with it (21,450 at most, same phone and game), so its threads keep building side by side
 static pthread_mutex_t g_pw_one = PTHREAD_MUTEX_INITIALIZER;
 static void *pw_main(void *a) {
     (void)a; pthread_setname_np(pthread_self(), "vk-prewarm");
@@ -999,7 +1000,7 @@ static void *pw_main(void *a) {
     uint32_t mem_mb = (uint32_t)VKA_ENV("DM_VK_PREWARM_MEM_MB", 2048);
     // Each thread holds its next compile while a long one runs (DM_VK_PREWARM_HEAVY_MS, default 1000; 0 never), or another build of the same shader (pw_heavy_hold)
     int heavy_ms = VKA_ENV("DM_VK_PREWARM_HEAVY_MS", 1000); uint64_t heavy_ns = heavy_ms > 0 ? (uint64_t)heavy_ms * 1000000ull : 0;
-    int overlap = VKA_ENV("DM_VK_PREWARM_OVERLAP", 0) != 0;   // 1: each thread builds on its own, as before g_pw_one
+    int overlap = VKA_ENV("DM_VK_PREWARM_OVERLAP", V.driver_id != VK_DRIVER_ID_MESA_TURNIP) != 0;   // 1: each thread builds on its own (default off Turnip); 0: g_pw_one
     for (;;) {
         pause_point();
         if (me > 0 && mem_mb) { uint64_t t0 = 0, av; while ((av = mem_avail_mb()) && av < mem_mb && atomic_load(&g_pw_next) < n) { if (!t0) t0 = now_ns(); usleep(250000); pause_point(); }
