@@ -200,7 +200,9 @@ static int mc_open(mav1 *a, const uint8_t *seq, size_t n) {
     if (n > sizeof a->seq || !mav1_av1c(seq, n, rec, &w, &h)) { if (!a->red++) LOG("[RED] movie: an AV1 sequence header the host cannot read (%zu bytes)", n); return 0; }
     memcpy(rec + 4, seq, n);
     a->mc = AMediaCodec_createDecoderByType("video/av01");
-    if (!a->mc) { atomic_store(&g_mc_av1, 0); LOG("[movie] AV1: the phone has no AV1 decoder in MediaCodec: dav1d decodes"); return 0; }
+    // NULL is also a decoder the phone has but could not give now (its instances taken): this stream stays on dav1d and the next one asks again. A software decoder is the
+    // phone's own answer and is kept for the session (below)
+    if (!a->mc) { static int k; if (!k++) LOG("[movie] AV1: MediaCodec gave no AV1 decoder: dav1d decodes this stream"); return 0; }
     char *name = NULL; AMediaCodec_getName(a->mc, &name); snprintf(a->mcname, sizeof a->mcname, "%s", name ? name : "MediaCodec"); if (name) AMediaCodec_releaseName(a->mc, name);
     if (mc_soft_name(a->mcname)) {
         LOG("[movie] AV1: the phone's AV1 decoder is %s, a software one: dav1d decodes", a->mcname);
