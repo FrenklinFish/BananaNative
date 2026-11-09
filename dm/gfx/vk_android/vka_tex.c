@@ -707,7 +707,9 @@ static int storage_mode(const tex_t *t, const uint8_t *c, const vka_fmt *f, int 
     }
     else if (!(d->flags & NVN_TEXTURE_FLAGS_COMPRESSIBLE) && t->pool && ((pf & (NVN_MEMORY_POOL_FLAGS_CPU_NO_ACCESS | NVN_MEMORY_POOL_FLAGS_CPU_UNCACHED)) || nvn_flushed(t->mem, t->L.size))
              && mem_any_mapped(c, t)) want = ST_FILL;
-    // Large compressed textures (e.g. 8192x8192 atlases) are updated through WriteTexels, never raw CPU stores: tracking them write-protects shared pool memory and causes page fault storms
+    // STOPGAP (cause partly open): large compressed textures (e.g. 8192x8192 atlases) are updated through WriteTexels, and tracking them write-protected shared pool memory and caused page
+    // fault storms (command memory shares the pool; AddCommandMemory now prepares what it grants, which may remove most of them). A game that fills such a texture with plain CPU
+    // stores is not followed here. Open: whether the cut is still needed with the grant preparation and the band/edge logic of upload_bands_tracked
     if (want == ST_TRACK && comp && t->L.size > (16u << 20)) want = ST_FILL;
     // No later CPU writes to follow: a pool the CPU cannot access, a virtual pool (its pages are not the storage's), storage outside every tracked pool, or tracking off
     int trk = VKA_ENV("DM_VK_TEX_TRACK", 1) != 0;   // live: textures made from now on
@@ -928,7 +930,10 @@ static uint64_t ft_hash(uintptr_t lo, uintptr_t hi) {
     return h ^ (h >> 29);
 }
 static void img_edges_take(vka_img *im) {
-    if (!im || im->vpool || !im->span || !im->mem) return;
+    if (!im) return;
+    im->edged = 0;
+    if (im->vpool || !im->span || !im->mem) return;
+    if (dm_guest_unmapped((uintptr_t)im->mem, im->L.size)) return;   // the edges are read in place: a page the guest has not mapped would fault
     uintptr_t pg = nvn_dirty_block_bytes(); if (!pg) pg = (uintptr_t)getpagesize();
     uintptr_t r[2][2], ia, ie;
     uintptr_t a = (uintptr_t)im->mem, e = a + im->L.size;
@@ -940,6 +945,7 @@ static void img_edges_take(vka_img *im) {
 }
 static int img_edges_clean(vka_img *im) {
     if (!im || !im->edged || im->vpool || !im->span || !im->mem) return 0;
+    if (dm_guest_unmapped((uintptr_t)im->mem, im->L.size)) return 0;
     uintptr_t pg = nvn_dirty_block_bytes(); if (!pg) pg = (uintptr_t)getpagesize();
     uintptr_t r[2][2], ia, ie;
     uintptr_t a = (uintptr_t)im->mem, e = a + im->L.size;
@@ -1892,6 +1898,16 @@ void mtl_tex_write_region(const tex_t *t, unsigned level, unsigned layer0, const
     }
     const vka_fmt *f = &im->f;
     int nz = r->depth ? r->depth : 1;
+    // The raw guest bytes are only the image's texels when no conversion lies between them (depth/stencil, video, a mapped format: the whole-image upload handles those),
+    // and only valid Vulkan usage inside the image: otherwise the storage holds the write and the next prepare reads all of it
+    uint32_t lw = im->w >> level ? im->w >> level : 1, lh = im->h >> level ? im->h >> level : 1;
+    if (f->kind >= 3 || im->m.z || im->is_video || level >= im->levels || layer0 + (unsigned)r->zoffset + (unsigned)nz > im->layers ||
+        r->xoffset < 0 || r->yoffset < 0 || r->width <= 0 || r->height <= 0 ||
+        (uint64_t)r->xoffset + (uint64_t)r->width > lw || (uint64_t)r->yoffset + (uint64_t)r->height > lh) {
+        redo_add_locked(im);
+        pthread_mutex_unlock(&g_tmu);
+        return;
+    }
     uint32_t bx = (r->width + f->bw - 1) / f->bw;
     uint32_t by = (r->height + f->bh - 1) / f->bh;
     size_t row_bytes = (size_t)bx * f->bpb;
@@ -1905,7 +1921,9 @@ void mtl_tex_write_region(const tex_t *t, unsigned level, unsigned layer0, const
     for (int z = 0; z < nz; z++) {
         uint8_t *data = malloc(slice_bytes);
         if (!data) {
-            redo_add_locked(im);   // the storage holds the write; the next prepare re-reads it
+            // the storage holds the write; the next prepare re-reads all of it. Slices queued before this one stay queued: they are copied first and the re-upload follows
+            // in the same order, so the image ends with the storage's content either way
+            redo_add_locked(im);
             break;
         }
         for (uint32_t y = 0; y < by; y++) {
@@ -2486,6 +2504,7 @@ void vka_tex_prepare(VkCommandBuffer cb) {
                 vk.vkCmdCopyBufferToImage(cb, s.buf, im->img, VK_IMAGE_LAYOUT_GENERAL, 1, &c);
                 w->copied = 1;
                 any_rw = 1;
+                atomic_fetch_add_explicit(&g_up_bytes, w->size, memory_order_relaxed);
                 g_reup++;
                 static int n_rw_log;
                 if (n_rw_log++ < 16) VLOG("region write serial %llu: %ux%u at [%d,%d] level %u layer %u (%zu bytes copied to image)",

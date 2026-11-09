@@ -2989,6 +2989,7 @@ static void write_texels(const tex_t *t, const view_t *v, const NVNcopyRegion *r
             unsigned ly = layer0 + (unsigned)(r->zoffset + z);
             if (hi > lo && (uint64_t)ly * t->L.layer_size + hi <= t->L.size)
                 dm_guest_write_prepare(t->mem + (uint64_t)ly * t->L.layer_size + lo, hi - lo);
+            else { dm_guest_write_prepare(t->mem, t->L.size); break; }   // a range not worked out: prepare all of it, as before
         }
         int ok = 1;
         for (int z = 0; z < nz && ok; z++) ok = !write_region_bl(t, level, layer0 + (unsigned)(r->zoffset + z), r, src + (size_t)z * img0, row0, bw, bh, bpb);
