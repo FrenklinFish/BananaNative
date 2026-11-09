@@ -707,10 +707,6 @@ static int storage_mode(const tex_t *t, const uint8_t *c, const vka_fmt *f, int 
     }
     else if (!(d->flags & NVN_TEXTURE_FLAGS_COMPRESSIBLE) && t->pool && ((pf & (NVN_MEMORY_POOL_FLAGS_CPU_NO_ACCESS | NVN_MEMORY_POOL_FLAGS_CPU_UNCACHED)) || nvn_flushed(t->mem, t->L.size))
              && mem_any_mapped(c, t)) want = ST_FILL;
-    // STOPGAP (cause partly open): large compressed textures (e.g. 8192x8192 atlases) are updated through WriteTexels, and tracking them write-protected shared pool memory and caused page
-    // fault storms (command memory shares the pool; AddCommandMemory now prepares what it grants, which may remove most of them). A game that fills such a texture with plain CPU
-    // stores is not followed here. Open: whether the cut is still needed with the grant preparation and the band/edge logic of upload_bands_tracked
-    if (want == ST_TRACK && comp && t->L.size > (16u << 20)) want = ST_FILL;
     // No later CPU writes to follow: a pool the CPU cannot access, a virtual pool (its pages are not the storage's), storage outside every tracked pool, or tracking off
     int trk = VKA_ENV("DM_VK_TEX_TRACK", 1) != 0;   // live: textures made from now on
     if (want == ST_TRACK && !is_vid && (!trk || (pf & (NVN_MEMORY_POOL_FLAGS_CPU_NO_ACCESS | NVN_MEMORY_POOL_FLAGS_VIRTUAL)) || !nvn_dirty_span(t->mem, t->L.size))) want = ST_FILL;
@@ -1896,6 +1892,12 @@ void mtl_tex_write_region(const tex_t *t, unsigned level, unsigned layer0, const
         pthread_mutex_unlock(&g_tmu);
         return;
     }
+    // A texture the game updates through WriteTexels gets its content from those writes (the region copies below, or a whole re-upload): it stops following its pages. Tracking
+    // it write-protected the pool memory around it, which is shared with command memory, and a large atlas faulted tens of thousands of times (Splatoon Raiders: 57,000 faults,
+    // texture prepare 65-79 ms; untracked 5,900 and 1 ms). Its protected pages fault once each and are not protected again. A game that also fills the texture with plain CPU
+    // stores is not followed from here on: if one exists, this is where it shows (the texture stays as WriteTexels left it)
+    if (im->track || im->mode == ST_TRACK) { im->track = 0; im->mode = ST_FILL; }
+    im->wt = 1;
     const vka_fmt *f = &im->f;
     int nz = r->depth ? r->depth : 1;
     // The raw guest bytes are only the image's texels when no conversion lies between them (depth/stencil, video, a mapped format: the whole-image upload handles those),
@@ -2473,7 +2475,7 @@ void vka_tex_prepare(VkCommandBuffer cb) {
         tex_t t = {0}; t.serial = im->serial; t.d = im->d; t.L = im->L; t.mem = (uint8_t *)im->mem;
         nvn_tex_layout(&t.d, &t.L);
         if (im->vtrack) { sparse_refresh(im, cb); g_reup++; n_up++; continue; }
-        if (!(compressed(&im->f) && im->L.size > (16u << 20)) && !im->track && (im->span = nvn_dirty_span(t.mem, t.L.size))) im->track = 1;
+        if (!im->wt && !im->track && (im->span = nvn_dirty_span(t.mem, t.L.size))) im->track = 1;
         if (im->track) upload_tracked(im, &t, cb); else upload_fill(im, &t, cb);
         g_reup++; n_up++;
     }
