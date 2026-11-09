@@ -370,6 +370,13 @@ Games read this count as a position in their own command memory and size their h
 - **Found on:** [Metroid Dread](../../dm/games/010093801237C000/README.md).
 - **Check:** `t_nvn` checks 15 regions in RGBA8, BC1 and a two-layer RGBA16F array, from 1×1 to the whole level, byte for byte against the old whole-level path.
 
+### `WriteTexels` subregion updates on the Vulkan replay
+
+- **Symptom:** severe frame rate drops (down to 5–11 FPS, `texture prepare` taking 80–165 ms) in scenes where background threads update lighting or bake tiles with `nvnTextureWriteTexels` (e.g. `bake::ModuleMgr` in Splatoon Raiders).
+- **Cause:** `write_texels()` marked the texture CPU-written with `mtl_tex_cpu_written(t)`, which added it to `g_redo`. At submission begin, `vka_tex_prepare()` re-uploaded the entire texture across all mip levels (85.3 MB for an 8192×8192 atlas, 4–5 times per frame = 340–425 MB/frame) with CPU deswizzling, even though only a small 64×64 or 128×128 region was written. Furthermore, if marked `ST_TRACK`, write-protecting the 85.3 MB pool range caused a storm of over 1,400 `SIGSEGV` page faults per frame when command buffers were allocated in the shared memory pool.
+- **Fix:** `write_texels()` calls `mtl_tex_write_region()` on 2D textures, which queues only the modified subregion and copies it directly into the image via `vkCmdCopyBufferToImage` in `vka_tex_prepare()`. In `storage_mode()`, large compressed textures (`> 16 MB`) use `ST_FILL` with region updates instead of `ST_TRACK`, avoiding page-fault storms on shared memory pools, while font glyph caches (e.g. BC4 at 128 KB) retain tracking so text renders properly. `nvnCommandBufferAddCommandMemory` also calls `dm_guest_write_prepare` before handing granted memory to the guest.
+- **Found on:** [Splatoon Raiders](../../dm/games/0400380020056000/README.md).
+
 ### Packaged texture data copied at `TextureInitialize`
 
 - **Cause:** a texture created with `TextureBuilderSetPackagedTextureData` gets that data copied into its storage by NVN at `TextureInitialize` (a compressible pool cannot be written by the CPU).

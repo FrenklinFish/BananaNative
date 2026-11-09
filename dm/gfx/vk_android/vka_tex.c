@@ -707,6 +707,8 @@ static int storage_mode(const tex_t *t, const uint8_t *c, const vka_fmt *f, int 
     }
     else if (!(d->flags & NVN_TEXTURE_FLAGS_COMPRESSIBLE) && t->pool && ((pf & (NVN_MEMORY_POOL_FLAGS_CPU_NO_ACCESS | NVN_MEMORY_POOL_FLAGS_CPU_UNCACHED)) || nvn_flushed(t->mem, t->L.size))
              && mem_any_mapped(c, t)) want = ST_FILL;
+    // Large compressed textures (e.g. 8192x8192 atlases) are updated through WriteTexels, never raw CPU stores: tracking them write-protects shared pool memory and causes page fault storms
+    if (want == ST_TRACK && comp && t->L.size > (16u << 20)) want = ST_FILL;
     // No later CPU writes to follow: a pool the CPU cannot access, a virtual pool (its pages are not the storage's), storage outside every tracked pool, or tracking off
     int trk = VKA_ENV("DM_VK_TEX_TRACK", 1) != 0;   // live: textures made from now on
     if (want == ST_TRACK && !is_vid && (!trk || (pf & (NVN_MEMORY_POOL_FLAGS_CPU_NO_ACCESS | NVN_MEMORY_POOL_FLAGS_VIRTUAL)) || !nvn_dirty_span(t->mem, t->L.size))) want = ST_FILL;
@@ -919,8 +921,47 @@ static uint8_t *unmapped_content(const tex_t *t) {
                                                               (unsigned long long)u, (unsigned long long)((t->L.size + 4095) >> 12), (const void *)t->mem);
     return c;
 }
+static uint64_t ft_hash(uintptr_t lo, uintptr_t hi) {
+    const uint8_t *p = (const uint8_t *)lo; size_t n = hi - lo, i = 0; uint64_t h = 0x9e3779b97f4a7c15ull ^ n, w;
+    for (; i + 8 <= n; i += 8) { memcpy(&w, p + i, 8); h ^= w * 0x87c37b91114253d5ull; h = ((h << 31) | (h >> 33)) * 0x4cf5ad432745937full; }
+    for (; i < n; i++) h = (h ^ p[i]) * 0x100000001b3ull;
+    return h ^ (h >> 29);
+}
+static void img_edges_take(vka_img *im) {
+    if (!im || im->vpool || !im->span || !im->mem) return;
+    uintptr_t pg = nvn_dirty_block_bytes(); if (!pg) pg = (uintptr_t)getpagesize();
+    uintptr_t r[2][2], ia, ie;
+    uintptr_t a = (uintptr_t)im->mem, e = a + im->L.size;
+    ia = (a + pg - 1) & ~(pg - 1); ie = e & ~(pg - 1);
+    if (ie <= ia) { r[0][0] = a; r[0][1] = e; r[1][0] = r[1][1] = 0; }
+    else { r[0][0] = a; r[0][1] = ia; r[1][0] = ie; r[1][1] = e; }
+    for (int i = 0; i < 2; i++) im->edge_h[i] = r[i][1] > r[i][0] ? ft_hash(r[i][0], r[i][1]) : 0;
+    im->edged = !nvn_dirty_since_span(im->span, im->mem, im->L.size, im->stamp);
+}
+static int img_edges_clean(vka_img *im) {
+    if (!im || !im->edged || im->vpool || !im->span || !im->mem) return 0;
+    uintptr_t pg = nvn_dirty_block_bytes(); if (!pg) pg = (uintptr_t)getpagesize();
+    uintptr_t r[2][2], ia, ie;
+    uintptr_t a = (uintptr_t)im->mem, e = a + im->L.size;
+    ia = (a + pg - 1) & ~(pg - 1); ie = e & ~(pg - 1);
+    if (ie <= ia) { r[0][0] = a; r[0][1] = e; r[1][0] = r[1][1] = 0; ia = ie = 0; }
+    else { r[0][0] = a; r[0][1] = ia; r[1][0] = ie; r[1][1] = e; }
+    uint64_t st = nvn_dirty_now();
+    nvn_dirty_protect(im->mem, im->L.size);
+    int in_dirty = (ie > ia && nvn_dirty_since_span(im->span, (const void *)ia, ie - ia, im->stamp));
+    int h0_bad = (r[0][1] > r[0][0] && ft_hash(r[0][0], r[0][1]) != im->edge_h[0]);
+    int h1_bad = (r[1][1] > r[1][0] && ft_hash(r[1][0], r[1][1]) != im->edge_h[1]);
+    if (in_dirty || h0_bad || h1_bad) return 0;
+    im->stamp = st;
+    img_edges_take(im);
+    static uint64_t g_edge_skips;
+    if (++g_edge_skips <= 8) VLOG("texture serial %llu %ux%u format %#x: only shared pages written beside it, re-upload skipped (%llu so far)",
+                                  (unsigned long long)im->serial, im->w, im->h, im->d.format, (unsigned long long)g_edge_skips);
+    return 1;
+}
 static void upload_tracked(vka_img *im, const tex_t *t, VkCommandBuffer cb) {   // stamp, protect, then read (nvn_mtl.m pkg_upload): a write during the copy is seen at the next check
     im->stamp = nvn_dirty_now(); nvn_dirty_protect(t->mem, t->L.size);
+    img_edges_take(im);
     if (vka_nan_on()) im->hash = mem_hash(t->mem, t->L.size);
     uint8_t *c = im->vpool ? NULL : gw_content(t->mem, t->L.size, &im->gw_seen);   // (a sparse pool's storage is read through its page table: upload_)
     if (!c && !im->vpool) c = unmapped_content(t);
@@ -943,12 +984,69 @@ static int upload_rows_tracked(vka_img *im, const tex_t *t, VkCommandBuffer cb, 
     uint32_t r0 = (uint32_t)(lo / st), r1 = (uint32_t)((hi + st - 1) / st); if (r1 > by) r1 = by;
     if (r0 >= r1) r0 = 0, r1 = by;
     im->stamp = nvn_dirty_now(); nvn_dirty_protect(t->mem, t->L.size);   // stamp, protect, then read (upload_tracked)
+    img_edges_take(im);
     vka_span s; if (!vka_scratch(pitch * (r1 - r0), 16, &s)) return 1;
     for (uint32_t y = r0; y < r1; y++) memcpy(s.ptr + (size_t)(y - r0) * pitch, t->mem + (size_t)y * st, pitch);
     uint32_t y0 = r0 * f->bh, y1 = r1 * f->bh > im->h ? im->h : r1 * f->bh;
     VkBufferImageCopy c = {s.off, bx * f->bw, (r1 - r0) * f->bh, {im->aspect, 0, 0, 1}, {0, (int32_t)y0, 0}, {im->w, y1 - y0, 1}};
     vk.vkCmdCopyBufferToImage(cb, s.buf, im->img, VK_IMAGE_LAYOUT_GENERAL, 1, &c);
     g_rows_up += pitch * (r1 - r0);
+    return 1;
+}
+// A dense block-linear 2D texture whose pages the CPU wrote since im->stamp (old): only the bands (one row of GOB blocks, one range of the storage) with a written page
+// (within lo..hi) are deswizzled and copied, runs of them through scratch memory, as upload_sparse_parts does. Splatoon Raiders keeps an 8192x8192 BC5 texture (85.3 MiB with its levels)
+// in memory beside data the CPU writes every frame: the whole texture was deswizzled and copied 9-10 times a frame (850 MB, 255 ms) for a few 64 KiB blocks. DM_VK_BANDS=0 = whole
+// texture again. 0 = not such a texture, or content the GPU has pending writes over (the caller uploads all of it)
+static int upload_bands_tracked(vka_img *im, const tex_t *t, VkCommandBuffer cb, size_t lo, size_t hi, uint64_t old) {
+    const nvn_texdesc *d = &t->d; const vka_fmt *f = &im->f;
+    if (!VKA_ENV("DM_VK_BANDS", 1) || im->vpool || im->m.z || im->is_video || vka_nan_on() || f->kind >= 3 || d->target == NVN_TEXTURE_TARGET_3D || im->depth > 1 ||
+        (d->flags & (NVN_TEXTURE_FLAGS_LINEAR | NVN_TEXTURE_FLAGS_LINEAR_RENDER_TARGET)) || im->L.size < (1u << 20)) return 0;
+    uint64_t seen; uint8_t *c = gw_content(t->mem, t->L.size, &seen);
+    if (c) { free(c); return 0; }
+    if ((c = unmapped_content(t))) { free(c); return 0; }
+    im->gw_seen = seen;
+    im->stamp = nvn_dirty_now(); nvn_dirty_protect(t->mem, t->L.size);   // stamp, protect, then read (upload_tracked)
+    img_edges_take(im);
+    uint64_t up = 0;
+    uint8_t *bst = NULL; uint32_t bst_cap = 0;
+    for (uint32_t lv = 0; lv < im->levels; lv++) {
+        uint32_t w = im->w >> lv ? im->w >> lv : 1, h = im->h >> lv ? im->h >> lv : 1;
+        uint32_t bx = (w + f->bw - 1) / f->bw, by = (h + f->bh - 1) / f->bh; size_t pitch = (size_t)bx * f->bpb;
+        uint32_t band_rows = by; uint64_t band_bytes = 0;
+        if (nvn_deswizzle_block_rows(d, lv) != (int)by || nvn_deswizzle_bands(d, lv, &band_rows, &band_bytes)) band_rows = by, band_bytes = 0;
+        for (uint32_t ly = 0; ly < im->layers; ly++) {
+            uint64_t off, len; sub_range(d, &im->L, lv, ly, &off, &len);
+            if (!len || off + len <= lo || off >= hi) continue;
+            uint32_t nb = band_bytes ? (by + band_rows - 1) / band_rows : 1;
+            if (bst_cap < nb) { free(bst); bst_cap = nb; if (!(bst = malloc(bst_cap))) { bst_cap = 0; return 1; } }
+            int any = 0;
+            for (uint32_t k = 0; k < nb; k++) {
+                uint64_t bo = band_bytes ? (uint64_t)k * band_bytes : 0, bl = band_bytes ? (bo < len ? (len - bo < band_bytes ? len - bo : band_bytes) : 0) : len;
+                if (!bl || off + bo + bl <= lo || off + bo >= hi) { bst[k] = 0; continue; }
+                bst[k] = nvn_dirty_since_span(im->span, t->mem + off + bo, bl, old); any |= bst[k];
+            }
+            if (!any) continue;
+            for (uint32_t k = 0, k1; k < nb; k = k1) {
+                k1 = k + 1;
+                if (!bst[k]) continue;
+                size_t maxrun = 16u << 20; if (maxrun < (size_t)band_rows * pitch) maxrun = (size_t)band_rows * pitch;
+                while (k1 < nb && (size_t)(k1 + 1 - k) * band_rows * pitch <= maxrun && bst[k1]) k1++;
+                if (!band_bytes) k1 = nb;
+                uint32_t y0 = k * band_rows, y1 = k1 * band_rows < by ? k1 * band_rows : by;
+                size_t sz = (size_t)(y1 - y0) * pitch;
+                vka_span s; if (!vka_scratch(sz, 16, &s)) { free(bst); return 1; }
+                if (nvn_deswizzle_rows(d, lv, ly, t->mem, s.ptr - (size_t)y0 * pitch, pitch, y0, y1)) {
+                    VRED_ONCE("texture serial %llu format %#x target %d: no CPU deswizzle", (unsigned long long)t->serial, d->format, d->target); free(bst); return 1; }
+                uint32_t py0 = y0 * f->bh, py1 = y1 * f->bh > h ? h : y1 * f->bh;
+                VkBufferImageCopy cp = {s.off, bx * f->bw, (y1 - y0) * f->bh, {im->aspect, lv, ly, 1}, {0, (int32_t)py0, 0}, {w, py1 - py0, 1}};
+                vk.vkCmdCopyBufferToImage(cb, s.buf, im->img, VK_IMAGE_LAYOUT_GENERAL, 1, &cp);
+                up += sz;
+                if (!(cb = vka_up_point(cb))) { free(bst); return 1; }
+            }
+        }
+    }
+    free(bst);
+    atomic_fetch_add_explicit(&g_up_bytes, up, memory_order_relaxed);
     return 1;
 }
 // A zero texel block: zeros, except ASTC, whose all-zero block is a reserved mode (the error colour): a void-extent block of colour (0, 0, 0, 0) there
@@ -1440,7 +1538,7 @@ vka_img *vka_tex_get(const tex_t *t, VkCommandBuffer cb) {
         for (int i = 0; i < g_nlive && !im; i++) if (t->mem && same_shape(g_live[i], t, &f, 1) && !(g_live[i]->base && sparse_gpu(t, &f))) {
             im = g_live[i]; im->refs++;
             if (im->pdead) {
-                im->pdead = 0; im->track = 1;
+                im->pdead = 0; im->track = (im->mode == ST_TRACK);
                 im->serial = t->serial;
             }
             if (t->pool && im->pool != t->pool) { uint64_t fin = nvn_pool_fin(), g = nvn_pool_live(t->pool, NULL, NULL); if (g) { im->pool = t->pool; im->pfin = fin; im->pgen = g; } } }
@@ -1754,6 +1852,79 @@ void mtl_tex_cpu_written(const tex_t *t) {
         e->im->cpu_dirty = 1;
         if (g_nredo == g_redocap) { g_redocap = g_redocap ? g_redocap * 2 : 64; g_redo = realloc(g_redo, (size_t)g_redocap * sizeof *g_redo); }
         g_redo[g_nredo++] = t->serial;
+    }
+    pthread_mutex_unlock(&g_tmu);
+}
+
+typedef struct {
+    vka_img *im;
+    uint32_t level, layer;
+    int32_t x, y, z;
+    uint32_t w, h;
+    uint8_t *data;
+    size_t size;
+} tex_region_write_t;
+static tex_region_write_t *g_reg_writes;
+static int g_nreg_writes, g_reg_writes_cap;
+
+void mtl_tex_write_region(const tex_t *t, unsigned level, unsigned layer0, const NVNcopyRegion *r, const uint8_t *src, size_t row, size_t img) {
+    if (!t || !r || !src) return;
+    pthread_mutex_lock(&g_tmu);
+    smap_ent *e = map_get(t->serial);
+    vka_img *im = e ? e->im : NULL;
+    if (!im) {
+        cpuw_take(t->serial, 1);
+        pthread_mutex_unlock(&g_tmu);
+        return;
+    }
+    if (im->gpu_owned || img_pool_dead(im)) {
+        pthread_mutex_unlock(&g_tmu);
+        return;
+    }
+    const vka_fmt *f = &im->f;
+    int nz = r->depth ? r->depth : 1;
+    uint32_t bx = (r->width + f->bw - 1) / f->bw;
+    uint32_t by = (r->height + f->bh - 1) / f->bh;
+    size_t row_bytes = (size_t)bx * f->bpb;
+    size_t slice_bytes = row_bytes * by;
+    size_t src_row = row ? row : row_bytes;
+    size_t src_img = img ? img : src_row * by;
+    if (!slice_bytes) {
+        pthread_mutex_unlock(&g_tmu);
+        return;
+    }
+    for (int z = 0; z < nz; z++) {
+        uint8_t *data = malloc(slice_bytes);
+        if (!data) {
+            if (!im->cpu_dirty) {
+                im->cpu_dirty = 1;
+                if (g_nredo == g_redocap) { g_redocap = g_redocap ? g_redocap * 2 : 64; g_redo = realloc(g_redo, (size_t)g_redocap * sizeof *g_redo); }
+                g_redo[g_nredo++] = t->serial;
+            }
+            break;
+        }
+        for (uint32_t y = 0; y < by; y++) {
+            memcpy(data + (size_t)y * row_bytes,
+                   src + (size_t)z * src_img + (size_t)y * src_row,
+                   row_bytes);
+        }
+        if (g_nreg_writes == g_reg_writes_cap) {
+            g_reg_writes_cap = g_reg_writes_cap ? g_reg_writes_cap * 2 : 32;
+            g_reg_writes = realloc(g_reg_writes, (size_t)g_reg_writes_cap * sizeof *g_reg_writes);
+        }
+        g_reg_writes[g_nreg_writes++] = (tex_region_write_t){
+            .im = im,
+            .level = level,
+            .layer = layer0 + (unsigned)(r->zoffset + z),
+            .x = r->xoffset,
+            .y = r->yoffset,
+            .z = 0,
+            .w = (uint32_t)r->width,
+            .h = (uint32_t)r->height,
+            .data = data,
+            .size = slice_bytes,
+        };
+        im->refs++;
     }
     pthread_mutex_unlock(&g_tmu);
 }
@@ -2278,11 +2449,45 @@ void vka_tex_prepare(VkCommandBuffer cb) {
         tex_t t = {0}; t.serial = im->serial; t.d = im->d; t.L = im->L; t.mem = (uint8_t *)im->mem;
         nvn_tex_layout(&t.d, &t.L);
         if (im->vtrack) { sparse_refresh(im, cb); g_reup++; continue; }
-        if (!im->track && (im->span = nvn_dirty_span(t.mem, t.L.size))) im->track = 1;
+        if (!(compressed(&im->f) && im->L.size > (16u << 20)) && !im->track && (im->span = nvn_dirty_span(t.mem, t.L.size))) im->track = 1;
         if (im->track) upload_tracked(im, &t, cb); else upload_fill(im, &t, cb);
         g_reup++;
     }
     g_nredo = 0;
+    int any_rw = 0;
+    for (int i = 0; i < g_nreg_writes; i++) {
+        tex_region_write_t *w = &g_reg_writes[i];
+        vka_img *im = w->im;
+        if (!im->gpu_owned && !img_pool_dead(im)) {
+            vka_span s;
+            if (vka_scratch(w->size, 16, &s)) {
+                memcpy(s.ptr, w->data, w->size);
+                VkBufferImageCopy c = {
+                    .bufferOffset = s.off,
+                    .bufferRowLength = 0,
+                    .bufferImageHeight = 0,
+                    .imageSubresource = {
+                        .aspectMask = im->aspect,
+                        .mipLevel = w->level,
+                        .baseArrayLayer = w->layer,
+                        .layerCount = 1,
+                    },
+                    .imageOffset = {w->x, w->y, w->z},
+                    .imageExtent = {w->w, w->h, 1},
+                };
+                vk.vkCmdCopyBufferToImage(cb, s.buf, im->img, VK_IMAGE_LAYOUT_GENERAL, 1, &c);
+                any_rw = 1;
+                g_reup++;
+                static int n_rw_log;
+                if (n_rw_log++ < 16) VLOG("region write serial %llu: %ux%u at [%d,%d] level %u layer %u (%zu bytes copied to image)",
+                                         (unsigned long long)im->serial, w->w, w->h, w->x, w->y, w->level, w->layer, w->size);
+            }
+        }
+        free(w->data);
+        unref_locked(im);
+    }
+    g_nreg_writes = 0;
+    if (any_rw) vka_barrier(cb);
     // GPU writes whose submission is done: the images over them that did not get their bytes are uploaded again (see gw_t above)
     gml_poll();
     if (vka_nan_on()) watch_scan(cb);
@@ -2383,11 +2588,15 @@ void vka_tex_prepare(VkCommandBuffer cb) {
             }
             if (!im->track || im->gpu_owned || !im->mem) continue;
             uint64_t size = im->L.size;
+            if (!im->span) im->span = nvn_dirty_span(im->mem, size);
+            if (!nvn_dirty_since_span(im->span, im->mem, size, im->stamp)) continue;
+            if (img_edges_clean(im)) continue;
             size_t lo, hi;
             if (!nvn_dirty_bounds_since(im->span, im->mem, size, im->stamp, &lo, &hi)) continue;
             tex_t t = {0}; t.serial = im->serial; t.d = im->d; t.L = im->L; t.mem = (uint8_t *)im->mem;
             int rows = VKA_ENV("DM_VK_ROWS", 1);
             if (rows && upload_rows_tracked(im, &t, cb, lo, hi)) continue;
+            if (upload_bands_tracked(im, &t, cb, lo, hi, im->stamp)) { if (g_reup++ < 8) VLOG("texture serial %llu %ux%u format %#x: the bands of its storage that changed re-uploaded", (unsigned long long)im->serial, im->w, im->h, im->d.format); continue; }
             upload_tracked(im, &t, cb);
             if (g_reup++ < 8) VLOG("texture serial %llu %ux%u format %#x flags %#x target %d: its storage changed, re-uploaded", (unsigned long long)im->serial, im->w, im->h, im->d.format, im->d.flags, im->d.target);
         }
