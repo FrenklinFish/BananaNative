@@ -65,6 +65,10 @@ final class Prefs {
         if (v == null) of(c).edit().remove(gameKey("xbox_buttons", titleId)).commit(); else of(c).edit().putInt(gameKey("xbox_buttons", titleId), v).commit();
     }
     static String xboxLabel(int v) { return XBOX_NAMES[v]; }
+    /** The in-game panel's Player 1 (PadOrder): the chosen gamepad's InputDevice descriptor, for every game; "" = automatic */
+    static String padFirst(Context c) { return of(c).getString("pad_first", ""); }
+    static void padFirst(Context c, String key) { of(c).edit().putString("pad_first", key == null ? "" : key).commit(); }
+
     /** Button mapping (PadMap, DM_PAD_MAP): Settings' default ("" = none: the host's default), then each game's own (unset = Settings'; "" = none for this game) */
     static String padMap(Context c) { return of(c).getString("pad_map", ""); }
     static void padMapDefault(Context c, String spec) { of(c).edit().putString("pad_map", spec == null ? "" : spec).commit(); }
