@@ -818,7 +818,7 @@ public final class GameActivity extends Activity implements SurfaceHolder.Callba
         File[] logs = LogProvider.dir(this).listFiles((d, n) -> n.startsWith(id + "-") && n.endsWith(".log"));
         if (logs == null || logs.length < KEEP_LOGS) return;
         Arrays.sort(logs, Comparator.comparingLong(File::lastModified));
-        for (int i = 0; i <= logs.length - KEEP_LOGS; i++) logs[i].delete();
+        for (int i = 0; i <= logs.length - KEEP_LOGS; i++) { logs[i].delete(); ExitWatch.digestOf(logs[i]).delete(); }   // and its digest (the notice's), if any
     }
 
     /** The last lines of the log over the surface, once a second: until the game's first frame, then only with the setting on (TouchControls.showLog), or after a crash */

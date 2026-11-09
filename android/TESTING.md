@@ -86,6 +86,8 @@ adb pull /sdcard/Android/data/dev.nxnative.android/files/logs/
 
 If the game crashed, also send `nxnative-logcat.txt` (it has the phone's own crash report, a `DEBUG` backtrace) or `adb logcat -d -b crash`.
 
+To see what went wrong without reading the whole log, run `python3 scripts/log_digest.py <log, folder of logs or zip>` (add `--logcat <file>` and `--exit <last-exit.txt>` when you have them): about 50-80 lines with the device and driver, the stage the run reached, one verdict in the words of the app's "The game stopped unexpectedly" notice, the crash, the `[RED]` lines grouped, the symptom entries they match and the frame rate. `--filter` prints the log itself without its routine lines (`dm/tools/log_noise.tsv`), each line with its number. Both shorten app folders and leave out key-like lines; the rules are in `dm/tools/log_rules.tsv`.
+
 ## What the log says at each stage
 
 Each line below starts with `[nxlaunch]` (the launcher) or `[dm]` (the host). The first stage whose line is missing is where the run stopped; the last lines before that say why.
