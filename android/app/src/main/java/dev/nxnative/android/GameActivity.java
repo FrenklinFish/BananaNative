@@ -849,6 +849,7 @@ public final class GameActivity extends Activity implements SurfaceHolder.Callba
         inputManager.registerInputDeviceListener(this, ui);
         for (int id : inputManager.getInputDeviceIds()) onInputDeviceAdded(id);
         Native.motionRotation(getDisplay().getRotation());
+        if (resumedNow && !paused) Native.motionStart();   // the screen was resumed before the game started (onResume then did nothing): the sensors start here
         audio = (AudioManager) getSystemService(Context.AUDIO_SERVICE);
         focus = new AudioFocusRequest.Builder(AudioManager.AUDIOFOCUS_GAIN)
                 .setAudioAttributes(new AudioAttributes.Builder().setUsage(AudioAttributes.USAGE_GAME).setContentType(AudioAttributes.CONTENT_TYPE_UNKNOWN).build())
@@ -921,8 +922,8 @@ public final class GameActivity extends Activity implements SurfaceHolder.Callba
     }
     @Override protected void onResume() {
         super.onResume();
+        resumedNow = true;   // also before the start: start() can come after the first onResume (the readiness check), and hostSetup() then starts the sensors
         if (!started) return;
-        resumedNow = true;
         Native.lifecycle(3);
         Native.motionRotation(getDisplay().getRotation());
         if (!paused) Native.motionStart();   // paused: the sensors stay off (they would wake the host at their rate for a frozen game); unpause starts them
