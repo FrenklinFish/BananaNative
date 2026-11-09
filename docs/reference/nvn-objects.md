@@ -377,6 +377,13 @@ Games read this count as a position in their own command memory and size their h
 - **Fix:** `write_texels()` calls `mtl_tex_write_region()` on 2D textures, which queues only the modified subregion and copies it directly into the image via `vkCmdCopyBufferToImage` in `vka_tex_prepare()`. In `storage_mode()`, large compressed textures (`> 16 MB`) use `ST_FILL` with region updates instead of `ST_TRACK`, avoiding page-fault storms on shared memory pools, while font glyph caches (e.g. BC4 at 128 KB) retain tracking so text renders properly. `nvnCommandBufferAddCommandMemory` also calls `dm_guest_write_prepare` before handing granted memory to the guest.
 - **Found on:** [Splatoon Raiders](../../dm/games/0400380020056000/README.md).
 
+### Band-granular re-uploads of a tracked texture
+
+- **Symptom:** (Android) a tracked block-linear texture of a few MB or more is deswizzled and copied whole whenever the CPU writes one small block, even one in a neighbouring allocation, so `texture prepare` grows with the texture rather than with the write.
+- **Cause:** the tracked re-upload in `vka_tex_prepare()` copied every level and layer whose storage range intersected the pages written since its last upload, and `nvn_dirty_protect()` write-protected the texture's whole storage, so a write into a shared block at either end (another texture, command memory) both faulted and re-uploaded everything.
+- **Fix:** `upload_bands_tracked` (`dm/gfx/vk_android/vka_tex.c`, `DM_VK_BANDS`, live, default 1) deswizzles and copies only the GOB bands (one row of block rows, one range of the storage) with a written page, and only the mip levels and layers that contain one, in runs through scratch memory; a band state that cannot be allocated, staged or deswizzled returns to the caller, which uploads the whole texture instead. `img_edges_take` / `img_edges_clean` hash the partial blocks at either end of the storage and skip the re-upload when the dirty pages are all in those edges and their bytes did not change (a neighbouring allocation's writes into a shared block). The 85 MB atlas this was found on is `ST_FILL` now (its updates go through the region copies of [`WriteTexels` subregion updates on the Vulkan replay](#writetexels-subregion-updates-on-the-vulkan-replay)), so this path serves the tracked textures that remain.
+- **Found on:** [Splatoon Raiders](../../dm/games/0400380020056000/README.md).
+
 ### Packaged texture data copied at `TextureInitialize`
 
 - **Cause:** a texture created with `TextureBuilderSetPackagedTextureData` gets that data copied into its storage by NVN at `TextureInitialize` (a compressible pool cannot be written by the CPU).

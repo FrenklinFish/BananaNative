@@ -1018,7 +1018,7 @@ static int upload_bands_tracked(vka_img *im, const tex_t *t, VkCommandBuffer cb,
             uint64_t off, len; sub_range(d, &im->L, lv, ly, &off, &len);
             if (!len || off + len <= lo || off >= hi) continue;
             uint32_t nb = band_bytes ? (by + band_rows - 1) / band_rows : 1;
-            if (bst_cap < nb) { free(bst); bst_cap = nb; if (!(bst = malloc(bst_cap))) { bst_cap = 0; return 1; } }
+            if (bst_cap < nb) { free(bst); bst_cap = nb; if (!(bst = malloc(bst_cap))) { bst_cap = 0; return 0; } }
             int any = 0;
             for (uint32_t k = 0; k < nb; k++) {
                 uint64_t bo = band_bytes ? (uint64_t)k * band_bytes : 0, bl = band_bytes ? (bo < len ? (len - bo < band_bytes ? len - bo : band_bytes) : 0) : len;
@@ -1034,14 +1034,14 @@ static int upload_bands_tracked(vka_img *im, const tex_t *t, VkCommandBuffer cb,
                 if (!band_bytes) k1 = nb;
                 uint32_t y0 = k * band_rows, y1 = k1 * band_rows < by ? k1 * band_rows : by;
                 size_t sz = (size_t)(y1 - y0) * pitch;
-                vka_span s; if (!vka_scratch(sz, 16, &s)) { free(bst); return 1; }
+                vka_span s; if (!vka_scratch(sz, 16, &s)) { free(bst); return 0; }
                 if (nvn_deswizzle_rows(d, lv, ly, t->mem, s.ptr - (size_t)y0 * pitch, pitch, y0, y1)) {
-                    VRED_ONCE("texture serial %llu format %#x target %d: no CPU deswizzle", (unsigned long long)t->serial, d->format, d->target); free(bst); return 1; }
+                    VRED_ONCE("texture serial %llu format %#x target %d: no CPU deswizzle", (unsigned long long)t->serial, d->format, d->target); free(bst); return 0; }
                 uint32_t py0 = y0 * f->bh, py1 = y1 * f->bh > h ? h : y1 * f->bh;
                 VkBufferImageCopy cp = {s.off, bx * f->bw, (y1 - y0) * f->bh, {im->aspect, lv, ly, 1}, {0, (int32_t)py0, 0}, {w, py1 - py0, 1}};
                 vk.vkCmdCopyBufferToImage(cb, s.buf, im->img, VK_IMAGE_LAYOUT_GENERAL, 1, &cp);
                 up += sz;
-                if (!(cb = vka_up_point(cb))) { free(bst); return 1; }
+                if (!(cb = vka_up_point(cb))) { free(bst); return 0; }
             }
         }
     }
@@ -1844,15 +1844,17 @@ unsigned mtl_cpu_tex_count(void) {   // live images whose content follows their 
 void mtl_pkg_stats(uint64_t *uploads, uint64_t *reuploads) { if (uploads) *uploads = g_st_up[ST_TRACK] + g_st_up[ST_FILL] + g_st_up[ST_SPARSE]; if (reuploads) *reuploads = g_reup; }
 // The CPU wrote the texture's storage: uploaded at its first use, or again at the next submission unless the GPU has written it since (then the GPU's content wins)
 static uint64_t *g_redo; static int g_nredo, g_redocap;
+static void redo_add_locked(vka_img *im) {   // (g_tmu held) its guest storage holds a write the next prepare must read again
+    if (!im || im->gpu_owned || im->cpu_dirty) return;
+    im->cpu_dirty = 1;
+    if (g_nredo == g_redocap) { g_redocap = g_redocap ? g_redocap * 2 : 64; g_redo = realloc(g_redo, (size_t)g_redocap * sizeof *g_redo); }
+    g_redo[g_nredo++] = im->serial;
+}
 void mtl_tex_cpu_written(const tex_t *t) {
     pthread_mutex_lock(&g_tmu);
     smap_ent *e = map_get(t->serial);
     if (!e) cpuw_take(t->serial, 1);
-    else if (e->im && !e->im->gpu_owned && !e->im->cpu_dirty) {
-        e->im->cpu_dirty = 1;
-        if (g_nredo == g_redocap) { g_redocap = g_redocap ? g_redocap * 2 : 64; g_redo = realloc(g_redo, (size_t)g_redocap * sizeof *g_redo); }
-        g_redo[g_nredo++] = t->serial;
-    }
+    else redo_add_locked(e->im);
     pthread_mutex_unlock(&g_tmu);
 }
 
@@ -1863,7 +1865,14 @@ typedef struct {
     uint32_t w, h;
     uint8_t *data;
     size_t size;
+    int copied;   // the drain recorded its copy (two copies over the same texels need a barrier between them)
 } tex_region_write_t;
+// Whether a region copy already recorded in this prepare writes texels this one also writes: the copies must then be separated by a barrier, since a write-after-write hazard
+// between two transfer commands has no order of its own (a tile baked twice in one frame must keep the game's order)
+static int reg_write_overlap(const tex_region_write_t *a, const tex_region_write_t *b) {
+    if (!a->copied || a->im != b->im || a->level != b->level || a->layer != b->layer) return 0;
+    return a->x < b->x + (int32_t)b->w && b->x < a->x + (int32_t)a->w && a->y < b->y + (int32_t)b->h && b->y < a->y + (int32_t)a->h;
+}
 static tex_region_write_t *g_reg_writes;
 static int g_nreg_writes, g_reg_writes_cap;
 
@@ -1896,11 +1905,7 @@ void mtl_tex_write_region(const tex_t *t, unsigned level, unsigned layer0, const
     for (int z = 0; z < nz; z++) {
         uint8_t *data = malloc(slice_bytes);
         if (!data) {
-            if (!im->cpu_dirty) {
-                im->cpu_dirty = 1;
-                if (g_nredo == g_redocap) { g_redocap = g_redocap ? g_redocap * 2 : 64; g_redo = realloc(g_redo, (size_t)g_redocap * sizeof *g_redo); }
-                g_redo[g_nredo++] = t->serial;
-            }
+            redo_add_locked(im);   // the storage holds the write; the next prepare re-reads it
             break;
         }
         for (uint32_t y = 0; y < by; y++) {
@@ -2441,6 +2446,7 @@ void vka_tex_prepare(VkCommandBuffer cb) {
     nvn_pool_use(1);   // the re-uploads below read guest storage: no pool is finalized (and unmapped) under them. Taken before g_tmu, as write_tex does
     pthread_mutex_lock(&g_tmu);
     vka_tex_prune_locked();   // (the limit measured again every 60 frames; nothing to do under it)
+    int n_up = 0;
     for (int i = 0; i < g_nredo; i++) {   // CPU writes to textures that already have an image (WriteTexels): from now on they follow their storage
         smap_ent *e = map_get(g_redo[i]); vka_img *im = e ? e->im : NULL;
         if (!im || !im->cpu_dirty) continue;
@@ -2448,19 +2454,21 @@ void vka_tex_prepare(VkCommandBuffer cb) {
         if (im->gpu_owned || img_pool_dead(im)) continue;
         tex_t t = {0}; t.serial = im->serial; t.d = im->d; t.L = im->L; t.mem = (uint8_t *)im->mem;
         nvn_tex_layout(&t.d, &t.L);
-        if (im->vtrack) { sparse_refresh(im, cb); g_reup++; continue; }
+        if (im->vtrack) { sparse_refresh(im, cb); g_reup++; n_up++; continue; }
         if (!(compressed(&im->f) && im->L.size > (16u << 20)) && !im->track && (im->span = nvn_dirty_span(t.mem, t.L.size))) im->track = 1;
         if (im->track) upload_tracked(im, &t, cb); else upload_fill(im, &t, cb);
-        g_reup++;
+        g_reup++; n_up++;
     }
     g_nredo = 0;
     int any_rw = 0;
+    if (n_up && g_nreg_writes) vka_barrier(cb);   // the whole-image uploads above before the region copies below, which may write the same texels
     for (int i = 0; i < g_nreg_writes; i++) {
         tex_region_write_t *w = &g_reg_writes[i];
         vka_img *im = w->im;
         if (!im->gpu_owned && !img_pool_dead(im)) {
             vka_span s;
             if (vka_scratch(w->size, 16, &s)) {
+                for (int j = 0; j < i; j++) if (reg_write_overlap(&g_reg_writes[j], w)) { vka_barrier(cb); break; }
                 memcpy(s.ptr, w->data, w->size);
                 VkBufferImageCopy c = {
                     .bufferOffset = s.off,
@@ -2476,12 +2484,13 @@ void vka_tex_prepare(VkCommandBuffer cb) {
                     .imageExtent = {w->w, w->h, 1},
                 };
                 vk.vkCmdCopyBufferToImage(cb, s.buf, im->img, VK_IMAGE_LAYOUT_GENERAL, 1, &c);
+                w->copied = 1;
                 any_rw = 1;
                 g_reup++;
                 static int n_rw_log;
                 if (n_rw_log++ < 16) VLOG("region write serial %llu: %ux%u at [%d,%d] level %u layer %u (%zu bytes copied to image)",
                                          (unsigned long long)im->serial, w->w, w->h, w->x, w->y, w->level, w->layer, w->size);
-            }
+            } else redo_add_locked(im);   // no staging: the storage holds the write, read it again at the next prepare
         }
         free(w->data);
         unref_locked(im);
