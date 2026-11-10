@@ -172,6 +172,15 @@ def header(g):
     # hle_fpslock.c sead_rate; pack_android.py build_rows keys it), and the Android launcher (build.gradle decoupleOf: a frame limit with presentation on the host's tick); a build's own place is an OBS row of its patches.py
     for r in g.values('fps_decouple') if g.get('fps_decouple', '') else []:
         if r != ['sead']: sys.exit(f"{g.id}: fps_decouple takes sead (the rewriter finds the controller; a build's own place is an OBS row of the profile's patches.py): {r}")
+    # fps_steps: the game's framework runs a whole number of fixed steps each frame and presents at that many vsyncs; the frame rate cap holds 60, 30 or 20 through it (hle_fpslock.c
+    # steps_tick). One row per main build: <main build ID> <global offset> <member offsets to the framework, comma-separated, or -> <mode field> <step count field>: the framework is at
+    # [main + global], then [that + each member]
+    fst = []
+    for r in g.values('fps_steps') if g.get('fps_steps', '') else []:
+        offs = r[2].split(',') if len(r) == 5 and r[2] != '-' else []
+        if len(r) != 5 or not re.fullmatch(r'[0-9a-f]{32}', r[0]) or not all(re.fullmatch(r'0x[0-9a-fA-F]+', x) for x in [r[1], r[3], r[4], *offs]) or len(offs) > 3:
+            sys.exit(f"{g.id}: fps_steps takes <main build ID (32 hex)> <global offset> <member offsets, comma-separated (at most 3), or -> <mode field> <step count field>: {r}")
+        fst.append('{' + q(r[0]) + f', {r[1]}, {r[3]}, {r[4]}, {len(offs)}, ' + '{' + (', '.join(offs) or '0') + '}}')
     drs = []   # the dynamic resolution controller's places, one row per main build: <main build ID> <params probe> <pick> <budget load> <preset flag> (probe.c drs_install)
     for r in g.values('drs_ctl') if g.get('drs_ctl', '') else []:
         if len(r) != 5 or not re.fullmatch(r'[0-9a-f]{32}', r[0]) or not all(re.fullmatch(r'0x[0-9a-fA-F]+', x) for x in r[1:]):
@@ -228,8 +237,7 @@ def header(g):
          f'#define DM_GAME_SYS_RESOURCE {int(g.get("sys_resource", "0x2000000"), 0):#x}ull',   # the NPDM's system resource size (hle_svc.c GetInfo TotalSystemResourceSize; 0 = no virtual address memory)
          f'#define DM_GAME_ARGS {q(g.get("game_args", ""))}',   # game arguments when the command line gives none (main.c; Octopath Traveler 0: Unreal's -SwitchVirtualAddressSpaceSize=)
          f'#define DM_GAME_ENV {q(g.get("game_env", ""))}',   # KEY=VALUE pairs getenv answers (hle_os.c; Absolum: .NET's DOTNET_GCRegionRange)
-         f'#define DM_GAME_FASTBOOT_ENV {q(g.get("fastboot_env", ""))}',
-         f'#define DM_GAME_HOST_ENV {q(g.get("host_env", ""))}',   # KEY=VALUE host switch defaults for this game, set at start unless the environment or env.txt sets them (main.c host_env_apply)   # KEY=VALUE host switches DM_FASTBOOT=1 sets for a test run (main.c fastboot_apply; the environment and env.txt win)
+         f'#define DM_GAME_FASTBOOT_ENV {q(g.get("fastboot_env", ""))}',   # KEY=VALUE host switches DM_FASTBOOT=1 sets for a test run (main.c fastboot_apply; the environment and env.txt win)
          f'#define DM_GAME_MEM_MAP_LIMIT {int(mml == "on")}',
          f'#define DM_GAME_STDALLOC_CAP {int(g.get("stdalloc_cap", "0"), 0):#x}ull',   # StandardAllocator's address space with virtual address memory (hle_svc.c); 0 = what the alias region has room for
          f'#define DM_GAME_DISPLAY_VERSIONS {vers}',
@@ -261,6 +269,7 @@ def header(g):
          f'#define DM_GAME_WINDOW_FN {{{", ".join(wfn) or "{\"\", 0, 0, 0, 0}"}}}', f'#define DM_GAME_NWINDOW_FN {len(wfn)}',
          '#define DM_GAME_MESH_PREPASS_CUT {' + (', '.join(mpc) or '{0, 0}') + '}', f'#define DM_GAME_NMESH_PREPASS_CUT {len(mpc)}',
 
+         '#define DM_GAME_FPS_STEPS {' + (', '.join(fst) or '{"", 0, 0, 0, 0, {0}}') + '}', f'#define DM_GAME_NFPS_STEPS {len(fst)}',
          f'#define DM_GAME_DRS_CTL {{{", ".join(drs) or "{\"\", 0, 0, 0, 0}"}}}', f'#define DM_GAME_NDRS_CTL {len(drs)}',
          '#define DM_GAME_RES_LEVELS {' + (', '.join(rlv) or '{"", 0, 0, 0, {{0, 0}}}') + '}', f'#define DM_GAME_NRES_LEVELS {len(rlv)}',
          *([f'#define DM_GAME_NVN_API_MAJOR {api.split(".")[0]}', f'#define DM_GAME_NVN_API_MINOR {api.split(".")[1]}'] if g.get('device_api', '') else []),   # without the key: by the SDK version (hle_nvn.c nvn_api)

@@ -265,13 +265,6 @@ A decoder hands out as many outputs as it has slots, and while every slot is tak
 - **Found on:** [Mario Kart World](../../dm/games/0400C3F00006E000/README.md) 1.8.0, a user session on the phone (2026-11-03): the abort at a teleport on the map.
 - **Open:** the teleport itself not yet replayed with the fix (the scripted runs do not reach it); HDR reads and alias pools.
 
-### Slow AV1 cutscenes on Android
-
-- **Symptom:** a 1440p movie plays at about 20 FPS on a 30 FPS title while the GPU is busy for only a few milliseconds per frame. Long frames report thousands of write faults and waits on the movie video thread.
-- **Cause:** Android decoded AV1 with dav1d even on devices with hardware AV1. The replay also write-protected decoded texture pages and scanned their dirty state in addition to using the decoder's picture generation. Each new 2560×1440 RGBA picture could fault on all 3,600 pages.
-- **Fix:** the platform MediaCodec decoder for AV1 on its own decode thread (v0.2.7), dav1d for other streams or with `DM_AV1_DAV1D=1`. The native texture conversion uses ARM SIMD with the same colour coefficients and rounding (`hle_movie.c` `md_rgba`). Vulkan refreshes decoder textures from their published picture generation without write-protecting them (`vka_tex.c`).
-- **Found on:** [Fire Emblem Fortune's Weave](../../dm/games/04007EF01F8AE000/README.md#saraminian-procession-cutscene).
-
 ### A movie ended by the host aborts the player
 
 - **Symptom:** (Android, v0.2.0 candidate `android-rel-016`) Donkey Kong Bananza aborts when its second guide movie of a session starts: `[codec] movie bypass: signalling end-of-stream on decoder 1 (seq 2) at submit 4`, then `[codec] VP9 decoder 1: end of stream after 5 pictures` twice, then `game called nn::diag abort: Result 0, call site main+0xe1ae94` and `FATAL game aborted`, `CRASH sig=6`. The first movie of the session plays.

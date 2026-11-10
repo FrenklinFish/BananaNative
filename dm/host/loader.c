@@ -285,6 +285,7 @@ static void install_fps_state(module_t *m) {
 }
 // The settings in the state page, written when the game starts (main.c, after host loading): on iOS the loading runs at app launch, before the launcher has set DM_FPS_TARGET and
 // DM_RENDER_SCALE (Launcher.swift), and nothing reads the page before the game runs
+__attribute__((weak)) void dm_fps_step_fold(void) {}   // hle_fpslock.c; tests that link the loader alone have no limiter
 void dm_fps_state_apply(void) {
     if (!dm_fps_state) return;
     const char *e = getenv("DM_FPS_TARGET"); int t = e ? atoi(e) : DM_GAME_FPS_TARGET;
@@ -297,6 +298,8 @@ void dm_fps_state_apply(void) {
     memcpy(dm_fps_state + 0x10, &sc, sizeof sc);
     char cap[32]; snprintf(cap, sizeof cap, ", capped at %d fps", t);
     LOG("%s: frame step %s%s (%s)", g_fps_mod, !t ? "as the game sets it" : "in whole vsyncs decided by the host", t ? cap : "", e ? "DM_FPS_TARGET" : "game profile fps_target");
+    // The frame limit (DM_FPS_LIMIT, on Android the profile's fps_limit) caps the step too (hle_fpslock.c dm_fps_step_fold)
+    dm_fps_step_fold();
 }
 static void install_key_page(module_t *m) {
     if (m->key_page_off + m->key_page_size > m->size) die("%s: key page out of range", m->name);
@@ -796,31 +799,9 @@ static void map_image(module_t *m, const char *dir) {
 
 static char g_module_dir[1024];   // the folder the modules were loaded from (dm_module_dir)
 const char *dm_module_dir(void) { return g_module_dir; }
-static char g_main_dir[1024];   // the folder main was loaded from: the pack's, or its variant's (DM_PATCH_VARIANT)
-const char *dm_main_dir(void) { return *g_main_dir ? g_main_dir : g_module_dir; }
-
-// DM_PATCH_VARIANT=<name> (the launcher's Game settings › Aspect ratio: 43 for a native 4:3 mod): a module the pack has under <dir>/<name>/ (pack_android.py
-// rewrite_variants, patch_nso.py VARIANT_CUTS) is loaded from there with its tables; the others, and every module without the switch, from dir
-static const char *variant_dir(const char *dir, const char *name, char *buf, size_t n) {
-    const char *v = getenv("DM_PATCH_VARIANT");
-    if (!v || !*v || strchr(v, '/') || strchr(v, '.')) return dir;
-    char p[1100]; snprintf(p, sizeof p, "%s/%s", dir, v);
-    if (access(p, R_OK)) { static int told; if (!told++) LOG("[RED] DM_PATCH_VARIANT=%s: the pack has no %s/ folder (Prepare again makes it): the game runs without the variant", v, v); return dir; }
-    snprintf(p, sizeof p, "%s/%s/%s.patched.bin", dir, v, name);
-    if (access(p, R_OK)) return dir;   // a module the variant leaves as it is
-    snprintf(buf, n, "%s/%s", dir, v);
-    LOG("%s: variant %s (%s)", name, v, buf);
-    return buf;
-}
 
 void load_modules(const char *dir, const char **names, int n) {
-    static char vdirs[64][1024]; const char *mdir[64];
-    if (n > 64) die("%d modules: the loader takes 64", n);
     strlcpy(g_module_dir, dir, sizeof g_module_dir);
-    for (int i = 0; i < n; i++) {
-        mdir[i] = variant_dir(dir, names[i], vdirs[i], sizeof vdirs[i]);
-        if (!strcmp(names[i], "main")) strlcpy(g_main_dir, mdir[i], sizeof g_main_dir);   // main's own folder (a variant's): the cheat engine reads main.changed.tsv there
-    }
     // Map everything and parse the symbol tables first, then relocate all at once (cross-module symbols must all be in place first)
     // DM_BOOTPROF: breakdown of ① host loading (milliseconds), to set the upper bound for ③ pre-relocation / mmap
     uint64_t t0 = now_ns(), tm = 0, tp = 0, tg = 0, tr = 0, t;
@@ -829,15 +810,15 @@ void load_modules(const char *dir, const char **names, int n) {
     for (int i = 0; i < n; i++) {
         module_t *m = &g_mod[i];
         strlcpy(m->name, names[i], sizeof m->name);
-        read_layout(m, mdir[i]);
+        read_layout(m, dir);
     }
     plat_slots_init();
     for (int i = 0; i < n; i++) {
         module_t *m = &g_mod[i];
-        t = now_ns(); map_image(m, mdir[i]); tm += now_ns() - t;   // On return the code area is already read-only+execute; from here on the loader only writes data
+        t = now_ns(); map_image(m, dir); tm += now_ns() - t;   // On return the code area is already read-only+execute; from here on the loader only writes data
         if (!i) tsd_check();
         t = now_ns(); parse_dynamic(m); tp += now_ns() - t;
-        t = now_ns(); register_gates(m, mdir[i]); tg += now_ns() - t;
+        t = now_ns(); register_gates(m, dir); tg += now_ns() - t;
         LOG("%s: base %p size %#zx", names[i], m->base, m->size);
         m->loaded = 1; g_loaded[g_nloaded++] = m; g_nmod++;
     }

@@ -6,6 +6,7 @@
 // one object and a present through another meet. Every image stays in VK_IMAGE_LAYOUT_GENERAL after its first use: no layout tracking until the draw path needs it
 #if defined(__ANDROID__)
 #include "vka.h"
+#include "vka_poolslot.h"
 #include "../nvn/nvn_mtl.h"
 #include "../tex/nvn_deswizzle.h"
 #include "../nvn/dmsh_abi_vk.h"
@@ -26,6 +27,8 @@
 
 __attribute__((weak)) int dm_codec_is_video_mem(const void *mem, uint64_t size, uint32_t *stride) { (void)mem; (void)size; (void)stride; return 0; }
 __attribute__((weak)) uint64_t dm_codec_video_gen(const void *mem) { (void)mem; return 0; }
+__attribute__((weak)) uint64_t dm_codec_video_epoch(void) { return 1; }    // (no codec: no video pool, ever)
+__attribute__((weak)) uint64_t dm_codec_video_writes(void) { return 0; }
 __attribute__((weak)) int dm_movie_playing(void) { return 0; }
 uint64_t vka_frame(void);
 
@@ -168,6 +171,17 @@ typedef struct view_ent { struct view_ent *next; VkImageView v; VkFormat f; VkIm
 typedef struct { uint64_t serial; vka_img *im; } smap_ent;   // serial 0 = empty, im NULL with a serial = a texture that has no image (format refused)
 static smap_ent *g_map; static size_t g_mapcap, g_mapn;
 static vka_img **g_live; static int g_nlive, g_livecap; static uint64_t g_live_gen;   // g_live_gen: raised when an image joins or leaves g_live (vka_tex_prepare's sorted list)
+// Live images (2026-11-10): the list (g_live), each image's place in it and chains by storage address (vka_livemap.h). A new texture looked for an image of its storage and
+// shape (vka_tex_get, same_shape) and for a GPU-written image over its storage (gpu_image_over) by walking every live image, and an image that went was looked for in the list
+// the same way: Mario Kart World's race starts make 750-1,100 textures in one frame beside 2,600 live images, 2-6 million image reads, in frames where the replay thread
+// spent 160-217 ms of its own CPU time (phone, Adreno 840 at a heat-capped 2.2 GHz; the walks' share was not measured: the [longframe] line's "new images" says it now)
+#define VKA_LIVE_T vka_img
+#include "vka_livemap.h"
+static vkl_index g_lvx;   // (under g_tmu)
+static void live_add(vka_img *im) { if (vkl_add(&g_live, &g_nlive, &g_livecap, &g_lvx, im)) g_live_gen++; }   // caller holds g_tmu
+static void live_del(vka_img *im) { if (vkl_del(g_live, &g_nlive, &g_lvx, im)) g_live_gen++; }                // caller holds g_tmu; nothing when im is not live
+static vka_img *live_first(const uint8_t *mem, int *k) { return vkl_first(g_live, g_nlive, &g_lvx, mem, k); }   // the live images whose storage starts at mem: the first, then live_next
+static vka_img *live_next(const vka_img *im, const uint8_t *mem, int *k) { return vkl_next(g_live, g_nlive, &g_lvx, im, mem, k); }
 static uint64_t *g_cpuw; static size_t g_cpuwcap, g_cpuwn;   // serials the CPU wrote before their image existed (a set, open addressing)
 static pthread_mutex_t g_tmu = PTHREAD_MUTEX_INITIALIZER;
 static uint64_t g_img_bytes;
@@ -265,7 +279,7 @@ static void unref_locked(vka_img *im) {
     atomic_fetch_add_explicit(&g_tgen, 1, memory_order_release);
     if (--im->refs) return;
     map_del_im(im);
-    for (int i = 0; i < g_nlive; i++) if (g_live[i] == im) { g_live[i] = g_live[--g_nlive]; g_live_gen++; break; }
+    live_del(im);
     for (int i = 0; i < g_nbig; i++) if (g_big[i] == im) { g_big[i] = g_big[--g_nbig]; break; }
     g_img_bytes -= im->bytes;
     if (im->soft) { g_soft_n--; g_soft_bytes -= im->soft_saved; }
@@ -653,6 +667,10 @@ static uint64_t g_st_up[4], g_reup;
 static _Atomic uint64_t g_up_ns, g_up_bytes;
 uint64_t mtl_upload_ns_take(void) { return atomic_exchange(&g_up_ns, 0); }
 uint64_t mtl_upload_bytes(void) { return atomic_load(&g_up_bytes); }
+// New images (vka_tex_get: the search for one to share, the cache's prune, the image, its memory and its first content, the uploads above included), cumulative: the
+// [longframe] line's "new images" (vka_perf.c mtl_frame_extra), which tells a frame of many first texture uses from one of slow uploads
+static _Atomic uint64_t g_new_ns, g_new_n;
+void vka_tex_new_stats(uint64_t *n, uint64_t *ns) { *n = atomic_load_explicit(&g_new_n, memory_order_relaxed); *ns = atomic_load_explicit(&g_new_ns, memory_order_relaxed); }
 // mem_any over guest storage: pages the guest has not mapped are skipped (inaccessible; they read as zeros: unmapped_content)
 static int mem_any_mapped(const uint8_t *c, const tex_t *t) {
     if (c != t->mem || !dm_guest_unmapped((uintptr_t)c, t->L.size)) return mem_any(c, t->L.size);
@@ -679,7 +697,7 @@ static int mem_any_mapped(const uint8_t *c, const tex_t *t) {
 static _Thread_local int g_first_sampled;
 static int img_pool_dead(vka_img *im);
 static int gpu_image_over(const uint8_t *mem) {   // caller holds g_tmu; images of finalized pools do not count (a new pool may lie at the same address)
-    for (int i = 0; i < g_nlive; i++) if (g_live[i]->mem == mem && g_live[i]->gpu_owned && !img_pool_dead(g_live[i])) return 1;
+    int k; for (vka_img *im = mem ? live_first(mem, &k) : NULL; im; im = live_next(im, mem, &k)) if (im->mem == mem && im->gpu_owned && !img_pool_dead(im)) return 1;
     return 0;
 }
 static int nvn2_sampled_content(const tex_t *t, const vka_fmt *f, unsigned pf, int sampled) {
@@ -914,22 +932,6 @@ static uint8_t *gw_content(const uint8_t *mem, uint64_t n, uint64_t *seen) {
     *seen = cap;
     return c;
 }
-// The bytes [addr, addr + n) as the GPU will read them at this point of the recording: the inline uniform updates, copies and fills recorded before it and not yet done
-// on the GPU applied over memory (gw_content). 0 = no pending write over the range (memory is right). The binding walker reads pointers, texture and sampler IDs out of
-// uniform buffers with it (vka_draw.c cpu_read): a game that writes them with nvnCommandBufferUpdateUniformBuffer earlier in the same submission had them read stale
-// (Fire Emblem Fortune's Weave's cloth: a storage buffer address in a uniform buffer, its bones read from last frame's layout, canopies stretched across the screen)
-int vka_tex_gw_read(uint64_t addr, void *out, size_t n, int *changed) {
-    pthread_mutex_lock(&g_tmu);
-    int any = 0; uint64_t done = vka_done();
-    for (int i = 0; i < g_ngw && !any; i++) { const gw_t *w = &g_gw[i]; if ((!w->fence || w->fence > done) && w->kind != GW_OPAQUE && w->lo < addr + n && w->hi > addr) any = 1; }
-    uint8_t *c = NULL; uint64_t seen;
-    if (any) c = gw_content((const uint8_t *)(uintptr_t)addr, n, &seen);
-    pthread_mutex_unlock(&g_tmu);
-    if (!c) return 0;
-    if (changed) *changed = memcmp(c, (const void *)(uintptr_t)addr, n) != 0;
-    memcpy(out, c, n); free(c);
-    return 1;
-}
 // Storage the guest has not mapped (all or part of it): its content as zeros, in a copy (NULL: all mapped). A memory pool is placed memory only once the GPU gets an address
 // in it (vka_mem.c mtl_pool_need); before, placing mapped the whole pool read-write, and Mario Kart World 1.8.0 uploads a texture of a CPU_NO_ACCESS pool whose pages its
 // SDK has not mapped (SIGSEGV in the deswizzle at 0x4074003000, phone m22)
@@ -984,10 +986,7 @@ static int img_edges_clean(vka_img *im) {
     return 1;
 }
 static void upload_tracked(vka_img *im, const tex_t *t, VkCommandBuffer cb) {   // stamp, protect, then read (nvn_mtl.m pkg_upload): a write during the copy is seen at the next check
-    im->stamp = nvn_dirty_now();
-    // The decoder publishes a generation after writing a complete picture. Reprotecting its storage
-    // here faults on every page of the next picture and duplicates the generation-based uploads.
-    if (!im->is_video) nvn_dirty_protect(t->mem, t->L.size);
+    im->stamp = nvn_dirty_now(); nvn_dirty_protect(t->mem, t->L.size);
     img_edges_take(im);
     if (vka_nan_on()) im->hash = mem_hash(t->mem, t->L.size);
     uint8_t *c = im->vpool ? NULL : gw_content(t->mem, t->L.size, &im->gw_seen);   // (a sparse pool's storage is read through its page table: upload_)
@@ -1624,8 +1623,9 @@ vka_img *vka_tex_get(const tex_t *t, VkCommandBuffer cb) {
     if (e) {
         vka_img *im = e->im;
         if (im) { im->last_frame = vka_frame(); im->last_fence = vka_fence_last(); }
-        if (im && !im->is_video && im->mem) {
-            uint32_t vs = 0;
+        uint64_t vep = im && !im->is_video && im->mem ? dm_codec_video_epoch() : 0;
+        if (vep && im->vep != vep) {   // (checked again only after a video pool came or went: "Live images" above)
+            uint32_t vs = 0; im->vep = vep;
             if (dm_codec_is_video_mem(im->mem, im->L.size, &vs)) {
                 im->is_video = 1;
                 im->d.flags |= NVN_TEXTURE_FLAGS_LINEAR;
@@ -1657,8 +1657,8 @@ vka_img *vka_tex_get(const tex_t *t, VkCommandBuffer cb) {
         // draws it again, and a large depth buffer is not made twice), but not one whose content came from the storage: the new pool's storage is the new texture's content,
         // and its pages were never protected for that image, so its tracking would not see the CPU's writes there and it kept the old pool's texels (tiles of the scene
         // before; docs/reference/nvn-objects.md "An image of a finalized pool taken over with its old content")
-        for (int i = 0; i < g_nlive && !im; i++) if (t->mem && same_shape(g_live[i], t, &f, 1) && !(g_live[i]->base && sparse_gpu(t, &f)) && (!img_pool_dead(g_live[i]) || g_live[i]->gpu_owned)) {
-            im = g_live[i]; im->refs++;
+        int lk; for (vka_img *o = t->mem ? live_first(t->mem, &lk) : NULL; o && !im; o = live_next(o, t->mem, &lk)) if (same_shape(o, t, &f, 1) && !(o->base && sparse_gpu(t, &f)) && (!img_pool_dead(o) || o->gpu_owned)) {
+            im = o; im->refs++;
             int revived = im->pdead;
             if (revived) {
                 im->pdead = 0; im->track = (im->mode == ST_TRACK);
@@ -1669,7 +1669,9 @@ vka_img *vka_tex_get(const tex_t *t, VkCommandBuffer cb) {
         uint32_t vmin = 0, base = sparse_sampled(t, &f) ? sparse_base(t->pool, t->mem, &t->d, &t->L, &vmin) : 0;
         int mode = 0;
         int soft = 0;
+        uint64_t t_new = 0;
         if (!im) {
+            t_new = now_ns();
             vka_tex_prune_locked();
             mode = first_mode(t, &f, cpuw_take(t->serial, 0));
             soft = !base && soft_want(t, &f, mode);
@@ -1680,8 +1682,7 @@ vka_img *vka_tex_get(const tex_t *t, VkCommandBuffer cb) {
         }
         if (im && !im->inited) {
             im->vmin = vmin;
-            if (g_nlive == g_livecap) { g_livecap = g_livecap ? g_livecap * 2 : 256; g_live = realloc(g_live, (size_t)g_livecap * sizeof *g_live); }
-            g_live[g_nlive++] = im; g_live_gen++;
+            live_add(im);
             big_note(im, t);
             // Its first content through the upload batch when cb is the replay's (vka_dev.c "Upload batches"): staging that retires on the batch's own completion
             VkCommandBuffer ucb = !ds_here(im, cb) && cb && cb == vka_rp_cb() && vka_up_on() ? vka_up_begin() : VK_NULL_HANDLE;
@@ -1689,6 +1690,7 @@ vka_img *vka_tex_get(const tex_t *t, VkCommandBuffer cb) {
             if (ucb) { vka_up_point(vka_up_cur(ucb)); vka_up_end(); }   // (an upload of many pieces, upload_mt, checks the batch budget only here)
             throttle = ucb != VK_NULL_HANDLE;
         }
+        if (t_new) { atomic_fetch_add_explicit(&g_new_ns, now_ns() - t_new, memory_order_relaxed); atomic_fetch_add_explicit(&g_new_n, 1, memory_order_relaxed); }
     }
     if (im) { im->last_frame = vka_frame(); im->last_fence = vka_fence_last(); }
     map_put(t->serial, im);
@@ -2442,7 +2444,7 @@ static int treg_dead(int id, const treg_ent *e) {
     if (dead) { static _Atomic int n; if (atomic_fetch_add(&n, 1) < 8) VLOG("texture ID %d (serial %llu, storage %p): its pool %p was finalized after the registration: null view", id, (unsigned long long)e->t.serial, (void *)e->t.mem, (const void *)e->t.pool); }
     return dead;
 }
-static void write_tex(int id, VkCommandBuffer cb, VkWriteDescriptorSet *w, VkDescriptorImageInfo *ii) {   // caller holds g_tmu; it is let go while the image is made
+static void write_tex(int id, VkCommandBuffer cb, VkWriteDescriptorSet *w, VkDescriptorImageInfo *ii, uint64_t *serial) {   // caller holds g_tmu; it is let go while the image is made. serial: the image's (0: the null view)
     treg_ent ent = g_treg[id], *e = &ent;
     if (e->img && VKA_ENV("DM_VK_IMG_UPGRADE", 1)) e->t.d.flags |= NVN_TEXTURE_FLAGS_IMAGE;   // an image registration is image intent (nvn_mtl.m image_prepare), with or without the texture's IMAGE flag
     // DM_VK_EAGER_TEX=1: the slot's image is made here (and uploaded) when it is not made yet. A texture a shader reads only through the pool (a bindless handle from a
@@ -2475,6 +2477,7 @@ static void write_tex(int id, VkCommandBuffer cb, VkWriteDescriptorSet *w, VkDes
     if (im && e->img) { VkFormat need = img_view_learn(e, im); if (need) { pthread_mutex_lock(&g_tmu); img_storage_upgrade(im, cb, need); pthread_mutex_unlock(&g_tmu); } }
     VkImageView view = (im && !treg_dead(id, e)) ? view_of(e, im, -1, 0, VK_FORMAT_UNDEFINED) : VK_NULL_HANDLE;
     if (!view) view = g_null_view;
+    *serial = view != g_null_view && im ? im->serial : 0;
     pthread_mutex_lock(&g_tmu);
     if (g_pfb_st && !e->img) {   // (whether the slot holds the null view: a pool read of it asks for its image, pfb_hit)
         if (view == g_null_view) g_pfb_st[id] |= PFB_NULL; else g_pfb_st[id] &= (uint8_t)~PFB_NULL;
@@ -2487,6 +2490,29 @@ static void write_tex(int id, VkCommandBuffer cb, VkWriteDescriptorSet *w, VkDes
                                 .descriptorType = e->img ? VK_DESCRIPTOR_TYPE_STORAGE_IMAGE : VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, .pImageInfo = ii};
 }
 
+// ---------- What each slot of the pool tables holds ----------
+// The pool tables (set 1: the sampled table, binding 0, and the image table, binding 2) are one update-after-bind set that every command buffer in flight reads.
+// UPDATE_UNUSED_WHILE_PENDING lets a slot be written while command buffers are pending only when none of them uses it; a shader that reads texture ID i through the pool
+// (a bindless handle from memory: GPU-driven materials) uses slot i, and the host cannot know which IDs a pending part reads. Until 2026-11-10 every direct binding of a
+// texture (id_view, at each draw or dispatch that named it) wrote its slot with the view in that binding's shape and class: a compute pass that binds a texture as a
+// storage image in another format, or a shader that samples it as another type, wrote another view into the slot than a draw before it, and back again at the next
+// binding of the first kind, while the parts recorded before were already on the GPU reading that slot. With GPU waits on, Mario Kart World 1.8.0's frames alternate
+// between queue 1's render parts and queue 6's compute parts up to six times, each handed to the queue as soon as it is recorded (the GPU idles, so it runs each part
+// while the next one, of the other queue, is recorded and rewrites the slots the running one reads). Now a slot holds one view: the texture's own (its registration's
+// type, format and range: what write_tex writes at a submission's start), written only when it changes (a first image, an image made again); a binding's own view goes
+// only into that draw's descriptors. g_sv: the view each slot was last written with and its image's serial (under g_tmu; a view handle may be reused once its image is
+// gone, a serial never is). DM_VK_POOL_SLOT_BIND=1 (live) writes the binding's view as before
+static vkps g_sv[3];   // bindings 0 (sampled) and 2 (images) (vka_poolslot.h)
+static uint64_t g_slot_bindw;   // slots written with a binding's own view (DM_VK_POOL_SLOT_BIND=1)
+void vka_tex_slot_counts(uint64_t *writes, uint64_t *changes) { pthread_mutex_lock(&g_tmu); *writes = g_sv[0].writes + g_sv[2].writes; *changes = g_sv[0].changes + g_sv[2].changes; pthread_mutex_unlock(&g_tmu); }
+// Slot id of binding b will hold v: 1 = write it (another view than it holds, or not known yet), 0 = it holds v already. why: 1 a binding, 2 a submission's start
+static int slot_put_locked(int b, int id, VkImageView v, uint64_t serial, int why) {
+    if (b < 0 || b > 2 || id <= 0 || !v) return v != VK_NULL_HANDLE;
+    const void *old = NULL;
+    if (!vkps_put(&g_sv[b], (uint32_t)id, (const void *)v, serial, &old)) return 0;
+    if (old) vka_qtrace(QT_SLOT, (uint64_t)why, 0, (uint64_t)(uintptr_t)old, (uint32_t)b, (uint32_t)id, 0, 0, (const volatile void *)v);
+    return 1;
+}
 // ---------- Per-draw lookups (vka_draw.c) ----------
 // A shader's binding names the shape it samples (dim: SPIR-V Dim, array, multisample, sampled type): the view is made in that shape when the image allows it, else none
 static int dim_view_type(uint8_t dim) {
@@ -2609,7 +2635,7 @@ VkImageView vka_tex_id_view_bits(int id, VkCommandBuffer cb, VkImageLayout *layo
 static VkImageView id_view(int id, VkCommandBuffer cb, uint8_t dim, int storage, vka_img **imo, VkFormat force) {
     pthread_mutex_lock(&g_tmu);
     if (id <= 0 || id >= g_ntreg || !g_treg[id].t.serial) { pthread_mutex_unlock(&g_tmu); return VK_NULL_HANDLE; }
-    treg_ent e = g_treg[id];
+    treg_ent e = g_treg[id], e0 = e;   // (e0: the registration as it is, for the slot's own view)
     if (storage && VKA_ENV("DM_VK_IMG_UPGRADE", 1)) e.t.d.flags |= NVN_TEXTURE_FLAGS_IMAGE;   // bound to an image slot: image intent (img_storage_upgrade)
     pthread_mutex_unlock(&g_tmu);
     nvn_pool_use(1); g_first_sampled = !storage; vka_img *im = treg_dead(id, &e) ? NULL : vka_tex_get(&e.t, cb); g_first_sampled = 0; nvn_pool_use(0);
@@ -2646,11 +2672,19 @@ static VkImageView id_view(int id, VkCommandBuffer cb, uint8_t dim, int storage,
     // Strict (unbound rather than the image's own format) for a class reinterpretation, and for a shader image in another format than the image's: the shader declares
     // its image format, and the image's own bits in another one are not what it reads or writes
     VkImageView vw; t_view_strict = ovr != VK_FORMAT_UNDEFINED || (storage && vf.vk != im->f.vk); vw = view_of(&e, im, vt, storage, ovr); t_view_strict = 0;
-    pthread_mutex_lock(&g_tmu); im_unhold_locked(im); pthread_mutex_unlock(&g_tmu);
-    if (g_set && vw && !force && id > 0 && id < (int)(e.img ? g_nimg_slots : g_ntex_slots)) {
-        VkDescriptorImageInfo di = {VK_NULL_HANDLE, vw, VK_IMAGE_LAYOUT_GENERAL};
-        VkWriteDescriptorSet wr = {VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, .dstSet = g_set, .dstBinding = e.img ? 2 : 0, .dstArrayElement = (uint32_t)id, .descriptorCount = 1,
-                                   .descriptorType = e.img ? VK_DESCRIPTOR_TYPE_STORAGE_IMAGE : VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, .pImageInfo = &di};
+    // The pool table's slot: the texture's own view ("What each slot of the pool tables holds"), written only when it changes
+    VkImageView sv = VK_NULL_HANDLE; int bind_view = VKA_ENV("DM_VK_POOL_SLOT_BIND", 0) != 0;
+    if (g_set && vw && !force && id > 0 && id < (int)(e0.img ? g_nimg_slots : g_ntex_slots)) sv = bind_view ? vw : treg_dead(id, &e0) ? VK_NULL_HANDLE : view_of(&e0, im, -1, 0, VK_FORMAT_UNDEFINED);
+    pthread_mutex_lock(&g_tmu);
+    int put = sv && slot_put_locked(e0.img ? 2 : 0, id, sv, im->serial, 1);
+    if (put && !e0.img && g_pfb_st && sv != g_null_view) g_pfb_st[id] &= (uint8_t)~PFB_NULL;
+    if (bind_view && sv) g_slot_bindw++;
+    im_unhold_locked(im);
+    pthread_mutex_unlock(&g_tmu);
+    if (put) {
+        VkDescriptorImageInfo di = {VK_NULL_HANDLE, sv, VK_IMAGE_LAYOUT_GENERAL};
+        VkWriteDescriptorSet wr = {VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, .dstSet = g_set, .dstBinding = e0.img ? 2 : 0, .dstArrayElement = (uint32_t)id, .descriptorCount = 1,
+                                   .descriptorType = e0.img ? VK_DESCRIPTOR_TYPE_STORAGE_IMAGE : VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, .pImageInfo = &di};
         vk.vkUpdateDescriptorSets(V.dev, 1, &wr, 0, NULL);
     }
     return vw;
@@ -2866,22 +2900,18 @@ void vka_tex_prepare(VkCommandBuffer cb) {
     }
     // Tracked images whose pages the CPU wrote since their last upload (a write to a protected page moves the dirty clock, so nothing is scanned while it stands still)
     // Sparse pools' textures also when a mapping request came since (the page table's generation moved)
-    static uint64_t seen, vseen; uint64_t now = nvn_dirty_now(), vnow = nvn_sparse_gen();
-    int vid_new = 0;
-    for (int i = 0; i < g_nlive; i++) {
-        vka_img *im = g_live[i];
-        if (im && im->mem && (im->is_video || dm_codec_is_video_mem(im->mem, im->L.size, NULL))) {
-            uint64_t vg = dm_codec_video_gen(im->mem);
-            if (vg != im->vgen) { vid_new = 1; break; }
-        }
-    }
+    // Video pictures: the scan below runs when a picture was written into a video pool or a pool came or went since the last one (before 2026-11-10 every live image
+    // was asked dm_codec_is_video_mem, a lock and 64 slots, at every submission to find that out, and again in the scan: "Live images" above); an image is asked again
+    // only after a pool came or went (vka_img.vep). The counts are read before the scan, so a picture written during it moves them for the next submission
+    static uint64_t seen, vseen, vw_seen, ve_seen; uint64_t now = nvn_dirty_now(), vnow = nvn_sparse_gen(), vw = dm_codec_video_writes(), ve = dm_codec_video_epoch();
+    int vid_new = vw != vw_seen || ve != ve_seen;
     if (now != seen || vnow != vseen || vid_new) {
-        seen = now; vseen = vnow;
+        seen = now; vseen = vnow; vw_seen = vw; ve_seen = ve;
         for (int i = 0; i < g_nlive; i++) {
             vka_img *im = g_live[i];
             if (img_pool_dead(im)) continue;
-            if (!im->is_video && im->mem) {
-                uint32_t vs = 0;
+            if (!im->is_video && im->mem && im->vep != ve) {
+                uint32_t vs = 0; im->vep = ve;
                 if (dm_codec_is_video_mem(im->mem, im->L.size, &vs)) {
                     im->is_video = 1;
                     im->d.flags |= NVN_TEXTURE_FLAGS_LINEAR;
@@ -2904,8 +2934,8 @@ void vka_tex_prepare(VkCommandBuffer cb) {
                     tex_t t = {0}; t.serial = im->serial; t.d = im->d; t.L = im->L; t.mem = (uint8_t *)im->mem;
                     upload(im, &t, cb);
                     g_reup++;
+                    continue;
                 }
-                continue;
             }
             if (im->vbind && im->mem) { if (nvn_sparse_since(im->vpool, (uint64_t)(uintptr_t)im->mem, im->L.size, im->vgen, im->stamp)) sparse_bind(im, cb, 0); continue; }   // (GPU-written: binds only)
             if (im->vtrack && !im->gpu_owned && im->mem) {
@@ -2935,8 +2965,8 @@ void vka_tex_prepare(VkCommandBuffer cb) {
     for (int k = 0; k < g_ntd; k++) {
         int id = g_tdirty[k]; g_tdflag[id] = 0;
         if (id >= (int)(g_treg[id].img ? g_nimg_slots : g_ntex_slots)) { VRED_ONCE("texture ID %d beyond the table", id); continue; }
-        write_tex(id, cb, &w[nw], &ii[nw]);
-        if (w[nw].pImageInfo->imageView) nw++;
+        uint64_t ser = 0; write_tex(id, cb, &w[nw], &ii[nw], &ser);
+        if (w[nw].pImageInfo->imageView && slot_put_locked((int)w[nw].dstBinding, id, w[nw].pImageInfo->imageView, ser, 2)) nw++;   // (a slot that holds that view already: not written again)
         if (nw == BATCH) { vk.vkUpdateDescriptorSets(V.dev, (uint32_t)nw, w, 0, NULL); nw = 0; }
     }
     g_ntd = 0;

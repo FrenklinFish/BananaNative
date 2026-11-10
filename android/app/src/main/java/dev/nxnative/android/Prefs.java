@@ -88,6 +88,12 @@ final class Prefs {
     /** The in-game panel's own size and text size (PanelLook: 0 Small, 1 Normal, 2 Large), for every game */
     static int panelSize(Context c) { return PanelLook.of(of(c).getInt("panel_size", PanelLook.NORMAL)); }
     static void panelSize(Context c, int v) { of(c).edit().putInt("panel_size", PanelLook.of(v)).commit(); }
+    /** Settings › Controller: in-game panel (PadPanel.OPEN_*): how a controller opens and closes the in-game panel, for every game; Home, or − and + held, by default */
+    static int panelPad(Context c) { return PadPanel.open(of(c).getInt("panel_pad", PadPanel.OPEN_BOTH)); }
+    static void panelPad(Context c, int v) { of(c).edit().putInt("panel_pad", PadPanel.open(v)).commit(); }
+    /** The one-time hint over the game that says how the panel opens (GameActivity.panelHint), once it has been shown */
+    static boolean panelHinted(Context c) { return of(c).getBoolean("panel_hint", false); }
+    static void panelHinted(Context c, boolean v) { of(c).edit().putBoolean("panel_hint", v).commit(); }
     static int panelText(Context c) { return PanelLook.of(of(c).getInt("panel_text", PanelLook.NORMAL)); }
     static void panelText(Context c, int v) { of(c).edit().putInt("panel_text", PanelLook.of(v)).commit(); }
     /** Games whose speed follows the measured frame rate (their profile has fps_decouple sead: the host's sead_rate) get a frame limit instead of 60 / 30 / 20 locking.
@@ -113,7 +119,7 @@ final class Prefs {
         return paceOf(of(c).getInt(gameKey("fps_cap", titleId), pl > 0 ? pl : of(c).getInt("fps_cap", -1)));
     }
     /** Game settings › Reset to defaults: every choice of the game's own back to the main screen's default (Extra environment's lines stay) */
-    static final String[] GAME_SETTINGS = {"window", "fps_cap", "gpu_driver", "gpu_ts", "pause_return", "ndsr_choice2", "ndsr_sharp", "drs2", "ram_saver", "decouple", "aspect"};
+    static final String[] GAME_SETTINGS = {"window", "fps_cap", "gpu_driver", "gpu_ts", "pause_return", "ndsr_choice2", "ndsr_sharp", "drs2", "ram_saver", "decouple"};
     static void resetGame(Context c, String titleId) {
         SharedPreferences.Editor e = of(c).edit();
         for (String k : GAME_SETTINGS) e.remove(gameKey(k, titleId));
@@ -217,11 +223,6 @@ final class Prefs {
     static void keepScreenPreparing(Context c, boolean on) { of(c).edit().putBoolean("keep_screen_preparing", on).commit(); }
 
     /** Game language (Game settings): a console language code (GameLanguage.CODES) passed as DM_LANG, null for the phone's language (the default) */
-    /** Game settings › Aspect ratio, for a game whose profile has a variant labelled w:h (Profile.aspectVariant; a native 4:3 mod): the label chosen ("4:3"), null = as
-     *  shipped (16:9). GameActivity passes DM_PATCH_VARIANT=<variant> and DM_VK_PICTURE_ASPECT=<label>; the pack holds both versions (pack_android.py rewrite_variants) */
-    static String aspect(Context c, String titleId) { return of(c).getString(gameKey("aspect", titleId), null); }
-    static void aspect(Context c, String titleId, String label) { put(c, gameKey("aspect", titleId), label); }
-
     static String gameLang(Context c, String titleId) { return of(c).getString(gameKey("lang", titleId), null); }
     static void gameLang(Context c, String titleId, String code) { put(c, gameKey("lang", titleId), code); }
 

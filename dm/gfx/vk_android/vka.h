@@ -47,7 +47,7 @@
     X(vkCmdSetViewport) X(vkCmdSetScissor) X(vkCmdSetCullMode) X(vkCmdSetFrontFace) X(vkCmdSetPrimitiveTopology) \
     X(vkCmdSetDepthTestEnable) X(vkCmdSetDepthWriteEnable) X(vkCmdSetDepthCompareOp) X(vkCmdSetDepthBoundsTestEnable) X(vkCmdSetStencilTestEnable) X(vkCmdSetStencilOp) \
     X(vkCmdSetStencilCompareMask) X(vkCmdSetStencilWriteMask) X(vkCmdSetStencilReference) X(vkCmdSetDepthBias) X(vkCmdSetDepthBiasEnable) \
-    X(vkCmdSetRasterizerDiscardEnable) X(vkCmdSetPrimitiveRestartEnable) X(vkCmdSetBlendConstants) X(vkCmdSetLineWidth) X(vkCmdSetDepthBounds) \
+    X(vkCmdSetRasterizerDiscardEnable) X(vkCmdSetPrimitiveRestartEnable) X(vkCmdSetBlendConstants) X(vkCmdSetLineWidth) \
     X(vkCmdPushDescriptorSetKHR) X(vkCmdSetVertexInputEXT) X(vkCmdPushConstants) X(vkCmdDrawMeshTasksEXT) X(vkCmdDrawMeshTasksIndirectEXT) \
     X(vkCmdDrawIndirectCount) X(vkCmdDrawIndexedIndirectCount)
 #define VKA_DECL(f) PFN_##f f;
@@ -90,7 +90,7 @@ typedef struct {
     // instance-rate divisors, logic operations, dual-source blending, geometry and tessellation stages, depth clamp, fill mode lines, wide lines
     int imageless;   // imagelessFramebuffer (Vulkan 1.2): classic render passes need it (DM_VK_CLASSIC_RP)
     int draw_count;                                 // drawIndirectCount (Vulkan 1.2): an indirect-count multi-draw's count read by the GPU (vka_draw.c vka_mdi_gpu)
-    int push_desc, vin_dyn, null_desc, idx8, divisor, logic_op, dual_src, geom, tess, depth_clamp, depth_bounds, robust, fill_lines, depth_bias_clamp, multi_vp, a2c;
+    int push_desc, vin_dyn, null_desc, idx8, divisor, logic_op, dual_src, geom, tess, depth_clamp, fill_lines, depth_bias_clamp, multi_vp, a2c;
     int vstores, fstores;   // vertexPipelineStoresAndAtomics, fragmentStoresAndAtomics: texture-use feedback of the pool (vka_tex.c "Texture pool reads") writes from those stages
     // NVN2 task and mesh programs (VK_EXT_mesh_shader: mesh = meshShader, task = taskShader too; DM_VK_MESH=0 leaves it off): their shaders are refused without it (vka_shader.c refusal)
     // and their draws skipped. mesh_inv / task_inv: the largest workgroup (maxMeshWorkGroupInvocations / maxTaskWorkGroupInvocations); mesh_out_v / mesh_out_p: the most vertices /
@@ -167,6 +167,12 @@ int vka_wait_done(uint64_t fence, uint64_t timeout_ns);
 int vka_worker_cpu_wait(uint64_t fence);    // vka_worker.c: a CPU thread is about to block on fence (parked queues and gates that hold it back go on once the worker is stuck)
 void vka_worker_cpu_wait_end(int was);      // ... and is no longer blocked (was: what vka_worker_cpu_wait returned)
 uint64_t vka_worker_cpu_blocked(void);       // the highest fence CPU threads block on now (0: none)
+// The GPU-wait trace (vka_worker.c, DM_VK_QS_TRACE): the last events of the queue scheduler and the submissions, printed when a GPU hang is declared
+enum { QT_SUB = 1, QT_PARK, QT_PASS, QT_RELEASE, QT_GATE, QT_FORCE, QT_SIGNAL, QT_COMMIT, QT_PART, QT_LAND, QT_PRESENT, QT_CPU_WAIT, QT_SUBMIT_ERR, QT_SLOT };
+void vka_tex_slot_counts(uint64_t *writes, uint64_t *changes);   // vka_tex.c: pool table slot writes, and of them changes of a slot's view
+void vka_qtrace(int kind, uint64_t q, uint64_t fence, uint64_t x, uint32_t a, uint32_t b, uint32_t c, uint32_t d, const volatile void *w);
+int vka_qtrace_on(void);
+void vka_qtrace_dump(void);
 void vka_after(uint64_t fence, void (*fn)(void *), void *arg);   // deferred destruction: fn(arg) once fence is done
 
 // Host-visible scratch memory for one submission (uploads, deswizzled texels, readbacks); valid until the submission's fence
@@ -286,6 +292,9 @@ typedef struct vka_img {
     uint32_t nsamp, novl; uint64_t ovl[4];
     // A soft texture's image (vka_soft.h, profile tex_soft): base 1, its finest level left out; soft_saved: the storage bytes that level takes (the stats' soft line)
     uint8_t soft; uint64_t soft_saved;
+    // The texture cache's own bookkeeping (vka_tex.c "Live images"): its place in the live list + 1 (0: not in it), the next live image in its storage address's chain,
+    // and the video pool registrations count (dm_codec_video_epoch) at which it was last checked for lying in a video pool
+    int live_ix; struct vka_img *mnext; uint64_t vep;
 } vka_img;
 // Texture level lv as a level of im (a sparse or soft texture's image starts at level im->base): 0 when the image does not hold it
 static inline int vka_img_lv(const vka_img *im, uint32_t *lv) { return vksoft_lv(im->base, im->levels, lv); }
@@ -402,8 +411,7 @@ vka_shader *vka_inst_variant(vka_shader *s, uint32_t binding);   // the instance
 int vka_shader_variant_key(uint64_t key);   // 1 when a key is no library key but an instanced variant's (an older prewarm list's record), without a red line
 typedef struct { vka_shader *sh[VKA_NSTAGE]; unsigned bad; } vka_progsh;   // by NVN stage; bad: stages whose shader is refused (bit = NVN stage) or VKA_BAD_MISSING (their draws are skipped)
 #define VKA_BAD_MISSING (1u << VKA_NSTAGE)   // vka_progsh.bad: a stage's shader is not in the library (its NVN stage unknown)
-int vka_prog_shaders(const prog_t *p, vka_progsh *out);
-int vka_prog_shaders_s(const prog_t *p, uint64_t serial, vka_progsh *out);   // by the serial recorded at bind (0: the program's own)      // 1 = resolved (stages the program lacks are NULL); 0 = no library or no program
+int vka_prog_shaders(const prog_t *p, vka_progsh *out);      // 1 = resolved (stages the program lacks are NULL); 0 = no library or no program
 void vka_prog_put(uint64_t serial, const vka_progsh *ps);   // a program made by the host itself (the selftest), by serial
 vka_shader *vka_shader_make(const vka_shlib *L, uint64_t key);
 const char *vka_shader_lib_path(void);   // the library file loaded ("" before or without one): this version's, or an older one of the same ABI or of a compatible older one (vka_abi_compat.h)
@@ -450,11 +458,10 @@ double vka_gpu_span_ms(uint64_t f);   // frame f's submissions from first part's
 typedef struct {
     vka_bstate b;
     const prog_t *bst[VKA_NSTAGE], *cprog;   // the program bound per graphics stage (NVN stage bits; [5] unused, [6] / [7] NVN2's task and mesh bits), the compute program
-    uint32_t bser[VKA_NSTAGE], cser;         // their serials at bind (p_bind_program.serial): what the draws resolve by (the program itself may be freed by now)
     blend_st blend[8]; color_st color; chmask_st chmask; ms_st ms; poly_st poly; ds_st ds;
     va_st attr[16]; int nattr; vs_st stream[16]; int nstream; NVNbufferRange vbuf[16];
     uint32_t st_vmask[2], st_wmask[2], st_ref[2];
-    p_poly_offset po; float vp[16][4]; float dr[2]; int has_vp, depth_clamp, db_on; float db[2]; uint8_t vp_sw[16][4];
+    p_poly_offset po; float vp[16][4]; float dr[2]; int has_vp, depth_clamp; uint8_t vp_sw[16][4];
     float blend_color[4], alpha_ref;
     p_prim_restart restart; int rast_discard, tf_on;
     int inited;
@@ -496,7 +503,6 @@ void vka_clear_outside(const vka_pclear *c);         // the clear on the image, 
 int vka_rp_clear(const p_set_rt *rt, int has_rt, const vka_dstate *d, const vka_pclear *c);
 void vka_draw(vka_dstate *d, const p_set_rt *rt, int has_rt, const p_scissor *sc, int has_sc, const p_draw *dw, const p_draw_idx *di);
 void vka_dispatch(vka_dstate *d, const p_dispatch *dp);
-int vka_dlss_fsr3(VkCommandBuffer cb, vka_img *src, vka_img *dst, vka_img *depth, vka_img *motion, const p_dlss_t2t *o);   // vka_fsr3.c: 0 = not done (the caller scales another way)
 // Whether the game is a Switch 2 one (NVN2: its compute reads the group counts at c0 + DMSH_C0_DISPATCH_NVN2): dm_sdk_ounce() unless set (the replayer sets it from the capture)
 int vka_nvn2(void);
 void vka_set_nvn2(int on);

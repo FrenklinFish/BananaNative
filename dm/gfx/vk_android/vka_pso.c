@@ -427,7 +427,6 @@ static int pstate_fill(pstate *P, vka_shader *const sh[VKA_NSTAGE], const vka_la
     for (size_t i = 0; i < sizeof base / sizeof *base; i++)   // (a mesh pipeline may not name the primitive topology or restart: it has no input assembly)
         if (!mesh || (base[i] != VK_DYNAMIC_STATE_PRIMITIVE_TOPOLOGY && base[i] != VK_DYNAMIC_STATE_PRIMITIVE_RESTART_ENABLE)) P->dyn[nd++] = base[i];
     if (!k->vin_static && !mesh) P->dyn[nd++] = VK_DYNAMIC_STATE_VERTEX_INPUT_EXT;
-    if (V.depth_bounds) P->dyn[nd++] = VK_DYNAMIC_STATE_DEPTH_BOUNDS;   // the game's bounds (vka_draw.c); the test's enable is in the base list
     P->dy = (VkPipelineDynamicStateCreateInfo){VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO, .dynamicStateCount = nd, .pDynamicStates = P->dyn};
     for (int i = 0; i < k->ncolor; i++) P->cf[i] = (VkFormat)k->cfmt[i];
     P->ri = (VkPipelineRenderingCreateInfo){VK_STRUCTURE_TYPE_PIPELINE_RENDERING_CREATE_INFO, .colorAttachmentCount = k->ncolor, .pColorAttachmentFormats = P->cf,
@@ -767,6 +766,10 @@ static opt_job *g_opt_head, **g_opt_tail = &g_opt_head; static pthread_mutex_t g
 static uint64_t g_opt_waiting;
 static void *opt_main(void *a) {
     (void)a; pthread_setname_np(pthread_self(), "vk-psopt"); vka_fp_host("vk-psopt");
+    // Under the game's threads, as the prewarm and asynchronous threads: nothing waits for an optimized pipeline (its linked one draws meanwhile). Before 2026-11-10 it kept
+    // the priority of the thread that queued its first job: nice 10 when that was an asynchronous thread, but the replay thread's -8 without DM_VK_PSO_ASYNC (the default),
+    // so every optimized compile (60-130 ms each on Turnip) competed with the recording and the game's threads for a core
+    setpriority(PRIO_PROCESS, 0, 10);
     for (;;) {
         pause_point();
         pthread_mutex_lock(&g_opt_mu);

@@ -289,7 +289,8 @@ static void post_run(void *ops_, int n) {   // the completion thread, in submiss
             uint64_t rec[2] = {DM_GAME_RENDER_COND ? 0 : tk, tk}; (void)tt;
             memcpy((void *)(uintptr_t)ops[i].addr, rec, sizeof rec); continue;
         }
-        if (ops[i].kind == 1) { volatile uint32_t *v = (volatile uint32_t *)(uintptr_t)ops[i].addr; if (ops[i].mode == NVN_EVENT_SIGNAL_MODE_ADD) *v += ops[i].v; else *v = ops[i].v; }
+        if (ops[i].kind == 1) { volatile uint32_t *v = (volatile uint32_t *)(uintptr_t)ops[i].addr; if (ops[i].mode == NVN_EVENT_SIGNAL_MODE_ADD) *v += ops[i].v; else *v = ops[i].v;
+                                vka_qtrace(QT_LAND, 0, vka_done(), 0, ops[i].mode, ops[i].v, *v, 0, v); }
         else {
             // A timestamp report's counter: the time, or 0 under render_cond (as on the GPU, nvn_mtl.m rc_value). Samples passed not counted (oq_report: DM_VK_OCCLUSION=0, no query
             // pool, no reset before it, no GPU): 1, so occlusion culling keeps everything visible
@@ -377,12 +378,18 @@ void vka_exec_hang_report(uint64_t fence) {
     uint64_t t = now_ns();
     for (uint64_t f = fence; f < fence + NHREC; f++) {
         int i = (int)(f % NHREC); if (g_hrec[i].fence != f) continue;
-        VRED("GPU hang: submission %llu (frame %llu, queue serial %llu): %llu draws, %llu clears / copies, %llu skipped, recorded in %.2f ms, handed to the queue %.2f s before",
+        // sub_ns 0: its commit had not returned from the submit yet (the submit that failed is this one's), so nothing of it after its last part split went to the queue.
+        // (Printed as "-1.00 s before" until 2026-11-10.) A submission cut at a GPU wait is entered at each of its commits: these are its latest
+        char when[96];
+        if (g_hrec[i].sub_ns) snprintf(when, sizeof when, "its latest commit handed to the queue %.2f s before", (t - g_hrec[i].sub_ns) / 1e9);
+        else snprintf(when, sizeof when, "its latest commit is the submit that failed (not handed to the queue)");
+        VRED("GPU hang: submission %llu (frame %llu, queue serial %llu): %llu draws, %llu clears / copies, %llu skipped, recorded in %.2f ms, %s",
              (unsigned long long)g_hrec[i].fence, (unsigned long long)g_hrec[i].frame, (unsigned long long)g_hrec[i].queue, (unsigned long long)g_hrec[i].draws,
-             (unsigned long long)g_hrec[i].ops, (unsigned long long)g_hrec[i].skipped, g_hrec[i].t_ns / 1e6, g_hrec[i].sub_ns ? (t - g_hrec[i].sub_ns) / 1e9 : -1.0); }
+             (unsigned long long)g_hrec[i].ops, (unsigned long long)g_hrec[i].skipped, g_hrec[i].t_ns / 1e6, when); }
     unsigned k = (g_slot_i - 1) % NSLOT;
     if (g_slot_ts[k]) VRED("GPU hang: the submission being recorded (frame %llu) had handed %u parts to the queue, %u of them seen finished", (unsigned long long)g_slot_frame[k],
                            g_slot_parts[k] - 1, g_part_seen);
+    vka_qtrace_dump();   // the scheduler's and the submissions' last events (vka_worker.c, DM_VK_QS_TRACE)
 }
 
 // Where a submission's recording time goes besides its draws, for the pace line (vka_exec_phases, cumulative ns): mtl_sub_begin (the slot's fence, the command buffer's reset
@@ -490,7 +497,7 @@ static void part_submit(const void *a) {   // the part ends and goes to the queu
     VkResult r = vk.vkEndCommandBuffer(cb);
     VkSemaphore gs = vka_gate_sem(); VkPipelineStageFlags gst = VK_PIPELINE_STAGE_ALL_COMMANDS_BIT;
     if (!r) r = vka_submit(cb, 0, pa.gate && gs ? 1 : 0, &gs, &pa.gate, &gst, VK_NULL_HANDLE);
-    if (r) { static _Atomic int n; if (atomic_fetch_add(&n, 1) < 4) VRED("part of a submission: %d", r); }
+    if (r) { static _Atomic int n; if (atomic_fetch_add(&n, 1) < 4) VRED("part of a submission: %d", r); vka_qtrace(QT_SUBMIT_ERR, 0, 0, 0, (uint32_t)r, 0, 0, 0, NULL); }
 }
 static void part_begin(const void *a) {
     part_arg pa; memcpy(&pa, a, sizeof pa); VkCommandBuffer cb = pa.cb;
@@ -513,6 +520,7 @@ static void parts_peek(unsigned k) {
         g_part_seen++;
     }
 }
+static uint64_t g_cur_fence;   // (below)
 static void chunk(void) {
     unsigned k = (g_slot_i - 1) % NSLOT;
     parts_peek(k);
@@ -534,6 +542,7 @@ static void chunk(void) {
     // With the encoder the part's end, its submit and the next part's reset and begin are made on its thread, in order with the calls before: the replay thread goes on
     if (vka_enc_call(part_submit, &pe, sizeof pe)) { vka_enc_call(part_begin, &pb, sizeof pb); vka_enc_switch(next); }
     else { part_submit(&pe); part_begin(&pb); }
+    vka_qtrace(QT_PART, S.serial, g_cur_fence, 0, part, 0, 0, 0, NULL);
     g_cb = next; vka_gbar_cb(g_cb);
     vka_draw_cb_switch(g_cb); vka_gp_part(g_cb);
     g_chunk_d0 = g_stat_draws; g_n_chunks++;
@@ -636,6 +645,7 @@ static uint64_t sub_commit(uint64_t reserved, int has_sig, uint64_t signal) {
     vka_scratch_retire(fence);
     if (r) {
         static _Atomic int nred; if (atomic_fetch_add(&nred, 1) < 8) VRED("submission %llu: %d (its effects run without the GPU)", (unsigned long long)fence, r);
+        vka_qtrace(QT_SUBMIT_ERR, S.serial, fence, 0, (uint32_t)r, 0, 0, 0, NULL);
         VkResult sr = VK_SUCCESS;
         if (signal) {
             pthread_mutex_lock(&V.qmu);   // signalled by the host: later submissions may wait for it
@@ -951,15 +961,6 @@ static void copy_t2t(const p_copy_t2t *c) {
     vka_img *s = vka_tex_get(c->src, g_cb), *d = vka_tex_get(c->dst, g_cb);
     if (!s || !d) return;
     vka_tex_own(d, g_cb);
-    if ((c->flags & DM_COPY_DLSS) && VKA_ENV("DM_VK_DLSS_FSR3", 1)) {
-        const p_dlss_t2t *o = (const p_dlss_t2t *)c;   // DLSS records carry the temporal upscaler's inputs after the copy (hle_nvn.c nvnCommandBufferEvaluateDlss)
-        vka_img *z = o->depth ? vka_tex_get(o->depth, g_cb) : NULL, *m = o->motion ? vka_tex_get(o->motion, g_cb) : NULL;
-        if (vka_dlss_fsr3(g_cb, s, d, z, m, o)) {
-            vka_img_written(d);
-            g_stat_ops++;
-            return;
-        }
-    }
     unsigned sl = c->has_sv && c->sv.set_levels ? c->sv.base_level : 0, dl = c->has_dv && c->dv.set_levels ? c->dv.base_level : 0;
     unsigned sz0 = c->has_sv && c->sv.set_layers ? c->sv.min_layer : 0, dz0 = c->has_dv && c->dv.set_layers ? c->dv.min_layer : 0;
     vka_tex_soft_copy(s, -1, g_cb); vka_tex_soft_copy(d, (int)dl, g_cb);   // (a soft texture copied from, or into at level 0: made whole first)
@@ -1180,7 +1181,6 @@ static int exec(const uint8_t *p, int depth) {   // 1: parked at a wait (g_pk ho
             }
             break;
         case OP_REPORT_COUNTER: { uint64_t t, ad; memcpy(&t, a, 8); memcpy(&ad, (const uint8_t *)a + 8, 8);
-            if (VKA_ENV("DM_VK_OCCLOG", 0) && t != NVN_COUNTER_TYPE_TIMESTAMP && t != NVN_COUNTER_TYPE_TIMESTAMP_TOP) VLOG("occlog frame %llu report type %llu at %#llx after draw %llu", (unsigned long long)g_frame, (unsigned long long)t, (unsigned long long)ad, (unsigned long long)(g_stat_draws - g_sub_draws0));
             uint32_t q = 0;
             if (g_sqp && g_cb && g_sq_n < SEGQ && (t == NVN_COUNTER_TYPE_TIMESTAMP || t == NVN_COUNTER_TYPE_TIMESTAMP_TOP)) {
                 q = (uint32_t)(g_sq_base + g_sq_n++) + 1;

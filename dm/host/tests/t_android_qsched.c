@@ -346,6 +346,7 @@ static void test_many_words(void) {
     work(&c, 1); ev(&c, T_WAIT, &w[N - 1], 0, 1); ev(&c, T_WAIT, &w[0], 0, 1); work(&c, 2); end(&c);
     submit1(5, &c);
     CHECK(g_norder == 2 && !sc.n_park, "a wait on the 3000th word goes on at once");
+    CHECK(sc.evpeak == N, "the stats line's words in flight: %u at the commit (it read 0 when only a rebuild sampled it)", sc.evpeak);
     g_done = g_fence; w[5] = 7;
     CHECK(qs_ev_value(&sc, &w[5]) == 7, "done: the word in memory");
     qs_sub next = {0}; next.fence = ++g_fence; sc.cur = &next;   // signals after they are done: an ADD on memory's value; the done words go at the next rebuild
@@ -355,8 +356,38 @@ static void test_many_words(void) {
     CHECK(qs_ev_value(&sc, &w[1]) == 3 && qs_ev_value(&sc, &w[N - 1]) == 3 && sc.nev <= N + 1, "after they are done: the new values, %u words kept", sc.nev);
     reset();
 }
+// Waits that hold when first asked, by whom (the stats line, DM_VK_QS_TRACE): a signal queued this frame, one queued in an earlier frame (a double-buffered event word
+// whose last use is still on the GPU: Mario Kart World's 0x...7000 / 0x...7100 pairs alternate frames), or memory. Each wait counts once, also after its park
+static void submit_fr(uint64_t serial, uint64_t frame, const list_t *l) {
+    qs_sub *s = calloc(1, sizeof *s); s->serial = serial; s->fence = ++g_fence; s->frame = frame; s->nh = 1;
+    const uint8_t **h = malloc(sizeof *h); h[0] = l->b; s->h = h;
+    qs_submit(&sc, s); qs_poll(&sc);
+}
+static void test_pass_sources(void) {
+    reset(); g_fence = 0;
+    volatile uint32_t e = 0, m = 0;
+    list_t p1 = {0}, c3 = {0}, p3 = {0}, c3b = {0}, cm = {0}, cp = {0}, pp = {0};
+    ev(&p1, T_SIGNAL, &e, 1, 5); work(&p1, 1); end(&p1);                 // frame 1: the producer leaves 5 (ADD), not done on the GPU
+    submit_fr(1, 1, &p1);
+    work(&c3, 30); ev(&c3, T_WAIT, &e, 1, 1); work(&c3, 31); end(&c3);    // frame 3 waits for >= 1 before its own producer: frame 1's queued 5 holds it
+    submit_fr(6, 3, &c3);
+    CHECK(sc.n_pass_old == 1 && !sc.n_pass_queued && !sc.n_pass_mem && !sc.n_park, "a wait held by an earlier frame's queued signal (old %llu queued %llu memory %llu parks %llu)",
+          (unsigned long long)sc.n_pass_old, (unsigned long long)sc.n_pass_queued, (unsigned long long)sc.n_pass_mem, (unsigned long long)sc.n_park);
+    ev(&p3, T_SIGNAL, &e, 1, 2); end(&p3); submit_fr(1, 3, &p3);           // this frame's signal, then a wait on it
+    ev(&c3b, T_WAIT, &e, 1, 7); work(&c3b, 32); end(&c3b); submit_fr(6, 3, &c3b);
+    CHECK(sc.n_pass_queued == 1, "a wait held by this frame's queued signal (%llu)", (unsigned long long)sc.n_pass_queued);
+    g_done = g_fence; m = 1;                                                // all done: the word in memory
+    ev(&cm, T_WAIT, &m, 0, 1); work(&cm, 33); end(&cm); submit_fr(5, 4, &cm);
+    CHECK(sc.n_pass_mem == 1, "a wait held by memory (%llu)", (unsigned long long)sc.n_pass_mem);
+    uint64_t n0 = sc.n_pass_old + sc.n_pass_queued + sc.n_pass_mem;        // parked, then released: asked again, not counted
+    volatile uint32_t f = 0;
+    ev(&cp, T_WAIT, &f, 0, 1); work(&cp, 34); end(&cp); submit_fr(5, 5, &cp);
+    ev(&pp, T_SIGNAL, &f, 0, 1); end(&pp); submit_fr(1, 5, &pp);
+    CHECK(sc.n_park == 1 && sc.n_release == 1 && sc.n_pass_old + sc.n_pass_queued + sc.n_pass_mem == n0, "a park and its release are not a wait held at once");
+    reset();
+}
 int main(void) {
-    test_many_words(); test_pred(); test_wait_event(); test_whole(); test_queued_values(); test_backlog(); test_nested(); test_wait_sync(); test_valves(); test_pingpong(); test_gate();
+    test_many_words(); test_pred(); test_wait_event(); test_whole(); test_queued_values(); test_backlog(); test_nested(); test_wait_sync(); test_valves(); test_pingpong(); test_gate(); test_pass_sources();
     if (g_fail) { printf("t_android_qsched: %d FAILED\n", g_fail); return 1; }
     printf("PASS: GPU waits across NVN queues (vka_qsched.h): parks, producers, predicates, syncs, signals, valves, gates\n");
     return 0;

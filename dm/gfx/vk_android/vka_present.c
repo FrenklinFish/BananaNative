@@ -76,7 +76,7 @@ void nxhost_picture_place(float x, float y) {
 #define ROT_FNS(X) X(vkCreateShaderModule) X(vkDestroyShaderModule) X(vkCreatePipelineLayout) X(vkCreateGraphicsPipelines) X(vkDestroyPipeline) \
     X(vkCmdBindPipeline) X(vkCmdBindDescriptorSets) X(vkCmdPushConstants) X(vkCmdSetViewport) X(vkCmdSetScissor) X(vkCmdDraw)
 static struct { ROT_FNS(VKA_DECL) } rk;   // loaded here: the replay's table (vka.h) does not need them
-static struct { int state; VkFormat fmt; VkPipeline pipe, lz, lzs; VkPipelineLayout lay; VkDescriptorSetLayout dsl; VkDescriptorPool pool; VkDescriptorSet set[NFRAME]; VkSampler samp[2]; } g_rot;   // lz: DM_VK_PRESENT_FILTER=1
+static struct { int state; VkFormat fmt; VkPipeline pipe; VkPipelineLayout lay; VkDescriptorSetLayout dsl; VkDescriptorPool pool; VkDescriptorSet set[NFRAME]; VkSampler samp[2]; } g_rot;
 static int rot_rotates(VkSurfaceTransformFlagBitsKHR t) { return t == VK_SURFACE_TRANSFORM_ROTATE_90_BIT_KHR || t == VK_SURFACE_TRANSFORM_ROTATE_180_BIT_KHR || t == VK_SURFACE_TRANSFORM_ROTATE_270_BIT_KHR; }
 static int rot_quarter(VkSurfaceTransformFlagBitsKHR t) { return t == VK_SURFACE_TRANSFORM_ROTATE_90_BIT_KHR || t == VK_SURFACE_TRANSFORM_ROTATE_270_BIT_KHR; }
 static int stretch_wanted(void) { return VKA_ENV("DM_VK_STRETCH", 0) != 0; }   // Game settings › Display: Stretch to screen
@@ -95,12 +95,10 @@ static int rk_load(void) {
     return ok = 1;
 }
 // The rotated copy's pipeline for a swapchain format (g_rot's layout): blend 0 writes the picture as it is, 1 draws a premultiplied source over the image (the overlay)
-static VkResult rot_pipeline_frag(VkFormat fmt, int blend, const uint32_t *frag, size_t fsize, VkPipeline *out);
-static VkResult rot_pipeline(VkFormat fmt, int blend, VkPipeline *out) { return rot_pipeline_frag(fmt, blend, vka_rot_frag, sizeof vka_rot_frag, out); }
-static VkResult rot_pipeline_frag(VkFormat fmt, int blend, const uint32_t *frag, size_t fsize, VkPipeline *out) {
+static VkResult rot_pipeline(VkFormat fmt, int blend, VkPipeline *out) {
     VkShaderModule sm[2] = {0};
     VkShaderModuleCreateInfo mv = {VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO, .codeSize = sizeof vka_rot_vert, .pCode = vka_rot_vert}, mf = mv;
-    mf.codeSize = fsize; mf.pCode = frag;
+    mf.codeSize = sizeof vka_rot_frag; mf.pCode = vka_rot_frag;
     VkResult r = rk.vkCreateShaderModule(V.dev, &mv, NULL, &sm[0]);
     if (!r) r = rk.vkCreateShaderModule(V.dev, &mf, NULL, &sm[1]);
     VkPipelineShaderStageCreateInfo st[2] = {{VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, .stage = VK_SHADER_STAGE_VERTEX_BIT, .module = sm[0], .pName = "main"},
@@ -148,13 +146,9 @@ static int rot_ready(VkFormat fmt) {
         if (!r) r = vk.vkCreateSampler(V.dev, &si, NULL, &g_rot.samp[1]);
         if (r) { VRED("pre-rotation: descriptor set, layout or sampler: %d", r); g_rot.state = -1; return 0; }
     }
-    if (g_rot.pipe) { vka_queue_idle(); rk.vkDestroyPipeline(V.dev, g_rot.pipe, NULL); g_rot.pipe = VK_NULL_HANDLE; }
-    if (g_rot.lz) { rk.vkDestroyPipeline(V.dev, g_rot.lz, NULL); g_rot.lz = VK_NULL_HANDLE; }
-    if (g_rot.lzs) { rk.vkDestroyPipeline(V.dev, g_rot.lzs, NULL); g_rot.lzs = VK_NULL_HANDLE; }   // a new swapchain format: no copy in flight
+    if (g_rot.pipe) { vka_queue_idle(); rk.vkDestroyPipeline(V.dev, g_rot.pipe, NULL); g_rot.pipe = VK_NULL_HANDLE; }   // a new swapchain format: no copy in flight
     VkResult r = rot_pipeline(fmt, 0, &g_rot.pipe);
     if (r) { VRED("pre-rotation: pipeline for format %d: %d; the compositor rotates", fmt, r); g_rot.state = -1; return 0; }
-    if (rot_pipeline_frag(fmt, 0, vka_rot_lz_frag, sizeof vka_rot_lz_frag, &g_rot.lz)) { g_rot.lz = VK_NULL_HANDLE; VRED_ONCE("present: Lanczos pipeline failed; DM_VK_PRESENT_FILTER stays bilinear"); }
-    if (rot_pipeline_frag(fmt, 0, vka_rot_lzs_frag, sizeof vka_rot_lzs_frag, &g_rot.lzs)) g_rot.lzs = VK_NULL_HANDLE;
     g_rot.state = 1; g_rot.fmt = fmt;
     return 1;
 }
@@ -212,13 +206,7 @@ static void rot_copy(VkCommandBuffer cb, unsigned k, uint32_t idx, vka_img *im, 
         if (vka_origin_ll()) { sv = -sv; ov = (cy + ch) / th; }
         float pc[6] = {su * a, su * b, sv * c, sv * d, ou + su * e, ov + sv * f};
         VkRect2D sc = {{0, 0}, g_ext};
-        // DM_VK_PRESENT_FILTER=1 (live): Lanczos-2 resample (vka_rot_lz_frag) in place of one bilinear sample; sharper small text when the picture is scaled down
-        // DM_VK_PRESENT_FILTER=2: the same plus a mild clamped sharpening (vka_rot_lzs_frag)
-        int fm = linear && !VKA_ENV("DM_VK_PRESENT_NEAREST", 0) ? (int)VKA_ENV("DM_VK_PRESENT_FILTER", 0) : 0;
-        VkPipeline pp = fm == 2 && g_rot.lzs ? g_rot.lzs : fm >= 1 && g_rot.lz ? g_rot.lz : g_rot.pipe;
-        int lz = pp == g_rot.lzs ? 2 : pp == g_rot.lz ? 1 : 0;
-        { static int told = -1; if (told != lz) { told = lz; VLOG("present: rotated copy %s (%dx%d -> %dx%d)", lz == 2 ? "Lanczos-2 + sharpen" : lz ? "Lanczos-2" : "bilinear", cw, ch, dw, dh); } }
-        rk.vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, pp);
+        rk.vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, g_rot.pipe);
         rk.vkCmdBindDescriptorSets(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, g_rot.lay, 0, 1, &g_rot.set[k], 0, NULL);
         rk.vkCmdPushConstants(cb, g_rot.lay, VK_SHADER_STAGE_VERTEX_BIT, 0, sizeof pc, pc);
         rk.vkCmdSetViewport(cb, 0, 1, &v);
@@ -748,10 +736,7 @@ static int present_one(const pq_item *it) {
     int ew = (int)(rot_quarter(g_pre) ? g_ext.height : g_ext.width), eh = (int)(rot_quarter(g_pre) ? g_ext.width : g_ext.height);   // the display, as the user sees it
     // Fit (keep aspect) or stretch to the whole display (DM_VK_STRETCH), at DM_VK_PICTURE_SIZE % of that, placed by nxhost_picture_place; all live (the in-game panel
     // sends the switches through DM_CTL and gives the launcher's touch mapping the same rectangle, PictureFit.rect)
-    // DM_VK_PICTURE_ASPECT=<w>:<h> (live; the launcher's Aspect ratio 4:3 sets 4:3): the picture's shape on screen when it is fitted, in place of the crop's own (a native 4:3
-    // mod lays its 4:3 picture out in the game's 16:9 frame: shown at 4:3 it fills a 4:3 screen and gets side bars on a 16:9 one). Stretch still fills the screen
-    int fw = cw; { const char *pa = getenv("DM_VK_PICTURE_ASPECT"); int aw = 0, ah = 0; if (pa && sscanf(pa, "%d:%d", &aw, &ah) == 2 && aw > 0 && ah > 0) fw = (int)((long)ch * aw / ah); }
-    int fr[4]; vka_fit_rect(ew, eh, fw, ch, stretch_wanted(), picture_size(), g_place_x, g_place_y, fr);
+    int fr[4]; vka_fit_rect(ew, eh, cw, ch, stretch_wanted(), picture_size(), g_place_x, g_place_y, fr);
     int dx = fr[0], dy = fr[1], dw = fr[2], dh = fr[3];
     static VkFormat s_last_fmt; static VkFormatProperties s_last_fp;
     VkFormatProperties fp = {0};

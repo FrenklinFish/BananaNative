@@ -19,7 +19,7 @@ HOST_EXT = ('.c', '.m', '.mm', '.h', '.swift')
 # What a build-keyed host table does (the table's name in the source; a row of another table is listed under its own name)
 TABLES = {'k_locks': 'engine frame limit set to fps_target', 'k_ue': "Unreal's allocator on a host malloc zone", 'k_nier_dr': 'frame interval and dynamic-resolution floor'}
 # Profile keys that are not behaviour switches: per-game data or controls, not something the host does differently
-NOT_SWITCHES = {'pad_layout', 'depth_mode', 'mem_used', 'sys_resource', 'fastboot_env', 'romfs_substitute', 'variant'}   # variant: an opt-in variant of the game's code (VARIANT_CUTS), its cuts listed with the build   # fastboot_env: a test-run preset (DM_FASTBOOT), not a change to how the game runs
+NOT_SWITCHES = {'pad_layout', 'depth_mode', 'mem_used', 'sys_resource', 'fastboot_env', 'romfs_substitute'}   # fastboot_env: a test-run preset (DM_FASTBOOT), not a change to how the game runs
 
 # ---- Binding: what a patch's correctness is anchored to, from the loosest (GitHub issue #635). A patch is at its goal when its binding is the loosest it could have; the gap between the two
 # is the work list. A patch file's BINDING is a list of {'what', 'now', 'goal', 'purpose', 'why'} with an optional 'blocked' (why the gap cannot close yet) or 'kept' (why it stays
@@ -120,8 +120,6 @@ SWITCH_BINDING = [
      'why': f'what iOS does for every game: {DEFAULT_SOON}'}),
     ('present_snap', '', {'what': 'present snapshots', 'now': 'game', 'goal': 'host', 'purpose': 'rendering', 'why': f'a setting the game was tested with: {DEFAULT_SOON}'}),
     ('pso_mtl4', '', {'what': 'MTL4Compiler pipelines on iOS', 'now': 'game', 'goal': 'host', 'purpose': 'rendering', 'why': f'a setting the game was tested with on an iPhone: {DEFAULT_SOON}'}),
-    ('host_env', 'DM_VK_DLSS_BLIT=1', {'what': "NVN2 DLSS replaced by the host's temporal upscaler (FSR 3.1), the 1080p display buffer mode and the Lanczos present", 'now': 'game', 'goal': 'host', 'purpose': 'rendering',
-     'why': 'every NVN2 game that evaluates DLSS needs the replacement (without it its 3D scene stays black): on for every game once more of them are checked'}),
     ('game_env', 'DOTNET_GCRegionRange=', {'what': ".NET's garbage-collector region range", 'now': 'game', 'goal': 'game', 'purpose': 'address space', 'why': "measured for the game's regions"}),
     ('stdalloc_cap', '', {'what': "StandardAllocator's address space", 'now': 'game', 'goal': 'game', 'purpose': 'address space',
      'why': "what the regions after it need, measured by the NSP script's region check; the host's cap is the default"}),
@@ -138,6 +136,8 @@ SWITCH_BINDING = [
      'why': "the game's own constant window size, at fixed offsets per main build; a function fingerprint (two leaf functions returning the size, found from their callers) could carry it over the game's updates"}),
     ('fps_decouple', '', {'what': "sead's frame-rate controller at the measured rate, and a frame limit with presentation on the host's tick (the Android launcher), for a game whose speed follows that rate", 'now': 'game', 'goal': 'game', 'purpose': 'frame rate',
      'why': "whether the game steps its world by the rate sead's controller hands it is the game's own (Ocarina of Time's framework turns it back into a present interval): the rewriter finds the controller in any main (nso_code.py sead_find) but gates it only for a profile with this key"}),
+    ('fps_steps', '', {'what': "the framework's fixed steps per frame (its mode and step count), written for the frame rate cap: 30 and 20 fps at full game speed", 'now': 'build', 'goal': 'engine', 'purpose': 'frame rate',
+     'why': "the framework at a fixed global per main build; a fingerprint of its frame function (the step pick from the mode, then the update loop over the count and the present interval set to it) could find it in the game's updates"}),
     ('drs_ctl', '', {'what': "the dynamic resolution's range steered while the game runs (DM_DRS, the Android launcher's Dynamic resolution)", 'now': 'build', 'goal': 'engine', 'purpose': 'rendering',
      'why': "four places in sead / agl's MaintainGpuPercentage controller, at fixed offsets per main build (each checked for its instruction); a fingerprint of the controller could find them in other games on that engine"}),
     ('res_levels', '', {'what': "the dynamic resolution's level lists, lowered at load to fit DM_WINDOW_SIZE (the Android launcher's Game resolution)", 'now': 'build', 'goal': 'engine', 'purpose': 'rendering',

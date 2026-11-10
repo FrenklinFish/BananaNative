@@ -41,6 +41,7 @@ static int vka_placed_probe(void) {
 vka_fns vk;
 vka_dev V = {.qmu = PTHREAD_MUTEX_INITIALIZER};
 static int g_state;   // 0 not tried, 1 up, -1 failed
+static int g_fault_on;   // VK_EXT_device_fault enabled (fault_report)
 static pthread_mutex_t g_init_mu = PTHREAD_MUTEX_INITIALIZER;
 
 
@@ -166,6 +167,11 @@ static int init_once(void) {
     if (x_mesh) dext[ndext++] = VK_EXT_MESH_SHADER_EXTENSION_NAME;
     int x_ph = has_ext(de, nde, "VK_QCOM_queue_perf_hint");
     if (x_ph) dext[ndext++] = "VK_QCOM_queue_perf_hint";
+    // VK_EXT_device_fault: after a lost device, what the driver knows of the fault (the address a GPU access faulted on, the kind), printed with the hang (fault_report).
+    // DM_VK_DEVICE_FAULT=0 (restart) leaves it off
+    const char *fault_env = getenv("DM_VK_DEVICE_FAULT");
+    int x_fault = has_ext(de, nde, VK_EXT_DEVICE_FAULT_EXTENSION_NAME) && !(fault_env && !strcmp(fault_env, "0"));
+    if (x_fault) dext[ndext++] = VK_EXT_DEVICE_FAULT_EXTENSION_NAME;
     V.mem_budget = has_ext(de, nde, VK_EXT_MEMORY_BUDGET_EXTENSION_NAME);   // the image heap's budget, for the texture cache's limit (vka_tex.c img_limit_update)
     if (V.mem_budget) dext[ndext++] = VK_EXT_MEMORY_BUDGET_EXTENSION_NAME;
     free(de);
@@ -178,30 +184,27 @@ static int init_once(void) {
     VkPhysicalDeviceVertexAttributeDivisorFeatures fdiv = {VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VERTEX_ATTRIBUTE_DIVISOR_FEATURES};
     VkPhysicalDeviceGraphicsPipelineLibraryFeaturesEXT fgpl = {VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_GRAPHICS_PIPELINE_LIBRARY_FEATURES_EXT};
     VkPhysicalDeviceMeshShaderFeaturesEXT fmesh = {VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MESH_SHADER_FEATURES_EXT};
+    VkPhysicalDeviceFaultFeaturesEXT ffault = {VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FAULT_FEATURES_EXT};
     void *chain = placed ? &fmp : NULL;
 #define LINK(on, st) if (on) { (st).pNext = chain; chain = &(st); }
     struct { VkStructureType sType; void *pNext; VkBool32 queuePerfHint; } fph = {(VkStructureType)1000302001};   // VkPhysicalDeviceQueuePerfHintFeaturesQCOM (not in the NDK's headers yet)
-    LINK(x_vin, fvin) LINK(x_rob, frob) LINK(x_i8, fi8) LINK(x_div, fdiv) LINK(x_ph, fph) LINK(x_gpl, fgpl) LINK(x_mesh, fmesh)
+    LINK(x_vin, fvin) LINK(x_rob, frob) LINK(x_i8, fi8) LINK(x_div, fdiv) LINK(x_ph, fph) LINK(x_gpl, fgpl) LINK(x_mesh, fmesh) LINK(x_fault, ffault)
 #undef LINK
     VkPhysicalDeviceVulkan13Features f13 = {VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_3_FEATURES, .pNext = chain};
     VkPhysicalDeviceVulkan12Features f12 = {VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_FEATURES, .pNext = &f13};
     VkPhysicalDeviceVulkan11Features f11 = {VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_1_FEATURES, .pNext = &f12};
     VkPhysicalDeviceFeatures2 f2 = {VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2, .pNext = &f11};
     vk.vkGetPhysicalDeviceFeatures2(V.pd, &f2);
-    // DM_VK_ROBUST=1 (at start): buffer robustness stays on (robustBufferAccess, and robustBufferAccess2 where the device has it): out-of-range buffer and vertex
-    // reads read zeros (or in-range data) as Maxwell / Ampere's do, instead of whatever memory follows
-    { const char *e = getenv("DM_VK_ROBUST"); V.robust = e && atoi(e) > 0; }
-    if (!V.robust) f2.features.robustBufferAccess = VK_FALSE;
-    f13.robustImageAccess = VK_FALSE;
+    f2.features.robustBufferAccess = VK_FALSE; f13.robustImageAccess = VK_FALSE;
     f12.bufferDeviceAddressCaptureReplay = VK_FALSE; f12.bufferDeviceAddressMultiDevice = VK_FALSE;
-    if (!V.robust || !f2.features.robustBufferAccess) frob.robustBufferAccess2 = VK_FALSE;
-    frob.robustImageAccess2 = VK_FALSE;   // only nullDescriptor: unbound slots read a null descriptor
+    frob.robustBufferAccess2 = VK_FALSE; frob.robustImageAccess2 = VK_FALSE;   // only nullDescriptor: unbound slots read a null descriptor
+    ffault.deviceFaultVendorBinary = VK_FALSE; g_fault_on = x_fault && ffault.deviceFault;   // (the vendor's binary dump: not read)
     // Mesh shading: the task and mesh stages only (multiview, shading-rate and query support each need more of the device than the replay enables or uses)
     fmesh.multiviewMeshShader = VK_FALSE; fmesh.primitiveFragmentShadingRateMeshShader = VK_FALSE; fmesh.meshShaderQueries = VK_FALSE;
     if (x_mesh && !fmesh.meshShader) fmesh.taskShader = VK_FALSE;   // (task shading is of no use without mesh shading)
     V.push_desc = x_push; V.vin_dyn = x_vin && fvin.vertexInputDynamicState; V.null_desc = x_rob && frob.nullDescriptor; V.idx8 = x_i8 && fi8.indexTypeUint8;
     V.divisor = x_div && fdiv.vertexAttributeInstanceRateDivisor; V.logic_op = f2.features.logicOp; V.dual_src = f2.features.dualSrcBlend; V.geom = f2.features.geometryShader;
-    V.tess = f2.features.tessellationShader; V.depth_clamp = f2.features.depthClamp; V.depth_bounds = f2.features.depthBounds; V.fill_lines = f2.features.fillModeNonSolid; V.depth_bias_clamp = f2.features.depthBiasClamp;
+    V.tess = f2.features.tessellationShader; V.depth_clamp = f2.features.depthClamp; V.fill_lines = f2.features.fillModeNonSolid; V.depth_bias_clamp = f2.features.depthBiasClamp;
     V.multi_vp = f2.features.multiViewport; V.a2c = 1; V.vstores = f2.features.vertexPipelineStoresAndAtomics; V.fstores = f2.features.fragmentStoresAndAtomics; V.mesh = x_mesh && fmesh.meshShader; V.task = V.mesh && fmesh.taskShader;
     if (!f12.timelineSemaphore || !f13.dynamicRendering) { VRED("the device lacks timeline semaphores (%d) or dynamic rendering (%d)", f12.timelineSemaphore, f13.dynamicRendering); return 0; }
     V.imageless = f12.imagelessFramebuffer;   // (enabled with the rest of f12)
@@ -651,11 +654,37 @@ uint64_t vka_hang_ns(void) {
 // thread finds it only at its next wait; meanwhile the failed commit's host signal of its timeline value went to the driver, and Turnip's vkSignalSemaphore on a lost
 // device faulted (SIGSEGV at address 8 inside the driver, called from vka_host_signal: Mario Kart World on Turnip V39, 2026-11-10)
 static void hang_declare(uint64_t want, uint64_t at, double s, const char *what);
+// What the driver reports of a lost device's fault (VK_EXT_device_fault, when the device has it): its description, the faulting addresses with their kind, and the
+// vendor's fault codes. Called once, after the hang lines
+static void fault_report(void) {
+    if (!g_fault_on) { VLOG("GPU hang: the driver reports no fault details (VK_EXT_device_fault %s)", getenv("DM_VK_DEVICE_FAULT") ? "off: DM_VK_DEVICE_FAULT=0" : "not on this device"); return; }
+    PFN_vkGetDeviceFaultInfoEXT get = (PFN_vkGetDeviceFaultInfoEXT)vk.vkGetDeviceProcAddr(V.dev, "vkGetDeviceFaultInfoEXT");
+    if (!get) { VRED("GPU hang: vkGetDeviceFaultInfoEXT not found"); return; }
+    VkDeviceFaultCountsEXT n = {VK_STRUCTURE_TYPE_DEVICE_FAULT_COUNTS_EXT};
+    VkResult r = get(V.dev, &n, NULL);
+    if (r && r != VK_INCOMPLETE) { VRED("GPU hang: vkGetDeviceFaultInfoEXT (counts) %d", r); return; }
+    if (n.addressInfoCount > 32) n.addressInfoCount = 32;
+    if (n.vendorInfoCount > 32) n.vendorInfoCount = 32;
+    n.vendorBinarySize = 0;
+    VkDeviceFaultAddressInfoEXT ai[32]; VkDeviceFaultVendorInfoEXT vi[32];
+    VkDeviceFaultInfoEXT fi = {VK_STRUCTURE_TYPE_DEVICE_FAULT_INFO_EXT, .pAddressInfos = n.addressInfoCount ? ai : NULL, .pVendorInfos = n.vendorInfoCount ? vi : NULL};
+    r = get(V.dev, &n, &fi);
+    if (r && r != VK_INCOMPLETE) { VRED("GPU hang: vkGetDeviceFaultInfoEXT %d", r); return; }
+    static const char *const kind[] = {"none", "read of an invalid address", "write to an invalid address", "execution at an invalid address", "instruction pointer unknown",
+                                       "instruction pointer invalid", "instruction pointer of the fault"};
+    VRED("GPU hang: the driver's fault report: \"%s\" (%u addresses, %u vendor codes)", fi.description, n.addressInfoCount, n.vendorInfoCount);
+    for (uint32_t i = 0; i < n.addressInfoCount; i++)
+        VRED("GPU hang: fault address %#llx (within %#llx): %s", (unsigned long long)ai[i].reportedAddress, (unsigned long long)ai[i].addressPrecision,
+             (unsigned)ai[i].addressType < 7 ? kind[ai[i].addressType] : "?");
+    for (uint32_t i = 0; i < n.vendorInfoCount; i++)
+        VRED("GPU hang: vendor fault \"%s\": code %#llx, data %#llx", vi[i].description, (unsigned long long)vi[i].vendorFaultCode, (unsigned long long)vi[i].vendorFaultData);
+}
 void vka_device_lost(const char *what) {
     if (vka_hung()) return;
     char w[96]; snprintf(w, sizeof w, "%s returned -4 (the device is lost)", what);
     uint64_t d = vka_done(); hang_declare(d + 1, d, 0, w);
 }
+static _Atomic int g_fault_reported;
 static void *hang_exit_main(void *arg) { (void)arg; pthread_setname_np(pthread_self(), "vk-hang"); dm_host_shutdown("GPU hang"); return NULL; }
 void vka_exec_hang_report(uint64_t fence);   // vka_exec.c: what the stuck submission held
 static void hang_declare(uint64_t want, uint64_t at, double s, const char *what) {
@@ -663,6 +692,7 @@ static void hang_declare(uint64_t want, uint64_t at, double s, const char *what)
     VRED("GPU hang: %s; fence %llu not reached in %.1f s (the timeline at %llu, %llu handed to the queue, %llu reserved): nothing more is submitted, every fence reads as done",
          what, (unsigned long long)want, s, (unsigned long long)at, (unsigned long long)vka_fence_queued(), (unsigned long long)vka_fence_last());
     vka_exec_hang_report(at + 1);
+    if (strstr(what, "-4") && !atomic_exchange(&g_fault_reported, 1)) fault_report();   // (a lost device: the driver may know where the GPU faulted)
     if (!VKA_ENV("DM_VK_HANG_EXIT", 1)) { VRED("GPU hang: DM_VK_HANG_EXIT=0, the game runs on without the GPU"); return; }
     VRED("GPU hang: the host exits (DM_VK_HANG_EXIT=0 runs on without the GPU)");
     pthread_t th; if (!pthread_create(&th, NULL, hang_exit_main, NULL)) pthread_detach(th);
