@@ -134,7 +134,7 @@ static uint32_t *spv_override(uint32_t *w, size_t *nb) {   // DM_VK_SPV_OVERRIDE
         if (e && strlen(e) < sizeof a) { strcpy(a, e); char *save = NULL;
             for (char *t = strtok_r(a, ",", &save); t && n < 4; t = strtok_r(NULL, ",", &save)) { char *c = strchr(t, ':'); if (!c) continue; *c = 0;
                 orig[n] = ov_read(t, &no[n]); patched[n] = ov_read(c + 1, &np[n]);
-                fprintf(stderr, "[dm] spv override %d: %s (original %zu bytes, patched %zu bytes)\n", n, orig[n] && patched[n] ? "on" : "[RED] files not read", no[n], np[n]); n++; } } }
+                if (orig[n] && patched[n]) fprintf(stderr, "[dm] spv override %d: on (original %zu bytes, patched %zu bytes)\n", n, no[n], np[n]); else fprintf(stderr, "[dm] [RED] spv override %d: files not read (original %zu bytes, patched %zu bytes)\n", n, no[n], np[n]); n++; } } }
     for (int i = 0; i < n; i++) {
         if (!orig[i] || !patched[i] || *nb != no[i] || memcmp(w, orig[i], no[i])) continue;
         uint32_t *o = malloc(np[i]); if (!o) return w;
