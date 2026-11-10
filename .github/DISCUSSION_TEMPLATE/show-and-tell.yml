@@ -1,0 +1,20 @@
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Show it running on your phone! Say the app version, phone, chip, RAM and GPU driver.
+        **No game files, keys, firmware or links to them**: don't share them, offer them or ask where to get them. Banana Native works with your own dump of a game you own. Posts that break this are edited or removed ([rules](https://github.com/moceure/BananaNative/discussions/23)).
+  - type: textarea
+    id: body
+    attributes:
+      label: Your post
+      description: "Videos, screenshots, frame rates."
+    validations:
+      required: true
+  - type: checkboxes
+    id: rules
+    attributes:
+      label: Rules
+      options:
+        - label: My post has no game files, keys, firmware or links to them, and doesn't ask for any.
+          required: true

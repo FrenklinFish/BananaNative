@@ -1,0 +1,25 @@
+# What this game needs of an Android phone, for the launcher's readiness check (android/README.md "Readiness check"; the format in dm/games/README.md "Readiness rows").
+# <required|degraded> <TAB> <fact> <TAB> <at least> <TAB> <title>: <why>. Facts: what vka_readiness.c reports, ram_gib (ActivityManager totalMem in GiB) and android.sdk.
+# A table of its own, not game.tsv rows: the launcher's rows apart from the host's (a pack's rewrite key hashes only game.tsv's build rows, pack_android.py rewrite_key).
+
+status	playable
+
+# Memory: 6.3-8.1 GB resident while playing on the 16 GB phone (14.66 GiB totalMem), the note's Memory section; no phone with less has run it
+required	ram_gib	10	Memory: the game keeps 6-8 GB in use while playing, which a phone with less than about 12 GB cannot give it
+degraded	ram_gib	14	Memory: tested on a 16 GB phone only; with less, Android may stop the game when memory runs short
+
+# The shader library's needs (android/SHADERS.md): 7 geometry shader modules (the terrain's culling pass: without the feature those draws are skipped, vka_shader.c),
+# 161 modules write storage images without a format and 30 read them, every vertex module takes draw parameters, 2 read memory through buffer device addresses with 64-bit integers
+required	feature.geometryShader	1	Geometry shaders: the terrain is drawn with them; without them those draws are skipped
+required	feature.shaderStorageImageWriteWithoutFormat	1	Storage image writes without a format: most of the game's compute and effect shaders use them
+required	feature.shaderStorageImageReadWithoutFormat	1	Storage image reads without a format: some of the game's shaders use them
+required	feature.shaderDrawParameters	1	Shader draw parameters: every vertex shader of the game reads them
+degraded	feature.bufferDeviceAddress	1	Buffer device addresses: two of the game's shaders read memory through them
+degraded	feature.shaderInt64	1	64-bit integers in shaders: two of the game's shaders use them
+
+# Textures are sampled in their own compressed formats, BC and ASTC 8x8 (vka_tex.c: no CPU decoding; a format the GPU lacks leaves that texture out)
+required	feature.textureCompressionBC	1	BC compressed textures: the game's textures are sampled as they are, never decoded on the CPU
+required	feature.textureCompressionASTC_LDR	1	ASTC compressed textures: the game's textures are sampled as they are, never decoded on the CPU
+
+# The largest compute shader's shared memory (shader_facts.tsv): 11,904 bytes, below Vulkan's minimum of 16 KiB
+required	limit.maxComputeSharedMemorySize	11904	Compute shared memory: the game's largest compute shader takes 11,904 bytes

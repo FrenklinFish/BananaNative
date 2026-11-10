@@ -1,0 +1,111 @@
+name: Android bug report
+description: Banana Native on Android crashes, hangs, draws wrong, runs slowly or will not prepare a game
+labels: [android]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for the report. Your phone is probably not the one this was tested on, so these details are what a problem is traced with.
+        Never attach game files, keys or anything extracted from a game. Logs and screenshots are fine.
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened
+      description: What you did and what you saw. Say whether it happens every time, and where in the game.
+    validations:
+      required: true
+  - type: input
+    id: phone
+    attributes:
+      label: Phone
+      description: Maker and model.
+      placeholder: "Samsung Galaxy S25 Ultra"
+    validations:
+      required: true
+  - type: input
+    id: chip
+    attributes:
+      label: Chip and RAM
+      placeholder: "Snapdragon 8 Elite Gen 5, 16 GB"
+    validations:
+      required: true
+  - type: input
+    id: android
+    attributes:
+      label: Android version
+      placeholder: "Android 16"
+    validations:
+      required: true
+  - type: dropdown
+    id: driver
+    attributes:
+      label: GPU driver (Settings › GPU driver)
+      options:
+        - System (Qualcomm)
+        - Turnip
+        - Other custom driver
+    validations:
+      required: true
+  - type: input
+    id: driver_version
+    attributes:
+      label: Driver version, if custom
+      placeholder: "Turnip 26.0.0"
+  - type: input
+    id: game
+    attributes:
+      label: Game title ID and version
+      description: As the game's card shows them. The README's Games table lists the versions that run.
+      placeholder: "040074A01BF12000, update 458752"
+    validations:
+      required: true
+  - type: input
+    id: release
+    attributes:
+      label: Banana Native release
+      description: Settings › About shows the build tag.
+      placeholder: "v0.1.0"
+    validations:
+      required: true
+  - type: dropdown
+    id: readiness
+    attributes:
+      label: Readiness check result (Settings › Readiness check)
+      options:
+        - Pass
+        - Fail
+        - Not run
+    validations:
+      required: true
+  - type: textarea
+    id: log
+    attributes:
+      label: Log
+      description: |
+        Settings › Share log (or the game's ⋯ › Share log) right after the problem. Best: save the file and drag it into this box, where it shows as one link. Or paste the whole log between the lines inside the block below (it is collapsed in the issue), and keep the `<details>` lines.
+      value: |
+        <details>
+        <summary>Log (click to expand)</summary>
+
+        ```text
+        paste the log here
+        ```
+
+        </details>
+    validations:
+      required: true
+  - type: textarea
+    id: extra
+    attributes:
+      label: Anything else
+      description: Settings you changed (resolution, frame rate cap, frame generation), a phone cooler, screenshots.
+  - type: checkboxes
+    id: rules
+    attributes:
+      label: Rules
+      description: Posts that share, offer or ask for game files, keys or links are edited or removed.
+      options:
+        - label: I play a dump of a game I own, made with my own console.
+          required: true
+        - label: I am not attaching, offering or linking game files, keys or firmware.
+          required: true

@@ -1,0 +1,9 @@
+# vk_android_build.py: tool changes whose Android shader libraries are byte-identical to an earlier version's (vk_android_build.py vk_version, android/SHADERS.md#versions).
+# A row is added only after a full build with the new tools reproduced the earlier library byte for byte; its digest is then that library's version.
+# tools digest	library version	evidence
+e2662a2b6a96	e38a586a8a89	result cache, progress lines, ctypes seam (35331832 on e38a586a8a89): full DKB build 2026-11-03, dmsh_vk.lib, index.json and _vk_build.json byte-identical
+bdf12a2caade	e38a586a8a89	the translator library checked by its source tree (xlate_tree.py), one translator call at a time for the library form (DMSH_VK_XLATE_J), the validator version in the result stamp, no result without a module or a reason, DMSH_VK_REQUIRE_ALL: full DKB build 2026-11-03 with the library forms (ctypes), dmsh_vk.lib, index.json and _vk_build.json byte-identical
+44b34b6f8f94	6607c8d19abc	stamp rows in the delta manifest (vk_android_delta.py stamp_only, restamped_header; --publish-delta writes them): full DKB and MKW 1.8.0 builds 2026-11-04, dmsh_vk.lib byte-identical
+088af9aa5109	6607c8d19abc	DMSH_VK_REQUIRE_ALL takes the profile manifest's "-" shaders (not built in the Mac's full build) out of the failures, and the delta check takes such a shader not built as the manifest has it (vk_android_delta.py not_built_there, entry_as_manifest): full MKW 1.8.0 build 2026-11-05 with REQUIRE_ALL, dmsh_vk.lib, index.json and _vk_build.json byte-identical
+f227ca1a8b99	ab4b4f8658c2	PID temp file and not want cleanup guard: byte-identical results
+16268b2ecbc3	0035e16073bf	a selected split's empty records have no key (record_key), and DMSH_VK_REQUIRE_ALL=0 leaves out the shaders the package lacks (open_packs): full Pokopia key-list build (8,161 shaders) 2026-11-08, dmsh_vk.lib, index.json, _vk_build.json and vk_delta.tsv byte-identical

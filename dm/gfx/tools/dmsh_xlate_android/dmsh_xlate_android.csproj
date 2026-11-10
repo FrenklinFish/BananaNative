@@ -1,0 +1,61 @@
+<!-- dmsh_xlate for Android (android/ONDEVICE.md): the same Program.cs, compiled with .NET NativeAOT for linux-bionic-arm64, so the phone translates the game's shaders itself.
+     Not one of DMSH_CHAIN's files: it compiles ../dmsh_xlate/Program.cs unchanged and embeds that file and ../dmsh_xlate/dmsh_xlate.csproj as src0 / src1, so the embedded source
+     (the source-sha argument) is the Mac translator's. Its own files: Sha256.cs (a managed SHA-256: .NET on bionic looks for OpenSSL, which Android does not have) and Entry.cs
+     (the exported entry of the shared library the app loads). build.sh builds both forms: an executable (adb shell tests) and libdmsh_xlate.so (the app). -->
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net10.0</TargetFramework>
+    <Nullable>disable</Nullable>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    <AssemblyName>dmsh_xlate</AssemblyName>
+    <RootNamespace>dmsh_xlate</RootNamespace>
+    <EnableDefaultCompileItems>false</EnableDefaultCompileItems>
+    <PublishAot>true</PublishAot>
+    <RuntimeIdentifier>linux-bionic-arm64</RuntimeIdentifier>
+    <!-- NativeAOT for bionic is built from the Mac with the NDK's clang (build.sh); the SDK calls that a cross-OS build -->
+    <DisableUnsupportedError>true</DisableUnsupportedError>
+    <PublishAotUsingRuntimePack>true</PublishAotUsingRuntimePack>
+    <InvariantGlobalization>true</InvariantGlobalization>
+    <UseSystemResourceKeys>true</UseSystemResourceKeys>
+    <!-- GC settings for the phone (android/ONDEVICE.md, The translator on the phone, 2026-11-07): the GC sizes its youngest generation from the CPU cache size, which
+         the phone does not report (no /sys/devices/system/cpu/cpu0/cache, sysconf 0), and background GC caps it further, so the translator collected all the time
+         (2.5-2.9x slower on one thread) and threads of one process stopped each other at every collection (6 threads slower than one). Non-concurrent GC, a 16 MB
+         gen0 budget and a 16 MB large-object threshold (GCgen0size / GCLOHThreshold below, hex as the runtime reads them): output byte-identical. Each one can be
+         overridden for tests by DOTNET_gcConcurrent, DOTNET_GCgen0size, DOTNET_GCLOHThreshold in the environment before the library loads. -->
+    <ConcurrentGarbageCollection>false</ConcurrentGarbageCollection>
+    <!-- CS0436: Sha256.cs's System.Security.Cryptography.SHA256 replaces the framework's on purpose -->
+    <NoWarn>$(NoWarn);CS0436</NoWarn>
+    <!-- A trim or AOT warning is an error here: such a call works in the Mac's JIT translator and fails only on the phone. Program.cs's JsonArray.Add(int) bound to
+         JsonArray.Add<T>, which needs reflection metadata NativeAOT does not have (IL3050), so every shader with a 1D fetch failed to translate on the phone
+         (3,384 of Pokémon Pokopia's 8,157: docs/reference/shaders.md, "A translator call that needs reflection fails only on the phone"). The analyzer's codes
+         (Requires* members: IL2026 trimming, IL3050 dynamic code, IL3002 single file) at compile time, and ILC's whole-program analysis of every assembly at publish -->
+    <WarningsAsErrors>$(WarningsAsErrors);IL2026;IL3050;IL3002</WarningsAsErrors>
+    <IlcTreatWarningsAsErrors>true</IlcTreatWarningsAsErrors>
+    <TrimmerSingleWarn>false</TrimmerSingleWarn>
+    <!-- No build-machine paths in the binaries (a home path once reached the public repository through them): source paths map to /_/, and no SourceLink
+         (it would embed the git remote and commit) -->
+    <PathMap>$([System.IO.Path]::GetFullPath('$(MSBuildThisFileDirectory)../../../../'))=/_/</PathMap>
+    <Deterministic>true</Deterministic>
+    <EnableSourceLink>false</EnableSourceLink>
+    <EnableSourceControlManagerQueries>false</EnableSourceControlManagerQueries>
+    <RyuSrc Condition="'$(RyuSrc)' == ''">$(MSBuildThisFileDirectory)../../../third_party/ryujinx</RyuSrc>
+  </PropertyGroup>
+  <ItemGroup>
+    <IlcArg Include="--runtimeopt:GCgen0size=1000000" />
+    <IlcArg Include="--runtimeopt:GCLOHThreshold=1000000" />
+  </ItemGroup>
+  <ItemGroup>
+    <Compile Include="../dmsh_xlate/Program.cs" />
+    <Compile Include="Sha256.cs" />
+    <Compile Include="Entry.cs" />
+    <EmbeddedResource Include="../dmsh_xlate/Program.cs" LogicalName="src0" />
+    <EmbeddedResource Include="../dmsh_xlate/dmsh_xlate.csproj" LogicalName="src1" />
+    <!-- the source tree's digest (dm/gfx/tools/xlate_tree.py), written by build.sh before it publishes: the library's - -tree-sha, which vk_android_build.py checks -->
+    <EmbeddedResource Include="obj/tree.sha" LogicalName="tree" Condition="Exists('obj/tree.sha')" />
+  </ItemGroup>
+  <ItemGroup>
+    <ProjectReference Include="$(RyuSrc)/src/Ryujinx.Graphics.Shader/Ryujinx.Graphics.Shader.csproj" />
+    <ProjectReference Include="$(RyuSrc)/src/Ryujinx.Common/Ryujinx.Common.csproj" />
+  </ItemGroup>
+</Project>

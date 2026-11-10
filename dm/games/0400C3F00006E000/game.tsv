@@ -1,0 +1,63 @@
+# Mario Kart World (Switch 2), 1.8.0: one Application content (version 0) that carries the 1.8.0 code and data, no separate update. In bring-up
+# Nintendo EPD's engine (sead / agl / gsys, Phive, Havok 2023.2), SDK 21.4.0 built for the Switch 2 (spec Ounce), NVN2; modules main + subsdk0 (NintendoSDK movie 21.4.0)
+# + subsdk1 (nn::ecli, Nintendo's embedded Mono runtime; main imports its allocator) + sdk.
+# Packed from a dump folder (base/). Shaders: Shader/*.Nin_Ounce_NVN2.bfsha.zs (BNSH with Ampere code), as Donkey Kong Bananza.
+
+# ---- Identity ----
+title_id	0400C3F00006E000
+program_id	0400C3F00006E000
+
+# ---- App ----
+name	Mario Kart World
+ipa	MarioKartWorld.ipa
+app_category	public.app-category.racing-games
+pad_layout	full
+
+# ---- Versions ----
+# The 1.8.0 dump is version 0 as the earlier base-game dump was, so it takes the v0 row: the earlier build (main 9e244438c3d8ef1c703a6a85ef99c4f0, subsdk0 d39a7a3d44530bb6..., the ecli module
+# that 1.8.0 loads as subsdk1, sdk 90ebba182862b9ec..., SDK 19.3.3) had no build-keyed cuts or host fixes and is not registered any more (README, Builds)
+build	v0	1.8.0	main=d00e4f399e411d0613aa8d26b1c02fef	subsdk0=746302f49f095cfca3d2188423c2bd77	subsdk1=8dec9c0b1bed821364e77b10a07b9a28	sdk=7a68b13d88183767fb9c7babffe89f3d
+package	v0
+shader_versions	v0
+
+# ---- Files ----
+modules	main subsdk0 subsdk1 sdk
+romfs_marker	System/Resource/ResourceSizeTable.Product.100.Nin_Ounce_NVN2.rsizetable.zs
+# Line 4 of System/RegionLangMask.txt is the build ID of the main its RomFS was made for (1.8.0: line 3 "180", line 4 d00e4f39...), as in Donkey Kong Bananza: a dump whose
+# RomFS is another build's data under 1.8.0's code (GitHub #27 / #44: CRASH sig=11 at main+0x8bfc0 1.7 s in) is refused at Add / Prepare and on the card
+romfs_check	System/RegionLangMask.txt	4	main
+zip_store	.zs:.bwav:.webm:.metallib
+
+# ---- Memory ----
+# The NPDM declares 64 MB of system resource (virtual address memory on; 1.8.0's NPDM differs only by the services chat:u, mnpp:app and stpl:u). nninitStartup sets the heap to the
+# free application memory less a fixed reserve (main+0x84790: 0x5dc00000 in 1.8.0, 0x60400000 in the earlier base build, whose Mac heap check measured 0x1dbc00000): 0x1de400000
+# (7.47 GB) in 1.8.0, by that formula (not measured), within the 7.75 GB heap region.
+# The alias region holds the SDK's AddressRegionManager node area (0x3fe00000) and then the regions the game maps physical memory into (earlier base build: main+0x68524c), past +1.6 GB within 8 s
+# of boot (DM_REGIONS, Switch-sized DM_ALIAS_SIZE); with a 1 GB alias region the first ones got no address and the game read a null object (main+0xc10170). 4 GB: the node area
+# and the 1.57 GB (1.53 GB in 1.8.0) the 9 GB pool leaves beside the heap, with room for fragmentation. The Switch 2's 9 GB pool (as Donkey Kong Bananza; not measured)
+mem_reserve	0x300000000
+mem_alias	0x100000000
+mem_stack	0x10000000
+app_pool	0x240000000
+sys_resource	0x4000000
+# The reserve beside the heap goes to the game's virtual address heap, whose free size is what the system reports free (main+0x5a8c60 in 1.8.0: nn::os::QueryMemoryInfo
+# total - used, page-aligned, less a page; GetInfo 21 / 22). On Horizon the used memory counts the pages mapped in the alias region; without this key the host leaves them out, so
+# the heap's free size never falls and its blocks are never let go (kartnative on 1.0.0: 954 regions of 0xb1000 bytes by a fourth race, each a 512x512 R16 texture of 10 levels
+# with its GPU copy; 2.4 GB mapped vs 1.25 GB with the limit; plumber-racer-2 sets it too). With it the used memory counts them and a map past the pool fails, as on Horizon:
+# the heap (pool - used - 0x5dc00000) leaves the alias region the 1.5 GB reserve
+
+# ---- Shader split (shader_split.py) ----
+shader_groups	/Shader/=shader /Effect/=effect /UI/=layout
+shader_note	Mario Kart World shaders
+
+# ---- Graphics ----
+# Large block-compressed textures from the game's files kept without their finest level on the Vulkan replay (Android; README, Memory): ported from plumber-racer-2 (MIT,
+# copyright seedds), where it made a race fit an iPhone 18 Pro. Textures the game copies from stay whole (its terrain arrays are filled by copies: the road went purple without it)
+tex_soft	on
+# agl's render buffer binding: Donkey Kong Bananza's clears are wrapped in render conditions; the same engine, not yet checked on this game
+render_cond	on
+# The 3D scenes' size follows the operation mode and the Switch 2 graphics scale, not the window (README, Render resolution): the Android launcher's Game resolution
+# sets these instead of DM_WINDOW_SIZE. <choice> <DM_GRAPHICS_SCALE> <operation mode>: handheld scale 0 crops 1920x1080, handheld scale 2 1280x720 (phone rH0 / rH2);
+# Original has no row: the game's own (console, scale 1: 2048x1152)
+graphics_scale	1920x1080	0	handheld
+graphics_scale	1280x720	2	handheld

@@ -1,0 +1,22 @@
+# Build outputs (Xcode derived data, produced by the scripts under dm/ios)
+.iosdd/
+.iosdd_mac/
+.iosdd_*/
+.DS_Store
+__pycache__/
+# Made from each shader build's Mac outputs (c1_guard.py, cb_extent.py; the NSP script makes them), not committed
+dm/games/*/c1_full.tsv
+dm/games/*/cb_extent.tsv
+# coverage.py data and its JSON report (pyproject.toml, [tool.coverage.run])
+.coverage
+.coverage.*
+/coverage.json
+# The packer environment scripts/bananative.command / .bat uses (a local path)
+/.bananative-env
+
+# Internal notes: kept in the private repository only
+/internal/
+HANDOFF*.md
+ONDEVICE*.md
+STUTTER-TEST*.md
+*.internal.md

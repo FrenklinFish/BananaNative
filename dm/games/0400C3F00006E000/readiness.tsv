@@ -1,0 +1,27 @@
+# What this game needs of an Android phone, for the launcher's readiness check (android/README.md "Readiness check"; the format in dm/games/README.md "Readiness rows").
+# <required|degraded> <TAB> <fact> <TAB> <at least> <TAB> <title>: <why>. Facts: what vka_readiness.c reports, ram_gib (ActivityManager totalMem in GiB) and android.sdk.
+# A table of its own, not game.tsv rows: the launcher's rows apart from the host's (a pack's rewrite key hashes only game.tsv's build rows, pack_android.py rewrite_key).
+
+# Playable on the tested 16 GB phone (the user's check, 2026-11-08); Supported on the player pages
+status	playable
+
+# Memory: plays on the 16 GB phone (14.66 GiB totalMem; earlier builds were stopped there by the low-memory killer about 20 s in, the note); nothing less has run it
+required	ram_gib	14	Memory: the game needs a 16 GB phone (14 GiB reported); 12 GB phones run out of memory
+
+# The shader library: 168 compute shaders take 49,152 bytes of shared memory (shader_facts.tsv), more than Vulkan's minimum of 16 KiB. The tested phone reports 32,768
+# (Adreno 840, Qualcomm 718a07726a) and the game still reaches its first frames there, so the row is degraded, not required: what those dispatches do above the limit
+# (pipeline refused, dispatch skipped, or the driver takes it anyway) is not measured yet (open). Make it required once a phone shows they fail
+degraded	limit.maxComputeSharedMemorySize	49152	Compute shared memory: 168 of the game's compute shaders take 48 KiB, more than this GPU's limit, and what that leaves out is not measured yet
+required	feature.textureCompressionBC	1	BC compressed textures: the game's textures are sampled as they are, never decoded on the CPU
+required	feature.textureCompressionASTC_LDR	1	ASTC compressed textures: the game's textures are sampled as they are, never decoded on the CPU
+
+# Sparse textures (the note: the terrain's 8192x8192 arrays, of which the game maps 3-12 %): with sparse residency images they take only the tiles the game maps; a format
+# without sparse residency gets a dense image that starts at a coarser level (DM_VK_SPARSE_DENSE_MB, default 128 MB): blurrier near the camera. The tested phone has
+# residency for RGBA8 / RGBA16F and for no block-compressed format (vka_sparse.c, vka_tex.c dense_floor; docs/reference/nvn-objects.md "Sparse texture arrays made at
+# their full size")
+degraded	sparse.residencyImages	1	Sparse residency images: without them the large texture arrays are dense images that start at a coarser level (lower detail near the camera, more memory)
+degraded	sparse.format.bc6h	1	Sparse BC6H textures: the large BC6H texture arrays start at a coarser level (lower detail near the camera)
+degraded	sparse.format.astc8x8	1	Sparse ASTC 8x8 textures: the large ASTC texture arrays start at a coarser level (lower detail near the camera)
+
+# Mesh and task shaders: 26 of the game's programs are mesh / task programs that the translator does not do yet, so those draws are missing on every phone (a port limit,
+# not a device one: no row until the translator does them; then VK_EXT_mesh_shader's meshShader / taskShader become rows here)

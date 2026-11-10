@@ -1,0 +1,63 @@
+# Donkey Kong Bananza (Switch 2, update v458752). In bring-up
+# Nintendo EPD's engine (sead / agl / gsys, Phive), SDK 20.5.19, NVN2 (the Switch 2's NVN: Ampere shaders, DLSS); modules main + sdk.
+# Packed from a dump folder (base/, updates/<version>/, dlc/) with scripts/pack_dump.py. Shaders: Shader/*.Nin_Ounce_NVN2.bfsha.zs (BNSH with Ampere code).
+
+# ---- Identity ----
+title_id	040074A01BF12000
+program_id	040074A01BF12000
+
+# ---- App ----
+name	Donkey Kong Bananza
+ipa	DonkeyKongBananza.ipa
+app_category	public.app-category.action-games
+pad_layout	full
+
+# ---- Versions ----
+build	v458752	v458752	main=e25c90c1c136638885659fd55bf8a03b	sdk=18265daea2105b31f25346adfbbd09b5
+package	v458752
+shader_versions	v458752
+
+# ---- Files ----
+modules	main sdk
+romfs_marker	System/Resource/ResourceSizeTable.Product.rsizetable.zs
+romfs_check	System/RegionLangMask.txt	4	main
+zip_store	.zs:.bwav:.webm:.metallib
+
+# ---- Memory ----
+# The Switch 2 leaves games 9 GB of its 12 GB (not measured here): with the guessed Switch 1 pool (3.2 GB) the game's heaps did not fit (AudioSystemHeap creation returned null, main+0x564b48).
+# 256 MB in front + 256 MB alias region + 256 MB stack region + 9 GB heap region
+mem_reserve	0x270000000
+mem_alias	0x10000000
+mem_stack	0x10000000
+app_pool	0x240000000
+# The NPDM declares no system resource: IsVirtualAddressMemoryEnabled is false, and the game sets a heap (without the key the host answers 32 MB, and the SDK's VammManager
+# asks GetInfo 0x21, which Switch 1 kernels do not have, for the size to map up front)
+sys_resource	0x0
+
+# ---- Shader split (shader_split.py) ----
+shader_groups	/Shader/=shader /Effect/=effect /UI/=layout
+shader_note	Donkey Kong Bananza shaders
+
+# ---- Graphics ----
+# agl's render buffer binding wraps its clears in render conditions (SetRenderEnableConditional(RENDER_IF_NOT_EQUAL) at main+0x12798c before the ClearColor at main+0x1279d4):
+# without the key, a clear-only rebinding of the composite target right after the composite draw wiped it before the upscaler read it, and every gameplay frame came out black
+render_cond	on
+# Dynamic resolution (MaintainGpuPercentage: the NDSR rate between NdsrUpscaleMinRate and NdsrUpscaleMaxRate) reads the GPU time between the frame's timestamp reports: each report takes its segment's GPU start / end
+gpu_timestamps	segment
+# The window size (the nvnWindow textures the upscaler's output is copied to; the render targets scale with it) is the constant pair two leaf functions of main return (mov w0,#2880 / #1620; ret):
+# the host writes DM_WINDOW_SIZE's size into them at load (loader.c window_apply; the Android launcher's Game resolution: Phone 1080p = 1920x1080), the game's own 2880x1620 without it (the game note, Window size)
+window_fn	e25c90c1c136638885659fd55bf8a03b	0x5bf770	0x5bf780	2880x1620
+# The game advances its world by the frame rate sead's frame-rate controller hands its framework, 60 / the interval it picked, from one sdiv (v458752 main+0x204b20,
+# v0 main+0x1eadf0). With this key the rewriter gates that sdiv (v458752's place is an OBS row of patches.py, any other build's found by its code) and the host makes
+# the rate the measured one there, so the game keeps its speed at any frame rate (dm/tools/nso_code.py sead_find, hle_fpslock.c sead_rate). The key also tells the launcher
+# the game's speed follows the measured rate: a frame limit (60/45/40/30/20) with presentation on the host's own tick instead of 60/30/20 locking
+fps_decouple	sead
+# The dynamic resolution controller (MaintainGpuPercentage), for the Android launcher's Dynamic resolution setting (probe.c drs_install): where the host finds the
+# range's parameter object (ldr x8, [x10, #0x5d0]), where every path's pick meets before it is stored (ldr x9, [x19, #0xf0]), the GPU budget load (ldr s2, [x19, #0xe8])
+# and a preset's automatic flag (ldrb w8, [x20, #0x29]). The row also tells the launcher the game has the setting
+drs_ctl	e25c90c1c136638885659fd55bf8a03b	0x38e100	0x38de2c	0x38dcbc	0x38dbc8
+
+# ---- Test runs ----
+# DM_FASTBOOT=1: A every 12 presented frames (0.1 s held) from the first present through the boot screen, the title, Continue and the file, a [mark] once 5 frames in a row
+# have 3,000 draws or more (the title has 63, the loading screen 6-9, the first level 5,500 and more) and no presses after it. With the seed save, am start to the first level in 45-50 s on the PNM-N49
+fastboot_env	DM_KEYS=f1:A~0.1*3000/12 DM_MARK_DRAWS=3000 DM_MARK_KEYS_STOP=1

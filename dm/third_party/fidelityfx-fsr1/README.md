@@ -1,0 +1,2 @@
+Source: https://github.com/GPUOpen-Effects/FidelityFX-FSR v1.0.2 (commit `a21ffb8f6c`), the two headers `ffx-fsr/ffx_a.h` and `ffx-fsr/ffx_fsr1.h`, unmodified. License in LICENSE.txt (MIT).
+Use: the Android present upscales the game's picture to the window with FSR 1 (EASU, then RCAS sharpening) when `DM_VK_FSR=1` (`dm/gfx/vk_android/vka_present.c`). The shaders that include these headers are `dm/gfx/vk_android/fsr/`; their SPIR-V is committed in `dm/gfx/vk_android/vka_present_fsr.h`, so the build does not compile GLSL.

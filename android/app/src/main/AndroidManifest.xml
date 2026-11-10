@@ -1,0 +1,95 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+    <!-- All files access: the host opens the game folder and the pack folder by their /storage paths (POSIX open, not the Storage Access Framework) -->
+    <!-- Vibrate: the game's rumble on the phone's motor when the controller has none (Rumble.java) -->
+    <uses-permission android:name="android.permission.VIBRATE" />
+    <uses-permission android:name="android.permission.MANAGE_EXTERNAL_STORAGE" />
+    <!-- Internet: the launcher's driver download (DriverFetch), on the user's tap, and the release app's update check (Updater) -->
+    <uses-permission android:name="android.permission.INTERNET" />
+    <!-- The in-app updater installs a newer release's APK through PackageInstaller (Updater); Android asks the player to allow it and to confirm each install -->
+    <uses-permission android:name="android.permission.REQUEST_INSTALL_PACKAGES" />
+    <uses-feature android:name="android.hardware.vulkan.version" android:version="0x402000" android:required="false" />
+    <!-- allowNativeHeapPointerTagging off: the host hands malloc'd blocks to guest code, which must see untagged pointers (also turned off in nxhost_main) -->
+    <!-- hasFragileUserData: the app's storage holds the saves and the packs (AppStorage); uninstalling asks whether to keep it -->
+    <!-- NxApp: every process opens a .nup picked in place (PickedNup) -->
+    <application
+        android:name=".NxApp"
+        android:label="@string/app_name"
+        android:icon="@mipmap/ic_launcher"
+        android:roundIcon="@mipmap/ic_launcher_round"
+        android:theme="@android:style/Theme.DeviceDefault"
+        android:extractNativeLibs="false"
+        android:allowNativeHeapPointerTagging="false"
+        android:largeHeap="true"
+        android:hasFragileUserData="true">
+        <activity
+            android:name=".MainActivity"
+            android:theme="@style/Theme.Banana"
+            android:launchMode="singleTask"
+            android:exported="true"
+            android:configChanges="orientation|screenSize|screenLayout|keyboardHidden">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity>
+        <!-- Emulator frontends (FRONTENDS.md): reached only by the exported alias <application ID>.Launch (dev.bananative.android/.Launch); draws nothing of its own -->
+        <activity
+            android:name=".FrontendLaunch"
+            android:exported="false"
+            android:taskAffinity=""
+            android:excludeFromRecents="true"
+            android:noHistory="true"
+            android:theme="@android:style/Theme.Translucent.NoTitleBar" />
+        <!-- No intent filters: Android 15 checks an explicit intent against an exported component's filters when it has any (and never matches one with no
+             action, Daijisho's -e game {file.path}), so the frontends' alias has none and takes every form (FRONTENDS.md) -->
+        <activity-alias
+            android:name="${applicationId}.Launch"
+            android:targetActivity=".FrontendLaunch"
+            android:exported="true" />
+        <!-- A .nup a file manager opens ("Open with"): its own alias, so the filter never restricts the frontends' one -->
+        <activity-alias
+            android:name="${applicationId}.Open"
+            android:targetActivity=".FrontendLaunch"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="android.intent.action.VIEW" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <data android:scheme="file" />
+                <data android:scheme="content" />
+                <data android:host="*" />
+                <data android:mimeType="*/*" />
+                <data android:pathPattern=".*\\.nup" />
+            </intent-filter>
+        </activity-alias>
+        <!-- The game runs in a process of its own: the host starts once per process and ends it when it stops, the launcher stays -->
+        <activity
+            android:name=".GameActivity"
+            android:exported="false"
+            android:launchMode="singleTask"
+            android:process=":game"
+            android:screenOrientation="sensorLandscape"
+            android:theme="@android:style/Theme.DeviceDefault.NoActionBar.Fullscreen"
+            android:configChanges="orientation|screenSize|screenLayout|smallestScreenSize|keyboard|keyboardHidden|navigation|uiMode|density" />
+        <!-- The graphics selftest (nxhost_vk_selftest), in a process of its own so it never meets a running game's Vulkan device -->
+        <activity
+            android:name=".SelftestActivity"
+            android:exported="false"
+            android:process=":selftest"
+            android:screenOrientation="sensorLandscape"
+            android:theme="@android:style/Theme.DeviceDefault.NoActionBar.Fullscreen"
+            android:configChanges="orientation|screenSize|screenLayout|smallestScreenSize|keyboard|keyboardHidden|navigation|uiMode|density" />
+        <!-- The readiness check (ReadinessActivity), in a process of its own: it loads a host and the GPU driver to ask Vulkan what the phone has -->
+        <activity
+            android:name=".ReadinessActivity"
+            android:exported="false"
+            android:process=":readiness"
+            android:theme="@style/Theme.Banana"
+            android:configChanges="orientation|screenSize|screenLayout|smallestScreenSize|keyboardHidden" />
+        <provider
+            android:name=".LogProvider"
+            android:authorities="${applicationId}.logs"
+            android:exported="false"
+            android:grantUriPermissions="true" />
+    </application>
+</manifest>

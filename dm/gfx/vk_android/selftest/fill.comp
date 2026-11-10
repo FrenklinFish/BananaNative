@@ -1,0 +1,7 @@
+#version 450
+// The dispatch selftest's compute shader: storage slot 0 at binding 0 (DMSH_VK_KIND_SBUF reg 0) and the driver segment c0 at binding 1 (DMSH_VK_KIND_DRVCB reg 0), whose
+// word DMSH_C0_DISPATCH (0x200 = vec4 32) holds the dispatch's group counts. Element i = i + 1000 * (number of groups in x)
+layout(local_size_x = 64) in;
+layout(set = 0, binding = 0, std430) buffer B { uint v[]; } b;
+layout(set = 0, binding = 1, std140) uniform C0 { uvec4 c0[160]; } d;
+void main() { uint i = gl_GlobalInvocationID.x; b.v[i] = i + 1000u * d.c0[32].x; }

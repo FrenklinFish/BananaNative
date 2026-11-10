@@ -1,0 +1,19 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- Dark mode: a warm night (roasted peel browns) with the same banana yellow -->
+    <color name="bn_bg">#FF17120C</color>
+    <color name="bn_card">#FF241C14</color>
+    <color name="bn_card_stroke">#FF3A2E20</color>
+    <color name="bn_tint">#FF3A2D17</color>
+    <color name="bn_banana">#FFFFD43B</color>
+    <color name="bn_banana_deep">#FFF2B705</color>
+    <color name="bn_on_banana">#FF3B2611</color>
+    <color name="bn_text">#FFFFF1D2</color>
+    <color name="bn_text_2">#FFCDB48C</color>
+    <color name="bn_accent">#FFFFD43B</color>
+    <color name="bn_leaf">#FF7FC79A</color>
+    <color name="bn_on_leaf">#FF10241A</color>
+    <color name="bn_danger">#FFFF9670</color>
+    <color name="bn_danger_tint">#FF3D2016</color>
+    <color name="bn_warn_tint">#FF3F3014</color>
+</resources>

@@ -1,0 +1,5 @@
+# What this game needs of an Android phone, for the launcher's readiness check (android/README.md "Readiness check"; the format in dm/games/README.md "Readiness rows").
+# A status row also marks the game as supported on Android: gradle.properties' nxGames builds every such profile into the APK (dm/tools/tests/test_android_games.py).
+
+# Playable (the user's check, 2026-11-07/08: sky correct, Pokedex images, plays fine); Supported on the player pages. Open: the Qualcomm driver's stall before the first Poke Ball (the note, Android)
+status	playable
