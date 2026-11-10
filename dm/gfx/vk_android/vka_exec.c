@@ -1,3 +1,4 @@
+// The occlusion queries (vka_oq_*, oq_*) follow Swap2-Native's: Copyright (c) 2026 Swap2-Native contributors, MIT (LICENSE).
 // The command replay: hle_nvn.c records the game's NVN commands into the game's own command memory (nvn_obj.h records); a submission replays its handles here into one
 // Vulkan command buffer (mtl_sub_begin → mtl_exec per handle → mtl_sub_commit), as nvn_mtl.m does into Metal. This milestone covers what a first frame needs: render targets,
 // colour / depth-stencil / texture clears, buffer and texture copies, inline updates and fills, barriers, events, counters and fences. Draws and dispatches log once and are skipped
@@ -7,6 +8,7 @@
 #include "../nvn/nvn_mtl.h"
 #include "../nvn/nvn_timestamp.h"
 #include "vka_present_rot.h"
+#include "vka_qsched.h"
 #include <math.h>
 #include <stdlib.h>
 #include <string.h>
@@ -17,51 +19,60 @@ enum { NQS = 8 };
 static qstate g_qs[NQS]; static int g_nqs;
 enum { NSLOT = 8 };
 enum { NCHUNK = 32 };
-static struct { VkCommandBuffer cb; uint64_t fence; VkCommandBuffer x[NCHUNK]; } g_slot[NSLOT];   // x: the command buffers a submission goes on in once it hands its first part to the queue (chunk)
+static struct { VkCommandBuffer cb; uint64_t fence; VkCommandBuffer x[NCHUNK]; VkFence vf; int vf_on; } g_slot[NSLOT];   // vf: set when its commit had no timeline signal (vf_on)   // x: the command buffers a submission goes on in once it hands its first part to the queue (chunk)
 static unsigned g_slot_i;
 static int g_chunk_draws = -1, g_nx; static uint64_t g_chunk_d0;   // chunk(): draws a part, parts this submission, draws at its part's start
 static VkCommandPool g_pool;
 static VkCommandBuffer g_cb;   // the submission being recorded (NULL without a device)
 VkCommandBuffer vka_rp_cb(void) { return g_cb; }
-typedef struct { int kind; uint32_t mode, v, type; uint64_t addr; } pop;   // kind 1 event, 2 counter report
+typedef struct { int kind; uint32_t mode, v, type; uint64_t addr, q0, q1; } pop;   // kind 1 event, 2 counter report, 3 frame span, 4 report marker (DM_VK_RC_LOG), 5 counted samples-passed report, 6 occlusion queries given back unread (q0..q1: their sequence numbers)
 static pop *g_post; static int g_npost, g_postcap;
 static uint64_t g_frame, g_stat_ops, g_stat_draws, g_stat_skipped;
 static int g_origin_ll = 1, g_queue_origin_ll = 1, g_depth_zero;
 _Atomic int vka_synclog_n;   // DM_VK_SYNCLOG: lines left (mtl_wait)
 #define g_synclog vka_synclog_n
 static double ms_now(void) { return (now_ns() % 1000000000000ull) / 1e6; }
-// Render conditions under render_cond (OP_RENDER_COND, rc_known). The timestamp reports replayed in this submission: their counter field reads 0 once written, though memory
-// does not show it yet. The table grows: it held 64 and dropped the rest, and a condition on a dropped report read what memory held (nvn_mtl.m: a table of 256 shared with
-// the query reports dropped entries once Splatoon Raiders' 285 ink queries came before its conditional clears, and the clears wiped the lit scene)
-static uint64_t *g_rc_ts; static int g_nrc_ts, g_rc_tscap;
-// Addresses ever written by a report of another counter (samples passed and the rest, open addressing, a power of two): the replay writes those counters only when the
-// submission completes, and as 1 for samples passed (post_run), not what the GPU counted, so a condition on them is unknown and keeps drawing (nvn_mtl.m rc_occ_has).
-// It read memory before: a pair of samples-passed reports both read 1 there, so a RENDER_IF_NOT_EQUAL block on an occlusion query was skipped
-static uint64_t *g_rc_occ; static uint32_t g_rc_ocap, g_rc_on;
-static int rc_occ_has(uint64_t a) {
-    if (!g_rc_ocap || !a) return 0;
-    for (uint32_t i = (uint32_t)(a >> 4) & (g_rc_ocap - 1);; i = (i + 1) & (g_rc_ocap - 1)) { if (g_rc_occ[i] == a) return 1; if (!g_rc_occ[i]) return 0; }
+// Render conditions under render_cond (OP_RENDER_COND, rc_known), evaluated on the CPU at record time from the records in memory. A report reaches memory only when its
+// submission completes (post_run), so the replay keeps, per report address, the latest report recorded there: its kind and the number of the submission that recorded it
+// (open addressing, a power of two, grown at half full; one entry per address, so its size follows the game's distinct report addresses, not its reports). While that
+// submission is being recorded or still on the GPU (rc_sub_done), a timestamp report's counter reads 0 (the time goes in the second field: Tears of the Kingdom's
+// conditional clears) and a counted samples-passed report (Occlusion queries, below) is unknown; once it is done, memory holds the answer. A report the replay writes as a
+// constant (another counter, or samples passed not counted: DM_VK_OCCLUSION=0, no query pool, no reset before it) is unknown for as long as it is the latest at its address.
+// An unknown condition keeps drawing: right for occlusion culling, which only saves work. Before 2026-11-08 only the timestamp reports of the submission being recorded
+// read 0 (an earlier submission's still on the GPU read old memory) and every address a non-timestamp report had ever written read unknown for good; before that a pair of
+// samples-passed reports both read the constant 1 and a RENDER_IF_NOT_EQUAL block on an occlusion query was skipped, and a table of 64 timestamp reports dropped the rest
+// (nvn_mtl.m: Splatoon Raiders' 285 ink queries came before its conditional clears, and the clears wiped the lit scene)
+enum { RCK_TS = 1, RCK_CONST = 2, RCK_OQ = 3 };   // a timestamp report; a counter written as a constant; a counted samples-passed report
+typedef struct { uint64_t addr, sub; uint32_t kind; } rc_ent;
+enum { RCM_MAX = 1u << 20 };   // addresses kept at most (24 MB): a condition on a report at an address past it reads memory
+static rc_ent *g_rcm; static uint32_t g_rcm_cap, g_rcm_n;
+static uint64_t g_n_sub;   // (the submission count, below)
+static int g_rc_rec;       // a submission (number g_n_sub) is being recorded: mtl_sub_begin to its commit
+static struct { uint64_t sub, fence; } g_rc_subf[64];   // the fences of the latest submissions by number (sub_commit)
+static rc_ent *rcm_find(uint64_t a) {
+    if (!g_rcm_cap || !a) return NULL;
+    for (uint32_t i = (uint32_t)(a >> 4) & (g_rcm_cap - 1);; i = (i + 1) & (g_rcm_cap - 1)) { if (g_rcm[i].addr == a) return &g_rcm[i]; if (!g_rcm[i].addr) return NULL; }
 }
-static void rc_occ_add(uint64_t a) {
-    if (!a || rc_occ_has(a)) return;
-    if ((g_rc_on + 1) * 2 > g_rc_ocap) {
-        uint32_t nc = g_rc_ocap ? g_rc_ocap * 2 : 4096; uint64_t *t = calloc(nc, 8);
-        if (!t) { VRED_ONCE("no memory for the render condition query table: conditions on later queries read memory"); return; }
-        for (uint32_t k = 0; k < g_rc_ocap; k++) if (g_rc_occ[k]) { uint32_t i = (uint32_t)(g_rc_occ[k] >> 4) & (nc - 1); while (t[i]) i = (i + 1) & (nc - 1); t[i] = g_rc_occ[k]; }
-        free(g_rc_occ); g_rc_occ = t; g_rc_ocap = nc;
+static void rc_note(uint64_t a, uint32_t kind) {   // a report recorded at a
+    if (!a) return;
+    rc_ent *e = rcm_find(a);
+    if (!e) {
+        if ((g_rcm_n + 1) * 2 > g_rcm_cap) {
+            uint32_t nc = g_rcm_cap ? g_rcm_cap * 2 : 4096; rc_ent *t = nc <= 2 * RCM_MAX ? calloc(nc, sizeof *t) : NULL;
+            if (!t) { VRED_ONCE("render conditions: the report table cannot grow past %u addresses: conditions on reports at new addresses read memory", g_rcm_n); return; }
+            for (uint32_t k = 0; k < g_rcm_cap; k++) if (g_rcm[k].addr) { uint32_t i = (uint32_t)(g_rcm[k].addr >> 4) & (nc - 1); while (t[i].addr) i = (i + 1) & (nc - 1); t[i] = g_rcm[k]; }
+            free(g_rcm); g_rcm = t; g_rcm_cap = nc;
+        }
+        uint32_t i = (uint32_t)(a >> 4) & (g_rcm_cap - 1); while (g_rcm[i].addr) i = (i + 1) & (g_rcm_cap - 1);
+        e = &g_rcm[i]; e->addr = a; g_rcm_n++;
     }
-    uint32_t i = (uint32_t)(a >> 4) & (g_rc_ocap - 1); while (g_rc_occ[i]) i = (i + 1) & (g_rc_ocap - 1);
-    g_rc_occ[i] = a; g_rc_on++;
+    e->sub = g_n_sub; e->kind = kind;
 }
-static void rc_note(uint64_t a, uint64_t type) {
-    if (type != NVN_COUNTER_TYPE_TIMESTAMP && type != NVN_COUNTER_TYPE_TIMESTAMP_TOP) { rc_occ_add(a); return; }
-    for (int i = 0; i < g_nrc_ts; i++) if (g_rc_ts[i] == a) return;
-    if (g_nrc_ts == g_rc_tscap) {
-        int nc = g_rc_tscap ? g_rc_tscap * 2 : 256; uint64_t *t = realloc(g_rc_ts, (size_t)nc * 8);
-        if (!t) { VRED_ONCE("no memory for the render condition timestamp table: conditions on later timestamps read memory"); return; }
-        g_rc_ts = t; g_rc_tscap = nc;
-    }
-    g_rc_ts[g_nrc_ts++] = a;
+static int rc_sub_done(uint64_t s) {   // submission s has completed (its reports are in memory)
+    if (g_rc_rec && s == g_n_sub) return 0;
+    unsigned k = s % 64;
+    if (g_rc_subf[k].sub == s) return g_rc_subf[k].fence <= vka_done();
+    return 1;   // 64 or more submissions old: done (mtl_sub_begin waits for a slot's fence before reusing it, and there are NSLOT)
 }
 static int g_rcl = -1; static _Atomic uint64_t g_rc_done;   // DM_VK_RC_LOG lines left (rcl_op); the latest submission whose reports post_run has written
 
@@ -71,6 +82,7 @@ int vka_depth_zero(void) { return g_depth_zero; }
 void mtl_set_origin_lower_left(int on) { if (__atomic_exchange_n(&g_origin_ll, on != 0, __ATOMIC_RELAXED) != (on != 0)) VLOG("window origin: %s", on ? "lower left (the present flips the picture)" : "upper left"); }
 void vka_rp_set_queue_origin(int on) { g_queue_origin_ll = on != 0; }
 void mtl_set_depth_zero(int on) { g_depth_zero = on != 0; }
+static void oq_stats(char *b, size_t n, double frames);   // (Occlusion queries)
 // Replay statistics every 300 frames (DM_VK_STATS=0: none): what a frame costs the GPU in passes and barriers (each pass loads and stores its attachments on a tiler), and the
 // CPU per draw (recording: mtl_sub_begin to vkEndCommandBuffer)
 extern uint64_t vka_n_rp, vka_n_bar; static uint64_t g_n_ub, g_n_sub, g_rec_ns, g_n_pclear, g_n_chunks;
@@ -88,11 +100,13 @@ void mtl_set_frame(uint64_t f) {
         if (f0) VLOG("replay up to frame %llu: per frame %.0f draws, %.0f render passes, %.0f clears / copies (%.0f in a pass), %.0f full barriers, %.0f inline uniform updates, %.1f submissions (%.1f parts); recording %.2f ms a frame (%.2f us a draw)",
                      (unsigned long long)f, (g_stat_draws - d0) / n, (vka_n_rp - rp0) / n, (g_stat_ops - o0) / n, (g_n_pclear - pc0) / n, (vka_n_bar - b0) / n, (g_n_ub - ub0) / n, (g_n_sub - s0) / n, (g_n_sub - s0 + g_n_chunks - ch0) / n, (g_rec_ns - r0) / n / 1e6,
                      g_stat_draws > d0 ? (g_rec_ns - r0) / 1e3 / (double)(g_stat_draws - d0) : 0.0);
-        { char pb[400]; void vka_draw_prof(char *b, size_t n, double draws); vka_draw_prof(pb, sizeof pb, (double)(g_stat_draws - d0)); if (pb[0]) VLOG("draw path per draw (us): %s", pb);
+        { char pb[600]; void vka_draw_prof(char *b, size_t n, double draws); vka_draw_prof(pb, sizeof pb, (double)(g_stat_draws - d0)); if (pb[0]) VLOG("draw path per draw (us): %s", pb);
           vka_enc_stats(pb, sizeof pb, n); if (pb[0]) VLOG("%s", pb);
           vka_floor_stats(pb, sizeof pb); if (pb[0]) VLOG("%s", pb);
           vka_rp_bar_stats(pb, sizeof pb, n); if (pb[0]) VLOG("%s", pb);
+          oq_stats(pb, sizeof pb, n); if (pb[0]) VLOG("%s", pb);
           { void vka_drv_memo_stats(char *b, size_t n); vka_drv_memo_stats(pb, sizeof pb); if (pb[0]) VLOG("%s", pb); } }
+        { static uint64_t fc; if (f - fc >= 1800) { vka_disp_census(f); fc = f; } }   // (every 1,800 frames)
         f0 = f; d0 = g_stat_draws; rp0 = vka_n_rp; b0 = vka_n_bar; ub0 = g_n_ub; s0 = g_n_sub; r0 = g_rec_ns; o0 = g_stat_ops; pc0 = g_n_pclear; ch0 = g_n_chunks;
     }
 }
@@ -118,6 +132,122 @@ void vka_rp_queue_forget(uint64_t serial) {
 static void post(pop o) {
     if (g_npost == g_postcap) { g_postcap = g_postcap ? g_postcap * 2 : 64; g_post = realloc(g_post, (size_t)g_postcap * sizeof *g_post); }
     g_post[g_npost++] = o;
+}
+
+// ---------- Occlusion queries (NVN_COUNTER_TYPE_SAMPLES_PASSED) ----------
+// NVN's samples-passed counter is cumulative: ResetCounter(SAMPLES_PASSED) zeroes it, every draw after it adds the samples that pass the depth and stencil tests, and
+// ReportCounter(SAMPLES_PASSED) writes the count at that point ({count, ticks}) once the GPU gets there; two reports with no reset between keep counting (the second holds the
+// first's samples too). Clears add nothing. nvn_mtl.m counts them through visibility result buffers. On Vulkan a query cannot outlive its render pass, so after a reset the
+// first draw of a pass begins an occlusion query (PRECISE when the device has occlusionQueryPrecise, which vka_dev.c enables with its other features), recorded through the
+// encoder in order with the draws; it ends at the pass end (vka_rp_end), before a clear inside the pass, at a report and at a reset. The queries since the last report (or
+// reset) are the next report's segment, handed to the completion thread with that report's fence: post_run adds their results to the running count (from 0 after a reset),
+// writes it into guest memory with the completion time, and gives the queries back to the ring (vkResetQueryPool: hostQueryReset, a Vulkan 1.2 feature vka_dev.c enables).
+// Nothing waits for the GPU: a result not available after its fence counts 1 sample, and so does a draw made while counting that got no query (the ring was full) or that
+// the replay skipped (no pipeline, no shader, DrawTexture, a GPU hang): what is not known reads as visible. A draw skipped by a render condition counts nothing, as on the
+// GPU. The queries are a ring of OQ_N by sequence number: the replay thread takes them in order and the completion thread gives them back in the same order. One count serves
+// every queue, as on Metal. Until 2026-11-08 every samples-passed report wrote a constant 1; DM_VK_OCCLUSION=0 (read once, at the first samples-passed reset or report)
+// still does, as does a report before any samples-passed reset (its count is not defined). After Swap2-Native's design and code (vka_oq_*, compile-checked there only; see the file header).
+// Costs: a query pool of OQ_N (a few hundred KB of driver memory), 16 more bytes per posted report, one vkGetQueryPoolResults per counted report on the completion thread.
+// The replay statistics (DM_VK_STATS) print "occlusion queries per frame: ..."
+enum { OQ_N = 16384, OQ_RB = 256 };   // queries in the ring; results read at a time
+static struct { VkQueryPool pool; int precise; PFN_vkCmdBeginQuery begin; PFN_vkCmdEndQuery end; PFN_vkResetQueryPool hreset; PFN_vkGetQueryPoolResults get; } OQ;
+static int g_oq = -1;                           // 1 counted; 0 the constant 1 (DM_VK_OCCLUSION=0, no device, no host query reset or no pool); -1 not decided yet
+static int g_oq_count, g_oq_fresh, g_oq_open;   // a samples-passed reset came (draws count); a reset since the last report (its count starts from 0); a query is active in the open pass
+static uint32_t g_oq_lost;                      // draws of the segment that count 1 sample each (no query, or skipped by the replay)
+static uint64_t g_oq_head, g_oq_seg0;           // the next query's sequence number; the segment's first
+static _Atomic uint64_t g_oq_ready;             // queries below it are reset and may begin (the completion thread moves it on)
+static uint64_t g_oq_acc; static pthread_mutex_t g_oq_mu = PTHREAD_MUTEX_INITIALIZER;   // the running count (post_run; vka_fence_cpu may run a submission's effects on another thread)
+static uint64_t g_oqs_reset, g_oqs_rep, g_oqs_const, g_oqs_q, g_oqs_full, g_oqs_skip, g_oqs_fly; static _Atomic uint64_t g_oqs_unav, g_oqs_zero;   // statistics (oq_stats)
+static int oq_on(void) {
+    if (g_oq >= 0) return g_oq;
+    g_oq = 0;
+    if (!VKA_ENV("DM_VK_OCCLUSION", 1)) { VLOG("occlusion queries: off (DM_VK_OCCLUSION=0): every samples-passed report writes 1"); return 0; }
+    if (!vka_ok()) { VRED("occlusion queries: no device: every samples-passed report writes 1"); return 0; }
+    VkPhysicalDeviceVulkan12Features f12 = {VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_FEATURES};
+    VkPhysicalDeviceFeatures2 f2 = {VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2, .pNext = &f12};
+    vk.vkGetPhysicalDeviceFeatures2(V.pd, &f2);   // (the device was made with every feature it has: vka_dev.c)
+    OQ.begin = (PFN_vkCmdBeginQuery)vk.vkGetDeviceProcAddr(V.dev, "vkCmdBeginQuery"); OQ.end = (PFN_vkCmdEndQuery)vk.vkGetDeviceProcAddr(V.dev, "vkCmdEndQuery");
+    OQ.hreset = (PFN_vkResetQueryPool)vk.vkGetDeviceProcAddr(V.dev, "vkResetQueryPool"); OQ.get = (PFN_vkGetQueryPoolResults)vk.vkGetDeviceProcAddr(V.dev, "vkGetQueryPoolResults");
+    PFN_vkCreateQueryPool create = (PFN_vkCreateQueryPool)vk.vkGetDeviceProcAddr(V.dev, "vkCreateQueryPool");
+    if (!f12.hostQueryReset || !OQ.hreset) { VRED("occlusion queries: the device has no host query reset: every samples-passed report writes 1"); return 0; }
+    OQ.precise = f2.features.occlusionQueryPrecise != 0;
+    VkQueryPoolCreateInfo ci = {VK_STRUCTURE_TYPE_QUERY_POOL_CREATE_INFO, .queryType = VK_QUERY_TYPE_OCCLUSION, .queryCount = OQ_N};
+    VkResult r = create && OQ.begin && OQ.end && OQ.get ? create(V.dev, &ci, NULL, &OQ.pool) : VK_ERROR_FEATURE_NOT_PRESENT;
+    if (r) { OQ.pool = VK_NULL_HANDLE; VRED("occlusion queries: no query pool (%d): every samples-passed report writes 1", r); return 0; }
+    OQ.hreset(V.dev, OQ.pool, 0, OQ_N); atomic_store(&g_oq_ready, OQ_N);
+    VLOG("occlusion queries: counted on the GPU (%s; a ring of %d; DM_VK_OCCLUSION=0: the constant 1)", OQ.precise ? "precise counts" : "not precise: a nonzero count for any sample", OQ_N);
+    return g_oq = 1;
+}
+typedef struct { VkCommandBuffer cb; uint32_t q, end; } oq_arg;
+static void oq_cmd(const void *a) { oq_arg w; memcpy(&w, a, sizeof w); if (w.end) OQ.end(w.cb, OQ.pool, w.q); else OQ.begin(w.cb, OQ.pool, w.q, OQ.precise ? VK_QUERY_CONTROL_PRECISE_BIT : 0); }
+static void oq_rec(uint32_t q, uint32_t end) { oq_arg w = {g_cb, q, end}; if (!vka_enc_call(oq_cmd, &w, sizeof w)) oq_cmd(&w); }   // in order with the encoder's calls
+static void oq_close(void) { if (g_oq_open) { g_oq_open = 0; oq_rec((uint32_t)((g_oq_head - 1) % OQ_N), 1); vka_draw_run_break(); } }   // (an instanced run is not extended past the query)
+void vka_oq_pass_end(void) { oq_close(); }   // vka_draw.c: the pass ends, or a clear is recorded inside it
+void vka_oq_draw(void) {   // vka_draw.c: a draw about to be recorded in the open pass; while counting, the pass's first draw (or the first after a report or a clear) begins a query
+    if (!g_oq_count || g_oq_open || !g_cb) return;
+    uint64_t ready = atomic_load_explicit(&g_oq_ready, memory_order_acquire);
+    if (g_oq_head >= ready) { g_oq_lost++; g_oqs_full++; return; }   // the ring is full: this draw counts 1
+    if (g_oq_head + 1 - (ready - OQ_N) > g_oqs_fly) g_oqs_fly = g_oq_head + 1 - (ready - OQ_N);
+    oq_rec((uint32_t)(g_oq_head % OQ_N), 0); g_oq_head++; g_oq_open = 1; g_oqs_q++;
+}
+static void oq_reset(void) {   // OP_RESET_COUNTER(SAMPLES_PASSED)
+    g_oqs_reset++;
+    if (!oq_on()) return;
+    oq_close(); vka_draw_run_break();
+    if (g_oq_head > g_oq_seg0 && g_cb) post((pop){6, 0, 0, 0, 0, g_oq_seg0, g_oq_head});   // the queries since the last report: no report reads them (after a hang they are not given back)
+    g_oq_seg0 = g_oq_head; g_oq_count = 1; g_oq_fresh = 1; g_oq_lost = 0;
+}
+static int oq_report(uint64_t ad, uint32_t t) {   // OP_REPORT_COUNTER(SAMPLES_PASSED): 1 = counted (its segment goes to the completion thread), 0 = the constant 1
+    g_oqs_rep++;
+    if (!oq_on() || !g_oq_count) { g_oqs_const++; return 0; }
+    // No command buffer (a GPU hang: its effects run at once on the CPU, vka_fence_cpu): the constant 1, not an empty segment's 0; the segment stays open for the next counted report
+    if (!g_cb) { g_oqs_const++; return 0; }
+    oq_close(); vka_draw_run_break();   // (draws after it begin a new query; an instanced run is not extended across the report, even with no query open)
+    post((pop){5, (uint32_t)g_oq_fresh, g_oq_lost, t, ad, g_oq_seg0, g_oq_head});
+    g_oq_seg0 = g_oq_head; g_oq_fresh = 0; g_oq_lost = 0;
+    return 1;
+}
+static void oq_lost(uint64_t skipped0) {   // after a draw while counting: one the replay skipped counts 1
+    if (!g_oq_count) return;
+    uint64_t sk = 0; vka_draw_stats(NULL, &sk, NULL, NULL);
+    if (sk > skipped0) { g_oq_lost++; g_oqs_skip++; }
+}
+static void oq_done(const pop *o, uint64_t ticks) {   // post_run, after the fence of the submission that recorded o
+    pthread_mutex_lock(&g_oq_mu);
+    if (o->kind == 5) {
+        uint64_t sum = o->v, r[2 * OQ_RB];   // (the draws that count 1)
+        for (uint64_t q = o->q0; q < o->q1;) {
+            uint32_t s = (uint32_t)(q % OQ_N), k = (uint32_t)(o->q1 - q < OQ_N - s ? o->q1 - q : OQ_N - s); if (k > OQ_RB) k = OQ_RB;
+            memset(r, 0, 16 * (size_t)k);
+            VkResult e = OQ.get(V.dev, OQ.pool, s, k, 16 * (size_t)k, r, 16, VK_QUERY_RESULT_64_BIT | VK_QUERY_RESULT_WITH_AVAILABILITY_BIT);   // (no wait: VK_NOT_READY leaves the unavailable ones 0)
+            for (uint32_t i = 0; i < k; i++) if (e < 0 || !r[2 * i + 1]) { sum++; atomic_fetch_add_explicit(&g_oqs_unav, 1, memory_order_relaxed); } else sum += r[2 * i];
+            q += k;
+        }
+        if (o->mode) g_oq_acc = 0;
+        g_oq_acc += sum;
+        if (!g_oq_acc) atomic_fetch_add_explicit(&g_oqs_zero, 1, memory_order_relaxed);
+        uint64_t rec[2] = {g_oq_acc, ticks}; memcpy((void *)(uintptr_t)o->addr, rec, sizeof rec);
+    }
+    if (o->q1 > o->q0) {   // given back, in order
+        for (uint64_t q = o->q0; q < o->q1;) { uint32_t s = (uint32_t)(q % OQ_N), k = (uint32_t)(o->q1 - q < OQ_N - s ? o->q1 - q : OQ_N - s); OQ.hreset(V.dev, OQ.pool, s, k); q += k; }
+        atomic_store_explicit(&g_oq_ready, o->q1 + OQ_N, memory_order_release);
+    }
+    pthread_mutex_unlock(&g_oq_mu);
+}
+static void oq_stats(char *b, size_t n, double frames) {   // every 300 frames with the replay statistics (no line while the game resets and reports none)
+    static uint64_t r0, p0, c0, q0, f0, s0, u0, z0;
+    uint64_t un = atomic_load(&g_oqs_unav), ze = atomic_load(&g_oqs_zero);
+    b[0] = 0;
+    if (frames > 0 && (g_oqs_reset != r0 || g_oqs_rep != p0)) {
+        if (g_oq != 1) snprintf(b, n, "occlusion queries per frame (not counted: %s): %.1f samples-passed resets, %.1f reports, each written 1", g_oq < 0 ? "not decided yet" : "DM_VK_OCCLUSION=0 or no query pool",
+                                (g_oqs_reset - r0) / frames, (g_oqs_rep - p0) / frames);
+        else snprintf(b, n, "occlusion queries per frame (counted, %s): %.1f samples-passed resets, %.1f reports (%.1f written 1: before any reset or without the GPU; %.1f counted read 0 samples), "
+                      "%.1f queries begun, %.1f draws counted 1 without a query (%.1f with the ring full, %.1f skipped by the replay), %.1f results not available after their fence (counted 1); "
+                      "queries in flight up to %llu of %d",
+                      OQ.precise ? "precise" : "not precise", (g_oqs_reset - r0) / frames, (g_oqs_rep - p0) / frames, (g_oqs_const - c0) / frames, (ze - z0) / frames, (g_oqs_q - q0) / frames,
+                      (g_oqs_full - f0 + g_oqs_skip - s0) / frames, (g_oqs_full - f0) / frames, (g_oqs_skip - s0) / frames, (un - u0) / frames, (unsigned long long)g_oqs_fly, OQ_N);
+    }
+    r0 = g_oqs_reset; p0 = g_oqs_rep; c0 = g_oqs_const; q0 = g_oqs_q; f0 = g_oqs_full; s0 = g_oqs_skip; u0 = un; z0 = ze; g_oqs_fly = 0;
 }
 uint64_t guest_ns(void);
 // Counter timestamps by segment (profile gpu_timestamps segment; DM_NVN_GPU_TS=segment / submission overrides it), as nvn_mtl.m's: a timestamp report also writes a GPU
@@ -145,6 +275,7 @@ static void post_run(void *ops_, int n) {   // the completion thread, in submiss
         VLOG("sync done: %d reports written at %.2f ms (the submission's GPU work done)", n, ms_now()); break; }
     for (int i = 0, q = 0; i < n; i++) {
         if (ops[i].kind == 4) { atomic_store(&g_rc_done, ops[i].addr); continue; }   // DM_VK_RC_LOG: this submission's reports up to here are written
+        if (ops[i].kind == 5 || ops[i].kind == 6) { oq_done(&ops[i], ticks); continue; }   // a counted samples-passed report, queries given back (Occlusion queries)
         if (ops[i].kind == 3) {   // the frame's span to here (the adaptive GPU clock floor)
             uint64_t f = ops[i].addr; unsigned k = f % 64;
             vka_floor_done(ops[i].v);
@@ -158,7 +289,8 @@ static void post_run(void *ops_, int n) {   // the completion thread, in submiss
         }
         if (ops[i].kind == 1) { volatile uint32_t *v = (volatile uint32_t *)(uintptr_t)ops[i].addr; if (ops[i].mode == NVN_EVENT_SIGNAL_MODE_ADD) *v += ops[i].v; else *v = ops[i].v; }
         else {
-            // A timestamp report's counter: the time, or 0 under render_cond (as on the GPU, nvn_mtl.m rc_value). Samples passed: 1, so occlusion culling keeps everything visible until draws count
+            // A timestamp report's counter: the time, or 0 under render_cond (as on the GPU, nvn_mtl.m rc_value). Samples passed not counted (oq_report: DM_VK_OCCLUSION=0, no query
+            // pool, no reset before it, no GPU): 1, so occlusion culling keeps everything visible
             uint64_t t = ops[i].type, rec[2] = {t == NVN_COUNTER_TYPE_TIMESTAMP || t == NVN_COUNTER_TYPE_TIMESTAMP_TOP ? (DM_GAME_RENDER_COND ? 0 : ticks) : t == NVN_COUNTER_TYPE_SAMPLES_PASSED ? 1 : 0, ticks};
             memcpy((void *)(uintptr_t)ops[i].addr, rec, sizeof rec);
         }
@@ -257,6 +389,9 @@ void vka_exec_hang_report(uint64_t fence) {
 static uint64_t g_t_begin, g_t_prep, g_t_commit;
 static _Atomic int g_rec_tid;   // the thread that records submissions (the replay worker, or the submitting thread inline): the pace line's thread statistics
 void vka_exec_phases(uint64_t *begin, uint64_t *prep, uint64_t *commit) { *begin = g_t_begin; *prep = g_t_prep; *commit = g_t_commit; }
+// the commit's parts (cumulative ns): waiting for the encoder thread to make every call, the upload batches' flush and throttle, vkQueueSubmit (vka_submit)
+static uint64_t g_t_cm_enc, g_t_cm_up, g_t_cm_sub;
+void vka_exec_commit_parts(uint64_t *enc, uint64_t *up, uint64_t *sub) { *enc = g_t_cm_enc; *up = g_t_cm_up; *sub = g_t_cm_sub; }
 int vka_rec_tid(void) { return atomic_load_explicit(&g_rec_tid, memory_order_relaxed); }
 // The recording thread's priority (DM_VK_REPLAY_NICE, live from the next submission; default -8, the encoder's and the completion thread's; 0 = as the thread was made, as
 // before: the priority of the game thread that started it, -4 for a guest thread on Android; the log line says which it was). The replay worker records the frame the game waits for, beside the game's own busy threads at the same priority: a core
@@ -279,11 +414,11 @@ void vka_rp_sub_begin(void) {
     vka_perf_thread(0); vka_ctl_sub();
     atomic_store_explicit(&g_rec_tid, gettid(), memory_order_relaxed); replay_nice();
     { uint64_t f = g_job_frame_set ? g_job_frame : g_frame; if (atomic_load(&g_fstart_f[f % 64]) != f) { atomic_store(&g_fstart[f % 64], now_ns()); atomic_store(&g_fstart_f[f % 64], f); } }
-    g_npost = 0; g_nrc_ts = 0; g_cb = VK_NULL_HANDLE;
+    g_npost = 0; g_rc_rec = 0; g_cb = VK_NULL_HANDLE;
     if (!vka_init()) return;
     vka_gpu_floor();
     if (vka_hung()) { VRED_ONCE("GPU hang: submissions from now on run their effects without the GPU"); return; }   // no command buffer: mtl_sub_commit takes the CPU path
-    g_sub_draws0 = g_stat_draws; g_sub_ops0 = g_stat_ops; g_sub_skip0 = g_stat_skipped; g_sub_t0 = now_ns(); g_n_sub++;
+    g_sub_draws0 = g_stat_draws; g_sub_ops0 = g_stat_ops; g_sub_skip0 = g_stat_skipped; g_sub_t0 = now_ns(); g_n_sub++; g_rc_rec = 1;
     if (!g_pool) {
         VkCommandPoolCreateInfo pi = {VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO, .flags = VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT, .queueFamilyIndex = V.qf};
         VkCommandBuffer cbs[NSLOT];
@@ -292,7 +427,14 @@ void vka_rp_sub_begin(void) {
         for (int i = 0; i < NSLOT; i++) g_slot[i].cb = cbs[i];
     }
     unsigned k = g_slot_i++ % NSLOT;
-    if (g_slot[k].fence) vka_wait_done(g_slot[k].fence, UINT64_MAX);
+    // A slot whose last commit went without a timeline signal (handed over while a lower fence was parked at a GPU wait, vka_qsched.h) waits for its own fence: its
+    // timeline value comes only with a later commit, which this thread makes (waiting for it would wait forever), and is reached only once all work up to that later
+    // commit is done (waiting for that tied the recording to the GPU: on the Honor Ocarina of Time's submission start took 20 ms a frame instead of 1.5, 2026-11-09)
+    if (g_slot[k].vf_on) {
+        if (vk.vkWaitForFences(V.dev, 1, &g_slot[k].vf, VK_TRUE, vka_hang_ns())) VRED_ONCE("a command buffer slot's fence was not reached in the hang time: reused anyway");
+        vk.vkResetFences(V.dev, 1, &g_slot[k].vf); g_slot[k].vf_on = 0;
+        if (g_slot_ts[k]) gpu_slot_done(k);   // its GPU times are there (its timeline fence may come later)
+    } else if (g_slot[k].fence) vka_wait_done(g_slot[k].fence, UINT64_MAX);
     uint64_t done = vka_done();
     for (unsigned i = 0; i < NSLOT; i++) if (g_slot_ts[i] && g_slot[i].fence <= done) gpu_slot_done(i);
     g_cb = g_slot[k].cb;
@@ -395,23 +537,57 @@ static inline void chunk_check(void) {
     }
 }
 static uint64_t g_cur_fence;   // the fence of the submission being replayed, reserved before it (vka_worker.c); 0 = reserved at its commit
-static uint64_t sub_commit(uint64_t reserved);
-uint64_t vka_rp_sub_commit(uint64_t reserved) { uint64_t t0 = now_ns(), f = sub_commit(reserved); g_t_commit += now_ns() - t0; return f; }
-static uint64_t sub_commit(uint64_t reserved) {
+// Commits without a signal (vka_qsched.h qs_commit: a part cut at a wait, or a submission replayed while a lower fence is parked): their completion effects wait here, in
+// the order they were recorded, and go with the first signal that covers their fence, so they land only after their GPU work
+typedef struct { uint64_t fence; pop *ops; int n; } carry_t;
+enum { NCARRY = 64 };
+static carry_t g_carry[NCARRY]; static int g_ncarry;
+static pop *carry_take(uint64_t fence, uint64_t signal, pop *ops, int *n) {
+    if (!signal) {
+        // A counter report's segment timestamp (kind 2, v: its query in the slot's range) is read when the effects run, which can be after the slot is reused (it waits for its
+        // own fence, not the timeline): such a report takes the completion time instead, as one with no segment query does
+        for (int i = 0; i < *n; i++) if (ops[i].kind == 2) ops[i].v = 0;
+        if (g_ncarry < NCARRY) { g_carry[g_ncarry++] = (carry_t){fence, ops, *n}; *n = 0; return NULL; }
+        VRED_ONCE("completion effects of more than %d unsignalled commits: dropped (events and counter reports not written)", NCARRY);   // (vka_qsched.h keeps it to QS_DEFER_MAX)
+        free(ops); *n = 0; return NULL;
+    }
+    int tot = *n, k = 0;
+    for (int i = 0; i < g_ncarry; i++) if (g_carry[i].fence <= signal) tot += g_carry[i].n;
+    if (tot == *n) return ops;
+    pop *all = malloc((size_t)tot * sizeof *all); int m = 0;
+    for (int i = 0; i < g_ncarry; i++) {
+        if (g_carry[i].fence <= signal) { if (g_carry[i].n) memcpy(all + m, g_carry[i].ops, (size_t)g_carry[i].n * sizeof *all); m += g_carry[i].n; free(g_carry[i].ops); }
+        else g_carry[k++] = g_carry[i];
+    }
+    g_ncarry = k;
+    if (*n) memcpy(all + m, ops, (size_t)*n * sizeof *all);
+    free(ops); *n = tot; return all;
+}
+static uint64_t sub_commit(uint64_t reserved, int has_sig, uint64_t signal);
+uint64_t vka_rp_sub_commit(uint64_t reserved) { uint64_t t0 = now_ns(), f = sub_commit(reserved, 0, 0); g_t_commit += now_ns() - t0; return f; }
+// The worker's commit with qs_commit's timeline value (0: no signal: its effects wait for the commit that signals past its fence)
+uint64_t vka_rp_sub_commit_sig(uint64_t reserved, uint64_t signal) { uint64_t t0 = now_ns(), f = sub_commit(reserved, 1, signal); g_t_commit += now_ns() - t0; return f; }
+static uint64_t sub_commit(uint64_t reserved, int has_sig, uint64_t signal) {
     uint64_t fence = reserved ? reserved : vka_fence_next(); g_cur_fence = 0;
+    if (!has_sig) signal = fence;
+    if (g_rc_rec) { g_rc_subf[g_n_sub % 64].sub = g_n_sub; g_rc_subf[g_n_sub % 64].fence = fence; g_rc_rec = 0; }   // (rc_sub_done)
     vka_draw_peek_commit(fence);   // DM_VK_SB_PEEK: this submission's storage buffers, read again once it has completed
     int tail = 0;   // counted for the tail floor (DM_VK_GPU_FLOOR_AUTO=2): given back by the span op when it completes
     if (g_cb && g_stat_draws > g_sub_draws0) { int vka_floor_tail_add(void); tail = vka_floor_tail_add(); post((pop){3, 0, (uint32_t)tail, 0, g_job_frame_set ? g_job_frame : g_frame}); }   // the frame's span at the end of this submission with draws (post_run)
     pop *ops = g_npost ? malloc((size_t)g_npost * sizeof *ops) : NULL; if (ops) memcpy(ops, g_post, (size_t)g_npost * sizeof *ops);
     int n = g_npost; g_npost = 0;
-    if (!g_cb) { vka_fence_cpu(fence, ops, n, post_run); return fence; }
+    ops = carry_take(fence, signal, ops, &n);
+    if (!g_cb) { if (signal) vka_fence_cpu(signal, ops, n, post_run); else free(ops); return fence; }
     vka_rp_end();
     if (VKA_ENV("DM_VK_PARTLOG", 0) && g_nx) { char zb[400]; vka_rp_zstats(zb, sizeof zb); VLOG("last part of the submission of frame %llu: %llu draws%s", (unsigned long long)g_frame, (unsigned long long)(g_stat_draws - g_chunk_d0), zb); }
+    vka_disp_settle(g_cb);   // the submission's last dispatches before the steps below and the next submission's (vka_draw.c "Dispatch order")
     vka_rw_point(g_cb, 'e', 0, 0, 0); vka_rw_commit(fence);   // DM_VK_RANGE_WATCH: the bytes at the submission's end, logged once it is done
     vka_tex_writeback(g_cb);   // linear textures the GPU wrote, back into their storage for the CPU
     VkMemoryBarrier mb = {VK_STRUCTURE_TYPE_MEMORY_BARRIER, .srcAccessMask = VK_ACCESS_MEMORY_WRITE_BIT, .dstAccessMask = VK_ACCESS_HOST_READ_BIT | VK_ACCESS_HOST_WRITE_BIT};
     vk.vkCmdPipelineBarrier(g_cb, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VK_PIPELINE_STAGE_HOST_BIT, 0, 1, &mb, 0, NULL, 0, NULL);
+    uint64_t tc0 = now_ns();
     vka_enc_stop();   // every call made: the command buffer is complete
+    g_t_cm_enc += now_ns() - tc0;
     unsigned k = (g_slot_i - 1) % NSLOT;
     if (g_slot_ts[k]) qf.write(g_cb, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, g_qp, k * QPS + 2 * (g_slot_parts[k] - 1) + 1);
     vka_gp_commit(g_cb, fence);
@@ -420,22 +596,31 @@ static uint64_t sub_commit(uint64_t reserved) {
     g_hrec[fence % NHREC] = (typeof(g_hrec[0])){fence, g_frame, S.serial, g_stat_draws - g_sub_draws0, g_stat_ops - g_sub_ops0, g_stat_skipped - g_sub_skip0, now_ns() - g_sub_t0, 0};
     vka_tex_gw_commit(fence);
     vka_floor_commit(tail);
+    tc0 = now_ns();
     vka_up_flush(); vka_up_throttle();   // before the submission that may use what it made
-    if (!r) r = vka_submit(g_cb, fence, 0, NULL, NULL, NULL, VK_NULL_HANDLE);
+    uint64_t tc1 = now_ns(); g_t_cm_up += tc1 - tc0;
+    unsigned ks = (g_slot_i - 1) % NSLOT;
+    if (!signal && !g_slot[ks].vf) { VkFenceCreateInfo fi = {VK_STRUCTURE_TYPE_FENCE_CREATE_INFO}; if (vk.vkCreateFence(V.dev, &fi, NULL, &g_slot[ks].vf)) g_slot[ks].vf = VK_NULL_HANDLE; }
+    if (!r) r = vka_submit_fence(g_cb, signal, !signal ? g_slot[ks].vf : VK_NULL_HANDLE);
+    if (!r && !signal && g_slot[ks].vf) g_slot[ks].vf_on = 1;   // (no fence made: the slot waits for the timeline, as a signalled one)
+    g_t_cm_sub += now_ns() - tc1;
     g_hrec[fence % NHREC].sub_ns = now_ns();
     g_slot[(g_slot_i - 1) % NSLOT].fence = fence;
-    if (vka_nan_on()) vka_nan_commit(fence);
+    if (vka_nan_on() || vka_texstats_on()) vka_nan_commit(fence);
     vka_scratch_retire(fence);
     if (r) {
         static _Atomic int nred; if (atomic_fetch_add(&nred, 1) < 8) VRED("submission %llu: %d (its effects run without the GPU)", (unsigned long long)fence, r);
-        VkSemaphoreSignalInfo si = {VK_STRUCTURE_TYPE_SEMAPHORE_SIGNAL_INFO, .semaphore = V.tl, .value = fence};
-        pthread_mutex_lock(&V.qmu);   // signalled by the host: later submissions may wait for it
-        VkResult sr = vka_hung() ? VK_ERROR_DEVICE_LOST : vk.vkSignalSemaphore(V.dev, &si);
-        if (!sr && fence > V.tl_queued) __atomic_store_n(&V.tl_queued, fence, __ATOMIC_RELEASE);
-        pthread_mutex_unlock(&V.qmu);
-        if (sr) { vka_fence_cpu(fence, ops, n, post_run); g_cb = VK_NULL_HANDLE; return fence; }
+        VkResult sr = VK_SUCCESS;
+        if (signal) {
+            VkSemaphoreSignalInfo si = {VK_STRUCTURE_TYPE_SEMAPHORE_SIGNAL_INFO, .semaphore = V.tl, .value = signal};
+            pthread_mutex_lock(&V.qmu);   // signalled by the host: later submissions may wait for it
+            sr = vka_hung() ? VK_ERROR_DEVICE_LOST : vk.vkSignalSemaphore(V.dev, &si);
+            if (!sr && signal > V.tl_queued) __atomic_store_n(&V.tl_queued, signal, __ATOMIC_RELEASE);
+            pthread_mutex_unlock(&V.qmu);
+        }
+        if (sr) { vka_fence_cpu(signal, ops, n, post_run); g_cb = VK_NULL_HANDLE; return fence; }
     }
-    vka_fence_post(fence, ops, n, post_run);
+    if (signal) vka_fence_post(signal, ops, n, post_run);
     if (atomic_load_explicit(&g_synclog, memory_order_relaxed) > 0)
         VLOG("sync sub: frame %llu fence %llu: %llu draws, %d parts, recorded %.2f-%.2f ms, queued", (unsigned long long)g_frame, (unsigned long long)fence,
              (unsigned long long)(g_stat_draws - g_sub_draws0), g_nx + 1, (g_sub_t0 % 1000000000000ull) / 1e6, ms_now());
@@ -701,6 +886,7 @@ static void copy_bt(const p_copy_b2t *c, int to_tex) {
     if (im->samples > 1) { VRED_ONCE("buffer copy of a multisampled texture"); return; }
     const vka_fmt *f = &im->f;
     unsigned lv = c->has_view && c->view.set_levels ? c->view.base_level : 0, l0 = c->has_view && c->view.set_layers ? c->view.min_layer : 0;
+    vka_tex_soft_copy(im, to_tex ? (int)lv : -1, g_cb);   // (a soft texture copied from, or into at level 0: made whole first)
     if (!vka_img_lv(im, &lv) || c->r.width <= 0 || c->r.height <= 0) return;
     size_t row = S.copy_stride ? (size_t)S.copy_stride : (size_t)((c->r.width + f->bw - 1) / f->bw) * f->bpb, rows = (size_t)(c->r.height + f->bh - 1) / f->bh;
     size_t img = S.copy_img_stride ? (size_t)S.copy_img_stride : row * rows;
@@ -742,6 +928,7 @@ static void copy_t2t(const p_copy_t2t *c) {
     vka_tex_own(d, g_cb);
     unsigned sl = c->has_sv && c->sv.set_levels ? c->sv.base_level : 0, dl = c->has_dv && c->dv.set_levels ? c->dv.base_level : 0;
     unsigned sz0 = c->has_sv && c->sv.set_layers ? c->sv.min_layer : 0, dz0 = c->has_dv && c->dv.set_layers ? c->dv.min_layer : 0;
+    vka_tex_soft_copy(s, -1, g_cb); vka_tex_soft_copy(d, (int)dl, g_cb);   // (a soft texture copied from, or into at level 0: made whole first)
     if (!vka_img_lv(s, &sl) || !vka_img_lv(d, &dl)) return;
     VkImageAspectFlags sa = s->aspect & (s->f.kind >= 3 ? VK_IMAGE_ASPECT_DEPTH_BIT | VK_IMAGE_ASPECT_STENCIL_BIT : VK_IMAGE_ASPECT_COLOR_BIT), da = d->aspect;
     if ((sa == VK_IMAGE_ASPECT_COLOR_BIT) != (da == VK_IMAGE_ASPECT_COLOR_BIT)) { VRED_ONCE("texture copy between a color and a depth texture (formats %#x → %#x)", c->src->d.format, c->dst->d.format); return; }
@@ -776,9 +963,12 @@ static void not_yet(uint32_t op) {
     g_stat_skipped++;
     VRED_ONCE("DrawTexture (op %u) is not on Vulkan yet: skipped from now on", op);
 }
-static int rc_known(uint64_t a, uint64_t *v) {   // a counter at a: 0 for a timestamp report earlier in this submission, unknown for a query's, else what memory holds now (0 = unknown)
-    if (rc_occ_has(a) && VKA_ENV("DM_VK_RC_QUERY_MEM", 0) == 0) return 0;   // DM_VK_RC_QUERY_MEM=1: read query records from memory, as before a9f7d1ac (A/B only)
-    for (int i = g_nrc_ts - 1; i >= 0; i--) if (g_rc_ts[i] == a) { *v = 0; return 1; }
+static int rc_known(uint64_t a, uint64_t *v) {   // a counter at a: 1 = known (*v), 0 = unknown (the condition draws; Render conditions, above)
+    const rc_ent *e = rcm_find(a);
+    if (e && (e->kind == RCK_TS || VKA_ENV("DM_VK_RC_QUERY_MEM", 0) == 0)) {   // DM_VK_RC_QUERY_MEM=1: other counters' records read from memory, as before a9f7d1ac (A/B only)
+        if (e->kind == RCK_CONST) return 0;
+        if (!rc_sub_done(e->sub)) { if (e->kind != RCK_TS) return 0; *v = 0; return 1; }
+    }
     if (!vka_addr(a, 8, NULL, NULL, NULL)) return 0;
     memcpy(v, (const void *)(uintptr_t)a, 8); return 1;
 }
@@ -790,12 +980,12 @@ static struct { int on, skip; uint32_t nd, nc, nx; uint64_t k[3]; char clr[200];
 static int rcr_find(uint64_t a) { for (uint32_t i = (uint32_t)(a >> 4) & 16383, k = 0; k < 16384; k++, i = (i + 1) & 16383) if (g_rcr[i].addr == a || !g_rcr[i].addr) return (int)i; return -1; }
 static void rcl_side(char *b, size_t n, uint64_t a) {
     uint64_t v = 0; int mem = vka_addr(a, 8, NULL, NULL, NULL) != 0; if (mem) memcpy(&v, (const void *)(uintptr_t)a, 8);
-    int ts = 0; for (int i = 0; i < g_nrc_ts; i++) if (g_rc_ts[i] == a) ts = 1;
+    const rc_ent *e = rcm_find(a); int pend = e && !rc_sub_done(e->sub);
     int i = rcr_find(a);
     if (i < 0 || !g_rcr[i].addr) { snprintf(b, n, "%#llx mem %llu%s, no report seen", (unsigned long long)a, (unsigned long long)v, mem ? "" : " (unmapped)"); return; }
     uint64_t d = atomic_load(&g_rc_done);
     snprintf(b, n, "%#llx mem %llu%s, last report type %u in sub %llu (%s)%s", (unsigned long long)a, (unsigned long long)v, mem ? "" : " (unmapped)", g_rcr[i].type, (unsigned long long)g_rcr[i].sub,
-             g_rcr[i].sub == g_n_sub ? "this submission" : d >= g_rcr[i].sub ? "written" : "PENDING", ts ? " [timestamp here: reads 0]" : rc_occ_has(a) ? " [query address: unknown]" : "");
+             g_rcr[i].sub == g_n_sub ? "this submission" : d >= g_rcr[i].sub ? "written" : "PENDING", !e ? "" : e->kind == RCK_CONST ? " [constant counter: unknown]" : !pend ? " [done: memory]" : e->kind == RCK_TS ? " [timestamp in flight: reads 0]" : " [counted query in flight: unknown]");
 }
 static void rcl_key(const prog_t *pr, uint64_t *k) {
     vka_progsh ps; if (!pr || !vka_prog_shaders(pr, &ps)) return;
@@ -908,14 +1098,24 @@ int vka_mdx_args(uint64_t ind, VkBuffer *b, VkDeviceSize *o) {
 }
 
 static void seg_write(const void *a) { struct { VkCommandBuffer cb; VkPipelineStageFlagBits st; uint32_t q; } w; memcpy(&w, a, sizeof w); qf.write(w.cb, w.st, g_sqp, w.q); }
-static void exec(const uint8_t *p, int depth) {
+// NVN queue waits (vka_qsched.h): the replay worker answers whether a wait holds (vka_wait_pass); one that does not ends the replay of this submission here, and its continuation
+// (the record after the wait and the return points of the lists that called it) is written to g_pk for vka_rp_resume. Replays outside the worker pass every wait
+int vka_wait_pass(uint32_t op, const void *a, const uint8_t *rec);   // vka_worker.c
+void vka_event_replayed(volatile uint32_t *w, uint32_t mode, uint32_t v);
+static qs_cont *g_pk;
+static int exec(const uint8_t *p, int depth) {   // 1: parked at a wait (g_pk holds where it goes on)
     for (;;) {
         op_hdr h; memcpy(&h, p, sizeof h);
         const void *a = p + 8;
         int bar_kept = 0;   // a game barrier taken inside the open pass (vka_rp_game_barrier): no pass end, no full barrier
+        switch (h.op) {   // GPU work other than a dispatch: after the barrier the dispatches before it left pending (vka_draw.c "Dispatch order"), and before a part ends at a draw
+        case OP_DRAW: case OP_DRAW_IDX: case OP_DRAW_TEX: case OP_CLEAR_COLOR: case OP_CLEAR_DS: case OP_CLEAR_TEX: case OP_CLEAR_BUF: case OP_COPY_B2B: case OP_COPY_B2T:
+        case OP_COPY_T2B: case OP_COPY_T2T: case OP_UPDATE_UB: case OP_REPORT_COUNTER: vka_disp_settle(g_cb); break;
+        default: break;
+        }
         if (h.op == OP_DRAW || h.op == OP_DRAW_IDX) chunk_check();   // before a draw that opens a new pass
         switch (h.op) {   // a render pass a draw opened stays open across draws and state; anything else closes it first
-        case OP_END: case OP_BEGIN: case OP_JUMP: case OP_CALL: case OP_SIGNAL_EVENT: case OP_REPORT_COUNTER: case OP_FENCE_SYNC: case OP_RENDER_COND: case OP_RESET_COUNTER:
+        case OP_END: case OP_BEGIN: case OP_JUMP: case OP_CALL: case OP_SIGNAL_EVENT: case OP_REPORT_COUNTER: case OP_FENCE_SYNC: case OP_RENDER_COND: case OP_RESET_COUNTER: case OP_WAIT_EVENT: case OP_WAIT_SYNC:
         case OP_SCISSOR: case OP_COPY_STRIDE: case OP_DRAW: case OP_DRAW_IDX: break;
         case OP_SET_RT: if (g_cb && !vka_pass_keep()) vka_rp_end(); break;
         case OP_BARRIER: if (g_cb) { int32_t bits; memcpy(&bits, a, 4); bar_kept = vka_rp_game_barrier((uint32_t)bits); if (!bar_kept) vka_rp_end(); } break;
@@ -923,11 +1123,21 @@ static void exec(const uint8_t *p, int depth) {
         default: if (g_cb && !vka_state_op(&S.d, h.op, a)) vka_rp_end(); else if (!g_cb) vka_state_op(&S.d, h.op, a); break;
         }
         switch (h.op) {
-        case OP_END: return;
+        case OP_END: return 0;
         case OP_BEGIN: break;
         case OP_JUMP: memcpy(&p, a, 8); continue;
-        case OP_CALL: { uint64_t t; memcpy(&t, a, 8); if (depth < 16) { g_xret[g_nxret++] = p + h.size; exec((const uint8_t *)(uintptr_t)t, depth + 1); g_nxret--; } else VRED_ONCE("command lists nested deeper than 16"); break; }
-        case OP_SIGNAL_EVENT: { uint64_t val; uint32_t m, v; memcpy(&val, a, 8); memcpy(&m, (const uint8_t *)a + 8, 4); memcpy(&v, (const uint8_t *)a + 12, 4); post((pop){1, m, v, 0, val}); break; }
+        case OP_CALL: { uint64_t t; memcpy(&t, a, 8);
+            if (depth < 16) { g_xret[g_nxret++] = p + h.size; int pk = exec((const uint8_t *)(uintptr_t)t, depth + 1); g_nxret--; if (pk) return 1; } else VRED_ONCE("command lists nested deeper than 16");
+            break; }
+        case OP_SIGNAL_EVENT: { uint64_t val; uint32_t m, v; memcpy(&val, a, 8); memcpy(&m, (const uint8_t *)a + 8, 4); memcpy(&v, (const uint8_t *)a + 12, 4); post((pop){1, m, v, 0, val});
+            vka_event_replayed((volatile uint32_t *)(uintptr_t)val, m, v); break; }
+        case OP_WAIT_EVENT: case OP_WAIT_SYNC:
+            if (g_pk && !vka_wait_pass(h.op, a, p)) {
+                if (g_nxret > QS_NRET) { VRED_ONCE("a wait inside command lists nested deeper than %d: passed", QS_NRET); break; }
+                g_pk->p = p + h.size; g_pk->nret = g_nxret; memcpy(g_pk->ret, g_xret, sizeof(g_xret[0]) * (size_t)g_nxret);
+                return 1;
+            }
+            break;
         case OP_REPORT_COUNTER: { uint64_t t, ad; memcpy(&t, a, 8); memcpy(&ad, (const uint8_t *)a + 8, 8);
             uint32_t q = 0;
             if (g_sqp && g_cb && g_sq_n < SEGQ && (t == NVN_COUNTER_TYPE_TIMESTAMP || t == NVN_COUNTER_TYPE_TIMESTAMP_TOP)) {
@@ -936,8 +1146,9 @@ static void exec(const uint8_t *p, int depth) {
                 if (!vka_enc_call(seg_write, &w, sizeof w)) seg_write(&w);
                 vka_rp_note_ts();
             }
-            post((pop){2, 0, q, (uint32_t)t, ad});
-            if (DM_GAME_RENDER_COND) rc_note(ad, t);
+            int counted = t == NVN_COUNTER_TYPE_SAMPLES_PASSED && oq_report(ad, (uint32_t)t);   // (Occlusion queries: its record is written by oq_done)
+            if (!counted) post((pop){2, 0, q, (uint32_t)t, ad});
+            if (DM_GAME_RENDER_COND) rc_note(ad, t == NVN_COUNTER_TYPE_TIMESTAMP || t == NVN_COUNTER_TYPE_TIMESTAMP_TOP ? RCK_TS : counted ? RCK_OQ : RCK_CONST);
             if (atomic_load_explicit(&g_synclog, memory_order_relaxed) > 0) VLOG("sync report: frame %llu type %llu at draw %llu of the submission, part %d, recording at %.2f ms", (unsigned long long)g_frame,
                                                                            (unsigned long long)t, (unsigned long long)(g_stat_draws - g_sub_draws0), g_nx + 1, ms_now());
             break; }
@@ -946,7 +1157,7 @@ static void exec(const uint8_t *p, int depth) {
             if (rc->mode >= 2) S.rc_skip = rc->mode == 3;
             else { uint64_t x, y; int known = rc_known(rc->addr, &x) && rc_known(rc->addr + 16, &y); S.rc_skip = known && (rc->mode ? x == y : x != y); }
             break; }
-        case OP_RESET_COUNTER: break;
+        case OP_RESET_COUNTER: { uint64_t t; memcpy(&t, a, 8); if (t == NVN_COUNTER_TYPE_SAMPLES_PASSED) oq_reset(); break; }
         case OP_CLEAR_BUF: mdx_write(); if (g_cb) { const p_clear_buf *cb = a; vka_rw_pre(g_cb); buf_fill(cb->addr, cb->size, cb->value); vka_barrier(g_cb); vka_rw_point(g_cb, 'f', 0, cb->value, cb->addr); } break;
         case OP_COPY_B2B: mdx_write(); if (g_cb) { uint64_t s_, d, n; memcpy(&s_, a, 8); memcpy(&d, (const uint8_t *)a + 8, 8); memcpy(&n, (const uint8_t *)a + 16, 8); vka_rw_pre(g_cb); buf_copy(s_, d, n); vka_barrier(g_cb); vka_rw_point(g_cb, 'c', 0, s_, d); } break;
         case OP_UPDATE_UB: mdx_write(); g_n_ub++; if (g_cb) { uint64_t d, n; memcpy(&d, a, 8); memcpy(&n, (const uint8_t *)a + 8, 8); vka_rw_pre(g_cb); buf_update((const uint8_t *)a + 16, d, n); vka_barrier(g_cb); vka_rw_point(g_cb, 'u', 0, n, d); } break;
@@ -960,16 +1171,37 @@ static void exec(const uint8_t *p, int depth) {
         case OP_COPY_T2B: mdx_write(); if (g_cb) { vka_rw_pre(g_cb); copy_bt(a, 0); vka_rw_point(g_cb, 't', 0, 0, 0); } break;
         case OP_COPY_T2T: if (g_cb) copy_t2t(a); break;
         case OP_BARRIER: if (g_cb && !bar_kept) vka_barrier(g_cb); break;
-        case OP_DRAW: if (!S.rc_skip && g_cb) { p_draw t; const p_draw *d = draw_rec(a, h.size, &t); g_stat_draws++; mdx_before_draw(p, d); vka_draw(&S.d, &S.rt, S.has_rt, &S.sc, S.has_sc, d, NULL); } break;
-        case OP_DRAW_IDX: if (!S.rc_skip && g_cb) { p_draw_idx t; g_stat_draws++; mdx_before_draw(p, NULL); vka_draw(&S.d, &S.rt, S.has_rt, &S.sc, S.has_sc, NULL, draw_idx_rec(a, h.size, &t)); } break;
+        case OP_DRAW: if (S.rc_skip) vka_rtlog_skip(&S.rt, S.has_rt, &S.d, "skipped by a render condition");
+                      if (!S.rc_skip && g_cb) { p_draw t; const p_draw *d = draw_rec(a, h.size, &t); g_stat_draws++; mdx_before_draw(p, d); uint64_t sk = 0; if (g_oq_count) vka_draw_stats(NULL, &sk, NULL, NULL);
+                          vka_draw(&S.d, &S.rt, S.has_rt, &S.sc, S.has_sc, d, NULL); oq_lost(sk); } else if (!S.rc_skip && g_oq_count) g_oq_lost++; break;
+        case OP_DRAW_IDX: if (S.rc_skip) vka_rtlog_skip(&S.rt, S.has_rt, &S.d, "skipped by a render condition");
+                          if (!S.rc_skip && g_cb) { p_draw_idx t; g_stat_draws++; mdx_before_draw(p, NULL); uint64_t sk = 0; if (g_oq_count) vka_draw_stats(NULL, &sk, NULL, NULL);
+                          vka_draw(&S.d, &S.rt, S.has_rt, &S.sc, S.has_sc, NULL, draw_idx_rec(a, h.size, &t)); oq_lost(sk); } else if (!S.rc_skip && g_oq_count) g_oq_lost++; break;
         case OP_DISPATCH: mdx_write(); if (!S.rc_skip && g_cb) vka_dispatch(&S.d, a); break;
-        case OP_DRAW_TEX: not_yet(h.op); break;
+        case OP_DRAW_TEX: not_yet(h.op); if (!S.rc_skip && g_oq_count) { g_oq_lost++; g_oqs_skip++; } break;
         default: break;   // state: taken by vka_state_op above
         }
         if (g_rcl) rcl_op(h.op, a);
-        if (h.size < 8) { VRED("command record of size %u at %p (op %u): the list is cut here", h.size, (const void *)p, h.op); return; }
+        if (h.size < 8) { VRED("command record of size %u at %p (op %u): the list is cut here", h.size, (const void *)p, h.op); return 0; }
         p += h.size;
     }
 }
-void vka_rp_exec(const uint8_t *handle, uint64_t fence) { if (fence) g_cur_fence = fence; if (handle) exec(handle, 0); }
+void vka_rp_exec(const uint8_t *handle, uint64_t fence) { if (fence) g_cur_fence = fence; if (handle) { g_pk = NULL; g_nxret = 0; exec(handle, 0); } }
+// The worker's replay of one handle of a submission: 1 when it stopped at a wait that does not hold yet (out: where it goes on)
+int vka_rp_exec_pk(const uint8_t *handle, uint64_t fence, qs_cont *out) {
+    if (fence) g_cur_fence = fence;
+    if (!handle) return 0;
+    g_pk = out; g_nxret = 0; int r = exec(handle, 0); g_pk = NULL; g_nxret = 0;
+    return r;
+}
+// Goes on where a park stopped (c): the rest of the innermost list, then each caller's rest, outermost last
+int vka_rp_resume(const qs_cont *c, uint64_t fence, qs_cont *out) {
+    if (fence) g_cur_fence = fence;
+    qs_cont k = *c; int r = 0;
+    g_pk = out; g_nxret = k.nret; memcpy(g_xret, k.ret, sizeof(g_xret[0]) * (size_t)k.nret);
+    if (exec(k.p, k.nret)) r = 1;
+    for (int i = k.nret - 1; !r && i >= 0; i--) { g_nxret = i; if (exec(k.ret[i], i)) r = 1; }
+    g_pk = NULL; g_nxret = 0;
+    return r;
+}
 #endif

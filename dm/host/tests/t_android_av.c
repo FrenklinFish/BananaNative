@@ -1,5 +1,5 @@
 // The Android host's pure audio / picture helpers (android/av_android.h), on the Mac: the AAudio fallback resampler, AAC channel mapping, the SPS size MediaCodec is configured
-// with, and MediaCodec output layouts into NV12 / RGBA
+// with, MediaCodec output layouts into NV12 / RGBA, and what a stream keeps for a hardware decoder that fails inside it
 #include "android/av_android.h"
 #include <stdio.h>
 #include <stdlib.h>
@@ -87,6 +87,16 @@ static void t_yuv(void) {
     // odd crop width 5: padded to 6 by repeating the last column
     nx_yuv_layout O = {NXYUV_NV12, S, SL, 0, 0, 5, 4}; uint8_t o3[6 * 4 * 3 / 2];
     CHECK(!nx_yuv_to_nv12(nv12, sizeof nv12, &O, o3) && o3[4] == 4 && o3[5] == 4, "odd width padded: %d %d", o3[4], o3[5]);
+    // Qualcomm's AV1 first picture: a 4x4 picture whose luma is padded to a slice height of 6 (two zero rows), then only the 2 chroma rows the picture has (4 * 6 + 4 * 2 bytes,
+    // not 4 * 6 + 4 * 3): taken at slice height 6, its chroma read after the padding (at 4 rows the chroma would come from the zero padding: green)
+    {   uint8_t q[4 * 6 + 4 * 2], qo[4 * 4 * 3 / 2]; memset(q, 0, sizeof q);
+        for (int i = 0; i < 16; i++) q[i] = 80;
+        for (int i = 24; i < 32; i++) q[i] = (uint8_t)(120 + i - 24);
+        nx_yuv_layout Q = {NXYUV_NV12, 4, 6, 0, 0, 4, 4};
+        CHECK(nx_yuv_bytes(&Q) == sizeof q, "the bytes the crop reads: %zu", nx_yuv_bytes(&Q));
+        CHECK(!nx_yuv_to_nv12(q, sizeof q, &Q, qo) && qo[0] == 80 && qo[16] == 120 && qo[23] == 127, "chroma after the padding: %d %d", qo[16], qo[23]);
+        CHECK(nx_yuv_to_nv12(q, sizeof q - 1, &Q, qo) == -1, "one byte short is refused");
+    }
 }
 static void t_rgba(void) {
     // limited-range white, black, and BT.601 / BT.709 red
@@ -103,8 +113,28 @@ static void t_rgba(void) {
     nx_nv12_to_rgba(fy, fuv, 2, 1, 2, o, 8, 1, 1);
     CHECK(o[0] == 255 && o[4] == 0, "full range: %d %d", o[0], o[4]);
 }
+static void t_mck(void) {
+    CHECK(!nx_mc_failed(0) && !nx_mc_failed(5) && !nx_mc_failed(-1) && !nx_mc_failed(-2) && !nx_mc_failed(-3), "indices and the three AMEDIACODEC_INFO_* codes are not failures");
+    CHECK(nx_mc_failed(-10000) && nx_mc_failed(-4), "AMEDIA_ERROR_UNKNOWN and other codes below -3 are failures");
+    nx_mck k; memset(&k, 0, sizeof k);
+    uint8_t a[3] = {1, 2, 3}, b[2] = {4, 5};
+    nx_mck_packet(&k, a, 3, 10, 1); nx_mck_packet(&k, b, 2, 20, 0); nx_mck_picture(&k);
+    CHECK(k.n == 2 && k.bytes == 5 && k.given == 1 && k.p[1].pts == 20 && k.p[1].d[1] == 5, "two packets since the key frame, one picture given: n %d bytes %zu given %llu", k.n, k.bytes, (unsigned long long)k.given);
+    nx_mck_packet(&k, b, 2, 30, 1);
+    CHECK(k.n == 1 && k.given == 0 && k.p[0].pts == 30, "a key frame starts over: n %d given %llu", k.n, (unsigned long long)k.given);
+    for (int i = 0; i < NX_MCK_PACKETS; i++) nx_mck_packet(&k, b, 2, i, 0);
+    CHECK(k.lost && k.n == 0 && k.bytes == 0, "past the cap the packets are given up: lost %d n %d", k.lost, k.n);
+    nx_mck_packet(&k, a, 3, 1, 0);
+    CHECK(k.lost && k.n == 0, "and stay given up until the next key frame");
+    nx_mck_packet(&k, a, 3, 2, 1);
+    CHECK(!k.lost && k.n == 1, "the next key frame keeps packets again");
+    nx_mck_packet(&k, NULL, 0, 3, 0);
+    CHECK(k.n == 2 && k.p[1].n == 0, "an empty packet is kept as one");
+    nx_mck_free(&k);
+    CHECK(!k.p && !k.n && !k.cap, "freed");
+}
 int main(void) {
-    t_resample(); t_chmap(); t_sps(); t_yuv(); t_rgba();
+    t_resample(); t_chmap(); t_sps(); t_yuv(); t_rgba(); t_mck();
     if (fails) { printf("t_android_av: %d failures\n", fails); return 1; }
     printf("t_android_av: ok\n");
     return 0;

@@ -181,6 +181,40 @@ def nso_build_id(path):   # the module's build ID (NSO header +0x40), as the pro
     return b[0x40:0x50].hex()
 
 
+def unregistered(g, ids):
+    """{module: the profile's builds of it} for each module of ids (module → NSO build ID) whose build no build row names; a module no row names is not listed.
+    Every row counts (one row a version: an update's and the base's), not only the last"""
+    known = {}
+    for v in g.builds().values():
+        for m, i in v.items():
+            if m != 'display': known.setdefault(m, set()).add(i)
+    return {m: sorted(known[m]) for m, i in ids.items() if known.get(m) and i not in known[m]}
+
+
+def dump_modules(g, exe):
+    """The profile's modules that a dump loads. All of them, unless the profile registers builds with different module sets (Mario Kart World: 1.8.0 has a subsdk1 that 1.0.0 lacks):
+    then the modules of the build row the dump matches (the modules that row names are all there, with its build IDs, and the others are not)"""
+    mods = g.words('modules'); have = [m for m in mods if (exe / m).is_file()]
+    if len(have) == len(mods): return mods
+    for row in g.builds().values():
+        want = [m for m in mods if m in row]
+        if want and want == have and all(nso_build_id(exe / m) == row[m] for m in want): return have
+    return mods   # no row has this set of modules: the caller names what is missing
+
+
+def optional_keys(g):
+    """The keys of the profile's shader_map.tsv that only some of its registered builds have (shader_optional.tsv): a dump may lack them"""
+    f = g.dir / 'shader_optional.tsv'
+    return {l.split('\t')[0] for l in f.read_text().splitlines() if l and not l.startswith('#')} if f.is_file() else set()
+
+
+def absent_optional(g, pkg):
+    """The keys a split's <package>/_absent.tsv lists (split_shaders), when every one is in the profile's shader_optional.tsv; else (none, or a list naming other keys) empty"""
+    f = pkg / '_absent.tsv'
+    keys = {l for l in f.read_text().splitlines() if l} if f.is_file() else set()
+    return keys if keys and keys <= optional_keys(g) else set()
+
+
 def nso_zbic(path):   # whether the module's segments are ZBIC (NSO flag bit 7, system 22.0.0 on), which nso.py needs a decoder for (nso.zbic_decoder)
     b = path.read_bytes()[:0x10]   # read_bytes: a module inside a .nup is a path of its own kind, as in nso_build_id
     return b[:4] == b'NSO0' and bool(int.from_bytes(b[0xc:0x10], 'little') & 0x80)
@@ -375,13 +409,18 @@ def split_shaders(a, g, vdir, pkg, parts=None):   # parts: the version's (romfs,
     if r.returncode: raise Error(f'shader_split.py exit code {r.returncode}')
     if (g.dir / 'shader_map.tsv').is_file():
         want, have = map_keys(g.dir / 'shader_map.tsv'), map_keys(tmp / 'shader_map.tsv')
-        if missing := sorted(want - have):
-            raise Error(f'the dump\'s shaders lack {len(missing)} of the {len(want)} in the profile\'s shader_map.tsv (e.g. {", ".join(missing[:3])}): the dump is of another version '
+        missing = sorted(want - have)
+        if hard := [k for k in missing if k not in optional_keys(g)]:
+            raise Error(f'the dump\'s shaders lack {len(hard)} of the {len(want)} in the profile\'s shader_map.tsv (e.g. {", ".join(hard[:3])}): the dump is of another version '
                         f'or incomplete, and the profile\'s shader library cannot be built from it (the split is in {tmp})')
         for f in ('shader_map.tsv', 'shader_facts.tsv', 'shader_pairs.tsv'):
             if (g.dir / f).is_file() and (g.dir / f).read_bytes() != (tmp / f).read_bytes():
                 print(f'shaders: the dump\'s {f} differs from the profile\'s ({len(have - want)} shaders more); the library is the profile\'s, its shaders found in the package by key')
     shutil.rmtree(pkg, ignore_errors=True); (tmp / 'pkg').rename(pkg)
+    absent = sorted(want - have) if (g.dir / 'shader_map.tsv').is_file() else []   # the keys only another registered build has (shader_optional.tsv): listed for a library build to leave out
+    if absent:
+        (pkg / '_absent.tsv').write_text(''.join(k + '\n' for k in absent))
+        print(f'shaders: {len(absent)} of the profile\'s {len(want)} shaders are not in this dump (they belong to another registered build of the game, shader_optional.tsv): listed in {pkg.name}/_absent.tsv')
     for f in tmp.iterdir(): f.replace(pkg.with_name(f.name))
     tmp.rmdir()
 
@@ -400,6 +439,10 @@ def pack_shaders(a, g, work, out, vdir, parts=None):
         print(f'shaders: building the Vulkan library {lib} from {pkg} with {py} (J={a.J}; about 10 minutes on DKB)', flush=True)
         (work / 'android-shaders' / 'work').mkdir(parents=True, exist_ok=True)
         env = child_env(DM_GAME=g.id, J=str(a.J), WORK=str(work / 'android-shaders' / 'work'))
+        if absent := absent_optional(g, pkg):   # a registered build without some of the map's shaders (shader_optional.tsv): the library is built without them
+            print(f'shaders: {len(absent)} of the profile\'s shaders are not in this build of the game (shader_optional.tsv); the library leaves them out '
+                  '(the [RED] "not in the package" line below counts them)', flush=True)
+            env['DMSH_VK_REQUIRE_ALL'] = '0'
         r = subprocess.run([py, str(VK_BUILD_WIN if WINDOWS else VK_BUILD), '--target', 'vulkan', str(pkg), str(cache)], env=env)
         if r.returncode: raise Error(f'vk_android_build.py exit code {r.returncode} (a package that lacks the profile\'s shaders stops it: delete {pkg} and the split runs again)')
         if not library_current(lib, g): raise Error(f'vk_android_build.py finished but {lib} is not a full library of {g.id} with the current inputs')
@@ -458,7 +501,7 @@ def main():
         exe, romfs = pack_dump.version_part(folder, vers, ver, 'exefs'), pack_dump.version_part(folder, vers, ver, 'romfs')   # its own, else the base's
         if not (exe / 'main.npdm').is_file() or not romfs.is_dir(): raise Error(f'{vdir}: no exefs/main.npdm and romfs (neither its own nor the base\'s)')
         if (pid := pack_dump.program_id(exe / 'main.npdm')) != app: raise Error(f'{vdir}: program ID {pid:016X}, the base is {app:016X}')
-        mods = g.words('modules')
+        mods = dump_modules(g, exe)
         srcs = {m: exe / m for m in mods}
         if missing := [m for m in mods if not srcs[m].is_file()]: raise Error(f'{exe}: no {", ".join(missing)} (the profile\'s modules are {" ".join(mods)})')
         if not a.keep_code and (zb := [m for m in mods if nso_zbic(srcs[m])]):
@@ -471,10 +514,8 @@ def main():
         except ValueError: pass
         out.mkdir(parents=True, exist_ok=True)
         ids = {m: nso_build_id(srcs[m]) for m in mods}
-        known = {m: i for v in g.builds().values() for m, i in v.items() if m != 'display'}
         print(f'{app:016X} {g.get("name", "?")} version {ver}: {vdir}', flush=True)
-        for m in mods:
-            if known.get(m) and known[m] != ids[m]: print(f'[RED] {m} build {ids[m]} is not the profile\'s build {known[m]}: build-gated cuts do not apply')
+        for m, known in unregistered(g, ids).items(): print(f'[RED] {m} build {ids[m]} is none of the profile\'s builds ({", ".join(known)}): build-gated cuts do not apply')
         if a.keep_code:
             # each module needs its rewritten code and, written last by the rewrite, its key: a module without the key is a rewrite that did not finish (or one from before keys)
             gaps = [f'{m} ({" and ".join(f for f in (f"{m}.patched.bin", f"{m}.android.key") if not (out / f).is_file())} missing)'
