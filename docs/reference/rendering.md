@@ -2,6 +2,16 @@
 
 The replay on Metal (`dm/gfx/nvn/nvn_mtl.m`) and the Vulkan and OpenGL layers. Each entry: symptom, cause, fix, the games it was found on. The [symptom index](../agents/symptoms.md) lists every symptom.
 
+## Driver loading
+
+### A Qualcomm custom driver silently falls back on Android 15
+
+- **Symptom:** the launcher selects Qualcomm 891.14, but Vulkan reports the system driver's version and features. Logcat's `hook_impl` says `cannot locate symbol "AIBinder_Class_setTransactionCodeToFunctionNameMap"` and `falling back`. The custom-driver tag describes the requested loader, not proof that its ICD loaded.
+- **Cause:** Qualcomm's helper imports an API 36 Binder tracing annotation that Android 15 lacks. The existing annotation stub in `libmain_hook.so` is global in the Vulkan loader's namespace, but libadrenotools creates a different namespace for the vendor driver, parented to the vendor namespace. That namespace preloads only `libhook_impl.so`; the stub is not visible there.
+- **Fix:** build `android/host/adreno_binder_compat.c` into `hook_impl` with `DF_1_GLOBAL`. The shim has the API's three arguments and forwards them to `libbinder_ndk.so` when the system supplies the annotation. On older systems only the optional transaction-name annotation is omitted; Binder transactions are not replaced. No vendored file or driver binary changes. The system-driver path does not load the hooks.
+- **Check:** on Odin 3, Adreno 830, Android 15 (2026-11-11), the same unmodified 891.14 driver changes from Vulkan 1.3.284 / `0x80320048` (silent system fallback) to Vulkan 1.3.351 / `0x8037b00e`; the missing-symbol error disappears. `test_android_binder_compat.py` checks both an absent annotation and forwarding all arguments, resolving the function once. This fixes loading only: neither driver advertises `VK_EXT_mesh_shader` on this device, so it does not restore missing mesh geometry.
+- **Found on:** [The Legend of Zelda: Ocarina of Time](../../dm/games/0400486024DEC000/README.md). Related earlier stub: [Forgejo PR 32](https://git.eden-emu.dev/moceure/BananaNative/pulls/32). API contract: [Android NDK Binder](https://developer.android.com/ndk/reference/group/ndk-binder#aibinder_class_settransactioncodetofunctionnamemap).
+
 ## Textures and formats
 
 ### Null textures in diagnostic logs
