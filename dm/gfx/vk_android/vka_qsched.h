@@ -50,9 +50,10 @@ typedef struct qs_sub {
     int wkind; volatile uint32_t *word; uint32_t mode, value; uint64_t wfence, t_park;   // the wait it is parked at: 1 event, 2 fence
     int w0kind; volatile uint32_t *w0word; uint32_t w0mode, w0value; uint64_t w0fence;   // its first wait when no event signal comes before it (1 event, 2 sync; 0 none): asked before replay
     volatile uint32_t *gword; uint32_t gmode, gvalue;                                    // the wait it was gated at last (asked again when the replay reaches it: passes)
+    const volatile uint32_t *aword; uint32_t amode, avalue;                              // the wait asked last (a second ask of the same wait, after its park or before the replay, is not counted again)
 } qs_sub;
 typedef struct { uint64_t serial; qs_sub *head, *tail; int n; } qs_queue;   // head: parked at its wait; the rest wait behind it
-typedef struct { volatile uint32_t *word; uint32_t value; uint64_t fence; } qs_ev;   // an event word as the replay leaves it, until fence completes
+typedef struct { volatile uint32_t *word; uint32_t value; uint64_t fence, frame; } qs_ev;   // an event word as the replay leaves it, until fence completes (frame: the game's frame of the submission that replayed the signal)
 typedef struct { const volatile uint32_t *word; int cpu; } qs_gw;                     // an event word's releases by memory in a row (QS_GATE_LEARN: a CPU event)
 
 typedef struct qs {
@@ -60,7 +61,7 @@ typedef struct qs {
     uint64_t lo, sig;                         // every fence <= lo handed to the queue whole; the highest fence signalled
     uint64_t mark[QS_NMARK]; int nmark;       // fences above lo handed whole
     uint64_t def[QS_NDEF]; int ndef;          // fences of the commits no signal covers yet (one per commit)
-    qs_ev *ev; uint32_t evcap, nev, evpeak;   // the words a replayed signal is in flight for: open addressing by word, no deletions (stale entries go at a rebuild); evpeak: the most in flight at a rebuild
+    qs_ev *ev; uint32_t evcap, nev, evpeak;   // the words a replayed signal is in flight for: open addressing by word, no deletions (stale entries go at a rebuild); evpeak: the most in flight at a commit (qs_commit)
     qs_gw gw[QS_NGW]; int ngw, ngw_next;
     int force; uint64_t seq;
     qs_sub *cur;                              // the submission being replayed (qs_wait_* and qs_event_replayed refer to it)
@@ -75,6 +76,11 @@ typedef struct qs {
     void *ctx;
     uint64_t park_ns;
     uint64_t n_park, n_whole, n_release, n_gate, n_force[QS_NWHY];
+    // Waits that held when first asked (no park): by a signal of the replay still queued from the waiting submission's own frame or a later one, by one queued from an earlier
+    // frame (the word's last use: a double-buffered event word seen before this frame's producer was replayed), or by the word in memory. The last one asked (note 3)
+    uint64_t n_pass_queued, n_pass_old, n_pass_mem;
+    const volatile uint32_t *pass_word; uint32_t pass_mode, pass_value; int pass_src;   // pass_src: 1 queued, 2 queued from an earlier frame, 3 memory
+    int force_why;                            // the valve of the release in progress (note 4)
 } qs;
 
 static inline int qs_pred(uint32_t cur, uint32_t mode, uint32_t target) { return mode == 0 ? cur == target : (uint32_t)(cur - target) < 0x80000000u; }   // NVNeventWaitMode
@@ -86,7 +92,9 @@ static inline int qs_whole(const qs *sc, uint64_t f) {   // fence f's submission
     return 0;
 }
 // A commit of fence f (final: its submission's last part; otherwise the part before a wait): the timeline value its submit signals, 0 = none yet
+static inline void qs_ev_peak(qs *sc);
 static inline uint64_t qs_commit(qs *sc, uint64_t f, int final) {
+    qs_ev_peak(sc);
     if (final && f > sc->lo && !qs_whole(sc, f)) {
         if (sc->nmark < QS_NMARK) sc->mark[sc->nmark++] = f;
         for (int moved = 1; moved;) { moved = 0; for (int i = 0; i < sc->nmark; i++) if (sc->mark[i] == sc->lo + 1) { sc->lo++; sc->mark[i] = sc->mark[--sc->nmark]; moved = 1; break; } }
@@ -141,6 +149,15 @@ static inline uint32_t qs_ev_value(qs *sc, const volatile uint32_t *w) {
     return *w;
 }
 static inline int qs_ev_inflight(qs *sc, const volatile uint32_t *w) { qs_ev *e = qs_ev_find(sc, w); return e && e->fence > sc->done(sc->ctx); }   // the replay's view is a queued signal
+// The words a replayed signal is in flight for now (a walk of the table). Until 2026-11-10 the peak was taken only at a rebuild, which comes at half full (128 words): Mario
+// Kart World's frames use 4 words (two pairs, alternate frames), the table never filled, and the stats line read "at most 0" in every run. Now sampled at every commit
+static inline uint32_t qs_ev_live(qs *sc) {
+    if (!sc->evcap) return 0;
+    uint64_t d = sc->done(sc->ctx); uint32_t n = 0;
+    for (uint32_t i = 0; i < sc->evcap; i++) if (sc->ev[i].word && sc->ev[i].fence > d) n++;
+    return n;
+}
+static inline void qs_ev_peak(qs *sc) { if (sc->nev > sc->evpeak) { uint32_t n = qs_ev_live(sc); if (n > sc->evpeak) sc->evpeak = n; } }
 // Gate learning: a release by memory counts for the word, a release by a queued signal of the replay sets it back (the producer is GPU work the replay orders)
 static inline qs_gw *qs_gw_find(qs *sc, const volatile uint32_t *w, int add) {
     for (int i = 0; i < sc->ngw; i++) if (sc->gw[i].word == w) return &sc->gw[i];
@@ -164,7 +181,7 @@ static inline void qs_event_replayed(qs *sc, volatile uint32_t *w, uint32_t mode
         uint32_t k = qs_ev_slot(w, sc->evcap); while (sc->ev[k].word) k = (k + 1) & (sc->evcap - 1);
         e = &sc->ev[k]; e->word = w; sc->nev++;
     }
-    e->value = mode == 1 ? base + v : v; e->fence = sc->cur->fence;
+    e->value = mode == 1 ? base + v : v; e->fence = sc->cur->fence; e->frame = sc->cur->frame;
 }
 
 // ---------- Waits (asked by the replay at a WAIT record of sc->cur) ----------
@@ -173,7 +190,18 @@ static inline void qs_event_replayed(qs *sc, volatile uint32_t *w, uint32_t mode
 // dark while walking, 2026-11-10). The worker releases the parks only when it cannot go on otherwise (vka_worker.c qs_step)
 static inline int qs_wait_event(qs *sc, volatile uint32_t *w, uint32_t mode, uint32_t value) {
     qs_sub *s = sc->cur;
-    if (!s || sc->force || qs_pred(qs_ev_value(sc, w), mode, value)) return 1;
+    if (!s || sc->force) return 1;
+    int again = s->aword == w && s->amode == mode && s->avalue == value;   // asked before (parked there, or passed as its first wait before the replay)
+    s->aword = w; s->amode = mode; s->avalue = value;
+    if (qs_pred(qs_ev_value(sc, w), mode, value)) {
+        if (!again) {   // held at once: by whom (the stats line; DM_VK_QS_TRACE)
+            qs_ev *e = qs_ev_find(sc, w); int queued = e && e->fence > sc->done(sc->ctx);
+            int src = queued ? (e->frame < s->frame ? 2 : 1) : 3;
+            if (src == 1) sc->n_pass_queued++; else if (src == 2) sc->n_pass_old++; else sc->n_pass_mem++;
+            if (sc->note) { sc->pass_word = w; sc->pass_mode = mode; sc->pass_value = value; sc->pass_src = src; sc->note(sc->ctx, 3, s); }
+        }
+        return 1;
+    }
     if (s->gword == w && s->gmode == mode && s->gvalue == value) return 1;   // gated already (its first wait, asked before the replay)
     if (sc->gate && s->fence && qs_gw_cpu(sc, w) && sc->gate(sc->ctx, s, w, mode, value)) {
         s->gword = w; s->gmode = mode; s->gvalue = value; sc->n_gate++;
@@ -281,6 +309,7 @@ static inline int qs_poll(qs *sc) {
 static inline void qs_force_all(qs *sc, int why) {
     if (sc->force || !qs_parked(sc)) return;
     sc->n_force[why]++;
+    if (sc->note) { sc->force_why = why; sc->note(sc->ctx, 4, NULL); }
     sc->force = 1;
     for (;;) {
         qs_queue *best = NULL;

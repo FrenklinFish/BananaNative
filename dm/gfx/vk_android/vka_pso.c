@@ -766,6 +766,10 @@ static opt_job *g_opt_head, **g_opt_tail = &g_opt_head; static pthread_mutex_t g
 static uint64_t g_opt_waiting;
 static void *opt_main(void *a) {
     (void)a; pthread_setname_np(pthread_self(), "vk-psopt"); vka_fp_host("vk-psopt");
+    // Under the game's threads, as the prewarm and asynchronous threads: nothing waits for an optimized pipeline (its linked one draws meanwhile). Before 2026-11-10 it kept
+    // the priority of the thread that queued its first job: nice 10 when that was an asynchronous thread, but the replay thread's -8 without DM_VK_PSO_ASYNC (the default),
+    // so every optimized compile (60-130 ms each on Turnip) competed with the recording and the game's threads for a core
+    setpriority(PRIO_PROCESS, 0, 10);
     for (;;) {
         pause_point();
         pthread_mutex_lock(&g_opt_mu);

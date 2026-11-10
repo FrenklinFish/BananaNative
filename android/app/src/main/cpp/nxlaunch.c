@@ -366,7 +366,7 @@ JNIEXPORT jstring JNICALL Java_dev_nxnative_android_Native_frameGenStatus(JNIEnv
     return (*env)->NewStringUTF(env, out);
 }
 
-// The frame rate cap (nxhost_fps_cap_set / _status): "<cap> <rates> <game fps>" (input_android.h), "-1 0 0" when this host has no cap
+// The frame rate cap (nxhost_fps_cap_set / _status): "<cap> <rates> <game fps> <limit held>" (input_android.h), "-1 0 0" when this host has no cap
 JNIEXPORT void JNICALL Java_dev_nxnative_android_Native_fpsCapSet(JNIEnv *env, jclass cls, jint fps) { (void)env; (void)cls; if (nxhost_fps_cap_set) nxhost_fps_cap_set(fps); }
 JNIEXPORT jstring JNICALL Java_dev_nxnative_android_Native_fpsCapStatus(JNIEnv *env, jclass cls) {
     (void)cls; char buf[64] = "-1 0 0";
@@ -494,6 +494,14 @@ JNIEXPORT jint JNICALL Java_dev_nxnative_android_Native_pinThreads(JNIEnv *env, 
 JNIEXPORT void JNICALL Java_dev_nxnative_android_Native_fpsLimitSet(JNIEnv *env, jclass cls, jint fps) { (void)env; (void)cls; if (nxhost_fps_limit_set) nxhost_fps_limit_set(fps); }
 // Full game speed at low frame rates, live from the in-game panel (Native.decoupleSet)
 JNIEXPORT void JNICALL Java_dev_nxnative_android_Native_decoupleSet(JNIEnv *env, jclass cls, jboolean on) { (void)env; (void)cls; if (nxhost_fps_decouple_set) nxhost_fps_decouple_set(on ? 1 : 0); }
+// Game resolution of a game that sizes its scenes by the graphics scale, live from the in-game panel (Native.graphicsModeSet): the host changes the scale and operation mode
+// and posts the console's notifications (300, 30 / 31), which the game answers by querying them again
+#pragma weak nxhost_graphics_mode_set
+void nxhost_graphics_mode_set(int scale, int opmode);   // hle_oe.c: -1 = the game's own
+JNIEXPORT jboolean JNICALL Java_dev_nxnative_android_Native_graphicsModeSet(JNIEnv *env, jclass cls, jint scale, jint opmode) {
+    (void)env; (void)cls; if (!nxhost_graphics_mode_set) return JNI_FALSE;
+    nxhost_graphics_mode_set(scale, opmode); return JNI_TRUE;
+}
 // Dynamic resolution, live from the in-game panel (Native.drsSet)
 #pragma weak nxhost_drs_set
 void nxhost_drs_set(int min_pct, int max_pct);   // probe.c: Donkey Kong Bananza's dynamic resolution range, % of the window (0 = the game's own)

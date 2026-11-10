@@ -13,6 +13,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
+#include <math.h>
 #ifdef NX_LSFG
 #include "lsfg/lsfg.h"
 #endif
@@ -240,6 +241,9 @@ int vka_fg_frame(uint64_t serial, const int *crop, double period, uint64_t fence
     double interval = F.pacer.smoothed_interval > 0 ? F.pacer.smoothed_interval : period;
     if (interval < period) interval = period;
     if (ng) *hold = interval / (double)(ng + 1);
+    // A hold within 0.15 refresh of a whole number of refreshes is that number: the measured interval runs a little long (34 ms at a 30 fps frame step), and a hold of 17 ms on a
+    // 16.7 ms panel let each image's desired time (vka_present.c, the previous one's plus the hold) drift across a refresh every few dozen frames, two images in one refresh
+    if (ng && rns) { double r = *hold * 1e9 / (double)rns, w = floor(r + 0.5); if (w >= 1 && fabs(r - w) <= 0.15) *hold = w * (double)rns / 1e9; }
     int st2 = ng ? 1 : 2;
     static int was_capped;
     if (atomic_exchange(&g_state, st2) != st2 || (st2 == 2 && capped != was_capped)) {

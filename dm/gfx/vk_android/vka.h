@@ -167,6 +167,12 @@ int vka_wait_done(uint64_t fence, uint64_t timeout_ns);
 int vka_worker_cpu_wait(uint64_t fence);    // vka_worker.c: a CPU thread is about to block on fence (parked queues and gates that hold it back go on once the worker is stuck)
 void vka_worker_cpu_wait_end(int was);      // ... and is no longer blocked (was: what vka_worker_cpu_wait returned)
 uint64_t vka_worker_cpu_blocked(void);       // the highest fence CPU threads block on now (0: none)
+// The GPU-wait trace (vka_worker.c, DM_VK_QS_TRACE): the last events of the queue scheduler and the submissions, printed when a GPU hang is declared
+enum { QT_SUB = 1, QT_PARK, QT_PASS, QT_RELEASE, QT_GATE, QT_FORCE, QT_SIGNAL, QT_COMMIT, QT_PART, QT_LAND, QT_PRESENT, QT_CPU_WAIT, QT_SUBMIT_ERR, QT_SLOT };
+void vka_tex_slot_counts(uint64_t *writes, uint64_t *changes);   // vka_tex.c: pool table slot writes, and of them changes of a slot's view
+void vka_qtrace(int kind, uint64_t q, uint64_t fence, uint64_t x, uint32_t a, uint32_t b, uint32_t c, uint32_t d, const volatile void *w);
+int vka_qtrace_on(void);
+void vka_qtrace_dump(void);
 void vka_after(uint64_t fence, void (*fn)(void *), void *arg);   // deferred destruction: fn(arg) once fence is done
 
 // Host-visible scratch memory for one submission (uploads, deswizzled texels, readbacks); valid until the submission's fence
@@ -286,6 +292,9 @@ typedef struct vka_img {
     uint32_t nsamp, novl; uint64_t ovl[4];
     // A soft texture's image (vka_soft.h, profile tex_soft): base 1, its finest level left out; soft_saved: the storage bytes that level takes (the stats' soft line)
     uint8_t soft; uint64_t soft_saved;
+    // The texture cache's own bookkeeping (vka_tex.c "Live images"): its place in the live list + 1 (0: not in it), the next live image in its storage address's chain,
+    // and the video pool registrations count (dm_codec_video_epoch) at which it was last checked for lying in a video pool
+    int live_ix; struct vka_img *mnext; uint64_t vep;
 } vka_img;
 // Texture level lv as a level of im (a sparse or soft texture's image starts at level im->base): 0 when the image does not hold it
 static inline int vka_img_lv(const vka_img *im, uint32_t *lv) { return vksoft_lv(im->base, im->levels, lv); }

@@ -2111,6 +2111,7 @@ static int thermal_capped(void) {
     pthread_mutex_unlock(&mu);
     return result;
 }
+__attribute__((weak)) int dm_fps_limit_step(void) { return 0; }   // hle_fpslock.c; graphics unit tests have no host
 static int fps_step_cap(void) {
     if (!dm_fps_state) return 0;
     uint32_t b = __atomic_load_n((uint32_t *)dm_fps_state, __ATOMIC_RELAXED); float t; memcpy(&t, &b, sizeof t);
@@ -2118,7 +2119,10 @@ static int fps_step_cap(void) {
     // Movies and a 30 fps target still need thermal samples: heat must reset the
     // calm interval, and cooling during those caps counts towards recovery.
     int thermal = thermal_capped();
-    return dm_movie_playing() || t <= 30 || thermal ? 30 : 60;   // a movie: its player takes a picture per game frame, paced for the Switch's 30 (hle_movie.c)
+    if (dm_movie_playing()) return 30;   // a movie: its player takes a picture per game frame, paced for the Switch's 30 (hle_movie.c)
+    // The frame limit held by the frame step (hle_fpslock.c dm_fps_limit_step: 60, 30 or 20; the state page says 30 for 20, the rate the stubs know)
+    int c = t <= 30 || thermal ? 30 : 60, l = dm_fps_limit_step();
+    return l && l < c ? l : c;
 }
 static int fstep_on(void) { return fps_step_cap() != 0; }   // the host decides the steps in whole vsyncs
 // Engine-native frame limiters have no frame-step state page. Their requested
@@ -2128,7 +2132,7 @@ static int fstep_on(void) { return fps_step_cap() != 0; }   // the host decides 
 // presented at a cap it does not step by runs fast or slow.
 // The cap can change while the game runs (hle_fpslock.c dm_fps_target_set: the Android launcher's in-game panel, DM_CTL "fps <n>"): it is read again when its generation moves.
 // Presentation holds whole vsyncs only (60, 30, 20, 15); 40 and 45 are left to an engine limiter that paces itself, and the game's interval stays.
-// An engine floor (sead's dynamic interval controller, hle_fpslock.c MIN_VSYNCS_I32) is not a fixed rate: dm_fps_lock_engine leaves it out and the game's own interval, at or above the floor, stays
+// An engine floor (sead's dynamic interval controller, hle_fpslock.c MIN_VSYNCS_I32) is not a fixed rate: dm_fps_lock_engine leaves it out and the game's own interval, at or above the floor, stays; so does a framework step count (STEPS_I32, a profile's fps_steps), whose interval the game sets to its steps a frame
 __attribute__((weak)) int dm_fps_target(void) { const char *e = getenv("DM_FPS_TARGET"); return e ? atoi(e) : DM_GAME_FPS_TARGET; }   // hle_fpslock.c; graphics unit tests have no host
 __attribute__((weak)) int dm_fps_target_gen(void) { return 0; }
 __attribute__((weak)) int dm_fps_lock_floor(void) { return 0; }
@@ -2140,7 +2144,7 @@ static int fps_present_cap(void) {
         int t = dm_fps_target(), first = g_present_cap < 0; g_present_gen = gen;
         g_present_cap = t > 0 && t <= 60 && 60 % t == 0 ? t : 0;
         if (g_present_cap && !dm_fps_lock_engine()) {
-            if (dm_fps_lock_floor()) LOG("[nvn] present cap %d fps: the game's frame-rate controller holds it (a floor the host writes), so presentation follows the interval the game sets", g_present_cap);
+            if (dm_fps_lock_floor()) LOG("[nvn] present cap %d fps: the game's frame-rate controller holds it (a floor or a step count the host writes, hle_fpslock.c), so presentation follows the interval the game sets", g_present_cap);
             else LOG("[nvn] present cap %d fps not applied: this main has neither a frame step nor an engine frame limit the host writes that fixes the rate, so the game's own present interval stays", g_present_cap);
             g_present_cap = 0;
         } else if (!first) LOG("[nvn] present cap now %d%s", g_present_cap, g_present_cap ? " fps" : " (the game's own interval)");
