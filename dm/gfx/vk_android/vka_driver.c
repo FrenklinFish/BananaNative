@@ -12,9 +12,11 @@
 #include "vka.h"
 #include <ctype.h>
 #include <dlfcn.h>
+#include <fcntl.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <unistd.h>
 
 #define ADRENOTOOLS_DRIVER_CUSTOM 1   // dm/third_party/libadrenotools/include/adrenotools/priv.h
 typedef void *(*open_libvulkan_fn)(int dlopen_mode, int feature_flags, const char *tmp_lib_dir, const char *hook_lib_dir, const char *custom_driver_dir,
@@ -53,6 +55,33 @@ void *vka_driver_open(void) {
     pthread_mutex_unlock(&mu);
     return lib;
 }
+// Adreno 740: the texture unit's UBWC flag hint (TPL1_DBG_ECO_CNTL1.TP_UBWC_FLAG_HINT) is one register for every driver on the GPU, and it has to match the system
+// driver's: Qualcomm's v6xx drivers leave it off, v7xx ones set it. Mesa's default for the 740 is off (most 740 phones shipped v6xx), so Turnip next to a v7xx
+// system driver flips it under SurfaceFlinger, and what the system then composites from compressed buffers comes out garbled: the picture flickers while Android
+// composites on the GPU (a screenshot, an overlay). So Turnip on a 740 gets FD_DEV_FEATURES=enable_tp_ubwc_flag_hint=<1 or 0> from the system driver's version
+// (the "V@0863" of libGLESv2_adreno.so: 863, at least 700), as DroidDeck does (its #963). The environment's own FD_DEV_FEATURES wins; DM_VK_TU_UBWC_HINT=0 leaves it alone
+static int adreno_system_version(void) {   // the system driver's version (863 for 512.863), 0 when not found
+    int fd = open("/vendor/lib64/libGLESv2_adreno.so", O_RDONLY | O_CLOEXEC); if (fd < 0) return 0;
+    static char buf[1 << 20]; size_t keep = 0; int v = 0; ssize_t n;
+    while (!v && (n = read(fd, buf + keep, sizeof buf - keep)) > 0) {
+        size_t len = keep + (size_t)n;
+        for (size_t i = 0; i + 7 <= len && !v; i++)
+            if (buf[i] == 'V' && buf[i + 1] == '@' && isdigit((unsigned char)buf[i + 2]) && isdigit((unsigned char)buf[i + 5])) v = atoi(buf + i + 2);
+        keep = len < 8 ? len : 8; memmove(buf, buf + len - keep, keep);
+    }
+    close(fd); return v;
+}
+static void ubwc_hint(void) {
+    if (getenv("FD_DEV_FEATURES") || !VKA_ENV("DM_VK_TU_UBWC_HINT", 1)) return;
+    char m[64] = ""; int fd = open("/sys/class/kgsl/kgsl-3d0/gpu_model", O_RDONLY | O_CLOEXEC);
+    if (fd >= 0) { ssize_t n = read(fd, m, sizeof m - 1); close(fd); if (n > 0) m[n] = 0; }
+    if (strncmp(m, "Adreno740", 9)) return;
+    int v = adreno_system_version();
+    if (!v) { VLOG("Turnip on an Adreno 740: the system driver's version was not found, FD_DEV_FEATURES left alone"); return; }
+    setenv("FD_DEV_FEATURES", v >= 700 ? "enable_tp_ubwc_flag_hint=1" : "enable_tp_ubwc_flag_hint=0", 0);
+    VLOG("Turnip on an Adreno 740, system driver V@%04d: FD_DEV_FEATURES=%s (DM_VK_TU_UBWC_HINT)", v, getenv("FD_DEV_FEATURES"));
+}
+
 static void *driver_open(void) {
     const char *drv = getenv("DM_VK_DRIVER");
     if (!drv || !*drv || !strcmp(drv, "system")) return NULL;
@@ -76,6 +105,7 @@ static void *driver_open(void) {
         if (!dladdr((void *)vka_driver_open, &di) || !di.dli_fname || !(sl = strrchr(di.dli_fname, '/'))) { VRED("DM_VK_DRIVER: cannot tell where libnxhost.so is: the system driver is used"); return NULL; }
         snprintf(hook, sizeof hook, "%.*s/", (int)(sl - di.dli_fname), di.dli_fname);
     }
+    if (!strncmp(name, "vulkan.ad0", 10)) ubwc_hint();   // Turnip (Mesa's Adreno driver): before the driver reads FD_DEV_FEATURES at its first device
     void *at = dlopen("libnxadreno.so", RTLD_NOW | RTLD_LOCAL);
     open_libvulkan_fn open_vk = at ? (open_libvulkan_fn)dlsym(at, "adrenotools_open_libvulkan") : NULL;
     if (!open_vk) { VRED("DM_VK_DRIVER: libnxadreno.so not loaded (%s): the system driver is used", dlerror()); return NULL; }
