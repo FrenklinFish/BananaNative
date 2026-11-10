@@ -686,6 +686,13 @@ The replay on Metal (`dm/gfx/nvn/nvn_mtl.m`) and the Vulkan and OpenGL layers. E
 - **Open:** per-vertex streams of indexed draws, indirect draws and the batched geometry captures are not bounded (their last element is not known on the CPU without scanning the indices or reading the arguments).
 - **Found on:** [Super Mario Odyssey](../../dm/games/0100000000010000/README.md) (GitHub issue #558): the composite of agl's half-resolution translucent pass (`alProgramShader`, vertex `40cc99352976d0ff`, pixel `934386ce027e72be`), every frame the half-resolution effects draw.
 
+### Shorter vertex attribute layouts
+
+- **Symptom:** intermittent stretched slabs, cones and beams during camera turns. The affected mesh's position and index data stay stable.
+- **Cause:** the Vulkan replay kept the largest active attribute count it had seen. When `BindVertexAttribState` supplied a shorter layout, the vertex shader could still fetch an omitted input using the preceding mesh's format and offset. In Fire Emblem, that read position bytes from another vertex as wind weights.
+- **Fix:** replace the active count on a full layout bind in `vka_state_op`. `vin_build` then sends absent inputs to the zero buffer. The Metal replay already replaces the active count.
+- **Found on:** [Fire Emblem Fortune's Weave](../../dm/games/04007EF01F8AE000/README.md#stretched-geometry-in-dagsion).
+
 ### Programs bound per stage
 
 - **Symptom:** scenes and characters black, only foliage, light shafts and the HUD drawn; pass dumps full of `Z … draw skipped: no program bound`.

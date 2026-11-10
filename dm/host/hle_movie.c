@@ -257,6 +257,10 @@ __attribute__((weak)) int vka_swap_rb(void);
 #define MD_SWAP_RB() 0
 #endif
 
+static inline uint8x8_t rgba_channel(int32x4_t low, int32x4_t high) {
+    return vqmovn_u16(vcombine_u16(vqrshrun_n_s32(low, 16), vqrshrun_n_s32(high, 16)));
+}
+
 // I420 → RGBA (native texture mode): by the colour space and range the picture declares (VP9 colour config; when undeclared BT.709 from 720 lines up, else BT.601), 16-bit fixed point; a smaller picture is padded with black, a larger one cropped
 void md_rgba(const vpx_image_t *im, uint8_t *dst, int w, int h) {
     int full = im->range == VPX_CR_FULL_RANGE, b709 = im->cs == VPX_CS_BT_709 || (im->cs == VPX_CS_UNKNOWN && h >= 720);
@@ -271,44 +275,29 @@ void md_rgba(const vpx_image_t *im, uint8_t *dst, int w, int h) {
         const uint8_t *py = im->planes[0] + (size_t)y * im->stride[0], *pu = im->planes[1] + (size_t)(y >> 1) * im->stride[1], *pv = im->planes[2] + (size_t)(y >> 1) * im->stride[2];
         uint32_t *o32 = (uint32_t *)(dst + (size_t)y * w * 4);
         int x = 0;
-        if (swap_rb) {
-            for (; x + 4 <= cw; x += 4) {
-                int u0 = pu[x >> 1] - 128, v0 = pv[x >> 1] - 128;
-                int cr0 = RV * v0 + 32768, cg0 = - GU * u0 - GV * v0 + 32768, cb0 = BU * u0 + 32768;
-                int l0 = (py[x] - y0) * Y, l1 = (py[x + 1] - y0) * Y;
-                o32[x] = (uint32_t)CL((l0 + cb0) >> 16) | ((uint32_t)CL((l0 + cg0) >> 16) << 8) | ((uint32_t)CL((l0 + cr0) >> 16) << 16) | 0xff000000u;
-                o32[x + 1] = (uint32_t)CL((l1 + cb0) >> 16) | ((uint32_t)CL((l1 + cg0) >> 16) << 8) | ((uint32_t)CL((l1 + cr0) >> 16) << 16) | 0xff000000u;
-
-                int u1 = pu[(x >> 1) + 1] - 128, v1 = pv[(x >> 1) + 1] - 128;
-                int cr1 = RV * v1 + 32768, cg1 = - GU * u1 - GV * v1 + 32768, cb1 = BU * u1 + 32768;
-                int l2 = (py[x + 2] - y0) * Y, l3 = (py[x + 3] - y0) * Y;
-                o32[x + 2] = (uint32_t)CL((l2 + cb1) >> 16) | ((uint32_t)CL((l2 + cg1) >> 16) << 8) | ((uint32_t)CL((l2 + cr1) >> 16) << 16) | 0xff000000u;
-                o32[x + 3] = (uint32_t)CL((l3 + cb1) >> 16) | ((uint32_t)CL((l3 + cg1) >> 16) << 8) | ((uint32_t)CL((l3 + cr1) >> 16) << 16) | 0xff000000u;
+        for (; x + 16 <= cw; x += 16) {
+            uint8x8_t u = vld1_u8(pu + (x >> 1)), v = vld1_u8(pv + (x >> 1));
+            uint8x8x2_t uu = vzip_u8(u, u), vv = vzip_u8(v, v);
+            for (int half = 0; half < 2; half++) {
+                int16x8_t l = vreinterpretq_s16_u16(vsubl_u8(vld1_u8(py + x + 8 * half), vdup_n_u8((uint8_t)y0)));
+                int16x8_t cu = vreinterpretq_s16_u16(vsubl_u8(uu.val[half], vdup_n_u8(128)));
+                int16x8_t cv = vreinterpretq_s16_u16(vsubl_u8(vv.val[half], vdup_n_u8(128)));
+                int32x4_t ll = vmulq_n_s32(vmovl_s16(vget_low_s16(l)), Y);
+                int32x4_t lh = vmulq_n_s32(vmovl_s16(vget_high_s16(l)), Y);
+                int32x4_t ul = vmovl_s16(vget_low_s16(cu)), uh = vmovl_s16(vget_high_s16(cu));
+                int32x4_t vl = vmovl_s16(vget_low_s16(cv)), vh = vmovl_s16(vget_high_s16(cv));
+                uint8x8_t r = rgba_channel(vmlaq_n_s32(ll, vl, RV), vmlaq_n_s32(lh, vh, RV));
+                uint8x8_t g = rgba_channel(vmlaq_n_s32(vmlaq_n_s32(ll, ul, -GU), vl, -GV),
+                                            vmlaq_n_s32(vmlaq_n_s32(lh, uh, -GU), vh, -GV));
+                uint8x8_t b = rgba_channel(vmlaq_n_s32(ll, ul, BU), vmlaq_n_s32(lh, uh, BU));
+                uint8x8x4_t rgba = {{swap_rb ? b : r, g, swap_rb ? r : b, vdup_n_u8(255)}};
+                vst4_u8((uint8_t *)(o32 + x + 8 * half), rgba);
             }
-            for (; x < cw; x++) {
-                int l = (py[x] - y0) * Y, u = pu[x >> 1] - 128, v = pv[x >> 1] - 128;
-                int r = (l + RV * v + 32768) >> 16, g = (l - GU * u - GV * v + 32768) >> 16, b = (l + BU * u + 32768) >> 16;
-                o32[x] = (uint32_t)CL(b) | ((uint32_t)CL(g) << 8) | ((uint32_t)CL(r) << 16) | 0xff000000u;
-            }
-        } else {
-            for (; x + 4 <= cw; x += 4) {
-                int u0 = pu[x >> 1] - 128, v0 = pv[x >> 1] - 128;
-                int cr0 = RV * v0 + 32768, cg0 = - GU * u0 - GV * v0 + 32768, cb0 = BU * u0 + 32768;
-                int l0 = (py[x] - y0) * Y, l1 = (py[x + 1] - y0) * Y;
-                o32[x] = (uint32_t)CL((l0 + cr0) >> 16) | ((uint32_t)CL((l0 + cg0) >> 16) << 8) | ((uint32_t)CL((l0 + cb0) >> 16) << 16) | 0xff000000u;
-                o32[x + 1] = (uint32_t)CL((l1 + cr0) >> 16) | ((uint32_t)CL((l1 + cg0) >> 16) << 8) | ((uint32_t)CL((l1 + cb0) >> 16) << 16) | 0xff000000u;
-
-                int u1 = pu[(x >> 1) + 1] - 128, v1 = pv[(x >> 1) + 1] - 128;
-                int cr1 = RV * v1 + 32768, cg1 = - GU * u1 - GV * v1 + 32768, cb1 = BU * u1 + 32768;
-                int l2 = (py[x + 2] - y0) * Y, l3 = (py[x + 3] - y0) * Y;
-                o32[x + 2] = (uint32_t)CL((l2 + cr1) >> 16) | ((uint32_t)CL((l2 + cg1) >> 16) << 8) | ((uint32_t)CL((l2 + cb1) >> 16) << 16) | 0xff000000u;
-                o32[x + 3] = (uint32_t)CL((l3 + cr1) >> 16) | ((uint32_t)CL((l3 + cg1) >> 16) << 8) | ((uint32_t)CL((l3 + cb1) >> 16) << 16) | 0xff000000u;
-            }
-            for (; x < cw; x++) {
-                int l = (py[x] - y0) * Y, u = pu[x >> 1] - 128, v = pv[x >> 1] - 128;
-                int r = (l + RV * v + 32768) >> 16, g = (l - GU * u - GV * v + 32768) >> 16, b = (l + BU * u + 32768) >> 16;
-                o32[x] = (uint32_t)CL(r) | ((uint32_t)CL(g) << 8) | ((uint32_t)CL(b) << 16) | 0xff000000u;
-            }
+        }
+        for (; x < cw; x++) {
+            int l = (py[x] - y0) * Y, u = pu[x >> 1] - 128, v = pv[x >> 1] - 128;
+            int r = (l + RV * v + 32768) >> 16, g = (l - GU * u - GV * v + 32768) >> 16, b = (l + BU * u + 32768) >> 16;
+            o32[x] = (uint32_t)CL(swap_rb ? b : r) | ((uint32_t)CL(g) << 8) | ((uint32_t)CL(swap_rb ? r : b) << 16) | 0xff000000u;
         }
     }
     #undef CL

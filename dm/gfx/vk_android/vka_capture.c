@@ -585,6 +585,8 @@ void nvn_cap_submit(int n, const uint64_t *h) {
     g_cap_ns += now_ns() - t0;
 }
 
+// DM_CTL "nvncap" (vka_ctl.c): with DM_NVN_CAPTURE=@<far>:1:<path> armed, the next frame is captured now (a moment a script picks)
+void nvn_cap_now(void) { if (g_cap_frame == 0 && !g_cap_done && g_cap_at_s > 0) { g_cap_at_s = 1e-3; CLOG("DM_CTL nvncap: the next frame is captured"); } else CRED("nvncap: no armed @seconds capture"); }
 // Hook: nvnQueuePresentTexture, before the present is queued
 void nvn_cap_present(const tex_t *t, const int crop[4]) {
     if (!nvn_cap_enabled()) return;

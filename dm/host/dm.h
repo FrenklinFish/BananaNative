@@ -85,6 +85,7 @@ static inline const char *dm_main_build(void) { for (int i = 0; i < g_nmod; i++)
 
 void load_modules(const char *dir, const char **names, int n);
 const char *dm_module_dir(void);   // the folder load_modules read the modules and the rewriter's tables from (the cheat engine reads main.changed.tsv there)
+const char *dm_main_dir(void);   // the folder main and its tables were loaded from: dm_module_dir, or its variant folder <dir>/<DM_PATCH_VARIANT> (loader.c)
 void run_module_inits(void);
 module_t *nro_find(const uint8_t sha256[32]);   // the mapped NRO with this hash (loader.c)
 int nro_refused(const uint8_t sha256[32]);      // an NRO the pack refused (an online SDK, nro.tsv "refused")

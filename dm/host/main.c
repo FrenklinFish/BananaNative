@@ -70,8 +70,23 @@ static void fastboot_apply(void) {
     }
     free(s);
 }
+// The profile's host_env (KEY=VALUE, separated by spaces): host switch defaults this game needs (Fire Emblem Fortune's Weave: its DLSS replacement), set at
+// start unless the environment (env.txt, the launcher's settings) already has them
+static void host_env_apply(void) {
+#ifdef DM_GAME_HOST_ENV
+    if (!*DM_GAME_HOST_ENV) return;
+    char *s = strdup(DM_GAME_HOST_ENV), *save = NULL; if (!s) return;
+    for (char *kv = strtok_r(s, " ", &save); kv; kv = strtok_r(NULL, " ", &save)) {
+        char *eq = strchr(kv, '='); if (!eq) continue; *eq = 0;
+        int had = getenv(kv) != NULL; if (!had) setenv(kv, eq + 1, 0);
+        LOG("game profile host_env: %s=%s%s", kv, had ? getenv(kv) : eq + 1, had ? " (set by the environment, kept)" : "");
+    }
+    free(s);
+#endif
+}
 static void host_preload(int argc, char **argv) {
     g_t0_ns = proc_start_mono_ns();
+    host_env_apply();
     fastboot_apply();
     flags_init();
     if (argc < 2) die("usage: dmhost <dir> [mod...] [-- game arguments...]");

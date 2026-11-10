@@ -1382,14 +1382,54 @@ NVN(nvnCommandBufferClearDepthStencil, void, NVNcommandBuffer *c, float depth, u
     p_clear_ds *r = REC(c, OP_CLEAR_DS, p_clear_ds); *r = (p_clear_ds){depth, (int)B(dmask), stencil, smask};
 }
 NVN(nvnCommandBufferSetViewports, void, NVNcommandBuffer *c, int first, int n, const float *v) {
+    { static int log = -1; if (log < 0) log = getenv("DM_NVN_SCISSORLOG") != NULL;   // (with the scissors) each distinct first viewport once, with the guest backtrace
+      if (log && n > 0) { static pthread_mutex_t mu = PTHREAD_MUTEX_INITIALIZER; static uint64_t seen[256]; static int ns;
+        uint64_t k = (uint64_t)((int)v[0] & 0xffff) | (uint64_t)((int)v[1] & 0xffff) << 16 | (uint64_t)((int)v[2] & 0xffff) << 32 | (uint64_t)((int)v[3] & 0xffff) << 48; int i = 0;
+        pthread_mutex_lock(&mu); while (i < ns && seen[i] != k) i++; int fresh = i == ns && ns < 256; if (fresh) seen[ns++] = k; pthread_mutex_unlock(&mu);
+        if (fresh) { LOG("[nvn] SetViewports first %d: %.1f,%.1f %.1fx%.1f", first, v[0], v[1], v[2], v[3]); dm_backtrace((uint64_t)__builtin_frame_address(0)); } } }
     if (n < 0 || first + n > 16) { LOG("[RED] SetViewports first=%d n=%d", first, n); return; }
     p_viewports *r = REC(c, OP_VIEWPORTS, p_viewports); r->first = first; r->n = n;
     for (int i = 0; i < n; i++) memcpy(r->v[i], v + 4 * i, 16);
 }
-NVN(nvnCommandBufferSetScissor, void, NVNcommandBuffer *c, int x, int y, int w, int h) { *REC(c, OP_SCISSOR, p_scissor) = (p_scissor){x, y, w, h}; }
+// DM_NVN_SCISSORLOG=1 (diagnostic): each distinct scissor rectangle of at least 16x16 once (up to 256), with the guest backtrace that set it
+NVN(nvnCommandBufferSetScissor, void, NVNcommandBuffer *c, int x, int y, int w, int h) {
+    static int log = -1; if (log < 0) log = getenv("DM_NVN_SCISSORLOG") != NULL;
+    if (log && w >= 16 && h >= 16) { static pthread_mutex_t mu = PTHREAD_MUTEX_INITIALIZER; static uint64_t seen[256]; static int ns;
+        uint64_t k = (uint64_t)(x & 0xffff) | (uint64_t)(y & 0xffff) << 16 | (uint64_t)(w & 0xffff) << 32 | (uint64_t)(h & 0xffff) << 48; int i = 0;
+        pthread_mutex_lock(&mu); while (i < ns && seen[i] != k) i++; int fresh = i == ns && ns < 256; if (fresh) seen[ns++] = k; pthread_mutex_unlock(&mu);
+        if (fresh) { LOG("[nvn] SetScissor %d,%d %dx%d", x, y, w, h); dm_backtrace((uint64_t)__builtin_frame_address(0)); } }
+    *REC(c, OP_SCISSOR, p_scissor) = (p_scissor){x, y, w, h};
+}
 NVN(nvnCommandBufferSetDepthRange, void, NVNcommandBuffer *c, float n, float f) { *REC(c, OP_DEPTH_RANGE, p_depth_range) = (p_depth_range){n, f}; }
+// A bound program's stage keys by serial, kept after the program is finalized: the replay resolves a bind recorded frames earlier with them, never through the game's
+// (maybe freed) NVNprogram. Entries are 64 bytes and stay (one per program serial that was ever bound)
+typedef struct { uint64_t serial; uint8_t key[6][8]; uint8_t ok, nstage; } sk_ent;
+static pthread_mutex_t g_sk_mu = PTHREAD_MUTEX_INITIALIZER; static sk_ent *g_sk; static size_t g_skcap, g_skn;
+static sk_ent *sk_slot(sk_ent *t, size_t cap, uint64_t s) { size_t j = (size_t)((s * 0x9E3779B97F4A7C15ull) >> 24) & (cap - 1); while (t[j].serial && t[j].serial != s) j = (j + 1) & (cap - 1); return &t[j]; }
+static void sk_put(uint64_t s, const prog_keys_t *k, unsigned nstage) {
+    pthread_mutex_lock(&g_sk_mu);
+    if ((g_skn + 1) * 2 > g_skcap) {
+        size_t nc = g_skcap ? g_skcap * 2 : 1024; sk_ent *nt = calloc(nc, sizeof *nt);
+        if (!nt) { pthread_mutex_unlock(&g_sk_mu); return; }
+        for (size_t i = 0; i < g_skcap; i++) if (g_sk[i].serial) *sk_slot(nt, nc, g_sk[i].serial) = g_sk[i];
+        free(g_sk); g_sk = nt; g_skcap = nc;
+    }
+    sk_ent *e = sk_slot(g_sk, g_skcap, s); if (!e->serial) g_skn++;
+    e->serial = s; memcpy(e->key, k->key, sizeof e->key); e->ok = k->ok; e->nstage = (uint8_t)nstage;
+    pthread_mutex_unlock(&g_sk_mu);
+}
+int nvn_serial_keys(uint64_t s, uint8_t key[6][8], uint8_t *ok, uint8_t *nstage) {
+    int r = 0; pthread_mutex_lock(&g_sk_mu);
+    if (s && g_skcap) { sk_ent *e = sk_slot(g_sk, g_skcap, s); if (e->serial == s) { memcpy(key, e->key, sizeof e->key); *ok = e->ok; *nstage = e->nstage; r = 1; } }
+    pthread_mutex_unlock(&g_sk_mu); return r;
+}
 NVN(nvnCommandBufferBindProgram, void, NVNcommandBuffer *c, const NVNprogram *p, int stages) {
-    *REC(c, OP_BIND_PROGRAM, p_bind_program) = (p_bind_program){(const prog_t *)p, stages};
+    const prog_t *o = (const prog_t *)p; uint64_t s = o ? o->serial : 0;
+    if (s) {   // once per serial per thread (a small direct-mapped memo): the keys as the replay's prog_key would compute them, while the program is alive
+        static __thread uint64_t seen[256]; uint64_t *m = &seen[s & 255];
+        if (*m != s) { prog_keys_t k = {0}; unsigned n = o->nstage < 6 ? o->nstage : 6; for (unsigned i = 0; i < n; i++) if (prog_key(o, i, k.key[i])) k.ok |= (uint8_t)(1u << i); sk_put(s, &k, n); *m = s; }
+    }
+    *REC(c, OP_BIND_PROGRAM, p_bind_program) = (p_bind_program){o, stages, (uint32_t)s};
 }
 static void bind_state(NVNcommandBuffer *c, int kind, const void *st, size_t n) { p_bind_state *r = rec(c, OP_BIND_STATE, offsetof(p_bind_state, bytes) + n); r->kind = kind; memcpy(r->bytes, st, n); }   // only the state's own bytes (nvn_obj.h p_bind_state)
 NVN(nvnCommandBufferBindBlendState, void, NVNcommandBuffer *c, const NVNblendState *st) { bind_state(c, 0, st, sizeof(blend_st)); }
@@ -1509,11 +1549,113 @@ NVN(nvnCommandBufferClearTexture, void, NVNcommandBuffer *c, const NVNtexture *t
 NVN(nvnCommandBufferClearTextureui, void, NVNcommandBuffer *c, const NVNtexture *t, const NVNtextureView *v, const NVNcopyRegion *r, const uint32_t *rgba, int mask) {
     p_clear_tex *o = REC_SNAP(c, OP_CLEAR_TEX, p_clear_tex, 1); o->tex = tex_snap(o, SNAP_OFF(p_clear_tex), 0, t, (uint64_t)__builtin_return_address(0)); copy_view(&o->view, &o->has_view, v); o->r = *r; o->mask = mask; o->is_uint = 1; memcpy(o->c.u, rgba, 16);
 }
-NVN(nvnCommandBufferCopyTextureToTexture, void, NVNcommandBuffer *c, const NVNtexture *s, const NVNtextureView *sv, const NVNcopyRegion *sr,
-    const NVNtexture *d, const NVNtextureView *dv, const NVNcopyRegion *dr, int flags) {
-    p_copy_t2t *o = REC_SNAP(c, OP_COPY_T2T, p_copy_t2t, 2); o->src = tex_snap(o, SNAP_OFF(p_copy_t2t), 0, s, (uint64_t)__builtin_return_address(0)); o->dst = tex_snap(o, SNAP_OFF(p_copy_t2t), 1, d, (uint64_t)__builtin_return_address(0));
+static void rec_copy_t2t(NVNcommandBuffer *c, const NVNtexture *s, const NVNtextureView *sv, const NVNcopyRegion *sr,
+    const NVNtexture *d, const NVNtextureView *dv, const NVNcopyRegion *dr, int flags, uint64_t ra) {
+    p_copy_t2t *o = REC_SNAP(c, OP_COPY_T2T, p_copy_t2t, 2); o->src = tex_snap(o, SNAP_OFF(p_copy_t2t), 0, s, ra); o->dst = tex_snap(o, SNAP_OFF(p_copy_t2t), 1, d, ra);
     copy_view(&o->sv, &o->has_sv, sv); copy_view(&o->dv, &o->has_dv, dv); o->sr = *sr; o->dr = *dr; o->flags = flags;
 }
+NVN(nvnCommandBufferCopyTextureToTexture, void, NVNcommandBuffer *c, const NVNtexture *s, const NVNtextureView *sv, const NVNcopyRegion *sr,
+    const NVNtexture *d, const NVNtextureView *dv, const NVNcopyRegion *dr, int flags) {
+    rec_copy_t2t(c, s, sv, sr, d, dv, dr, flags, (uint64_t)__builtin_return_address(0));
+}
+#ifdef __ANDROID__
+// NVN2's DLSS builder ABI follows nxnative's MetalFX host. The diagnostic
+// writes the scene colour into the game's output using the normal replay copy.
+typedef struct { int w, h, method; } dlss_blit_net_t;
+// The game's parameter object holds no more than the driver's own (nxnative's dlss_params_t is 128 bytes): this one is 128
+typedef struct {
+    const NVNtexture *src, *dst;
+    const NVNtextureView *src_view, *dst_view;
+    NVNcopyRegion src_rect, dst_rect;
+    const NVNtexture *depth, *motion;
+    float jitter[2], mv[2];
+    uint32_t reset;
+} dlss_blit_params_t;
+_Static_assert(sizeof(dlss_blit_params_t) <= 128, "the game's DLSS parameter object");
+
+NVN_NOPROTO(nvnDlssNetworkBuilderSetDefaults, void, dlss_blit_net_t *b) { *b = (dlss_blit_net_t){0}; }
+NVN_NOPROTO(nvnDlssNetworkBuilderSetDevice, void, dlss_blit_net_t *b, NVNdevice *d) { (void)b; (void)d; }
+NVN_NOPROTO(nvnDlssNetworkBuilderSetOutputResolution, void, dlss_blit_net_t *b, int w, int h) { b->w = w; b->h = h; }
+NVN_NOPROTO(nvnDlssNetworkBuilderSetMethod, void, dlss_blit_net_t *b, int m) { b->method = m; }
+NVN_NOPROTO(nvnDlssNetworkBuilderSetPreset, void, dlss_blit_net_t *b, int p) { (void)b; (void)p; }
+NVN_NOPROTO(nvnDlssNetworkBuilderSetFlags, void, dlss_blit_net_t *b, uint32_t f) { (void)b; (void)f; }
+NVN_NOPROTO(nvnDlssNetworkBuilderSetMaxEvaluationEntries, void, dlss_blit_net_t *b, int n) { (void)b; (void)n; }
+NVN_NOPROTO(nvnDlssNetworkBuilderSetTextureIDs, void, dlss_blit_net_t *b, const void *pool, const int *ids, int n) { (void)b; (void)pool; (void)ids; (void)n; }
+NVN_NOPROTO(nvnDlssNetworkBuilderSetStorage, void, dlss_blit_net_t *b, void *mem, size_t n) { (void)b; (void)mem; (void)n; }
+NVN_NOPROTO(nvnDlssNetworkBuilderGetStorageSize, size_t, const dlss_blit_net_t *b) { (void)b; return 0x1000; }
+NVN_NOPROTO(nvnDlssNetworkBuilderGetOptimalSettings, NVNboolean, const dlss_blit_net_t *b, int *ow, int *oh, int *maxw, int *maxh, int *minw, int *minh, float *sharp) {
+    if (b->w <= 0 || b->h <= 0) return 0;
+    int factor = b->method == 1 ? 3 : b->method == 2 ? 1 : 2;
+    int w = (b->w - 1) / factor + 1, h = (b->h - 1) / factor + 1;
+    // DM_VK_DLSS_INPUT_X / _Y: the scene's size as a percentage of the output, per axis, in place of the method's factor. With the native 4:3 pack the
+    // 16:9 frame is stretched 4:3 on the panel, so its width carries a third more texels per panel pixel than its height: 37.5 x 50 matches them
+    const char *px = getenv("DM_VK_DLSS_INPUT_X"), *py = getenv("DM_VK_DLSS_INPUT_Y");
+    if (px && atof(px) > 0) w = (int)(b->w * atof(px) / 100.0 + 0.5) & ~1;
+    if (py && atof(py) > 0) h = (int)(b->h * atof(py) / 100.0 + 0.5) & ~1;
+    if (ow) *ow = w;
+    if (oh) *oh = h;
+    if (maxw) *maxw = w;
+    if (maxh) *maxh = h;
+    if (minw) *minw = w;
+    if (minh) *minh = h;
+    if (sharp) *sharp = 0;
+    return 1;
+}
+NVN_NOPROTO(nvnDlssNetworkInitialize, NVNboolean, dlss_blit_net_t *n, const dlss_blit_net_t *b) {
+    const char *enabled = getenv("DM_VK_DLSS_BLIT");
+    if (!enabled || strcmp(enabled, "1") || b->w <= 0 || b->h <= 0) { *n = (dlss_blit_net_t){0}; return 0; }
+    *n = *b;
+    void *ra = __builtin_return_address(0);
+    module_t *m = module_of(ra);
+    LOG("[nvn] DLSS network %dx%d: Vulkan scene upscale (from %s+%#llx)", b->w, b->h,
+        m ? m->name : "?", m ? (unsigned long long)((uintptr_t)ra - (uintptr_t)m->base) : 0ULL);
+    return 1;
+}
+NVN_NOPROTO(nvnDlssNetworkFinalize, void, dlss_blit_net_t *n) { *n = (dlss_blit_net_t){0}; }
+NVN_NOPROTO(nvnDlssParametersSetDefaults, void, dlss_blit_params_t *p) { *p = (dlss_blit_params_t){0}; p->mv[0] = p->mv[1] = 1; }
+NVN_NOPROTO(nvnDlssParametersSetInputColor, void, dlss_blit_params_t *p, const NVNtexture *t, const NVNtextureView *v) { p->src = t; p->src_view = v; }
+NVN_NOPROTO(nvnDlssParametersSetOutputColor, void, dlss_blit_params_t *p, const NVNtexture *t, const NVNtextureView *v) { p->dst = t; p->dst_view = v; }
+NVN_NOPROTO(nvnDlssParametersSetInputSubrectangleSize, void, dlss_blit_params_t *p, int w, int h) { p->src_rect.width = w; p->src_rect.height = h; }
+NVN_NOPROTO(nvnDlssParametersSetInputColorSubrectangleBase, void, dlss_blit_params_t *p, int x, int y) { p->src_rect.xoffset = x; p->src_rect.yoffset = y; }
+NVN_NOPROTO(nvnDlssParametersSetOutputSubrectangleBase, void, dlss_blit_params_t *p, int x, int y) { p->dst_rect.xoffset = x; p->dst_rect.yoffset = y; }
+NVN_NOPROTO(nvnDlssParametersSetDepth, void, dlss_blit_params_t *p, const NVNtexture *t, const NVNtextureView *v) { p->depth = t; (void)v; }
+NVN_NOPROTO(nvnDlssParametersSetMotionVectors, void, dlss_blit_params_t *p, const NVNtexture *t, const NVNtextureView *v) { p->motion = t; (void)v; }
+NVN_NOPROTO(nvnDlssParametersSetDepthSubrectangleBase, void, dlss_blit_params_t *p, int x, int y) { (void)p; (void)x; (void)y; }
+NVN_NOPROTO(nvnDlssParametersSetMotionVectorSubrectangleBase, void, dlss_blit_params_t *p, int x, int y) { (void)p; (void)x; (void)y; }
+NVN_NOPROTO(nvnDlssParametersSetMotionVectorScale, void, dlss_blit_params_t *p, float x, float y) { p->mv[0] = x; p->mv[1] = y; }
+NVN_NOPROTO(nvnDlssParametersSetJitterOffset, void, dlss_blit_params_t *p, float x, float y) { p->jitter[0] = x; p->jitter[1] = y; }
+NVN_NOPROTO(nvnDlssParametersSetHistoryReset, void, dlss_blit_params_t *p, uint32_t on) { p->reset = on & 0xff; }   // an NVNboolean: only its low 8 bits are the guest's
+NVN_NOPROTO(nvnDlssParametersSetEvaluationIndex, void, dlss_blit_params_t *p, int i) { (void)p; (void)i; }
+
+static int dlss_blit_rect_fits(const NVNtexture *tex, const NVNcopyRegion *r) {
+    return r->xoffset >= 0 && r->yoffset >= 0 && r->width > 0 && r->height > 0 &&
+        r->width <= h_nvnTextureGetWidth(tex) - r->xoffset &&
+        r->height <= h_nvnTextureGetHeight(tex) - r->yoffset;
+}
+
+NVN_NOPROTO(nvnCommandBufferEvaluateDlss, void, NVNcommandBuffer *c, const dlss_blit_net_t *n, const dlss_blit_params_t *p) {
+    static _Atomic int warned, logged;
+    if (n->w <= 0 || n->h <= 0) return;
+    NVNcopyRegion src = p->src_rect, dst = p->dst_rect;
+    dst.width = n->w;
+    dst.height = n->h;
+    src.depth = dst.depth = 1;
+    if (!p->src || !p->dst || p->src == p->dst || p->src_view || p->dst_view ||
+        !dlss_blit_rect_fits(p->src, &src) || !dlss_blit_rect_fits(p->dst, &dst)) {
+        if (!atomic_exchange(&warned, 1)) LOG("[RED] Vulkan DLSS diagnostic needs distinct textures and valid base-level rectangles");
+        return;
+    }
+    // The copy record the replay scales with (linear, FSR 1), followed by the temporal upscaler's inputs (vka_fsr3.c): depth, motion vectors, jitter, their scale, the reset
+    uint64_t ra = (uint64_t)__builtin_return_address(0);
+    p_dlss_t2t *o = REC_SNAP(c, OP_COPY_T2T, p_dlss_t2t, 4);
+    o->c.src = tex_snap(o, SNAP_OFF(p_dlss_t2t), 0, p->src, ra); o->c.dst = tex_snap(o, SNAP_OFF(p_dlss_t2t), 1, p->dst, ra);
+    o->c.has_sv = o->c.has_dv = 0; o->c.sr = src; o->c.dr = dst; o->c.flags = DM_COPY_DLSS | NVN_COPY_FLAGS_LINEAR_FILTER_BIT;
+    o->depth = tex_snap(o, SNAP_OFF(p_dlss_t2t), 2, p->depth, ra); o->motion = tex_snap(o, SNAP_OFF(p_dlss_t2t), 3, p->motion, ra);
+    memcpy(o->jitter, p->jitter, sizeof o->jitter); memcpy(o->mv, p->mv, sizeof o->mv); o->reset = p->reset != 0;
+    if (!atomic_exchange(&logged, 1)) LOG("[nvn] Vulkan DLSS evaluation recorded: %dx%d -> %dx%d, depth %s, motion vectors %s, jitter %.3f %.3f, motion scale %.2f %.2f",
+                                          src.width, src.height, dst.width, dst.height, p->depth ? "yes" : "no", p->motion ? "yes" : "no", p->jitter[0], p->jitter[1], p->mv[0], p->mv[1]);
+}
+#endif
 // A textured rectangle into the bound colour targets, replayed as draw_tex (nvn_mtl.m). The handle's IDs are moved to the pools this command buffer bound, as bind_handles does:
 // Streets of Rage 4 draws its movie frames into its scene target this way, from a second texture pool. Only the handle's lower 32 bits reach the GPU (bind_handles)
 NVN(nvnCommandBufferDrawTexture, void, NVNcommandBuffer *c, NVNtextureHandle h, const NVNdrawTextureRegion *d, const NVNdrawTextureRegion *s) {
@@ -1667,7 +1809,6 @@ NVN(nvnQueueSubmitCommands, void, NVNqueue *q, int n, const NVNcommandHandle *h)
 static void nvn_nop(void) {}
 static const char *const g_nops[] = {
     "nvnCommandBufferSetPatchSize",
-    "nvnCommandBufferSetDepthBounds",
     "nvnCommandBufferSetShaderScratchMemory",
     "nvnCommandBufferPushDebugGroupDynamic",
     "nvnCommandBufferPopDebugGroup",
@@ -1736,7 +1877,12 @@ NVN(nvnWindowSetPresentInterval, void, NVNwindow *w, int v) {
 }
 NVN(nvnWindowSetCrop, void, NVNwindow *w, int x, int y, int ww, int hh) {
     win_t *o = (win_t *)w; int v[4] = {x, y, ww, hh};
-    if (memcmp(o->crop, v, sizeof v)) LOG("[nvn] WindowCrop %d,%d %dx%d", x, y, ww, hh);
+    if (memcmp(o->crop, v, sizeof v)) {
+        void *ra = __builtin_return_address(0);
+        module_t *m = module_of(ra);
+        LOG("[nvn] WindowCrop %d,%d %dx%d (from %s+%#llx)", x, y, ww, hh,
+            m ? m->name : "?", m ? (unsigned long long)((uintptr_t)ra - (uintptr_t)m->base) : 0ULL);
+    }
     memcpy(o->crop, v, sizeof v);
 }
 NVN(nvnWindowGetCrop, void, const NVNwindow *w, NVNrectangle *r) {   // Bayonetta 3 reads it back every few frames; before any SetCrop it is the whole first texture, as NVN starts it
@@ -3123,6 +3269,16 @@ NVN(nvnCommandBufferSetRenderEnableConditional, void, NVNcommandBuffer *c, NVNco
     else ONCE_LOG("[RED] SetRenderEnableConditional: the host draws anyway for now");
 }
 // Fire Emblem: Three Houses turns depth clamp on for its scenes; ignored, the ground right under its close-up battle cameras was clipped away and the lighting pass painted the sky's fog colour there
+// Depth bounds (Android: the replay's depth bounds test; elsewhere ignored as before). It was a no-op everywhere: Fire Emblem Fortune's Weave bounds its deferred
+// light volumes with it, and without it the lights' shaders ran over the sky and far buildings behind each volume, which showed as flat pink / blue cones, slabs and a
+// grey sky in Dagsion whenever a lamp came into view (2026-11-09)
+NVN(nvnCommandBufferSetDepthBounds, void, NVNcommandBuffer *c, uint32_t en, float n, float f) {
+#if defined(__ANDROID__)
+    *REC(c, OP_DEPTH_BOUNDS, p_depth_bounds) = (p_depth_bounds){(en & 0xff) != 0, n, f};
+#else
+    (void)c; (void)en; (void)n; (void)f;
+#endif
+}
 NVN(nvnCommandBufferSetDepthClamp, void, NVNcommandBuffer *c, uint32_t en) { REC(c, OP_DEPTH_CLAMP, p_depth_clamp)->on = (en & 0xff) != 0; }
 // Absolum (FNA3D's NVN driver) keeps the lower-left window origin and sets viewport 0's swizzle every frame (NEGATIVE_Y: clip y negated, how a GL-heritage renderer flips its picture).
 // Ignored, its whole picture came out upside down. The replay applies it to the viewport (draw in nvn_mtl.m)

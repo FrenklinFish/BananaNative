@@ -914,6 +914,22 @@ static uint8_t *gw_content(const uint8_t *mem, uint64_t n, uint64_t *seen) {
     *seen = cap;
     return c;
 }
+// The bytes [addr, addr + n) as the GPU will read them at this point of the recording: the inline uniform updates, copies and fills recorded before it and not yet done
+// on the GPU applied over memory (gw_content). 0 = no pending write over the range (memory is right). The binding walker reads pointers, texture and sampler IDs out of
+// uniform buffers with it (vka_draw.c cpu_read): a game that writes them with nvnCommandBufferUpdateUniformBuffer earlier in the same submission had them read stale
+// (Fire Emblem Fortune's Weave's cloth: a storage buffer address in a uniform buffer, its bones read from last frame's layout, canopies stretched across the screen)
+int vka_tex_gw_read(uint64_t addr, void *out, size_t n, int *changed) {
+    pthread_mutex_lock(&g_tmu);
+    int any = 0; uint64_t done = vka_done();
+    for (int i = 0; i < g_ngw && !any; i++) { const gw_t *w = &g_gw[i]; if ((!w->fence || w->fence > done) && w->kind != GW_OPAQUE && w->lo < addr + n && w->hi > addr) any = 1; }
+    uint8_t *c = NULL; uint64_t seen;
+    if (any) c = gw_content((const uint8_t *)(uintptr_t)addr, n, &seen);
+    pthread_mutex_unlock(&g_tmu);
+    if (!c) return 0;
+    if (changed) *changed = memcmp(c, (const void *)(uintptr_t)addr, n) != 0;
+    memcpy(out, c, n); free(c);
+    return 1;
+}
 // Storage the guest has not mapped (all or part of it): its content as zeros, in a copy (NULL: all mapped). A memory pool is placed memory only once the GPU gets an address
 // in it (vka_mem.c mtl_pool_need); before, placing mapped the whole pool read-write, and Mario Kart World 1.8.0 uploads a texture of a CPU_NO_ACCESS pool whose pages its
 // SDK has not mapped (SIGSEGV in the deswizzle at 0x4074003000, phone m22)
@@ -968,7 +984,10 @@ static int img_edges_clean(vka_img *im) {
     return 1;
 }
 static void upload_tracked(vka_img *im, const tex_t *t, VkCommandBuffer cb) {   // stamp, protect, then read (nvn_mtl.m pkg_upload): a write during the copy is seen at the next check
-    im->stamp = nvn_dirty_now(); nvn_dirty_protect(t->mem, t->L.size);
+    im->stamp = nvn_dirty_now();
+    // The decoder publishes a generation after writing a complete picture. Reprotecting its storage
+    // here faults on every page of the next picture and duplicates the generation-based uploads.
+    if (!im->is_video) nvn_dirty_protect(t->mem, t->L.size);
     img_edges_take(im);
     if (vka_nan_on()) im->hash = mem_hash(t->mem, t->L.size);
     uint8_t *c = im->vpool ? NULL : gw_content(t->mem, t->L.size, &im->gw_seen);   // (a sparse pool's storage is read through its page table: upload_)
@@ -2885,8 +2904,8 @@ void vka_tex_prepare(VkCommandBuffer cb) {
                     tex_t t = {0}; t.serial = im->serial; t.d = im->d; t.L = im->L; t.mem = (uint8_t *)im->mem;
                     upload(im, &t, cb);
                     g_reup++;
-                    continue;
                 }
+                continue;
             }
             if (im->vbind && im->mem) { if (nvn_sparse_since(im->vpool, (uint64_t)(uintptr_t)im->mem, im->L.size, im->vgen, im->stamp)) sparse_bind(im, cb, 0); continue; }   // (GPU-written: binds only)
             if (im->vtrack && !im->gpu_owned && im->mem) {

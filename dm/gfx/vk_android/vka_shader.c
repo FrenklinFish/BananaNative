@@ -677,16 +677,26 @@ static int mem_read(uint64_t addr, void *out, size_t n) {
     return !plat_mem_read(addr, out, n);
 }
 
-int vka_prog_shaders(const prog_t *p, vka_progsh *out) {
+int vka_prog_shaders(const prog_t *p, vka_progsh *out) { return vka_prog_shaders_s(p, 0, out); }
+// By the serial recorded at bind: the stage keys come from hle_nvn.c's table by serial (kept after the game finalizes the program), so a program freed before the
+// replay reaches its draw is never read; live = the program's memory still holds that serial (only then are its own fields used: the key fallback, the shader dump)
+int vka_prog_shaders_s(const prog_t *p, uint64_t serial, vka_progsh *out) {
     memset(out, 0, sizeof *out);
-    if (!p || !p->serial) return 0;
-    pthread_mutex_lock(&g_mu); prent *e = pr_find(p->serial); if (e) *out = e->ps; pthread_mutex_unlock(&g_mu);
+    if (!p) return 0;
+    if (!serial) serial = p->serial;
+    if (!serial) return 0;
+    pthread_mutex_lock(&g_mu); prent *e = pr_find(serial); if (e) *out = e->ps; pthread_mutex_unlock(&g_mu);
     if (e) return 1;
     pthread_mutex_lock(&g_mu); int ok = lib_load(); pthread_mutex_unlock(&g_mu);
     if (!ok) return 0;
-    for (unsigned i = 0; i < p->nstage && i < 6; i++) {   // (a program has at most 6 shaders: hle_nvn.c nvnProgramSetShaders)
+    uint8_t skey[6][8], sok = 0, sn = 0; const int known = nvn_serial_keys(serial, skey, &sok, &sn);
+    const int live = p->serial == serial;
+    if (!known && !live) { static _Atomic int n; if (atomic_fetch_add(&n, 1) < 8) VRED("program serial %llu was freed before its draw and its keys were not kept: skipped", (unsigned long long)serial); return 0; }
+    const unsigned nst = known ? sn : p->nstage;
+    for (unsigned i = 0; i < nst && i < 6; i++) {   // (a program has at most 6 shaders: hle_nvn.c nvnProgramSetShaders)
         uint8_t md[8];
-        if (!prog_key(p, i, md)) continue;
+        if (known) { if (!(sok >> i & 1)) continue; memcpy(md, skey[i], 8); }
+        else if (!prog_key(p, i, md)) continue;
         uint64_t key = vka_shlib_key(md);
         const dmsh_vk_entry *en = vka_shlib_find(&g_lib, key);
         if (!en) {
@@ -696,7 +706,7 @@ int vka_prog_shaders(const prog_t *p, vka_progsh *out) {
                 VRED("shader %016llx (program stage %u) is not in the shader library", (unsigned long long)key, i);
             static const char *shd; static int shd_init;
             if (!shd_init) { shd = getenv("DM_NVN_SHDUMP"); shd_init = 1; if (shd && *shd) mkdir(shd, 0777); }
-            if (shd && p->sd[i].control) {
+            if (shd && live && p->sd[i].control) {
                 char path[1024]; FILE *f; uint32_t ncode = 0, nctl = 0;
                 nvn_ctl_lens(p->sd[i].control, &nctl, &ncode);
                 if (nctl == 0x48) nctl = 0xd8;
@@ -715,11 +725,11 @@ int vka_prog_shaders(const prog_t *p, vka_progsh *out) {
         }
         int st = vka_nvn_stage(en->stage);
         if (st < 0) { out->bad |= VKA_BAD_MISSING; continue; }   // (vka_shlib_open refuses a stage past DMSH_VK_STAGE_MS)
-        if (out->sh[st]) { static _Atomic int n; if (atomic_fetch_add(&n, 1) < 8) VRED("program serial %llu has two %s shaders (%016llx, %016llx): the second is used", (unsigned long long)p->serial, stage_name(en->stage), (unsigned long long)out->sh[st]->key, (unsigned long long)key); }
+        if (out->sh[st]) { static _Atomic int n; if (atomic_fetch_add(&n, 1) < 8) VRED("program serial %llu has two %s shaders (%016llx, %016llx): the second is used", (unsigned long long)serial, stage_name(en->stage), (unsigned long long)out->sh[st]->key, (unsigned long long)key); }
         out->sh[st] = vka_shader_make(&g_lib, key);
         if (!out->sh[st]) out->bad |= 1u << st;
     }
-    vka_prog_put(p->serial, out);
+    vka_prog_put(serial, out);
     return 1;
 }
 #endif

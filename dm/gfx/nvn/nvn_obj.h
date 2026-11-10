@@ -106,7 +106,7 @@ enum {
     OP_BIND_PROGRAM, OP_BIND_STATE, OP_BIND_VATTR, OP_BIND_VSTREAM, OP_BIND_VBUF,
     OP_BIND_UBO, OP_BIND_SSBO, OP_BIND_TEX, OP_BIND_SAMP,
     OP_STENCIL, OP_POLY_OFFSET, OP_DRAW, OP_DRAW_IDX, OP_DISPATCH, OP_BARRIER,
-    OP_SET_TEX_POOL, OP_SET_SAMP_POOL, OP_COPY_B2T, OP_COPY_STRIDE, OP_BLEND_COLOR, OP_COPY_T2B, OP_BIND_IMG, OP_COPY_T2T, OP_RESET_COUNTER, OP_CLEAR_TEX, OP_CLEAR_BUF, OP_DEPTH_CLAMP, OP_RENDER_COND, OP_FENCE_SYNC, OP_TF_BIND, OP_TF_STATE, OP_RAST_DISCARD, OP_VP_SWIZZLE, OP_BIND_TEX1, OP_PRIM_RESTART, OP_BIND_UBO_SMALL, OP_BIND_VBUF1, OP_DRAW_TEX, OP_ALPHA_REF, OP_PUSH_CONST,
+    OP_SET_TEX_POOL, OP_SET_SAMP_POOL, OP_COPY_B2T, OP_COPY_STRIDE, OP_BLEND_COLOR, OP_COPY_T2B, OP_BIND_IMG, OP_COPY_T2T, OP_RESET_COUNTER, OP_CLEAR_TEX, OP_CLEAR_BUF, OP_DEPTH_CLAMP, OP_RENDER_COND, OP_FENCE_SYNC, OP_TF_BIND, OP_TF_STATE, OP_RAST_DISCARD, OP_VP_SWIZZLE, OP_BIND_TEX1, OP_PRIM_RESTART, OP_BIND_UBO_SMALL, OP_BIND_VBUF1, OP_DRAW_TEX, OP_ALPHA_REF, OP_PUSH_CONST, OP_DEPTH_BOUNDS,
     OP_WAIT_EVENT, OP_WAIT_SYNC,   // GPU waits: the queue goes on past them once the event or sync is reached (vk_android/vka_qsched.h; the Metal replay passes them at once)
     OP_COUNT_
 };
@@ -122,9 +122,12 @@ typedef struct { int32_t first, n; float v[16][6]; } p_viewports;          // x,
 typedef struct { int32_t x, y, w, h; } p_scissor;
 typedef struct { float n, f; } p_depth_range;
 typedef struct { uint32_t on, index; } p_prim_restart;
+typedef struct { int32_t on; float n, f; } p_depth_bounds;   // SetDepthBounds: fragments whose stored depth is outside [n, f] are discarded (deferred light volumes)
 typedef struct { int32_t on; } p_depth_clamp;   // SetDepthClamp: depth outside [near, far] is clamped instead of clipped (Metal's depth clip mode)
 typedef struct { int32_t first, n; uint8_t sw[16][4]; } p_vp_swizzle;   // SetViewportSwizzles: per viewport the source of clip x, y, z, w (NVNviewportSwizzle) XOR the identity (0, 2, 4, 6), so 0 = unchanged
-typedef struct { const prog_t *prog; int32_t stages; } p_bind_program;
+// serial: the program's serial when it was bound (low 32 bits). The replay runs frames after the game; a program finalized and freed (or reused) by then is read through it
+// (nvn_serial_keys), not through prog: Fire Emblem Fortune's Weave frees programs while Dagsion loads, and the replay crashed hashing a freed control section (2026-11-09)
+typedef struct { const prog_t *prog; int32_t stages; uint32_t serial; } p_bind_program;
 // kind: 0 blend 1 color 2 chmask 3 ms 4 poly 5 ds. Recorded with the state object's own bytes only (hle_nvn.c bind_state): 16 bytes with the header for color, channel mask and polygon state,
 // 24 for blend, multisample and depth-stencil, instead of 40 for all. Readers take that kind's size from bytes. Games size display-list heaps by GetCommandMemoryUsed: Super Mario Odyssey's
 // "DisplayList" GPU heap (62 MB, a bump allocator, main+0x5e8280) filled while a kingdom loaded with 40-byte state binds (39% of its bytes), and every display list after that got no memory
@@ -186,7 +189,10 @@ typedef struct { const dpool_t *pool; } p_set_pool;
 typedef struct { uint64_t src; const tex_t *tex; view_t view; uint8_t has_view; NVNcopyRegion r; int32_t flags; } p_copy_b2t;
 // A host-only bit in flags: DM_COPY_RESOLVE = this is a Downsample (multisample resolve), recorded as a texture copy so everything else treats it as one (reads the source, writes the destination)
 #define DM_COPY_RESOLVE 0x40000000
+#define DM_COPY_DLSS 0x20000000  // scene upscale, recorded in the same order as a texture copy
 typedef struct { const tex_t *src, *dst; view_t sv, dv; uint8_t has_sv, has_dv; NVNcopyRegion sr, dr; int32_t flags; } p_copy_t2t;   // Reused for T2B: src stores the destination buffer address
+// A DLSS evaluation (DM_COPY_DLSS): a texture copy from the scene colour to the output, followed by what a temporal upscaler takes (vka_fsr3.c); replayers that do not know it read the copy
+typedef struct { p_copy_t2t c; const tex_t *depth, *motion; float jitter[2], mv[2]; uint32_t reset; } p_dlss_t2t;
 typedef struct { const tex_t *tex; view_t view; uint8_t has_view, is_uint; NVNcopyRegion r; int32_t mask; union { float f[4]; uint32_t u[4]; } c; } p_clear_tex;
 typedef struct { int64_t stride; int image; } p_copy_stride;   // image: SetCopyImageStride (bytes per layer / depth slice) instead of SetCopyRowStride
 typedef struct { uint64_t addr, size; uint32_t value, _pad; } p_clear_buf;   // buffer filled with a 32-bit value (ClearBuffer)
@@ -262,6 +268,7 @@ int nvn_tex_mirror_t2t(const tex_t *s, unsigned sl, unsigned ss, const NVNcopyRe
 // A program's per-stage shader key (hle_nvn.c): the first 8 bytes of sha256(first 0x880 bytes of the control section (its own length when shorter) + code area). Computed at SetShaders (NVN lets the caller free the control section once it returns, and Unity does);
 // a stage whose code area was not yet in any memory pool then is computed the first time it is asked for. Returns 0 = no such stage
 int prog_key(const prog_t *p, unsigned stage, uint8_t key[8]);
+int nvn_serial_keys(uint64_t serial, uint8_t key[6][8], uint8_t *ok, uint8_t *nstage);   // a bound program's stage keys by its serial (1 = known)
 void nvn_ctl_lens(const void *control, uint32_t *nctl, uint32_t *ncode);   // a control section's bytes in the shader key and its code area's length (NVN or NVN2), hle_nvn.c
 void mtl_reg_samp(int id, const samp_par *p);
 void mtl_prog_release(prog_t *p);

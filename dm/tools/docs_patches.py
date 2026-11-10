@@ -19,7 +19,7 @@ HOST_EXT = ('.c', '.m', '.mm', '.h', '.swift')
 # What a build-keyed host table does (the table's name in the source; a row of another table is listed under its own name)
 TABLES = {'k_locks': 'engine frame limit set to fps_target', 'k_ue': "Unreal's allocator on a host malloc zone", 'k_nier_dr': 'frame interval and dynamic-resolution floor'}
 # Profile keys that are not behaviour switches: per-game data or controls, not something the host does differently
-NOT_SWITCHES = {'pad_layout', 'depth_mode', 'mem_used', 'sys_resource', 'fastboot_env', 'romfs_substitute'}   # fastboot_env: a test-run preset (DM_FASTBOOT), not a change to how the game runs
+NOT_SWITCHES = {'pad_layout', 'depth_mode', 'mem_used', 'sys_resource', 'fastboot_env', 'romfs_substitute', 'variant'}   # variant: an opt-in variant of the game's code (VARIANT_CUTS), its cuts listed with the build   # fastboot_env: a test-run preset (DM_FASTBOOT), not a change to how the game runs
 
 # ---- Binding: what a patch's correctness is anchored to, from the loosest (GitHub issue #635). A patch is at its goal when its binding is the loosest it could have; the gap between the two
 # is the work list. A patch file's BINDING is a list of {'what', 'now', 'goal', 'purpose', 'why'} with an optional 'blocked' (why the gap cannot close yet) or 'kept' (why it stays
@@ -120,6 +120,8 @@ SWITCH_BINDING = [
      'why': f'what iOS does for every game: {DEFAULT_SOON}'}),
     ('present_snap', '', {'what': 'present snapshots', 'now': 'game', 'goal': 'host', 'purpose': 'rendering', 'why': f'a setting the game was tested with: {DEFAULT_SOON}'}),
     ('pso_mtl4', '', {'what': 'MTL4Compiler pipelines on iOS', 'now': 'game', 'goal': 'host', 'purpose': 'rendering', 'why': f'a setting the game was tested with on an iPhone: {DEFAULT_SOON}'}),
+    ('host_env', 'DM_VK_DLSS_BLIT=1', {'what': "NVN2 DLSS replaced by the host's temporal upscaler (FSR 3.1), the 1080p display buffer mode and the Lanczos present", 'now': 'game', 'goal': 'host', 'purpose': 'rendering',
+     'why': 'every NVN2 game that evaluates DLSS needs the replacement (without it its 3D scene stays black): on for every game once more of them are checked'}),
     ('game_env', 'DOTNET_GCRegionRange=', {'what': ".NET's garbage-collector region range", 'now': 'game', 'goal': 'game', 'purpose': 'address space', 'why': "measured for the game's regions"}),
     ('stdalloc_cap', '', {'what': "StandardAllocator's address space", 'now': 'game', 'goal': 'game', 'purpose': 'address space',
      'why': "what the regions after it need, measured by the NSP script's region check; the host's cap is the default"}),

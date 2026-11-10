@@ -515,7 +515,7 @@ static int g_nchanged, g_changed_state;   // state 0 not read yet, 1 read, -1 mi
 static void changed_load(void) {
     if (g_changed_state) return;
     g_changed_state = -1;
-    char p[1100]; snprintf(p, sizeof p, "%s/main.changed.tsv", dm_module_dir());
+    char p[1100]; snprintf(p, sizeof p, "%s/main.changed.tsv", dm_main_dir());
     FILE *f = fopen(p, "r");
     if (!f) { LOG("[RED] cheats: no %s (the modules come from an older rewriter): code writes are refused; rewrite them with dm/tools/patch_nso.py", p); return; }
     char line[256], bid[40] = ""; int cap = 0; unsigned long off, len;
