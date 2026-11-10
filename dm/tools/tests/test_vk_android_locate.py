@@ -145,6 +145,29 @@ class OpenPacks(unittest.TestCase):
         self.assertEqual((self.ns['MISSING'], self.ns['ORDER'], self.ns['TOTAL']), ({c}, [a, b], [2]))
         self.assertEqual((self.ns['loc'][a], self.ns['loc'][b]), (('ps_x.bin', 2), ('ps_x.bin', 1)))
 
+    def test_real_package_files_and_windows_wrapper(self):
+        """index_packs, _rec and close_packs on a real .bin package (with CR LF and 0x1a bytes in the shader code, which Windows text mode alters, and
+        os.pread from vk_android_win.install on Windows)"""
+        import concurrent.futures as cf, mmap
+        sys.path.insert(0, str(TOOLS))
+        import vk_android_win
+        if os.name == 'nt': vk_android_win.install()
+        ra, ka = record(b'a\r\n\x1ab')
+        rb, kb = record(b'c\x1a\r\nd')
+        ns = vk_functions('borrow', 'borrow_key', 'record_key', 'locate', 'index_packs', '_rec', 'open_packs', 'close_packs')
+        ns['BUILD'], ns['BORROWED'] = str(TOOLS / 'dmsh_build.py'), ('record_index',)
+        ns['NS'] = ns['borrow']({'os': os, 're': __import__('re'), 'mmap': mmap})
+        with tempfile.TemporaryDirectory() as d:
+            (Path(d) / 'ps_x.bin').write_bytes(ra + rb)
+            ns.update(packs={}, dm_dir=d, GAME={}, MISSING=set(), TOTAL=[2], ORDER=[ka, kb], loc={ka: ('ps_x.bin', 0), kb: ('ps_x.bin', 1)})
+            try:
+                self.assertEqual(ns['open_packs']([ka, kb]), [ka, kb])
+                with cf.ThreadPoolExecutor(4) as ex:
+                    got = list(ex.map(lambda i: ns['_rec']('ps_x.bin', i % 2), range(32)))
+                self.assertEqual(got, [ra if i % 2 == 0 else rb for i in range(32)])
+            finally:
+                ns['close_packs']()
+
 
 class SplitCheck(unittest.TestCase):
     """pack_android.py split_shaders: the dump's split must hold every shader of the profile's map"""

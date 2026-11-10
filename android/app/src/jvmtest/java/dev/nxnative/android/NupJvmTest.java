@@ -107,10 +107,36 @@ public final class NupJvmTest {
 
     static byte[] bytes(File f) throws IOException { return Files.readAllBytes(f.toPath()); }
 
+    /** Builds a meta block from type and data pairs */
+    static byte[] tlvs(Object... tp) throws IOException {
+        java.io.ByteArrayOutputStream o = new java.io.ByteArrayOutputStream();
+        for (int i = 0; i < tp.length; i += 2) {
+            byte[] p = tp[i + 1] instanceof String ? ((String) tp[i + 1]).getBytes(StandardCharsets.UTF_8) : (byte[]) tp[i + 1];
+            int t = (Integer) tp[i];
+            o.write(new byte[] {(byte) t, (byte) (t >> 8), 0, 0, (byte) p.length, (byte) (p.length >> 8), (byte) (p.length >> 16), (byte) (p.length >>> 24)});
+            o.write(p);
+        }
+        return o.toByteArray();
+    }
+
+    /** Meta blocks with the spec's numbers and with the packer's shifted ones, an "icon" that isn't an image, and a record cut off at the end */
+    static void meta() throws IOException {
+        byte[] jpg = {(byte) 0xFF, (byte) 0xD8, (byte) 0xFF, (byte) 0xE0, 1, 2, 3}, npdm = "META".getBytes(StandardCharsets.UTF_8);
+        Nup.Meta m = Nup.Meta.parse(tlvs(1, npdm, 3, jpg, 4, "1.8.0", 5, "Mario Kart World", 6, "Nintendo", 0x8001, "private"));
+        check(m.icon != null && m.icon.length == jpg.length && "1.8.0".equals(m.version) && "Mario Kart World".equals(m.title) && "Nintendo".equals(m.publisher), "meta: the spec's types");
+        m = Nup.Meta.parse(tlvs(0, npdm, 2, jpg, 3, "3.0.0", 4, "Donkey Kong Bananza", 5, "Nintendo", 6, new byte[32]));
+        check(m.icon != null && "3.0.0".equals(m.version) && "Donkey Kong Bananza".equals(m.title) && "Nintendo".equals(m.publisher), "meta: the packer's types, one lower (a type 0 record)");
+        m = Nup.Meta.parse(tlvs(1, npdm, 3, "not an image", 5, "Zelda"));
+        check(m.icon == null && "Zelda".equals(m.title) && m.version == null, "meta: an icon that is no JPEG or PNG is not taken");
+        m = Nup.Meta.parse(java.util.Arrays.copyOf(tlvs(5, "Cut"), 10));
+        check(m.title == null, "meta: a record past the block's end is not read");
+    }
+
     public static void main(String[] args) throws Exception {
         if (args[0].equals("real")) { real(new File(args[1]), new File(args[2])); System.out.println("ok " + n); return; }
         File repo = new File(args[0]), t = new File(args[1]);
         names();
+        meta();
         Zstd.contentSize(new byte[] {(byte) 0x28, (byte) 0xB5, 0x2F, (byte) 0xFD, 0x20, 0x05, 0x01, 0, 0});   // a header alone parses
         File d = new File(t, "Game");
         dump(d);
@@ -129,6 +155,12 @@ public final class NupJvmTest {
         Pack p = Pack.read(packDir(t, "pack-nodlc", raw.getName() + ":update/458752/romfs", "1	" + raw.getName() + ":addon/" + AOC + "/romfs"));
         check(Nup.open(nodlc).of(Nup.ADDON).isEmpty() && raw.getAbsolutePath().equals(p.aocLinks(nodlc).get("1.nup")), "no add-on in the game's .nup: the row's .nup " + p.aocLinks(nodlc));
         check(p.romfsPath(nodlc).equals(nodlc.getAbsolutePath() + ":update/458752/romfs"), "the game's own RomFS all the same");
+        // Forgejo #30: an aoc row whose add-on neither the game's .nup nor the row's .nup has is no link (the host reported it owned and stopped at its mount), and a line names it
+        for (String row : new String[] {"1\tdlc/" + AOC + "/0/romfs", "1\tGone.nup:addon/" + AOC + "/romfs", "1\t" + nodlc.getName() + ":addon/" + AOC + "/romfs"}) {
+            List<String> skipped = new ArrayList<>();
+            Map<String, String> l = Pack.read(packDir(t, "pack-nodlc2", nodlc.getName() + ":update/458752/romfs", row)).aocLinks(nodlc, skipped);
+            check(l.isEmpty() && skipped.size() == 1 && skipped.get(0).contains("add-on 1") && skipped.get(0).contains("runs without it"), "no add-on anywhere (" + row + "): no link, one line " + l + " " + skipped);
+        }
         folderRows(t);
         dumps(repo, d, t);
         System.out.println("ok " + n);
@@ -384,6 +416,8 @@ public final class NupJvmTest {
         check(p.romfsPath(g).equals(new File(g, "updates/458752/romfs").getPath()) && p.romfsPath(g).equals(p.romfs(g).getPath()), "folder DM_ROMFS " + p.romfsPath(g));
         Map<String, String> l = p.aocLinks(g);
         check(l.size() == 1 && l.get("1").equals(new File(g, "dlc/" + AOC + "/0/romfs").getPath()), "folder aoc links: " + l);
+        List<String> skipped = new ArrayList<>();
+        check(p.aocLinks(g, skipped).equals(l) && skipped.size() == 1 && skipped.get(0).contains("add-on 2"), "a missing DLC folder is a line: " + skipped);
         aocLinkDir(t, l);
         // a pack made from a .nup, used with the folder: the folder's own RomFS (Pack.romfs falls back), no aoc link
         p = Pack.read(packDir(t, "pack-fold2", "game.nup:update/458752/romfs", "1\tgame.nup:addon/" + AOC + "/romfs"));

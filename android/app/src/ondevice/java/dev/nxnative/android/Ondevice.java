@@ -3,6 +3,7 @@ package dev.nxnative.android;
 import android.Manifest;
 import android.app.AlertDialog;
 import android.content.ComponentName;
+import android.content.Context;
 import android.content.Intent;
 import android.content.ServiceConnection;
 import android.content.pm.PackageManager;
@@ -78,6 +79,43 @@ final class Ondevice {
         panel.picked(dump, true, packDir, false, true);
     }
 
+    /**
+     * A code update the user need not ask for: when the pack is this app's own (ownPack) and its code key no longer matches because the app's tools changed
+     * (a profile's patches.py, the rewriter), its code is rewritten in the background, as Prepare again would, keeping the shaders. Only with the dump there
+     * (the card's check found no problem with it), its build one the profile knows (checked by picked: a build mismatch stops it), and no game or other job
+     * running; once per dump per app process. The rewrite goes through the job's staging and swap, so a stopped update never leaves new code beside old tables
+     */
+    static boolean autoCodeUpdate(MainActivity a, File dump, File packDir) {
+        if (panel == null || panel.a != a || panel.alive() || gameRunning(a) || !autoTried.add("code:" + dump.getPath())) return false;
+        panel.picked(dump, true, packDir, true, true);
+        return true;
+    }
+
+    /**
+     * Whether this app made the pack, so the launcher may update its code by itself: its pack.tsv's made_by row (written by the phone's pack step), else, for a pack
+     * made before that row, the job beside the dump that says it made this pack folder (job.json own_pack). Without either, the pack is treated as other tools'.
+     * Reads files: call it off the main thread
+     */
+    static boolean ownPack(File dump, File packDir, String titleId) {
+        try {
+            if (Pack.read(packDir).madeByApp()) return true;
+            File jf = Job.fileOf(DumpCheck.workOf(dump, titleId));
+            if (!jf.isFile()) return false;
+            Job j = Job.read(jf);
+            return j.ownsPack() && GameList.samePath(j.pack().getPath(), packDir.getPath());
+        } catch (IOException | RuntimeException e) {
+            return false;
+        }
+    }
+
+    /** Whether a game runs now (the :game process): the background code update waits for it, as the pack's code must not change under a running game */
+    private static boolean gameRunning(Context c) {
+        android.app.ActivityManager am = (android.app.ActivityManager) c.getSystemService(Context.ACTIVITY_SERVICE);
+        List<android.app.ActivityManager.RunningAppProcessInfo> ps = am == null ? null : am.getRunningAppProcesses();
+        if (ps != null) for (android.app.ActivityManager.RunningAppProcessInfo p : ps) if (p.processName.endsWith(":game")) return true;
+        return false;
+    }
+
     /** Whether a job (any game's) runs now, so a background shader update of another card waits for it (autoUpdate starts none while one is alive) */
     static boolean busy(MainActivity a) { return panel != null && panel.a == a && panel.alive(); }
 
@@ -149,6 +187,8 @@ final class Ondevice {
         boolean bound, resumed;
         long resumedAt;
         Job job;
+        private String placedFor;   // which job (dump and pack) the list was last built for
+        private String metaLine;   // the game's version and publisher from its .nup, shown before the state
         boolean jobAlive;   // the service said its worker runs this job
 
         Panel(MainActivity a) {
@@ -304,9 +344,24 @@ final class Ondevice {
             // A finished job: its game goes into the list with its pack (once), and the card goes: Play is on the game's card
             if (ready && !alive && !addedKey(job).equals(Prefs.open(a, "ondevice").getString("added", ""))) addGame(job);
             boolean was = view.getVisibility() == View.VISIBLE;
-            if (job == null || ready && listed(job)) { keepScreen(false); view.setVisibility(View.GONE); if (was) a.refresh(); return; }
+            if (job == null || ready && listed(job)) { keepScreen(false); view.setVisibility(View.GONE); placedFor = null; if (was) a.refresh(); return; }
             view.setVisibility(View.VISIBLE);
-            if (!was) a.refresh();   // the games' empty card hides while this one shows
+            // The list puts this card where its game's card would be. When the card switches to another game's job, the list has to be rebuilt too.
+            // That happens after an APK update: the card first shows another game's finished job, then a background shader update takes it over,
+            // and without a rebuild the card stays in the first game's spot, hiding that game's card while the updated game shows twice
+            String key = job.dump().getPath() + "\n" + job.pack().getPath();
+            if (!was || !key.equals(placedFor)) {
+                placedFor = key;
+                a.refresh();   // this also hides the "no games yet" card while this one shows
+                Ui.tileIcon(tile, null);   // like the game card: the icon from the .nup if it has one, and its version and publisher before the state
+                metaLine = null;
+                GameMeta.load(job.dump(), m -> {
+                    if (!key.equals(placedFor)) return;
+                    if (m.icon != null) Ui.tileIcon(tile, m.icon);
+                    metaLine = m.line();
+                    if (metaLine != null) show();
+                });
+            }
             String st = job.state();
             String sim = "fake".equals(BuildConfig.NX_PACK_ENGINE) ? "  (simulated engine)" : "";
             head.setText(job.name());
@@ -315,7 +370,7 @@ final class Ondevice {
             // A job of a game this app version does not include (made by an APK that had it): one sentence, nothing to press but ⋯ (Forget, the deletes)
             String notIncluded = Profile.missing(job.titleId(), job.name());
             boolean failed = "failed".equals(st);
-            title.setText((notIncluded != null ? "Not in this app version" : "done".equals(st) ? "Prepared" : "pending".equals(st) ? "Ready to prepare" : failed ? "Could not prepare"
+            title.setText((metaLine != null ? metaLine + " \u00b7 " : "") + (notIncluded != null ? "Not in this app version" : "done".equals(st) ? "Prepared" : "pending".equals(st) ? "Ready to prepare" : failed ? "Could not prepare"
                     : "paused".equals(st) ? "Paused" : "Preparing") + (job.tryAnyway() ? " · tried anyway" : "") + sim);
             status.setText(notIncluded != null ? notIncluded : job.statusText(alive));
             int pct = (int) Math.round(job.overall() * 1000);

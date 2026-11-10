@@ -47,6 +47,14 @@ gpu_timestamps	segment
 # The window size (the nvnWindow textures the upscaler's output is copied to; the render targets scale with it) is the constant pair two leaf functions of main return (mov w0,#2880 / #1620; ret):
 # the host writes DM_WINDOW_SIZE's size into them at load (loader.c window_apply; the Android launcher's Game resolution: Phone 1080p = 1920x1080), the game's own 2880x1620 without it (the game note, Window size)
 window_fn	e25c90c1c136638885659fd55bf8a03b	0x5bf770	0x5bf780	2880x1620
+# The game advances its world by 60 / the frame-rate controller's interval each frame, from one sdiv (main+0x204b20). With presentation on the host's own tick
+# (the Android launcher's frame limit) the host writes the measured frame rate into the controller and switches that sdiv to a load of it, so the game keeps its speed
+# when frames come late (hle_fpslock.c sead_decouple). The row also tells the launcher the game's speed follows the measured rate (a frame limit instead of 60/30/20)
+fps_decouple	e25c90c1c136638885659fd55bf8a03b	0x204b20
+# The dynamic resolution controller (MaintainGpuPercentage), for the Android launcher's Dynamic resolution setting (probe.c drs_install): where the host finds the
+# range's parameter object (ldr x8, [x10, #0x5d0]), where every path's pick meets before it is stored (ldr x9, [x19, #0xf0]), the GPU budget load (ldr s2, [x19, #0xe8])
+# and a preset's automatic flag (ldrb w8, [x20, #0x29]). The row also tells the launcher the game has the setting
+drs_ctl	e25c90c1c136638885659fd55bf8a03b	0x38e100	0x38de2c	0x38dcbc	0x38dbc8
 
 # ---- Test runs ----
 # DM_FASTBOOT=1: A every 12 presented frames (0.1 s held) from the first present through the boot screen, the title, Continue and the file, a [mark] once 5 frames in a row

@@ -29,6 +29,8 @@ int nxhost_main(int argc, char **argv);
 // ---- The host's launcher interface: the headers are the host's own, so a signature change there fails here at compile time; every entry point is weak ----
 #include "input_android.h"
 #include "vk_android.h"
+#pragma weak nxhost_env_changed
+void nxhost_env_changed(void);
 #pragma weak nxhost_set_window
 #pragma weak nxhost_vk_selftest
 #pragma weak nxhost_input_device_added
@@ -56,8 +58,11 @@ int nxhost_main(int argc, char **argv);
 #pragma weak nxhost_fps_cap_set
 #pragma weak nxhost_fps_cap_status
 #pragma weak nxhost_input_device_player
+#pragma weak nxhost_input_device_first
 #pragma weak nxhost_rumble_callback
 #pragma weak nxhost_rumble_route
+#pragma weak nxhost_fps_limit_set
+void nxhost_fps_limit_set(int fps);   // hle_fpslock.c: the frame limiter, live from the in-game panel
 #pragma weak nxhost_text_input_callback
 
 // ---- Log: the host's stdout and stderr go straight into the log file (nothing is lost when the process dies), and a thread copies new lines to logcat ----
@@ -218,6 +223,12 @@ static void text_input_setup(JNIEnv *env) {
     nxhost_text_input_callback(text_input, NULL);
 }
 
+// A surface can arrive while the readiness dialog is still up, before Native.start opens the log file and applies env.txt / env-<id>.txt (DM_VK_DRIVER, DM_VK_GPL,
+// DM_VK_MESH, DM_VK_VALIDATE, ...). Hold the window here and hand it to nxhost_set_window only once Native.start has set the environment
+static ANativeWindow *g_window;
+static pthread_mutex_t g_win_mu = PTHREAD_MUTEX_INITIALIZER;
+static int g_win_ready;
+
 // start(args, env, log path, cwd): args[0] is the program name (main.c reads args[1] as the pack folder), env is KEY=VALUE strings. 0 = started; the host runs on
 JNIEXPORT jint JNICALL Java_dev_nxnative_android_Native_start(JNIEnv *env, jclass cls, jobjectArray args, jobjectArray envs, jstring log, jstring cwd) {
     (void)cls;
@@ -234,8 +245,13 @@ JNIEXPORT jint JNICALL Java_dev_nxnative_android_Native_start(JNIEnv *env, jclas
         if (eq) { *eq = 0; setenv(kv, eq + 1, 1); fprintf(stderr, "[nxlaunch] env %s=%s\n", kv, eq + 1); }
         free(kv);
     }
+    pthread_mutex_lock(&g_win_mu);
+    g_win_ready = 1;
+    if (g_window && nxhost_set_window) nxhost_set_window(g_window);
+    pthread_mutex_unlock(&g_win_mu);
     exit_record_install(getenv("NX_EXIT_RECORD"));   // before the host thread: the host's crash handler (crash.c) takes this one as the handler before its own
     { const char *tc = getenv("DM_TEST_CRASH"); pthread_t ct; if (tc && !strcmp(tc, "native") && !pthread_create(&ct, NULL, test_crash_thread, NULL)) pthread_detach(ct); }
+    if (nxhost_env_changed) nxhost_env_changed();   // the replay's cached switches read the environment again (some were read before it, with the window)
     char *wd = jstr(env, cwd); if (chdir(wd)) fprintf(stderr, "[nxlaunch] chdir %s: %s\n", wd, strerror(errno)); free(wd);
     g_run.argc = (*env)->GetArrayLength(env, args);
     g_run.argv = calloc((size_t)g_run.argc + 1, sizeof *g_run.argv);
@@ -254,13 +270,14 @@ JNIEXPORT void JNICALL Java_dev_nxnative_android_Native_note(JNIEnv *env, jclass
 }
 
 // ---- Surface, input and lifecycle, forwarded when the host has the entry points ----
-static ANativeWindow *g_window;
 JNIEXPORT void JNICALL Java_dev_nxnative_android_Native_setSurface(JNIEnv *env, jclass cls, jobject surface) {
     (void)cls;
     ANativeWindow *w = surface ? ANativeWindow_fromSurface(env, surface) : NULL;
-    if (nxhost_set_window) nxhost_set_window(w);
+    pthread_mutex_lock(&g_win_mu);
+    if (g_win_ready && nxhost_set_window) nxhost_set_window(w);
     if (g_window) ANativeWindow_release(g_window);   // the host takes its own reference when it keeps the window
     g_window = w;
+    pthread_mutex_unlock(&g_win_mu);
 }
 JNIEXPORT jboolean JNICALL Java_dev_nxnative_android_Native_hasInput(JNIEnv *env, jclass cls) { (void)env; (void)cls; return nxhost_input_key != NULL; }
 JNIEXPORT jint JNICALL Java_dev_nxnative_android_Native_deviceAdded(JNIEnv *env, jclass cls, jint device, jstring name, jboolean labelled) {
@@ -382,6 +399,8 @@ JNIEXPORT jboolean JNICALL Java_dev_nxnative_android_Native_hasSelftest(JNIEnv *
 JNIEXPORT jint JNICALL Java_dev_nxnative_android_Native_selftest(JNIEnv *env, jclass cls, jobject surface, jint frames) {
     (void)cls; if (!nxhost_vk_selftest) return -1;
     ANativeWindow *w = surface ? ANativeWindow_fromSurface(env, surface) : NULL;
+    // The selftest never calls Native.start: let setSurface forward its resizes and the null on leaving to the host, as start does for a game
+    pthread_mutex_lock(&g_win_mu); g_win_ready = 1; pthread_mutex_unlock(&g_win_mu);
     fprintf(stderr, "[nxlaunch] graphics selftest: nxhost_vk_selftest(%p, %d)\n", (void *)w, frames);
     int r = nxhost_vk_selftest(w, frames);
     fprintf(stderr, "[nxlaunch] graphics selftest returned %d: %s\n", r, r ? "FAIL" : "PASS");
@@ -391,6 +410,10 @@ JNIEXPORT jint JNICALL Java_dev_nxnative_android_Native_selftest(JNIEnv *env, jc
 
 JNIEXPORT jint JNICALL Java_dev_nxnative_android_Native_devicePlayer(JNIEnv *env, jclass cls, jint device) {
     (void)env; (void)cls; return nxhost_input_device_player ? nxhost_input_device_player(device) : -1;
+}
+JNIEXPORT jint JNICALL Java_dev_nxnative_android_Native_deviceFirst(JNIEnv *env, jclass cls, jint device, jstring name) {   // PadOrder: this device is player 1
+    (void)cls; if (!nxhost_input_device_first) return -1;
+    char *n = name ? jstr(env, name) : NULL; int p = nxhost_input_device_first(device, n); free(n); return p;
 }
 
 // ---- Rumble: the host calls rumble() on its rumble thread for each change of a player's vibration; it goes to listener.onRumble(player, intensity, sharpness) (Rumble.java),
@@ -466,3 +489,8 @@ JNIEXPORT jint JNICALL Java_dev_nxnative_android_Native_pinThreads(JNIEnv *env, 
     closedir(d);
     return placed;
 }
+JNIEXPORT void JNICALL Java_dev_nxnative_android_Native_fpsLimitSet(JNIEnv *env, jclass cls, jint fps) { (void)env; (void)cls; if (nxhost_fps_limit_set) nxhost_fps_limit_set(fps); }
+// Dynamic resolution, live from the in-game panel (Native.drsSet)
+#pragma weak nxhost_drs_set
+void nxhost_drs_set(int min_pct, int max_pct);   // probe.c: Donkey Kong Bananza's dynamic resolution range, % of the window (0 = the game's own)
+JNIEXPORT void JNICALL Java_dev_nxnative_android_Native_drsSet(JNIEnv *env, jclass cls, jint lo, jint hi) { (void)env; (void)cls; if (nxhost_drs_set) nxhost_drs_set(lo, hi); }

@@ -139,9 +139,11 @@ def header(g):
     if tdu not in ('on', 'off') or (tdu == 'on' and tfu != 'on'): sys.exit(f'{g.id}: tex_dirty_upload must be on or off, and needs tex_flush_upload on: {tdu}')
     tds = g.get('tex_dyn_slots', 'off')   # shaders whose texture handle the translator could not trace to one slot: slot indices in c2, the bound slots in the fallback arrays (nvn_mtl.m): on / off
     if tds not in ('on', 'off'): sys.exit(f'{g.id}: tex_dyn_slots must be on or off: {tds}')
+    tsf = g.get('tex_soft', 'off')   # large block-compressed packaged textures kept without their finest level (Android: vka_tex.c "Soft textures", vka_soft.h; from plumber-racer-2's nvn_mtl.m tex_soft): on / off
+    if tsf not in ('on', 'off'): sys.exit(f'{g.id}: tex_soft must be on or off: {tsf}')
     vcr = g.get('vconv_range', 'off')   # vertex attributes converted on the CPU only over the vertices each draw reads (nvn_mtl.m vc_draw_range): on / off
     if vcr not in ('on', 'off'): sys.exit(f'{g.id}: vconv_range must be on or off: {vcr}')
-    mml = g.get('mem_map_limit', 'off')   # MapPhysicalMemory refused beyond the application pool, as on Horizon (hle_svc.c): on / off
+    mml = g.get('mem_map_limit', 'on')   # MapPhysicalMemory refused beyond the application pool, as on Horizon (hle_svc.c): on / off
     if mml not in ('on', 'off'): sys.exit(f'{g.id}: mem_map_limit must be on or off: {mml}')
     gts = g.get('gpu_timestamps', 'submission')   # counter timestamps (nvn_mtl.m rep_ticks): submission = one time per submission, segment = the GPU start / end of the segment holding the report
     if gts not in ('submission', 'segment'): sys.exit(f'{g.id}: gpu_timestamps must be submission or segment: {gts}')
@@ -164,6 +166,16 @@ def header(g):
             w, h = map(int, r[3].split('x'))
             if not (0 < w < 65536 and 0 < h < 65536): sys.exit(f'{g.id}: window_fn size must be 1..65535 each: {r[3]}')
             wfn.append('{' + q(r[0]) + f', {r[1]}, {r[2]}, {w}, {h}' + '}')
+    fdc = []   # the frame-rate controller's sdiv the host switches to the measured rate, one row per main build: <main build ID> <offset> (hle_fpslock.c sead_decouple)
+    for r in g.values('fps_decouple') if g.get('fps_decouple', '') else []:
+        if len(r) != 2 or not re.fullmatch(r'[0-9a-f]{32}', r[0]) or not re.fullmatch(r'0x[0-9a-fA-F]+', r[1]):
+            sys.exit(f"{g.id}: fps_decouple takes <main build ID (32 hex)> <offset of the frame-rate controller's sdiv>: {r}")
+        fdc.append('{' + q(r[0]) + f', {r[1]}' + '}')
+    drs = []   # the dynamic resolution controller's places, one row per main build: <main build ID> <params probe> <pick> <budget load> <preset flag> (probe.c drs_install)
+    for r in g.values('drs_ctl') if g.get('drs_ctl', '') else []:
+        if len(r) != 5 or not re.fullmatch(r'[0-9a-f]{32}', r[0]) or not all(re.fullmatch(r'0x[0-9a-fA-F]+', x) for x in r[1:]):
+            sys.exit(f"{g.id}: drs_ctl takes <main build ID (32 hex)> <parameter object probe> <pick> <budget load> <preset flag> (offsets): {r}")
+        drs.append('{' + q(r[0]) + ', ' + ', '.join(r[1:]) + '}')
     # Game resolution by the Switch 2 graphics scale (the Android launcher, build.gradle resolutionOf; the host reads DM_GRAPHICS_SCALE and DM_OPMODE, nothing is generated):
     # <the launcher's choice: WxH or original> <scale 0|1|2> <console|handheld>, for a game that sizes its scenes by the scale rather than its window
     if g.get('graphics_scale', ''):
@@ -188,6 +200,14 @@ def header(g):
             ls += [('0', 0)] * (12 - len(ls))
             rlv.append('{' + q(r[0]) + f', {r[1]}, {n}, {len(r) - 3}, ' + '{' + ', '.join(f'{{{o}, {ln}}}' for o, ln in ls) + '}}')
         if g.get('graphics_scale', ''): sys.exit(f'{g.id}: graphics_scale and res_levels are two levers for one setting: keep one')
+    # Depth-only mesh prepass draws skipped and their colour pass's EQUAL relaxed to LEQUAL on Qualcomm's driver (vka_draw.c mesh_cut; a workaround, open: rendering.md
+    # "Depth-only mesh prepass drawn as spikes on Qualcomm's driver"): one row per pair, <prepass mesh shader key> <colour pass mesh shader key>, 16 hex digits each
+    mpc = []
+    for r in g.values('mesh_prepass_cut'):
+        if len(r) != 2 or not all(re.fullmatch(r'[0-9a-f]{16}', x) for x in r) or r[0] == r[1]:
+            sys.exit(f'{g.id}: mesh_prepass_cut takes <prepass mesh shader key> <colour pass mesh shader key>, two different keys of 16 lowercase hex digits: {r}')
+        mpc.append(f'{{0x{r[0]}ull, 0x{r[1]}ull}}')
+    if len(mpc) > 64: sys.exit(f'{g.id}: mesh_prepass_cut: at most 64 pairs')
     api = g.get('device_api', '55.15')   # the NVN API major.minor version nvnDeviceGetInteger reports (hle_nvn.c)
     if not re.fullmatch(r'\d+\.\d+', api): sys.exit(f'{g.id}: device_api must be major.minor: {api}')
     src = f'dm/games/{g.id}' if g.dir.parent == HERE else str(g.dir)
@@ -230,11 +250,15 @@ def header(g):
          f'#define DM_GAME_RENDER_COND {int(rcd == "on")}',
          f'#define DM_GAME_TEX_DIRTY_UPLOAD {int(tdu == "on")}',
          f'#define DM_GAME_TEX_DYN_SLOTS {int(tds == "on")}',
+         f'#define DM_GAME_TEX_SOFT {int(tsf == "on")}',
          f'#define DM_GAME_GPU_TS_SEGMENT {int(gts == "segment")}',
          f'#define DM_GAME_DRAW_BARRIERS_GAME {int(dbr == "game")}',
          f'#define DM_GAME_VCONV_RANGE {int(vcr == "on")}',
          f'#define DM_GAME_ROMFS_SUBST {q(rsub)}',
          f'#define DM_GAME_WINDOW_FN {{{", ".join(wfn) or "{\"\", 0, 0, 0, 0}"}}}', f'#define DM_GAME_NWINDOW_FN {len(wfn)}',
+         '#define DM_GAME_MESH_PREPASS_CUT {' + (', '.join(mpc) or '{0, 0}') + '}', f'#define DM_GAME_NMESH_PREPASS_CUT {len(mpc)}',
+         f'#define DM_GAME_FPS_DECOUPLE {{{", ".join(fdc) or "{\"\", 0}"}}}', f'#define DM_GAME_NFPS_DECOUPLE {len(fdc)}',
+         f'#define DM_GAME_DRS_CTL {{{", ".join(drs) or "{\"\", 0, 0, 0, 0}"}}}', f'#define DM_GAME_NDRS_CTL {len(drs)}',
          '#define DM_GAME_RES_LEVELS {' + (', '.join(rlv) or '{"", 0, 0, 0, {{0, 0}}}') + '}', f'#define DM_GAME_NRES_LEVELS {len(rlv)}',
          *([f'#define DM_GAME_NVN_API_MAJOR {api.split(".")[0]}', f'#define DM_GAME_NVN_API_MINOR {api.split(".")[1]}'] if g.get('device_api', '') else []),   # without the key: by the SDK version (hle_nvn.c nvn_api)
          '']

@@ -24,6 +24,7 @@ final class Pack {
     final String[] modules;   // the profile's modules, rewritten in the pack
     final List<String> builds;   // "main=<build ID>" rows: the NSO builds the code was rewritten from (PackCheck.build)
     final String packer;   // the commit of the tools that made it ("" when not recorded)
+    final String madeBy;   // its made_by row: "app <version>" when this app's pack step made it, "" for a pack from other tools (or from before the row)
 
     private Pack(File dir, Map<String, List<String>> rows) throws IOException {
         this.dir = dir;
@@ -47,7 +48,12 @@ final class Pack {
         builds = rows.getOrDefault("build", List.of());
         List<String> pk = rows.get("packer");
         packer = pk == null || pk.isEmpty() ? "" : pk.get(0);
+        List<String> mb = rows.get("made_by");
+        madeBy = mb == null || mb.isEmpty() ? "" : mb.get(0);
     }
+
+    /** Whether this app made the pack (its made_by row), so its code can be updated without asking when only the tools changed */
+    boolean madeByApp() { return madeBy.startsWith("app "); }
 
     /** The shader library this APK's host loads from the pack: shaders/v-<DMSH_VK_CHAIN>/dmsh_vk.lib (vka_shader.c makes the path itself; pack.tsv's row is not read), null when missing */
     File library() { return libraryOf(dir); }
@@ -295,12 +301,12 @@ final class Pack {
         return Nup.versionSelector(v);
     }
 
-    /** Whether a .nup has the addon the host would pick for an index (the low 12 bits of its title ID, NUP.md) */
-    private static boolean hasAddon(File nup, int index) {
+    /** Whether a .nup has the addon the host would pick for an index: the low 12 bits of its title ID (NUP.md), with a RomFS (nup_image.h skips one without) */
+    static boolean hasAddon(File nup, int index) {
         try {
-            for (Nup.Pkg p : Nup.open(nup).of(Nup.ADDON)) if ((p.titleId & 0xFFF) == index) return true;
+            for (Nup.Pkg p : Nup.open(nup).of(Nup.ADDON)) if ((p.titleId & 0xFFF) == index && p.romfsDir != Nup.NONE) return true;
         } catch (IOException e) {
-            // unreadable: the row's .nup when it is there
+            // unreadable: not this .nup
         }
         return false;
     }
@@ -309,7 +315,9 @@ final class Pack {
      * The links GameActivity makes in DM_AOC_DIR (hle_fs.c aoc_dir), link name → target. A folder game: &lt;index&gt; → its DLC's RomFS folder in the game
      * folder, for each aoc row whose folder is there (as before). A .nup game: &lt;index&gt;.nup → a .nup file (the host picks the addon package by the index,
      * NUP.md), for each aoc row: the game's own .nup when it has that addon, else the .nup the row names (relative to the folder holding the game) when it is
-     * there, else the game's own
+     * there and has it, else no link: the game runs without that DLC, and skipped (when not null) gets a line naming it. The game's own .nup used to be linked
+     * for a row it had no addon for (a pack made from a folder, or from another .nup with the DLC): the host reported the DLC as owned and stopped at its
+     * mount (Forgejo #30, docs/reference/packing.md)
      */
     /** Makes a symbolic link (GameActivity: Os.symlink, its errno in the message; the JVM tests: Files.createSymbolicLink) */
     interface Linker { void link(String target, String path) throws IOException; }
@@ -336,26 +344,30 @@ final class Pack {
         dir.delete();
     }
 
-    Map<String, String> aocLinks(File game) {
+    Map<String, String> aocLinks(File game) { return aocLinks(game, null); }
+
+    Map<String, String> aocLinks(File game, List<String> skipped) {
         Map<String, String> out = new LinkedHashMap<>();
         boolean nup = Nup.isNup(game);
         for (Map.Entry<Integer, String> e : aoc.entrySet()) {
             if (!nup) {
                 File target = new File(game, e.getValue());
                 if (target.isDirectory()) out.put(String.valueOf(e.getKey()), target.getPath());
+                else if (skipped != null) skipped.add("add-on " + e.getKey() + ": no folder " + e.getValue() + " in " + game.getName() + ": the game runs without it");
                 continue;
             }
-            File target = game.getAbsoluteFile();
-            if (!hasAddon(game, e.getKey())) {
+            File target = hasAddon(game, e.getKey()) ? game.getAbsoluteFile() : null;
+            if (target == null) {
                 try {
                     Nup.Ref r = Nup.parse(e.getValue());
-                    File parent = game.getAbsoluteFile().getParentFile();
-                    if (r != null && parent != null && Nup.isNup(new File(parent, r.path)) && new File(parent, r.path).isFile()) target = new File(parent, r.path);
+                    File parent = game.getAbsoluteFile().getParentFile(), other = r == null || parent == null ? null : new File(parent, r.path);
+                    if (other != null && Nup.isNup(other) && other.isFile() && hasAddon(other, e.getKey())) target = other;
                 } catch (IllegalArgumentException ex) {
-                    // not a .nup name: the game's own
+                    // not a .nup name: only the game's own, which has not got it
                 }
             }
-            out.put(e.getKey() + ".nup", target.getPath());
+            if (target != null) out.put(e.getKey() + ".nup", target.getPath());
+            else if (skipped != null) skipped.add("add-on " + e.getKey() + " (pack.tsv aoc row " + e.getValue() + ") is in neither " + game.getName() + " nor the .nup the row names: the game runs without it");
         }
         return out;
     }

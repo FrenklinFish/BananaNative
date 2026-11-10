@@ -48,7 +48,7 @@ public final class MainActivity extends Activity {
     private LinearLayout gameBox;   // the game cards (refresh)
     private View accessCard;
     private BananaBackgroundView bananas;   // the drifting bananas behind the screen
-    private Ui.Setting overlayRow, resRow, capRow, lsfgRow, gpuRow, updateRow;
+    private Ui.Setting overlayRow, resRow, capRow, upsRow, sharpRow, drsRow, lsfgRow, gpuRow, updateRow;
     private boolean resumed, settingsPage;
     private boolean merged;   // the list's duplicates were merged (Game.collapse) since this activity started
     private File pendingGame;   // a game folder (or .nup) waiting for its pack folder
@@ -63,7 +63,7 @@ public final class MainActivity extends Activity {
         frame.addView(bananas, new FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
         setContentView(frame);
         build();
-        if (saved == null) fromIntent(getIntent());
+        if (saved == null) { setIntent(gated(getIntent())); fromIntent(getIntent()); }   // start() reads no_pause from getIntent() too
         Updater.onStart(this);   // the release app: a newer release on GitHub opens the update popup (once per process start: not on a resume or a rotation)
     }
 
@@ -177,6 +177,14 @@ public final class MainActivity extends Activity {
         padMap.view.setOnClickListener(v -> PadMapUi.forDefault(this, () -> padMap.value(PadMapUi.label(this, null))));
         padMap.value(PadMapUi.label(this, null));
         play.addView(padMap.view);
+        upsRow = new Ui.Setting(this, "🔍", "Upscaler", v -> pick("Upscaler", GameUpscaler.MODES, GameUpscaler.mode(this), w -> GameUpscaler.modeDefault(this, w))).chevron(this);
+        play.addView(upsRow.view);
+        sharpRow = new Ui.Setting(this, "✨", "FSR sharpness", v -> pick("FSR sharpness", GameUpscaler.SHARP_NAMES, GameUpscaler.sharpIndex(GameUpscaler.sharp(this)),
+                w -> GameUpscaler.sharpDefault(this, GameUpscaler.SHARPS[w]))).chevron(this);
+        play.addView(sharpRow.view);
+        drsRow = new Ui.Setting(this, "📐", "Dynamic resolution", v -> DrsSlider.dialog(this, "", Prefs.drs(this), null, true, w -> Prefs.drsDefault(this, w),
+                this::refreshSettings)).chevron(this);
+        play.addView(drsRow.view);
         lsfgRow = new Ui.Setting(this, "✨", "Frame generation", v -> frameGen()).chevron(this);
         play.addView(lsfgRow.view);
         TextView hint = Ui.small(this, "A game's own settings (⋯ on its card) override these.");
@@ -188,6 +196,7 @@ public final class MainActivity extends Activity {
         gpuRow = new Ui.Setting(this, "🎮", "GPU driver", v -> GpuDriver.dialog(this, PICK_DRIVER)).chevron(this);   // custom GPU drivers (GpuDriver.java)
         sys.addView(gpuRow.view);
         sys.addView(new Ui.Setting(this, "📁", "Folders", v -> Folders.dialog(this)).value("Game, pack and save folders").chevron(this).view);
+        sys.addView(new Ui.Setting(this, "🧹", "Storage", v -> StorageUi.dialog(this)).value("Remove leftovers and old files; never saves").chevron(this).view);   // (StorageUi.java)
         // some phones stop or slow a background job once the screen is off (GitHub discussion 58): Home keeps the screen on while preparing (Ondevice), the service its wake lock
         sys.addView(new Ui.Setting(this, "🔆", "Keep the screen on while preparing", null).toggle(this, Prefs.keepScreenPreparing(this), (b, on) -> Prefs.keepScreenPreparing(this, on))
                 .value("While Home shows a game being prepared").view);   // the game, pack and save folders, kept across updates (Folders.java)
@@ -198,6 +207,19 @@ public final class MainActivity extends Activity {
                 .value("Can this phone run your games?").chevron(this).view);   // (ReadinessActivity.java)
         help.addView(new Ui.Setting(this, "🧪", "Graphics self-test", v -> startActivity(new Intent(this, SelftestActivity.class))).value("Needs no game").chevron(this).view);
         help.addView(new Ui.Setting(this, "📨", "Share log", v -> shareLog()).value("The newest log").chevron(this).view);
+        if (BuildConfig.NX_PLAY) {   // a test build always takes adb's commands (Prefs.adbControl)
+            Ui.Setting adb = new Ui.Setting(this, "🛠", "ADB control (debug)", null)
+                    .value("Lets adb commands add games, start Prepare and install GPU drivers. Off: only you, in the app");
+            adb.toggle(this, Prefs.adbControl(this), (b, on) -> {
+                if (on == Prefs.adbControl(this)) return;   // the switch set back to what is stored (below): nothing to do
+                if (!on) { Prefs.adbControl(this, false); return; }
+                b.setChecked(false);   // stays off until confirmed
+                Ui.confirmDanger(this, "Turn ADB control on?", "While it is on, adb, and any other app on this phone, can add games, start Prepare and install or pick a GPU "
+                        + "driver through Banana Native's launcher, without asking you. A GPU driver is code that runs inside the game. Turn it on only while you use adb, then off again.",
+                        "Turn on", () -> { Prefs.adbControl(this, true); b.setChecked(true); });
+            });
+            help.addView(adb.view);
+        }
 
         Ui.add(content, Ui.section(this, "About"), Ui.SECTION_GAP);
         LinearLayout about = Ui.add(content, Ui.card(this), 8);
@@ -226,6 +248,10 @@ public final class MainActivity extends Activity {
         overlayRow.value(ov ? "On · " + n + " of " + Overlay.ITEMS.length + " items" : "Off");
         resRow.value(resLabel());
         capRow.value(capLabel(Prefs.fpsCap(this)));
+        upsRow.value(GameUpscaler.MODES[GameUpscaler.mode(this)]);
+        sharpRow.value(GameUpscaler.sharpName(GameUpscaler.sharp(this)));
+        sharpRow.view.setVisibility(GameUpscaler.mode(this) == GameUpscaler.MODE_FSR ? View.VISIBLE : View.GONE);
+        drsRow.value(Prefs.DRS_NAMES[Prefs.drs(this)]);
         lsfgRow.value(!BuildConfig.NX_LSFG ? "Not in this build" : Lsfg.on(this) ? "On · " + Lsfg.multiplier(this) + "x" + (Lsfg.find(this) == null ? " · Lossless.dll missing" : "") : "Off");
         GpuDriver.Info d = GpuDriver.selected(this);
         gpuRow.value(d == null ? "System" : d.label());
@@ -244,6 +270,7 @@ public final class MainActivity extends Activity {
     /** adb: am start -n dev.nxnative.android/.MainActivity --es game <game folder> [--es pack <pack folder>] [--es save <save folder>] [--ez run true] adds the game without
      *  the pickers (android/TESTING.md); --es add_game <folder or .nup> takes Add game's own path instead (gamePicked: all of a folder's games added, Prepare asked); save is the save folder Folders would pick for it (test runs of a play or release app keep away from the user's saves/<id>) */
     private void fromIntent(Intent i) {
+        i = gated(i);
         if (settingsPage && (i.hasExtra("game") || i.hasExtra("add_game") || i.hasExtra("ondevice_dump") || i.hasExtra("ondevice_pause"))) page(false);   // these act on Home's cards
         Ondevice.fromIntent(this, i);   // --es ondevice_dump <dump folder> [--ez ondevice_start true] (Ondevice)
         GpuDriver.fromIntent(this, i);   // --es gpu_driver_zip <zip> / --es gpu_driver <name | system>
@@ -264,6 +291,19 @@ public final class MainActivity extends Activity {
         String save = i.getStringExtra("save");
         if (save != null) Prefs.folder(this, "save_" + id, new File(save).getPath());
         if (i.getBooleanExtra("run", false)) for (Game g : games) if (GameList.samePath(g.gameDir, dir.getPath())) { launch(g); break; }
+    }
+
+    /** The intent without its adb control extras (AdbControl) while Prefs.adbControl refuses them: MainActivity is exported, so any app may send them (a toast and a
+     *  log line say that some were dropped). Ported from Anka Native 0.2.2 (EddizEge, MIT; its issue #7) */
+    private Intent gated(Intent i) {
+        if (i == null || Prefs.adbControl(this)) return i;
+        List<String> asked = AdbControl.asked(i::hasExtra);
+        if (asked.isEmpty()) return i;
+        android.util.Log.w("nxnative", "launcher intent from " + getReferrer() + " with " + asked + " ignored: ADB control is off (Settings › Help › ADB control)");
+        Toast.makeText(this, "A command from another app was ignored (Settings › ADB control is off)", Toast.LENGTH_LONG).show();
+        Intent out = new Intent(i);
+        for (String k : asked) out.removeExtra(k);
+        return out;
     }
 
     /** A game a frontend sent that needs the user (FrontendLaunch.ready): its card's Play says what is missing and offers the fix; a new game takes the steps of a picked one */
@@ -329,6 +369,7 @@ public final class MainActivity extends Activity {
                 if (!key.equals(updateDone)) { updateDone = key; done = true; }
                 continue;
             }
+            if (j.currentStep().equals("rewrite")) { Ui.status(e.getKey(), s.equals("running") ? "Ready · updating game code" : "Ready · game code update paused", R.color.bn_leaf); continue; }   // (its progress once the rewrite step reports one)
             Ui.status(e.getKey(), ShaderLibs.updatingText(java.util.Locale.getDefault(), j.shadersDone(), j.shadersTotal(), Job.etaText(j.shadersEta()), !s.equals("running")), R.color.bn_leaf);
         }
         if (done) { refresh(); return; }   // the new library is in: the cards' states are checked again ("Ready")
@@ -404,7 +445,8 @@ public final class MainActivity extends Activity {
         LinearLayout c = Ui.card(this);
         c.setPadding(dp(16), dp(16), dp(16), dp(16));
         LinearLayout top = Ui.row(this);
-        top.addView(Ui.tile(this, g.name, 52));
+        TextView tile = Ui.tile(this, g.name, 52);
+        top.addView(tile);
         LinearLayout info = new LinearLayout(this);
         info.setOrientation(LinearLayout.VERTICAL);
         info.setPadding(dp(14), 0, dp(4), 0);
@@ -412,6 +454,13 @@ public final class MainActivity extends Activity {
         name.setMaxLines(2);
         name.setEllipsize(TextUtils.TruncateAt.END);
         info.addView(name);
+        TextView about = Ui.small(this, "");   // the version and publisher from the .nup; its icon goes in the tile
+        about.setVisibility(View.GONE);
+        info.addView(about);
+        GameMeta.load(new File(g.gameDir), m -> {
+            if (m.icon != null) Ui.tileIcon(tile, m.icon);
+            if (m.line() != null) { about.setText(m.line()); about.setVisibility(View.VISIBLE); }
+        });
         boolean other = Profile.of(g.titleId) == null;   // no profile in this APK: it cannot run here (Profile.missing says why)
         TextView st = other ? Ui.status(this, "Not in this app version", R.color.bn_danger) : Ui.status(this, "Checking…", R.color.bn_text_2);
         LinearLayout.LayoutParams sp = Ui.wrap();
@@ -539,6 +588,7 @@ public final class MainActivity extends Activity {
             Boolean ok = null;
             if (problem == null) try { ok = PackCheck.code(this, Pack.read(new File(g.packDir)), new File(g.gameDir)); } catch (IOException e) { ok = null; }
             Boolean code = ok;
+            boolean own = Boolean.FALSE.equals(ok) && Ondevice.ownPack(new File(g.gameDir), new File(g.packDir), g.titleId);   // the app's own pack, its code from older tools
             runOnUiThread(() -> {
                 if (info.getParent() == null) return;
                 // An APK update's new shaders: made in the background with no question when the pack's older library is one the delta manifest knows (Ondevice.autoUpdate)
@@ -579,6 +629,15 @@ public final class MainActivity extends Activity {
                     play.setOnClickListener(v -> { if (!needAccess(new File(g.gameDir))) Ondevice.prepare(this, new File(g.gameDir), false); });
                 }
                 if (!Boolean.FALSE.equals(code)) return;
+                // The app's own pack whose code older tools made (an APK update changed the rewriter or the profile's patches): updated in the background, no question;
+                // the card says so like a shader update. Play stays on: the new code is swapped in only when the rewrite is complete
+                if (own) {
+                    if (Ondevice.autoCodeUpdate(this, new File(g.gameDir), new File(g.packDir))) {
+                        Ui.status(st, "Ready · updating game code", R.color.bn_leaf);
+                        updating.put(st, g); updateTick();
+                    } else Ui.status(st, "Ready · game code update waits", R.color.bn_leaf);   // a game or another job runs (or it was tried this run): the next check starts it
+                    return;   // the app's own pack: no "other tools" chip
+                }
                 // A pack whose code other tools made: a small chip; its tap says what that means
                 TextView n = Ui.warnChip(this, "Pack from other tools", "Pack from other tools",
                         "This game's pack was made by other tools than this app's. It usually still runs. If the game misbehaves, ⋯ › Prepare again remakes it from your dump.");
@@ -1214,16 +1273,37 @@ public final class MainActivity extends Activity {
         shareLog(log);
     }
 
-    /** One log file (ExitWatch's notice: the log of the run that ended) */
-    void shareLog(File log) {
+    /** One log file */
+    void shareLog(File log) { shareLog(log, null); }
+
+    /** One log file, with its digest beside it when there is one (ExitWatch's notice: the log of the run that ended and LogDigest's text of it) */
+    void shareLog(File log, File digest) {
         Uri uri = LogProvider.uri(log);
-        Intent send = new Intent(Intent.ACTION_SEND).setType("text/plain").putExtra(Intent.EXTRA_STREAM, uri).putExtra(Intent.EXTRA_SUBJECT, "nxnative log " + log.getName());
-        send.setClipData(ClipData.newRawUri(log.getName(), uri));
+        Intent send;
+        if (digest == null) send = new Intent(Intent.ACTION_SEND).setType("text/plain").putExtra(Intent.EXTRA_STREAM, uri);
+        else {
+            Uri du = LogProvider.uri(digest);
+            send = new Intent(Intent.ACTION_SEND_MULTIPLE).setType("text/plain").putParcelableArrayListExtra(Intent.EXTRA_STREAM, new ArrayList<>(List.of(uri, du)));
+        }
+        send.putExtra(Intent.EXTRA_SUBJECT, "nxnative log " + log.getName());
+        ClipData clip = ClipData.newRawUri(log.getName(), uri);
+        if (digest != null) clip.addItem(new ClipData.Item(LogProvider.uri(digest)));
+        send.setClipData(clip);
         send.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION);
         startActivity(Intent.createChooser(send, "Share " + log.getName()));
+    }
+
+    /** A web page (a rule's doc from ExitWatch's notice) in the phone's browser */
+    void openLink(String url) {
+        try { startActivity(new Intent(Intent.ACTION_VIEW, Uri.parse(url))); }
+        catch (android.content.ActivityNotFoundException e) { error("No app can open " + url); }
     }
 
     void error(String msg) { new AlertDialog.Builder(this).setMessage(msg).setPositiveButton("OK", null).show(); }
 
     private static String touchLabel(int m) { return m == TouchControls.MODE_AUTO ? "Auto: hidden while a controller is connected" : TouchControls.MODE_NAMES[m]; }
+    /** A default's choice in Settings (no "Default" entry: this is the default) */
+    private void pick(String title, String[] items, int cur, java.util.function.IntConsumer set) {
+        new AlertDialog.Builder(this).setTitle(title).setSingleChoiceItems(items, cur, (d, w) -> { set.accept(w); refreshSettings(); d.dismiss(); }).setNegativeButton("Cancel", null).show();
+    }
 }

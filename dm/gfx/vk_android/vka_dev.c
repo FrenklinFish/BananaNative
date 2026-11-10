@@ -8,6 +8,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
+#include "vka_fd_alias.h"
 
 // One placed map of a 64 KiB host-visible allocation at an address reserved for it (vka_dev.c, unadvertised placed maps): 1 when the driver maps it exactly there and
 // the memory reads back what was written through it
@@ -51,6 +52,38 @@ uint32_t vka_mem_type(uint32_t bits, VkMemoryPropertyFlags want, VkMemoryPropert
 static int has_ext(const VkExtensionProperties *e, uint32_t n, const char *name) { for (uint32_t i = 0; i < n; i++) if (!strcmp(e[i].extensionName, name)) return 1; return 0; }
 
 static void *completion_main(void *arg);
+// ---------- The host's floating-point environment (vka_fpenv.h) ----------
+int vka_fp_guest(void) {
+    static _Atomic int v = -1;
+    int g = atomic_load_explicit(&v, memory_order_relaxed);
+    if (g < 0) {
+        g = vka_fp_guest_env(getenv("DM_VK_GUEST_FPCR"));
+        if (atomic_exchange(&v, g) < 0 && g) VLOG("DM_VK_GUEST_FPCR=1: the replay's threads and the driver's compiles keep the FPCR they inherit from the game; the pipeline cache keeps no file");
+    }
+    return g;
+}
+uint64_t vka_fp_host(const char *who) {
+    uint64_t was = vka_fp_enter(vka_fp_guest());
+    static _Atomic int n;
+    if (who && was != VKA_HOST_FPCR && atomic_fetch_add(&n, 1) < 8)
+        VLOG("%s: started with the game's FPCR %#llx%s", who, (unsigned long long)was, vka_fp_guest() ? ", kept (DM_VK_GUEST_FPCR=1)" : ", the host's (0) set");
+    return was;
+}
+// The calls of vk.* that compile go through these, so they compile with the host's FPCR on whatever thread calls them (the replay, presents, the NaN scan, NDSR,
+// a replay run inline on the game's thread), and the caller's FPCR is put back afterwards
+static PFN_vkCreateShaderModule g_csm; static PFN_vkCreateGraphicsPipelines g_cgp; static PFN_vkCreateComputePipelines g_ccp;
+static VkResult VKAPI_CALL fp_csm(VkDevice d, const VkShaderModuleCreateInfo *ci, const VkAllocationCallbacks *a, VkShaderModule *m) {
+    uint64_t f = vka_fp_host(NULL); VkResult r = g_csm(d, ci, a, m); vka_fp_back(f); return r; }
+static VkResult VKAPI_CALL fp_cgp(VkDevice d, VkPipelineCache c, uint32_t n, const VkGraphicsPipelineCreateInfo *ci, const VkAllocationCallbacks *a, VkPipeline *p) {
+    uint64_t f = vka_fp_host(NULL); VkResult r = g_cgp(d, c, n, ci, a, p); vka_fp_back(f); return r; }
+static VkResult VKAPI_CALL fp_ccp(VkDevice d, VkPipelineCache c, uint32_t n, const VkComputePipelineCreateInfo *ci, const VkAllocationCallbacks *a, VkPipeline *p) {
+    uint64_t f = vka_fp_host(NULL); VkResult r = g_ccp(d, c, n, ci, a, p); vka_fp_back(f); return r; }
+static void fp_wrap_compiles(void) {
+    if (vka_fp_guest()) return;
+    if ((g_csm = vk.vkCreateShaderModule)) vk.vkCreateShaderModule = fp_csm;
+    if ((g_cgp = vk.vkCreateGraphicsPipelines)) vk.vkCreateGraphicsPipelines = fp_cgp;
+    if ((g_ccp = vk.vkCreateComputePipelines)) vk.vkCreateComputePipelines = fp_ccp;
+}
 static int init_once(void) {
     void *lib = vka_driver_open();   // DM_VK_DRIVER: a custom driver through libadrenotools (vka_driver.c); NULL = the system's
     if (!lib) lib = dlopen("libvulkan.so", RTLD_NOW | RTLD_LOCAL);
@@ -102,7 +135,7 @@ static int init_once(void) {
 
     uint32_t nde = 0; vk.vkEnumerateDeviceExtensionProperties(V.pd, NULL, &nde, NULL);
     VkExtensionProperties *de = calloc(nde ? nde : 1, sizeof *de); vk.vkEnumerateDeviceExtensionProperties(V.pd, NULL, &nde, de);
-    const char *dext[16]; uint32_t ndext = 0;
+    const char *dext[24]; uint32_t ndext = 0;
     { char q[700]; size_t qn = 0; q[0] = 0;   // the vendor's own extensions (tile properties, render pass transforms ...): what a tiler-specific path could use
       for (uint32_t i = 0; i < nde && qn < sizeof q; i++) if (strstr(de[i].extensionName, "_QCOM_")) qn += (size_t)snprintf(q + qn, sizeof q - qn, " %s", de[i].extensionName + 3);
       if (qn) VLOG("device extensions of the vendor:%s", q); }
@@ -111,6 +144,8 @@ static int init_once(void) {
     if (swap) dext[ndext++] = VK_KHR_SWAPCHAIN_EXTENSION_NAME;
     if (map2) dext[ndext++] = VK_KHR_MAP_MEMORY_2_EXTENSION_NAME;
     if (placed) dext[ndext++] = VK_EXT_MAP_MEMORY_PLACED_EXTENSION_NAME;
+    int x_fd = has_ext(de, nde, VK_KHR_EXTERNAL_MEMORY_FD_EXTENSION_NAME);
+    if (x_fd) dext[ndext++] = VK_KHR_EXTERNAL_MEMORY_FD_EXTENSION_NAME;
     if (V.display_timing) dext[ndext++] = VK_GOOGLE_DISPLAY_TIMING_EXTENSION_NAME;
     // The draw path (vka_draw.c): each one optional, with a fallback when absent
     int x_push = has_ext(de, nde, VK_KHR_PUSH_DESCRIPTOR_EXTENSION_NAME), x_vin = has_ext(de, nde, VK_EXT_VERTEX_INPUT_DYNAMIC_STATE_EXTENSION_NAME);
@@ -173,6 +208,7 @@ static int init_once(void) {
 #define D(f) vk.f = (PFN_##f)vk.vkGetDeviceProcAddr(V.dev, #f);
     VKA_DEVICE_FNS(D)
 #undef D
+    fp_wrap_compiles();
     if (!vk.vkMapMemory2KHR) vk.vkMapMemory2KHR = (PFN_vkMapMemory2KHR)vk.vkGetDeviceProcAddr(V.dev, "vkMapMemory2");   // core in 1.4
     if (!vk.vkUnmapMemory2KHR) vk.vkUnmapMemory2KHR = (PFN_vkUnmapMemory2KHR)vk.vkGetDeviceProcAddr(V.dev, "vkUnmapMemory2");
     if (!vk.vkMapMemory2KHR || !vk.vkUnmapMemory2KHR) V.placed = V.placed_range = 0;
@@ -182,6 +218,10 @@ static int init_once(void) {
     if (!V.placed && vk.vkMapMemory2KHR && vk.vkUnmapMemory2KHR) {
         const char *e = getenv("DM_VK_PLACED_PROBE");
         if (!e || strcmp(e, "0")) V.placed = vka_placed_probe();
+    }
+    if (!V.placed && x_fd && vka_fd_enabled()) {
+        char why[160]; V.fd_alias = vka_fd_probe(&vk, V.pd, V.dev, &V.memp, V.bda, why, sizeof why);
+        VLOG("exported guest memory alias: %s (%s; DM_VK_FD_ALIAS=0: off)", V.fd_alias ? "on" : "unavailable", why);
     }
     vk.vkGetDeviceQueue(V.dev, V.qf, 0, &V.q);
     if (x_ph && fph.queuePerfHint) V.perf_hint = (void *)vk.vkGetDeviceProcAddr(V.dev, "vkQueueSetPerfHintQCOM");
@@ -251,7 +291,7 @@ static int init_once(void) {
          "uniform alignment %llu (range %llu), storage alignment %llu, subgroups %u (%u-%u)",
          V.push_desc ? "yes" : "no", V.max_push, V.vin_dyn ? "yes" : "no", V.null_desc ? "yes" : "no", V.idx8 ? "yes" : "no", V.divisor ? "yes" : "no", V.logic_op ? "yes" : "no",
          V.dual_src ? "yes" : "no", V.geom ? "yes" : "no", V.tess ? "yes" : "no", (unsigned long long)V.ub_align, (unsigned long long)V.ub_range, (unsigned long long)V.sb_align, V.subgroup_size, V.subgroup_min, V.subgroup_max);
-    if (!V.placed) VRED("no VK_EXT_map_memory_placed: guest memory stays anonymous and the GPU sees no memory pool");
+    if (!V.placed && !V.fd_alias) VRED("no placed maps or exported guest memory alias: guest memory stays anonymous and the GPU sees no memory pool");
     if (!swap) VRED("no VK_KHR_swapchain: nothing is presented");
     vka_present_init();
     return 1;
@@ -259,13 +299,27 @@ static int init_once(void) {
 int vka_init(void) {
     if (__atomic_load_n(&g_state, __ATOMIC_ACQUIRE)) return g_state > 0;
     pthread_mutex_lock(&g_init_mu);
-    if (!g_state) __atomic_store_n(&g_state, init_once() ? 1 : -1, __ATOMIC_RELEASE);
+    // With the host's FPCR: the driver compiles at device creation, and the threads it makes here inherit this thread's FPCR (often a game thread's)
+    if (!g_state) { uint64_t f = vka_fp_host(NULL); __atomic_store_n(&g_state, init_once() ? 1 : -1, __ATOMIC_RELEASE); vka_fp_back(f); }
     pthread_mutex_unlock(&g_init_mu);
     return g_state > 0;
 }
 int vka_ok(void) { return __atomic_load_n(&g_state, __ATOMIC_ACQUIRE) > 0; }
 
+static VkResult submit_x(VkCommandBuffer cb, uint64_t signal, uint32_t nwait, const VkSemaphore *wait, const uint64_t *wait_vals, const VkPipelineStageFlags *stages, VkSemaphore bin_signal, VkFence fence);
+// Every vka_submit's time waiting for the queue's lock and in the driver's vkQueueSubmit, and the calls (cumulative; the pace cost line, vka_perf.c)
+static _Atomic uint64_t g_qs_lock_ns, g_qs_call_ns, g_qs_n;
+void vka_submit_stats(uint64_t *lock_ns, uint64_t *call_ns, uint64_t *n) { *lock_ns = g_qs_lock_ns; *call_ns = g_qs_call_ns; *n = g_qs_n; }
+// Who else holds the queue lock, and for how long (the pace cost line): the present's submission and vkQueuePresentKHR, and the GPU clock floor
+static _Atomic uint64_t g_qh_ns[4];
+void vka_qhold_add(int k, uint64_t ns) { g_qh_ns[k & 3] += ns; }
+void vka_qhold_stats(uint64_t *v) { for (int i = 0; i < 4; i++) v[i] = g_qh_ns[i]; }
 VkResult vka_submit(VkCommandBuffer cb, uint64_t signal, uint32_t nwait, const VkSemaphore *wait, const uint64_t *wait_vals, const VkPipelineStageFlags *stages, VkSemaphore bin_signal) {
+    return submit_x(cb, signal, nwait, wait, wait_vals, stages, bin_signal, VK_NULL_HANDLE);
+}
+// A submission with a fence of its own (vka_exec.c: a commit no timeline value signals yet, whose command buffer slot is reused once that fence is reached)
+VkResult vka_submit_fence(VkCommandBuffer cb, uint64_t signal, VkFence fence) { return submit_x(cb, signal, 0, NULL, NULL, NULL, VK_NULL_HANDLE, fence); }
+static VkResult submit_x(VkCommandBuffer cb, uint64_t signal, uint32_t nwait, const VkSemaphore *wait, const uint64_t *wait_vals, const VkPipelineStageFlags *stages, VkSemaphore bin_signal, VkFence fence) {
     VkSemaphore sig[2]; uint64_t sv[2]; uint32_t ns = 0;
     if (signal) { sig[ns] = V.tl; sv[ns++] = signal; }
     if (bin_signal) { sig[ns] = bin_signal; sv[ns++] = 0; }
@@ -273,12 +327,15 @@ VkResult vka_submit(VkCommandBuffer cb, uint64_t signal, uint32_t nwait, const V
     VkSemaphore ws[9]; uint64_t wv[9]; VkPipelineStageFlags wst[9];
     if (nwait > 8) { VRED_ONCE("vka_submit: %u waits, at most 8 taken: the rest are dropped", nwait); nwait = 8; }
     for (uint32_t i = 0; i < nwait; i++) { ws[i] = wait[i]; wv[i] = wait_vals[i]; wst[i] = stages[i]; }
+    uint64_t t0 = now_ns();
     pthread_mutex_lock(&V.qmu);
+    uint64_t t1 = now_ns();
     vks_queue_locked(&nwait, ws, wv, wst);
     VkTimelineSemaphoreSubmitInfo ti = {VK_STRUCTURE_TYPE_TIMELINE_SEMAPHORE_SUBMIT_INFO, .waitSemaphoreValueCount = nwait, .pWaitSemaphoreValues = wv, .signalSemaphoreValueCount = ns, .pSignalSemaphoreValues = sv};
     VkSubmitInfo si = {VK_STRUCTURE_TYPE_SUBMIT_INFO, .pNext = &ti, .waitSemaphoreCount = nwait, .pWaitSemaphores = ws, .pWaitDstStageMask = wst,
                        .commandBufferCount = cb ? 1 : 0, .pCommandBuffers = &cb, .signalSemaphoreCount = ns, .pSignalSemaphores = sig};
-    VkResult r = vka_hung() ? VK_ERROR_DEVICE_LOST : vk.vkQueueSubmit(V.q, 1, &si, VK_NULL_HANDLE);
+    VkResult r = vka_hung() ? VK_ERROR_DEVICE_LOST : vk.vkQueueSubmit(V.q, 1, &si, fence);
+    g_qs_lock_ns += t1 - t0; g_qs_call_ns += now_ns() - t1; g_qs_n++;
     if (!r && signal > V.tl_queued) __atomic_store_n(&V.tl_queued, signal, __ATOMIC_RELEASE);
     pthread_mutex_unlock(&V.qmu);
     return r;
@@ -327,6 +384,7 @@ uint64_t vka_done(void) { return __atomic_load_n(&g_done, __ATOMIC_ACQUIRE); }
 int vka_wait_done(uint64_t fence, uint64_t timeout_ns) {
     if (vka_done() >= fence) return 1;
     if (!timeout_ns) return 0;
+    vka_worker_cpu_wait(fence);   // a queue the replay parked at a GPU wait (vka_qsched.h) goes on now if it holds this fence back
     struct timespec dl; clock_gettime(CLOCK_REALTIME, &dl);
     uint64_t ns = (uint64_t)dl.tv_nsec + (timeout_ns > 3600000000000ull ? 3600000000000ull : timeout_ns);
     dl.tv_sec += (time_t)(ns / 1000000000ull); dl.tv_nsec = (long)(ns % 1000000000ull);
@@ -364,8 +422,21 @@ static void hang_declare(uint64_t want, uint64_t at, double s, const char *what)
     pthread_t th; if (!pthread_create(&th, NULL, hang_exit_main, NULL)) pthread_detach(th);
 }
 
+// A host wait for the timeline. Test switch DM_VK_TL_POLL=1 (live): it reads the counter every 0.25 ms instead of blocking in vkWaitSemaphores (does a driver's
+// blocking wait hold its submissions back? Turnip v32 on KGSL, Ocarina of Time's note)
+VkResult vka_tl_wait(VkSemaphore s, uint64_t v, uint64_t timeout_ns) {
+    if (!VKA_ENV("DM_VK_TL_POLL", 0)) { VkSemaphoreWaitInfo wi = {VK_STRUCTURE_TYPE_SEMAPHORE_WAIT_INFO, .semaphoreCount = 1, .pSemaphores = &s, .pValues = &v}; return vk.vkWaitSemaphores(V.dev, &wi, timeout_ns); }
+    uint64_t end = now_ns() + timeout_ns;
+    for (;;) {
+        uint64_t c = 0; VkResult r = vk.vkGetSemaphoreCounterValue(V.dev, s, &c);
+        if (r) return r;
+        if (c >= v) return VK_SUCCESS;
+        if (now_ns() >= end) return VK_TIMEOUT;
+        struct timespec ts = {0, 250000}; nanosleep(&ts, NULL);
+    }
+}
 static void *completion_main(void *arg) {
-    (void)arg; pthread_setname_np(pthread_self(), "vk-complete"); void vka_perf_thread(int nice); vka_perf_thread(-8);   // vka_perf.c
+    (void)arg; pthread_setname_np(pthread_self(), "vk-complete"); vka_fp_host("vk-complete"); void vka_perf_thread(int nice); vka_perf_thread(-8);   // vka_perf.c
     uint64_t stall_t0 = 0, stall_at = 0; int stall_logged = 0;
     for (;;) {
         pthread_mutex_lock(&g_fmu);
@@ -376,8 +447,7 @@ static void *completion_main(void *arg) {
         uint64_t sub = g_submitted, done = g_done, want = VKA_ENV("DM_VK_DONE_LAST", 0) ? sub : done + 1; pthread_mutex_unlock(&g_fmu);
         uint64_t v = 0;
         if (!vka_hung()) {
-            VkSemaphoreWaitInfo wi = {VK_STRUCTURE_TYPE_SEMAPHORE_WAIT_INFO, .semaphoreCount = 1, .pSemaphores = &V.tl, .pValues = &want};
-            VkResult r = vk.vkWaitSemaphores(V.dev, &wi, 500000000ull);
+            VkResult r = vka_tl_wait(V.tl, want, 500000000ull);
             vk.vkGetSemaphoreCounterValue(V.dev, V.tl, &v);
             uint64_t t = now_ns();
             if (r == VK_TIMEOUT && v <= done) {   // no progress in this wait
@@ -426,7 +496,8 @@ static uint64_t up_done(void) {   // the upload timeline's value (every batch co
 static int sblk_idle(const sblk *b, uint64_t done, uint64_t udone) { return b->fence <= (b->up ? udone : done); }
 static sblk *sblk_new(VkDeviceSize n) {
     sblk *b = calloc(1, sizeof *b); b->size = n;
-    VkBufferCreateInfo bi = {VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO, .size = n, .usage = VK_BUFFER_USAGE_TRANSFER_SRC_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT | VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT | VK_BUFFER_USAGE_STORAGE_BUFFER_BIT};
+    VkBufferCreateInfo bi = {VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO, .size = n, .usage = VK_BUFFER_USAGE_TRANSFER_SRC_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT | VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT | VK_BUFFER_USAGE_STORAGE_BUFFER_BIT |
+                                                                         VK_BUFFER_USAGE_INDIRECT_BUFFER_BIT};   // indirect: the {count, 1, 1} copies of indirect mesh draws (vka_exec.c mdx_copy)
     if (vk.vkCreateBuffer(V.dev, &bi, NULL, &b->buf)) { free(b); return NULL; }
     VkMemoryRequirements mr; vk.vkGetBufferMemoryRequirements(V.dev, b->buf, &mr);
     uint32_t t = vka_mem_type(mr.memoryTypeBits, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT | VK_MEMORY_PROPERTY_HOST_CACHED_BIT, 0);
@@ -757,7 +828,7 @@ const char *vka_floor_state(int *pct, int *res) {
 static void floor_set_(int s, int tail, int again) {   // again: send it even if unchanged (the KGSL rule, see kg_apply)
     static _Atomic int cur = -1;
     if (!tail && !again && atomic_load(&cur) == s) return;
-    pthread_mutex_lock(&V.qmu);
+    pthread_mutex_lock(&V.qmu); uint64_t th = now_ns();
     if (tail) s = atomic_load(&g_tail_n) > 0 ? s : 0;
     if (!again && atomic_load(&cur) == s) { pthread_mutex_unlock(&V.qmu); return; }
     VkResult r;
@@ -766,6 +837,7 @@ static void floor_set_(int s, int tail, int again) {   // again: send it even if
         r = ((VkResult (*)(VkQueue, const void *))V.perf_hint)(V.q, &h);
     } else r = kg_apply(s);
     int was = atomic_exchange(&cur, s); atomic_store(&g_floor_cur, s); atomic_store(&g_floor_res, (int)r);
+    vka_qhold_add(2, now_ns() - th);
     pthread_mutex_unlock(&V.qmu);
     if (was < 0 || (was != s && VKA_ENV("DM_VK_GPU_FLOOR_LOG", 0) > 1)) VLOG("GPU clock floor%s: %d %% (%s): %d", V.perf_hint ? "" : " (KGSL)", s, s >= 100 ? "highest" : s ? "scaled" : "default governor", r);
 }

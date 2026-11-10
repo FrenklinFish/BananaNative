@@ -22,13 +22,15 @@ final class Profile {
     String resolution = "";   // what Game resolution sets (build.gradle resolutionOf): "window", "scale:<choice>=<scale>/<console|handheld>,…" or "" (nothing: not offered)
     String gpuTs = "submission";   // game.tsv gpu_timestamps (build.gradle gpuTsOf): "segment" or "submission", what the host does without DM_NVN_GPU_TS (Game settings › GPU timing)
     String window = "";   // game.tsv android_window (build.gradle windowOf): the default Game resolution when the player chose none (Prefs.gameWindow), "" for the main screen's
+    boolean drs;   // game.tsv has drs_ctl rows (build.gradle drsOf): the host can steer the game's dynamic resolution (Prefs.drsGame)
+    boolean decoupled;   // game.tsv has fps_decouple rows (build.gradle decoupleOf): the game's speed follows its measured frame rate, so it gets a frame limit (Prefs.paced)
     String romfsChecks = "";   // game.tsv romfs_check rows (build.gradle romfsChecksOf): "<path>|<line>|<expected or main>", ';' between them (RomfsCheck)
 
     /** Whether Game resolution does something for this game (its profile has window_fn, res_levels or graphics_scale rows) */
     boolean hasResolution() { return resolution.equals("window") || resolution.startsWith("scale:"); }
 
     /**
-     * The host's environment lines for a Game resolution choice (Prefs.WINDOWS: "original", "2560x1440", "1920x1080", "1280x720", "960x540"): DM_WINDOW_SIZE=&lt;choice&gt; for a game with
+     * The host's environment lines for a Game resolution choice (Prefs.WINDOWS: "original", "2560x1440", "1920x1080", "1280x720", "960x540", "848x480"): DM_WINDOW_SIZE=&lt;choice&gt; for a game with
      * window_fn rows (its window size) or res_levels rows (a cap on its dynamic resolution); DM_GRAPHICS_SCALE and DM_OPMODE from the choice's graphics_scale row for a game that sizes its scenes by the graphics scale (none for a choice
      * without a row: the game's own); none for a game with neither.
      */
@@ -75,6 +77,8 @@ final class Profile {
             p.romfsChecks = c.length > 10 ? c[10] : "";
             if (c.length > 11 && !c[11].isEmpty()) p.gpuTs = c[11];
             p.window = c.length > 12 ? c[12] : "";
+            p.decoupled = c.length > 13 && c[13].equals("1");
+            p.drs = c.length > 14 && c[14].equals("1");
             out.add(p);
         }
         return Collections.unmodifiableList(out);

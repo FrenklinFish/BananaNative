@@ -125,6 +125,9 @@ final class Native {
     /** The player a gamepad drives (0..7), -1 when it has none (yet). */
     static native int devicePlayer(int device);
 
+    /** The gamepad becomes player 1 (PadOrder); player 1's device moves to its old player. 0, or -1 (every player taken, or not in this host). */
+    static native int deviceFirst(int device, String name);
+
     /** Rumble (Rumble.java): the listener's onRumble(player, intensity, sharpness) gets every change of a player's vibration; set once, before start. False without rumble in this host. */
     static native boolean setRumbleListener(Object listener);
 
@@ -133,4 +136,8 @@ final class Native {
 
     /** Places the replay thread on the phone's fastest cores and the encoder and the game's threads off the small ones (nxlaunch.c); the number placed by this call, -1 when the phone reports no clocks */
     static native int pinThreads();
+    /** The frame limit while the game runs (games whose speed follows the measured rate: Prefs.paced); 0 = none */
+    static native void fpsLimitSet(int fps);
+    /** Donkey Kong Bananza's dynamic resolution range while it runs, % of the window (probe.c nxhost_drs_set); 100, 100 = off (the native size) */
+    static native void drsSet(int minPct, int maxPct);
 }

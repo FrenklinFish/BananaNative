@@ -25,12 +25,12 @@ final class Prefs {
     static boolean overlayItem(Context c, String key) { return of(c).getBoolean("overlay_" + key, true); }
     static void overlayItem(Context c, String key, boolean on) { of(c).edit().putBoolean("overlay_" + key, on).commit(); }
 
-    /** The game's window size (Game resolution): DM_WINDOW_SIZE for the host (loader.c window_apply), "1920x1080" (Phone 1080p, the default), "original" (the game's own, 2880x1620 in Donkey Kong Bananza), "1280x720" (Phone 720p: less GPU time a frame), "2560x1440" (Phone 1440p: for QHD screens) or "960x540" (Phone 540p: for weaker GPUs). DM_WINDOW_SIZE in env.txt overrides it for a run.
+    /** The game's window size (Game resolution): DM_WINDOW_SIZE for the host (loader.c window_apply), "1920x1080" (Phone 1080p, the default), "original" (the game's own, 2880x1620 in Donkey Kong Bananza), "1280x720" (Phone 720p: less GPU time a frame), "2560x1440" (Phone 1440p: for QHD screens), "960x540" (Phone 540p: for weaker GPUs) or "848x480" (Phone 480p). DM_WINDOW_SIZE in env.txt overrides it for a run.
      *  A game whose profile has graphics_scale rows gets the graphics scale and operation mode that give the size instead (Profile.resolutionEnv).
      *  Listed from the largest. The stored value is the size itself, so the order can change; the default is WINDOW_DEFAULT. */
-    static final String[] WINDOWS = {"original", "2560x1440", "1920x1080", "1280x720", "960x540"},
-            WINDOW_NAMES = {"Original (the game's own size)", "Phone 1440p (2560x1440)", "Phone 1080p (1920x1080)", "Phone 720p (1280x720)", "Phone 540p (960x540)"},
-            WINDOW_SHORT = {"Original", "1440p", "1080p", "720p", "540p"};
+    static final String[] WINDOWS = {"original", "2560x1440", "1920x1080", "1280x720", "960x540", "848x480"},
+            WINDOW_NAMES = {"Original (the game's own size)", "Phone 1440p (2560x1440)", "Phone 1080p (1920x1080)", "Phone 720p (1280x720)", "Phone 540p (960x540)", "Phone 480p (848x480)"},
+            WINDOW_SHORT = {"Original", "1440p", "1080p", "720p", "540p", "480p"};
     static final String WINDOW_DEFAULT = "1920x1080";   // Phone 1080p
     /** A window size's name in the lists, its short name for a settings row (short); the value itself when it is none of WINDOWS (an env.txt-style size) */
     static String windowName(String v, boolean shortName) {
@@ -65,6 +65,10 @@ final class Prefs {
         if (v == null) of(c).edit().remove(gameKey("xbox_buttons", titleId)).commit(); else of(c).edit().putInt(gameKey("xbox_buttons", titleId), v).commit();
     }
     static String xboxLabel(int v) { return XBOX_NAMES[v]; }
+    /** The in-game panel's Player 1 (PadOrder): the chosen gamepad's InputDevice descriptor, for every game; "" = automatic */
+    static String padFirst(Context c) { return of(c).getString("pad_first", ""); }
+    static void padFirst(Context c, String key) { of(c).edit().putString("pad_first", key == null ? "" : key).commit(); }
+
     /** Button mapping (PadMap, DM_PAD_MAP): Settings' default ("" = none: the host's default), then each game's own (unset = Settings'; "" = none for this game) */
     static String padMap(Context c) { return of(c).getString("pad_map", ""); }
     static void padMapDefault(Context c, String spec) { of(c).edit().putString("pad_map", spec == null ? "" : spec).commit(); }
@@ -86,6 +90,36 @@ final class Prefs {
     static void panelSize(Context c, int v) { of(c).edit().putInt("panel_size", PanelLook.of(v)).commit(); }
     static int panelText(Context c) { return PanelLook.of(of(c).getInt("panel_text", PanelLook.NORMAL)); }
     static void panelText(Context c, int v) { of(c).edit().putInt("panel_text", PanelLook.of(v)).commit(); }
+    /** Games whose speed follows the measured frame rate (their profile has fps_decouple rows: the host's sead_decouple) get a frame limit instead of 60 / 30 / 20 locking.
+     *  The limit is one of PACE_CAPS: 0 = 60 fps (the game's fastest rate, where the measured rate is clamped), or at most that many frames a second (paceOf) */
+    static final int[] PACE_CAPS = {0, 45, 40, 30};
+    static boolean paced(String titleId) { Profile p = Profile.of(titleId); return p != null && p.decoupled; }
+    static int paceOf(int v) { return v <= 0 || v >= 60 ? 0 : v >= 45 ? 45 : v >= 40 ? 40 : 30; }
+    static String paceLabel(int v) { return (v <= 0 ? 60 : v) + " fps"; }   // 0 is 60: the game's own fastest rate, where the decoupling's rate is clamped
+    /** A paced game's cap as saved, without capOf (which turns 45 and 40 into 30 for the other games): its own, else the default, as one of PACE_CAPS */
+    static int paceCap(Context c, String titleId) { return paceOf(of(c).getInt(gameKey("fps_cap", titleId), of(c).getInt("fps_cap", -1))); }
+    /** Game settings › Reset to defaults: every choice of the game's own back to the main screen's default (Extra environment's lines stay) */
+    static final String[] GAME_SETTINGS = {"window", "fps_cap", "gpu_driver", "gpu_ts", "pause_return", "ndsr_choice2", "ndsr_sharp", "drs2", "ram_saver"};
+    static void resetGame(Context c, String titleId) {
+        SharedPreferences.Editor e = of(c).edit();
+        for (String k : GAME_SETTINGS) e.remove(gameKey(k, titleId));
+        e.commit();
+    }
+
+    /** Dynamic resolution, for games whose profile has drs_ctl rows (the host steers them: probe.c drs_install): the range the render size moves in, as % of the window,
+     *  always up to 100 %; {100, 100} is off: the full size and no upscaling. Stored as an index into DRS, the main screen's default then each game's own */
+    static boolean drsGame(String titleId) { Profile p = Profile.of(titleId); return p != null && p.drs; }
+    static final int[][] DRS = {{100, 100}, {80, 100}, {70, 100}, {60, 100}, {50, 100}, {40, 100}, {30, 100}};   // 30 %: the game's rate table stops at 3x (640x360 at 1080p)
+    static final String[] DRS_NAMES = {"Off", "80%", "70%", "60%", "50%", "40%", "30%"};   // the lowest render size, as % of the window (always up to 100 %)
+    static final int DRS_DEFAULT = 5;   // 40-100 %
+    static int drs(Context c) { int v = of(c).getInt("drs2", DRS_DEFAULT); return v >= 0 && v < DRS.length ? v : DRS_DEFAULT; }
+    static void drsDefault(Context c, int v) { of(c).edit().putInt("drs2", v).commit(); }
+    static boolean ownDrs(Context c, String titleId) { return of(c).contains(gameKey("drs2", titleId)); }
+    static int drs(Context c, String titleId) { int v = of(c).getInt(gameKey("drs2", titleId), drs(c)); return v >= 0 && v < DRS.length ? v : drs(c); }
+    /** null removes the game's own choice */
+    static void drs(Context c, String titleId, Integer v) {
+        if (v == null) of(c).edit().remove(gameKey("drs2", titleId)).commit(); else of(c).edit().putInt(gameKey("drs2", titleId), v).commit();
+    }
 
     /** The game's window size: its own choice, else the default (defaultWindow) */
     static String gameWindow(Context c, String titleId) { return of(c).getString(gameKey("window", titleId), defaultWindow(c, titleId)); }
@@ -136,6 +170,17 @@ final class Prefs {
     /** Game settings › Instanced draws (DM_VK_INSTANCE): runs of draws that repeat one mesh drawn as one instanced draw. Off by default (a GPU loss on Adreno 830 with Turnip, open) */
     static boolean instancedDraws(Context c, String titleId) { return of(c).getBoolean(gameKey("vk_instance", titleId), false); }
     static void instancedDraws(Context c, String titleId, boolean on) { of(c).edit().putBoolean(gameKey("vk_instance", titleId), on).commit(); }
+    /** Game settings › Background pipelines (DM_VK_PSO_ASYNC): a pipeline the cache doesn't have yet is made on two background threads instead of on the frame,
+     *  so a cold cache gives a short pop-in instead of a freeze (Bananza's heaviest area with an empty cache: worst frame 8.1 s → 3.7 s). On by default */
+    static boolean psoAsync(Context c, String titleId) { return of(c).getBoolean(gameKey("vk_pso_async", titleId), true); }
+    static void psoAsync(Context c, String titleId, boolean on) { of(c).edit().putBoolean(gameKey("vk_pso_async", titleId), on).commit(); }
+    /**
+     * RAM saver (per game, off by default; from Anka Native, NOTICE.md): DM_MEM_FILEBACK=1 with DM_MEM_FILEBACK_KINDS=shader,texture for the host (shader-code pools are
+     * file-backed for every game by default; this adds the texture kind), so the game's large write-once texture pools live in a file in the app's cache folder instead of anonymous memory: clean file pages the kernel drops instead of compressing them into
+     * zram. For phones short of RAM with free storage; it writes the pools' data to storage at each area load. Lines in env.txt or the game's own lines win
+     */
+    static boolean ramSaver(Context c, String titleId) { return of(c).getBoolean(gameKey("ram_saver", titleId), false); }
+    static void ramSaver(Context c, String titleId, boolean on) { of(c).edit().putBoolean(gameKey("ram_saver", titleId), on).commit(); }
     /** Game settings › Classic render passes (DM_VK_CLASSIC_RP): VkRenderPasses with imageless framebuffers instead of dynamic rendering. Off by default (a GPU loss on Adreno 830 with Turnip, open) */
     static boolean classicPasses(Context c, String titleId) { return of(c).getBoolean(gameKey("vk_classic_rp", titleId), false); }
     static void classicPasses(Context c, String titleId, boolean on) { of(c).edit().putBoolean(gameKey("vk_classic_rp", titleId), on).commit(); }
@@ -147,6 +192,11 @@ final class Prefs {
     /** GPU timing (Game settings): "segment" or "submission" passed to the host as DM_NVN_GPU_TS, null for the game's default (its profile's gpu_timestamps) */
     static String gpuTs(Context c, String titleId) { return of(c).getString(gameKey("gpu_ts", titleId), null); }
     static void gpuTs(Context c, String titleId, String mode) { put(c, gameKey("gpu_ts", titleId), mode); }
+
+    /** Whether the launcher takes the adb control commands of the intents that start it (AdbControl: add a game, start Prepare, install or pick a GPU driver, export or
+     *  import a pack; android/TESTING.md): a test build always; a play or release build only while Settings › Help › ADB control (debug) is on, off by default */
+    static boolean adbControl(Context c) { return AdbControl.allowed(BuildConfig.NX_PLAY, of(c).getBoolean("adb_control", false)); }
+    static void adbControl(Context c, boolean on) { of(c).edit().putBoolean("adb_control", on).commit(); }
 
     /** Keep the screen on while a game is prepared (Settings › System, on by default): Home keeps it on while the job runs and its card shows (Ondevice) */
     static boolean keepScreenPreparing(Context c) { return of(c).getBoolean("keep_screen_preparing", true); }

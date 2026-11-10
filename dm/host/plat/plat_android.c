@@ -118,8 +118,27 @@ void *plat_mem_reserve(size_t size) {
         LOG("[RED] guest block: no room at a fixed address below %#llx; the kernel gave %p", GUEST_VA_END, p);
     } else if (at != want) LOG("guest block: %#llx was taken, reserved at %#llx", (unsigned long long)want, (unsigned long long)at);
     if ((uint64_t)(uintptr_t)p + size > GUEST_VA_END) LOG("[RED] guest block %p+%#zx ends above %#llx (the 39-bit user space)", p, size, GUEST_VA_END);
-    prctl(PR_SET_VMA, PR_SET_VMA_ANON_NAME, p, size, "nxnative guest");   // its name in /proc/self/maps (fails quietly where the kernel has no anonymous VMA names)
+    plat_mem_name_guest(p, size);
     return p;
+}
+// Its name in /proc/self/maps (fails quietly where the kernel has no anonymous VMA names). The kernel merges two neighbouring anonymous mappings only when their names are
+// the same, so a fixed map inside the block (guest_release, the Vulkan replay's give-back) is named again: unnamed, every such map stayed a mapping of its own beside the
+// named rest, and the alias region's map and unmap churn left thousands of them (vm.max_map_count, docs/reference/memory.md)
+void plat_mem_name_guest(void *p, size_t n) { prctl(PR_SET_VMA, PR_SET_VMA_ANON_NAME, p, n, "nxnative guest"); }
+// Lines of /proc/self/maps, counted in a stack buffer (no allocation: at the limit malloc may need a new mapping itself); vm.max_map_count read once
+int plat_maps_count(int *max) {
+    static _Atomic int mx;
+    if (max) {
+        int m = atomic_load(&mx);
+        if (!m) { char b[32]; int fd = open("/proc/sys/vm/max_map_count", O_RDONLY | O_CLOEXEC); ssize_t k = fd >= 0 ? read(fd, b, sizeof b - 1) : -1; if (fd >= 0) close(fd);
+                  m = k > 0 ? (b[k] = 0, atoi(b)) : 0; if (m <= 0) m = 65530; atomic_store(&mx, m); }   // (the kernel's default when it cannot be read)
+        *max = m;
+    }
+    int fd = open("/proc/self/maps", O_RDONLY | O_CLOEXEC); if (fd < 0) return -1;
+    char b[16384]; ssize_t k; int n = 0;
+    while ((k = read(fd, b, sizeof b)) > 0) for (ssize_t i = 0; i < k; i++) n += b[i] == '\n';
+    close(fd);
+    return k < 0 ? -1 : n;
 }
 int64_t plat_footprint_bytes(void) {
     char b[128]; int fd = open("/proc/self/statm", O_RDONLY | O_CLOEXEC); if (fd < 0) return -1;

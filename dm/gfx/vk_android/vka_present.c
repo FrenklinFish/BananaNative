@@ -89,6 +89,9 @@ static int rk_load(void) {
 #define ROT_LOAD(f) rk.f = (PFN_##f)vk.vkGetDeviceProcAddr(V.dev, #f); if (!rk.f) { VRED("present: no %s", #f); return ok = 0; }
     ROT_FNS(ROT_LOAD)
 #undef ROT_LOAD
+    // The compiling calls through the replay's table: its wrappers compile with the host's FPCR on any thread, an inline present's on the game's included (vka_dev.c)
+    if (vk.vkCreateShaderModule) rk.vkCreateShaderModule = vk.vkCreateShaderModule;
+    if (vk.vkCreateGraphicsPipelines) rk.vkCreateGraphicsPipelines = vk.vkCreateGraphicsPipelines;
     return ok = 1;
 }
 // The rotated copy's pipeline for a swapchain format (g_rot's layout): blend 0 writes the picture as it is, 1 draws a premultiplied source over the image (the overlay)
@@ -185,7 +188,7 @@ static void rot_copy(VkCommandBuffer cb, unsigned k, uint32_t idx, vka_img *im, 
     };
     VkImageView view = ok ? vka_view(im, raw_unorm_twin(im->f.vk), VK_IMAGE_VIEW_TYPE_2D, VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1, vka_swap_rb() ? &swz_rb : NULL) : VK_NULL_HANDLE;
     if (view) {
-        VkDescriptorImageInfo ii = {g_rot.samp[linear], view, VK_IMAGE_LAYOUT_GENERAL};
+        VkDescriptorImageInfo ii = {g_rot.samp[linear && !VKA_ENV("DM_VK_PRESENT_NEAREST", 0)], view, VK_IMAGE_LAYOUT_GENERAL};   // DM_VK_PRESENT_NEAREST: the launcher's Upscaler, nearest neighbor
         VkWriteDescriptorSet w = {VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, .dstSet = g_rot.set[k], .descriptorCount = 1, .descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, .pImageInfo = &ii};
         vk.vkUpdateDescriptorSets(V.dev, 1, &w, 0, NULL);
         float W = (float)g_ext.width, H = (float)g_ext.height;   // the image; the display is H x W for a quarter turn
@@ -217,7 +220,7 @@ static void rot_copy(VkCommandBuffer cb, unsigned k, uint32_t idx, vka_img *im, 
 // ---------- FSR 1 upscale: EASU into an intermediate image, then RCAS into the swapchain image (vka_present_fsr.h) ----------
 // DM_VK_FSR=1 replaces the bilinear blit, or the rotated copy, when the picture is scaled up; DM_VK_FSR_SHARP is RCAS's sharpness in stops (0 = the most,
 // each stop halves it; AMD's default 0.25). Both are live. The intermediate image has the picture's size on the window, one per frame in flight
-static struct { int state; VkFormat fmt; VkPipeline easu, rcas; VkPipelineLayout lay; VkDescriptorSetLayout dsl; VkDescriptorPool pool; VkDescriptorSet set[NFRAME][2]; VkSampler samp;
+static struct { int state; VkFormat fmt; VkPipeline easu, rcas, easu_sc; VkPipelineLayout lay; VkDescriptorSetLayout dsl; VkDescriptorPool pool; VkDescriptorSet set[NFRAME][2]; VkSampler samp;
                 VkImage mid[NFRAME]; VkDeviceMemory mem[NFRAME]; VkImageView view[NFRAME]; uint32_t mw[NFRAME], mh[NFRAME]; } g_fsr;
 static int fsr_wanted(void) { return VKA_ENV("DM_VK_FSR", 0) != 0; }
 static VkPipeline fsr_pipe(const uint32_t *frag, size_t fsize, VkFormat fmt) {
@@ -270,7 +273,9 @@ static int fsr_ready(VkFormat fmt) {
         if (!(g_fsr.easu = fsr_pipe(vka_fsr_easu_frag, sizeof vka_fsr_easu_frag, VK_FORMAT_R8G8B8A8_UNORM))) { g_fsr.state = -1; return 0; }
     }
     if (g_fsr.rcas) { vka_queue_idle(); rk.vkDestroyPipeline(V.dev, g_fsr.rcas, NULL); g_fsr.rcas = VK_NULL_HANDLE; }   // a new swapchain format: no pass in flight
+    if (g_fsr.easu_sc) { rk.vkDestroyPipeline(V.dev, g_fsr.easu_sc, NULL); g_fsr.easu_sc = VK_NULL_HANDLE; }
     if (!(g_fsr.rcas = fsr_pipe(vka_fsr_rcas_frag, sizeof vka_fsr_rcas_frag, fmt))) { g_fsr.state = -1; return 0; }
+    g_fsr.easu_sc = fsr_pipe(vka_fsr_easu_frag, sizeof vka_fsr_easu_frag, fmt);   // EASU straight into the swapchain image (sharpness off, no turn); NULL: through RCAS as before
     g_fsr.state = 1; g_fsr.fmt = fmt;
     VLOG("FSR 1 upscale on (RCAS sharpness %.2f stops)", VKA_ENVF("DM_VK_FSR_SHARP", 0.25));
     return 1;
@@ -318,6 +323,26 @@ static int fsr_copy(VkCommandBuffer cb, unsigned k, uint32_t idx, vka_img *im, i
     if (vka_origin_ll()) { easu[1] = -sy; easu[3] = cy + ch - 0.5f * sy - 0.5f; }
     uint32_t pc[16];
     for (int i = 0; i < 16; i++) pc[i] = fsr_bits(easu[i]);
+    // Sharpening off (DM_VK_FSR_SHARP below 0) and no turn: EASU draws straight into the letterbox of the swapchain image, no intermediate image and no RCAS pass. Its fragment
+    // coordinates then start at the letterbox corner, so the constants' offsets move by (dx, dy) in output pixels
+    if (VKA_ENVF("DM_VK_FSR_SHARP", 0.25) < 0 && g_fsr.easu_sc && (g_pre == VK_SURFACE_TRANSFORM_IDENTITY_BIT_KHR || !g_pre)) {
+        float e2 = easu[2] - dx * easu[0], e3 = easu[3] - dy * easu[1]; pc[2] = fsr_bits(e2); pc[3] = fsr_bits(e3);
+        VkViewport vd = {(float)dx, (float)dy, (float)dw, (float)dh, 0, 1}; VkRect2D sd = {{0, 0}, g_ext};
+        vka_img_barrier(cb, g_simg[idx], VK_IMAGE_ASPECT_COLOR_BIT, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL);
+        VkRenderingAttachmentInfo cd = {VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO, .imageView = g_sview[idx], .imageLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+            .loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR, .storeOp = VK_ATTACHMENT_STORE_OP_STORE, .clearValue = {.color = {{0, 0, 0, 1}}}};   // the bars
+        VkRenderingInfo rd = {VK_STRUCTURE_TYPE_RENDERING_INFO, .renderArea = sd, .layerCount = 1, .colorAttachmentCount = 1, .pColorAttachments = &cd};
+        vk.vkCmdBeginRendering(cb, &rd);
+        rk.vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, g_fsr.easu_sc);
+        rk.vkCmdBindDescriptorSets(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, g_fsr.lay, 0, 1, &g_fsr.set[k][0], 0, NULL);
+        rk.vkCmdPushConstants(cb, g_fsr.lay, VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof pc, pc);
+        rk.vkCmdSetViewport(cb, 0, 1, &vd);
+        rk.vkCmdSetScissor(cb, 0, 1, &sd);
+        rk.vkCmdDraw(cb, 3, 1, 0, 0);
+        vk.vkCmdEndRendering(cb);
+        vka_img_barrier(cb, g_simg[idx], VK_IMAGE_ASPECT_COLOR_BIT, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, VK_IMAGE_LAYOUT_PRESENT_SRC_KHR);
+        return 1;
+    }
     VkViewport v = {0, 0, (float)dw, (float)dh, 0, 1}; VkRect2D sc = {{0, 0}, {(uint32_t)dw, (uint32_t)dh}};
     vka_img_barrier(cb, g_fsr.mid[k], VK_IMAGE_ASPECT_COLOR_BIT, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL);
     VkRenderingAttachmentInfo ca = {VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO, .imageView = g_fsr.view[k], .imageLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
@@ -342,7 +367,8 @@ static int fsr_copy(VkCommandBuffer cb, unsigned k, uint32_t idx, vka_img *im, i
     default:                                      v = (VkViewport){(float)dx, (float)dy, (float)dw, (float)dh, 0, 1}; memcpy(m, (int[6]){1, 0, 0, 1, -dx, -dy}, sizeof m); break;
     }
     memset(pc, 0, sizeof pc);
-    pc[0] = fsr_bits(exp2f(-(float)VKA_ENVF("DM_VK_FSR_SHARP", 0.25)));
+    { float st = (float)VKA_ENVF("DM_VK_FSR_SHARP", 0.25);   // below 0: no sharpening at all (RCAS's strength 0 leaves every pixel as EASU made it; the pass still places and turns it)
+      pc[0] = fsr_bits(st < 0 ? 0.0f : exp2f(-st)); }
     memcpy(&pc[4], m, sizeof m);
     sc = (VkRect2D){{0, 0}, g_ext};
     vka_img_barrier(cb, g_simg[idx], VK_IMAGE_ASPECT_COLOR_BIT, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL);
@@ -712,12 +738,19 @@ static int present_one(const pq_item *it) {
     // sends the switches through DM_CTL and gives the launcher's touch mapping the same rectangle, PictureFit.rect)
     int fr[4]; vka_fit_rect(ew, eh, cw, ch, stretch_wanted(), picture_size(), g_place_x, g_place_y, fr);
     int dx = fr[0], dy = fr[1], dw = fr[2], dh = fr[3];
-    VkFormatProperties fp = {0}; if (im) vk.vkGetPhysicalDeviceFormatProperties(V.pd, im->f.vk, &fp);
+    static VkFormat s_last_fmt; static VkFormatProperties s_last_fp;
+    VkFormatProperties fp = {0};
+    if (im) {
+        if (im->f.vk != s_last_fmt) { vk.vkGetPhysicalDeviceFormatProperties(V.pd, im->f.vk, &s_last_fp); s_last_fmt = im->f.vk; }
+        fp = s_last_fp;
+    }
     int blit = im && im->inited && im->aspect == VK_IMAGE_ASPECT_COLOR_BIT && im->f.kind == 0 && im->samples == 1 && (fp.optimalTilingFeatures & VK_FORMAT_FEATURE_BLIT_SRC_BIT);
     // FSR in place of the blit or the rotated copy for a picture scaled up; switched on live, the swapchain has no attachment views yet: blitted once, and the next swapchain has them.
     // A view that failed on a swapchain made for FSR is not asked for again: each present would make a new swapchain (a queue idle) and fail the same way
     int fsr = blit > 0 && fsr_wanted() && (dw > cw || dh > ch) && (im->usage & VK_IMAGE_USAGE_SAMPLED_BIT)
               && (fp.optimalTilingFeatures & VK_FORMAT_FEATURE_SAMPLED_IMAGE_FILTER_LINEAR_BIT);
+    if (!fsr && fsr_wanted() && im) { static int told; if (!told++) VLOG("FSR wanted but not used: blit %d, picture %dx%d -> %dx%d, usage %#x, linear filter %d", blit, cw, ch, dw, dh,
+                                                                   (unsigned)im->usage, (fp.optimalTilingFeatures & VK_FORMAT_FEATURE_SAMPLED_IMAGE_FILTER_LINEAR_BIT) != 0); }
     if (fsr && !g_sview[idx]) {
         if (!g_sview_fsr) g_recreate = 1;
         else VRED_ONCE("FSR: swapchain image %u has no attachment view: blitted", idx);
@@ -743,7 +776,7 @@ static int present_one(const pq_item *it) {
         int y0 = cy, y1 = cy + ch; if (vka_origin_ll()) { y0 = cy + ch; y1 = cy; }   // lower-left origin: the window texture is stored bottom-up
         VkImageBlit b = {{VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1}, {{cx, y0, 0}, {cx + cw, y1, 1}}, {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1}, {{dx, dy, 0}, {dx + dw, dy + dh, 1}}};
         vk.vkCmdBlitImage(cb, im->img, VK_IMAGE_LAYOUT_GENERAL, g_simg[idx], VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &b,
-                          fp.optimalTilingFeatures & VK_FORMAT_FEATURE_SAMPLED_IMAGE_FILTER_LINEAR_BIT ? VK_FILTER_LINEAR : VK_FILTER_NEAREST);
+                          (fp.optimalTilingFeatures & VK_FORMAT_FEATURE_SAMPLED_IMAGE_FILTER_LINEAR_BIT) && !VKA_ENV("DM_VK_PRESENT_NEAREST", 0) ? VK_FILTER_LINEAR : VK_FILTER_NEAREST);
     } else if (im && !blit) VRED_ONCE("window texture serial %llu (format %#x) cannot be blitted to the swapchain: presented black", (unsigned long long)im->serial, im->d.format);
     if (blit >= 0) vka_img_barrier(cb, g_simg[idx], VK_IMAGE_ASPECT_COLOR_BIT, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_PRESENT_SRC_KHR);
     ovl_draw(cb, k, idx);   // the launcher's overlay over the picture (generated frames too)
@@ -768,6 +801,13 @@ static int present_one(const pq_item *it) {
     VkPresentTimeGOOGLE pt = {(uint32_t)it->ticket, want};
     VkPresentTimesInfoGOOGLE ptv = {VK_STRUCTURE_TYPE_PRESENT_TIMES_INFO_GOOGLE, .swapchainCount = 1, .pTimes = &pt};
     VkPresentInfoKHR pi = {VK_STRUCTURE_TYPE_PRESENT_INFO_KHR, .pNext = V.display_timing ? &ptv : NULL, .waitSemaphoreCount = 1, .pWaitSemaphores = &g_sdone[idx], .swapchainCount = 1, .pSwapchains = &g_swap, .pImageIndices = &idx};
+    // The frame done on the GPU before the queue lock is taken: a submission that waits for a timeline value still pending can block inside vkQueueSubmit until it is
+    // signalled (Turnip on KGSL emulates timeline semaphores: 25-35 ms a frame with the lock held, so every replay submission behind it waited; Ocarina of Time's note).
+    // The copy cannot start before the frame ends anyway; only a value already handed to the queue is waited for here (a later one is handled under the lock below)
+    // Test switch DM_VK_PRESENT_PREWAIT=0: no wait here (as before), for A/B runs
+    if (it->fence && !vka_hung() && VKA_ENV("DM_VK_PRESENT_PREWAIT", 1) && it->fence <= __atomic_load_n(&V.tl_queued, __ATOMIC_ACQUIRE)) {
+        VkResult vka_tl_wait(VkSemaphore s, uint64_t v, uint64_t timeout_ns); vka_tl_wait(V.tl, it->fence, vka_hang_ns());   // a timeout: the submission below waits as before, and the hang handling sees it
+    }
     pthread_mutex_lock(&V.qmu);
     // Never a wait for a value no earlier submission signals: the queue runs its batches in order, so the copy would wait for a submission queued behind it, and neither ever
     // runs (mtl_present takes vka_fence_queued for that; this holds it under the queue lock)
@@ -778,8 +818,11 @@ static int present_one(const pq_item *it) {
     { static int mode = -1, at; if (mode < 0) { const char *e = getenv("DM_VK_TEST_HANG"); mode = 0; if (e && sscanf(e, "%d,%d", &mode, &at) < 1) mode = 0; if (at <= 0) at = 600; }
       if (mode && it->ticket == (uint64_t)at && it->fence) { wv[1] = mode == 1 ? vka_fence_last() + 1 : V.tl_queued + 1000000000ull;
           VRED("DM_VK_TEST_HANG=%d: present ticket %llu waits for fence %llu (%llu handed to the queue)", mode, (unsigned long long)it->ticket, (unsigned long long)wv[1], (unsigned long long)V.tl_queued); } }
+    void vka_qhold_add(int k, uint64_t ns); uint64_t th0 = now_ns();
     r = vka_hung() ? VK_ERROR_DEVICE_LOST : vk.vkQueueSubmit(V.q, 1, &si, g_fr[k].fence);
+    uint64_t th1 = now_ns();
     VkResult pr = r ? r : vk.vkQueuePresentKHR(V.q, &pi);
+    vka_qhold_add(0, th1 - th0); vka_qhold_add(1, now_ns() - th1);
     pthread_mutex_unlock(&V.qmu);
     g_fr[k].held = im;
     if (!r) vka_ctl_shot_done(g_fr[k].fence);
@@ -793,7 +836,7 @@ static int present_one(const pq_item *it) {
 
 void vka_perf_thread(int nice); void vka_perf_frame(double period_s);   // vka_perf.c
 static void *present_main(void *arg) {
-    (void)arg; pthread_setname_np(pthread_self(), "vk-present"); vka_perf_thread(-8);
+    (void)arg; pthread_setname_np(pthread_self(), "vk-present"); vka_fp_host("vk-present"); vka_perf_thread(-8);
     pthread_mutex_lock(&g_pmu);
     for (;;) {
         while (g_pq_read == g_pq_fill && g_win_ack == g_win_gen) pthread_cond_wait(&g_pcv, &g_pmu);
@@ -877,5 +920,5 @@ int mtl_link_wait_ticks(int ticks, uint64_t timeout_ns) { (void)ticks; (void)tim
 int mtl_snap_on(void) { return 0; }
 uint64_t mtl_snap_acquire_wait(void) { return 0; }
 
-static void *selftest_main(void *arg) { int r = nxhost_vk_selftest(NULL, (int)(intptr_t)arg); VLOG("selftest (NXHOST_VK_SELFTEST) ended: %s", r ? "FAILED" : "passed"); return NULL; }
+static void *selftest_main(void *arg) { vka_fp_host("vk-selftest"); int r = nxhost_vk_selftest(NULL, (int)(intptr_t)arg); VLOG("selftest (NXHOST_VK_SELFTEST) ended: %s", r ? "FAILED" : "passed"); return NULL; }
 #endif

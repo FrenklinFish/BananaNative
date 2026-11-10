@@ -7,6 +7,10 @@
 // copy then the render thread's. The games' configs set the limit to 30 and the interval to 2 (their notes name the .ini files)
 #include "hle.h"
 #include <stdatomic.h>
+#include <stdlib.h>
+#include <time.h>
+#include <sys/mman.h>
+#include <errno.h>
 
 // What a field holds: the frame rate as a float, double or int32, vsyncs per frame (60 / frame rate) as an int32, or the frame time in milliseconds as a float. Copies: consecutive copies of the
 // value (Unreal keeps one for the game thread, one for the render thread). A row with no pointer (ptr_off 0) has its field at main + field: a constant in main's read-only data, which the loader
@@ -211,11 +215,14 @@ static int ue_rows(const module_t *m, lock_t *out, int *missing) {
 
 // The running main's engine limiters, found once: by the first present (dm_fps_lock_tick) or by the graphics layer's present cap, which may ask first (dm_fps_lock_engine, from the acquire)
 static lock_t ue[3]; static const lock_t *rows[NLOCKS + 3]; static int nrow, nier, ue_missing; static uint8_t *base; static uint32_t display;
+static uint64_t g_decouple_off;   // where this main's frame-rate controller divides 60 by its interval (the profile's fps_decouple row; 0 = the profile has none for this build)
 static pthread_once_t g_found = PTHREAD_ONCE_INIT;
 static void lock_find(void) {
     for (int i = 0; i < g_nmod; i++) if (!strcmp(g_mod[i].name, "main")) {
         for (int k = 0; k < (int)(sizeof k_nier_dr / sizeof *k_nier_dr); k++) if (!strcmp(g_mod[i].build_id, k_nier_dr[k].build)) { base = g_mod[i].base; nier = 1; display = k_nier_dr[k].display; }
         for (int k = 0; k < NLOCKS; k++) if (!strcmp(g_mod[i].build_id, k_locks[k].build)) { rows[nrow++] = &k_locks[k]; base = g_mod[i].base; }
+        static const struct { const char *build; uint64_t off; } dc[] = DM_GAME_FPS_DECOUPLE;
+        for (int k = 0; k < DM_GAME_NFPS_DECOUPLE; k++) if (!strcmp(g_mod[i].build_id, dc[k].build)) g_decouple_off = dc[k].off;
         int nue = ue_rows(&g_mod[i], ue, &ue_missing);
         for (int k = 0; k < nue; k++) { rows[nrow++] = &ue[k]; base = g_mod[i].base; }
     }
@@ -285,7 +292,125 @@ int dm_fps_lock_rates(void) {
     for (int i = 0; i < 6; i++) if (holds(k_rates[i])) m |= 1 << i;   // a floor's maximum is read each time: the panel asks again while the game runs
     return m;
 }
+// sead's dynamic interval controller (a floor row's object: Donkey Kong Bananza main+0x204a18) at a 60 cap, on a device whose GPU clocks up only under steady load (the
+// Odin 2 Portal's Adreno 740 at 401 of 680 MHz). The controller steps to a longer interval after +0x0c consecutive late frames (the game's 2) and back only when its
+// cooldown +0x4c, refilled from +0x10, has counted down on frames that fit the shorter interval. At a low clock no frame fits 60, so once at 30 it stays there and
+// the GPU, now idle half the time, never clocks up: the trap. Two writes break it:
+// - patience: +0x0c late frames before stepping down, as many as DM_FPS_PATIENCE seconds (default 3, what the GPU governor needs to raise the clock; 0 leaves the
+//   game's) take at the presents' real rate, kept between the game's own count and 180. Counted in time, not frames: the game steps its logic by the interval, so
+//   late frames at interval 1 run it slow, and 180 frames of a 20 fps scene were 9 s of slow motion;
+// - retry: after DM_FPS_RETRY seconds (default 10; 0 = never) above the floor, the cooldown to 0 and the next shorter interval (+0x44) to one step shorter than now,
+//   so the controller tries the next faster rate (20 → 30, 30 → 60) on its next frame and the GPU gets the load that clocks it up. One step at a time: the same trap
+//   holds a light scene at 20 (a 2,000-draw area of Donkey Kong Bananza at 475-550 MHz), and a jump from 20 straight to 60 failed in heavy ones (8,000 draws)
+// Decoupling the game's speed from its present interval (DM_FPS_DECOUPLE, default 1): the controller hands the framework a frame rate of 60 / interval
+// (sdiv at main+0x204b20), and the game steps its logic by that rate: a frame presented late at interval 1 (54 fps on screen) still advanced the world
+// 1/60 s, so the game ran slow. Here the controller reads the measured rate instead: the framework times every frame ([framework+0xe8], timer ticks from one
+// frame start to the next, 31.25 MHz), and the host writes ceil(31.25 MHz / ticks) into the controller's padding at +0x5c (+0x58 is a bool, +0x60 a pointer)
+// every present, then replaces the sdiv with ldr w8, [x20, #0x5c]. Measured on the Portal (2026-11-05): at interval 1 in a 20 fps area a half-second walk went
+// as far as at the game's own interval 3, where without this it went a third of that. Rounded up so the framework's own limiter (1 / rate) never waits longer
+#define DECOUPLE_ORIG 0x1ad50d08u   // sdiv w8, w8, w21
+#define DECOUPLE_LDR 0xb9405e88u    // ldr w8, [x20, #0x5c]
+static void sead_decouple(const lock_t *L, uint64_t ctl) {
+    static int on = -1, patched, nlog;
+    if (on < 0) { const char *e = getenv("DM_FPS_DECOUPLE"); on = !e || atoi(e) != 0; if (!on) LOG("main: frame rate decoupling off (DM_FPS_DECOUPLE=0)"); }
+    if (!PLAT_ANDROID || !on || !g_decouple_off || L->nderef < 1) return;   // Android only: elsewhere presentation still follows the game's interval
+    uint64_t app = 0, fw = 0; int64_t ticks = 0;
+    if (!rd((uint64_t)(uintptr_t)(base + L->ptr_off), &app, 8) || !app || !rd(app + L->deref[0], &fw, 8) || !fw || !rd(fw + 0xe8, &ticks, 8) || ticks <= 0) return;
+    int32_t fps = (int32_t)((31250000 + ticks - 1) / ticks);
+    if (fps < 10) fps = 10;
+    if (fps > 60) fps = 60;
+    int32_t *slot = (int32_t *)(uintptr_t)(ctl + 0x5c);
+    dm_guest_write_prepare(slot, 4); __atomic_store_n(slot, fps, __ATOMIC_RELAXED);
+    if (patched) return;
+    uint32_t *w = (uint32_t *)(uintptr_t)(base + g_decouple_off);
+    if (*w != DECOUPLE_ORIG) { patched = -1; LOG("[RED] main: frame rate decoupling: main+%#llx (the profile's fps_decouple) is %08x, not the controller's sdiv: left as it is", (unsigned long long)g_decouple_off, *w); return; }
+    // The page stays executable throughout (read, write and execute while the word changes): the game's main thread runs the controller on it every frame
+    uintptr_t pg = (uintptr_t)w & ~(uintptr_t)0x3fff;
+    if (mprotect((void *)pg, 0x4000, PROT_READ | PROT_WRITE | PROT_EXEC)) { patched = -1; LOG("[RED] main: frame rate decoupling: mprotect failed"); return; }
+    __atomic_store_n(w, DECOUPLE_LDR, __ATOMIC_RELEASE);
+    mprotect((void *)pg, 0x4000, PROT_READ | PROT_EXEC);
+    plat_icache_invalidate(w, 4);
+    patched = 1;
+    if (nlog++ < 2) LOG("main: frame rate decoupled from the present interval: the controller reads the measured rate (now %d fps) instead of 60 / interval (DM_FPS_DECOUPLE)", fps);
+}
+
+// Without a cap (the uncapped mode and the frame limiter's caps: presents on the host's own tick, the limiter pacing) the controller kept the game's tuning: two late
+// frames moved it to a longer interval, six frames later it tried the shortest again. Each switch back to interval 1 let the game start its next frame without waiting:
+// two frames of GPU work queued, the one after waited up to ~100 ms, and the decoupling took one 60 fps measurement: a hitch about once a second (Donkey Kong Bananza at
+// 1080p, the controller flipping 3 and 1 several times a second, 2026-11-05). Here the interval does not pace the game (the GPU or the limiter does: 19-20 fps at
+// interval 1 and 3 alike), so its longest interval (+0x04) is held at 1 and the controller never switches; the game's own longest comes back with a cap that needs it.
+// DM_FPS_PIN=0 off
+static int32_t g_pin_orig;
+static void sead_pin(uint64_t ctl, int on) {
+    static int en = -1, nlog;
+    if (en < 0) { const char *e = getenv("DM_FPS_PIN"); en = PLAT_ANDROID && (!e || atoi(e) != 0); }   // Android only, like the rest of this pacing
+    int32_t v[2]; if (!rd(ctl, v, sizeof v) || v[0] < 1 || v[1] < 1 || v[1] > 8) return;   // +0 shortest, +4 longest interval
+    int32_t *p = (int32_t *)(uintptr_t)(ctl + 4);
+    if (on && en) {
+        if (v[1] != 1) { g_pin_orig = v[1]; dm_guest_write_prepare(p, 4); __atomic_store_n(p, 1, __ATOMIC_RELAXED);
+                         if (nlog++ < 4) LOG("main: frame-rate controller held at interval 1 (its longest was %d): the GPU or the frame limiter paces the game (DM_FPS_PIN)", g_pin_orig); }
+    } else if (g_pin_orig && v[1] == 1) { dm_guest_write_prepare(p, 4); __atomic_store_n(p, g_pin_orig, __ATOMIC_RELAXED); LOG("main: frame-rate controller's longest interval back to %d", g_pin_orig); g_pin_orig = 0; }
+}
+
+static void sead_ctl_tune(uint64_t ctl, int target, const char *src) {
+    static int retry_s = -1, nlog, nretry; static float patience_s = -1, frame_s; static int32_t game_patience; static struct timespec slow_since, last_tick; static int slow;
+    if (!PLAT_ANDROID) return;   // the GPU clock trap this works around was measured on Android phones; the Mac and iOS keep the game's own tuning
+    if (patience_s < 0) { const char *e = getenv("DM_FPS_PATIENCE"); patience_s = e ? (float)atof(e) : 3; e = getenv("DM_FPS_RETRY"); retry_s = e ? atoi(e) : 10; }
+    struct timespec now; clock_gettime(CLOCK_MONOTONIC, &now);
+    if (last_tick.tv_sec) {   // the presents' real interval (this runs once a present), smoothed over about 30 presents
+        float dt = (float)((now.tv_sec - last_tick.tv_sec) + (now.tv_nsec - last_tick.tv_nsec) / 1e9);
+        if (dt > 0 && dt < 0.5f) frame_s = frame_s ? frame_s + (dt - frame_s) / 30 : dt;
+    }
+    last_tick = now;
+    int32_t v[0x14]; if (!rd(ctl, v, sizeof v)) return;   // +0x00 .. +0x4c
+    int32_t floor_ = v[0], late = v[3], interval = v[0x10], lower = v[0x11];
+    if (floor_ < 1 || interval < 1 || interval > 4) return;   // not set up yet
+    if (target != 60) {   // the game's own patience back, for caps that hold a longer interval anyway
+        if (game_patience && late != game_patience) { int32_t *p = (int32_t *)(uintptr_t)(ctl + 0xc); dm_guest_write_prepare(p, 4); __atomic_store_n(p, game_patience, __ATOMIC_RELAXED); }
+        slow = 0; return;
+    }
+    if (patience_s > 0 && frame_s > 0 && late >= 1 && late <= 1000) {
+        if (!game_patience) game_patience = late;
+        int32_t want = (int32_t)(patience_s / frame_s + 0.5f);
+        if (want > 180) want = 180;
+        if (want < game_patience) want = game_patience;
+        if (want != late && (want - late > 4 || late - want > 4 || want == game_patience)) {   // a few frames either way is not worth a write
+            int32_t *p = (int32_t *)(uintptr_t)(ctl + 0xc); dm_guest_write_prepare(p, 4); __atomic_store_n(p, want, __ATOMIC_RELAXED);
+            if (nlog++ < 6) LOG("main: frame-rate controller patience %d → %d late frames (%.1f s at %.1f fps; DM_FPS_PATIENCE; %s)", late, want, patience_s, 1 / frame_s, src);
+        }
+    }
+    if (retry_s <= 0) return;
+    if (interval <= floor_) { slow = 0; return; }
+    if (!slow) { slow = 1; slow_since = now; return; }
+    if ((now.tv_sec - slow_since.tv_sec) + (now.tv_nsec - slow_since.tv_nsec) / 1e9 < retry_s) return;
+    int32_t *lo = (int32_t *)(uintptr_t)(ctl + 0x44), *cd = (int32_t *)(uintptr_t)(ctl + 0x4c);
+    int32_t step = interval - 1 > floor_ ? interval - 1 : floor_;
+    dm_guest_write_prepare(lo, 4); __atomic_store_n(lo, step, __ATOMIC_RELAXED);
+    dm_guest_write_prepare(cd, 4); __atomic_store_n(cd, 0, __ATOMIC_RELAXED);
+    if (nretry++ < 20) LOG("main: frame-rate controller at interval %d for %d s: trying interval %d (was next %d; DM_FPS_RETRY)", interval, retry_s, step, lower);
+    slow_since = now;
+}
+
+// A frame limiter for games whose speed follows the measured frame rate (sead_decouple): with the present interval no longer pacing the game (DM_PRESENT_INTERVAL=display),
+// the game runs as fast as it can, and this holds it to at most DM_FPS_LIMIT frames a second (0 = no limit; live: nxhost_fps_limit_set, the launcher's in-game panel).
+// It waits on the game's thread, before the present, until 1 / limit after the previous frame's deadline; a frame that comes late starts a new schedule
+static _Atomic int g_fps_limit = -1;
+__attribute__((visibility("default"))) void nxhost_fps_limit_set(int fps) { atomic_store(&g_fps_limit, fps > 0 ? fps : 0); LOG("main: frame limit %d fps%s", fps, fps > 0 ? "" : " (none)"); }
+int nxhost_fps_limit_get(void) { int l = atomic_load(&g_fps_limit); if (l < 0) { const char *e = getenv("DM_FPS_LIMIT"); l = e ? atoi(e) : 0; } return l > 0 ? l : 0; }   // the cap chosen (0: none); probe.c aims the dynamic resolution at it
+static void fps_limit_wait(void) {
+    if (!PLAT_ANDROID) return;   // only the Android launcher sets a frame limit
+    int lim = atomic_load(&g_fps_limit);
+    if (lim < 0) { const char *e = getenv("DM_FPS_LIMIT"); lim = e ? atoi(e) : 0; if (lim < 0) lim = 0; int was = -1; atomic_compare_exchange_strong(&g_fps_limit, &was, lim); lim = atomic_load(&g_fps_limit);
+                   if (lim) LOG("main: frame limit %d fps (DM_FPS_LIMIT)", lim); }
+    static uint64_t next;
+    if (!lim) { next = 0; return; }
+    uint64_t now = plat_abs_time(), period = 1000000000ull / (uint64_t)lim;   // the platform's monotonic clock and sleep (plat.h): clock_nanosleep is Linux only
+    if (next > now && next - now <= period) { plat_wait_until(next); now = next; }
+    next = (next > now || (next && now - next < period / 2) ? next : now) + period;   // keep the phase through small lateness, restart after a long frame
+}
+
 void dm_fps_lock_tick(void) {
+    fps_limit_wait();
     dynamic_resolution_tick();   // separate from the FPS cap
     static int state = -2, nlog[NLOCKS + 3], target, gen = -1, start_cap; static const char *src; static uint8_t over[NLOCKS + 3];
     static uint32_t orig[NLOCKS + 3][2]; static uint8_t have_orig[NLOCKS + 3][2];   // what a row held before the host first wrote it: put back when the cap goes to 0 while the game runs
@@ -318,7 +443,10 @@ void dm_fps_lock_tick(void) {
         target = t; start_cap = first && t;
         if (!first) for (int r = 0; r < NLOCKS + 3; r++) nlog[r] = over[r] = 0;
     }
-    if (!target) return;
+    if (!target) {   // no cap: the decoupling still runs (presentation may follow the host's own tick, DM_PRESENT_INTERVAL=display, where the interval no longer paces the game)
+        for (int r = 0; r < nrow; r++) if (rows[r]->kind == MIN_VSYNCS_I32) { uint64_t obj = row_obj(rows[r]); if (obj) { sead_decouple(rows[r], obj + rows[r]->field); sead_pin(obj + rows[r]->field, 1); } }
+        return;
+    }
     // The cap at start (DM_FPS_TARGET: the Android panel's saved cap, env.txt; or the profile) may be one this game cannot hold: 15 on Donkey Kong Bananza, whose controller goes to
     // 3 vsyncs at most. Once every floor's maximum is known, such a cap becomes 0, the game's own, so the front end and presentation show what the game really does
     if (start_cap) {
@@ -357,6 +485,7 @@ void dm_fps_lock_tick(void) {
     for (int r = 0; r < nrow; r++) {
         const lock_t *L = rows[r]; if (!rate_ok(L->kind, target)) continue;
         uint64_t obj = row_obj(L); if (!obj) continue;   // not created yet
+        if (L->kind == MIN_VSYNCS_I32) { sead_pin(obj + L->field, 0); sead_ctl_tune(obj + L->field, target, src); sead_decouple(L, obj + L->field); }
         if (L->kind == FPS_F64) {
             for (int c = 0; c < L->copies; c++) {
                 uint64_t a = obj + L->field + 8 * (uint64_t)c; double cur, want = target;

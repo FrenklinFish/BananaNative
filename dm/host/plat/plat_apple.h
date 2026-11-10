@@ -67,6 +67,8 @@ static inline void *plat_mem_alias(void *addr, size_t len) {
 static inline void plat_icache_invalidate(void *p, size_t len) { sys_icache_invalidate(p, len); }
 static inline size_t plat_page_size(void) { return vm_page_size; }
 static inline void *plat_mem_reserve(size_t size) { void *p = mmap(NULL, size, PROT_NONE, MAP_PRIVATE | MAP_ANON, -1, 0); return p == MAP_FAILED ? NULL : p; }
+static inline void plat_mem_name_guest(void *p, size_t n) { (void)p; (void)n; }
+static inline int plat_maps_count(int *max) { if (max) *max = 0; return -1; }
 static inline int64_t plat_footprint_bytes(void) {
     task_vm_info_data_t vi; mach_msg_type_number_t cnt = TASK_VM_INFO_COUNT;
     return task_info(mach_task_self(), TASK_VM_INFO, (task_info_t)&vi, &cnt) == KERN_SUCCESS ? (int64_t)vi.phys_footprint : -1;

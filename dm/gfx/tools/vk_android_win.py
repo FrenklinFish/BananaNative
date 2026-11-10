@@ -8,15 +8,19 @@
 #                    delete on close: the files are made with delete_on_close=False (still deleted when the with block ends)
 #   text files       a file opened for writing in text mode gets '\n' line ends and UTF-8 (Windows would write CR LF and the ANSI code page): the stamp
 #                    inputs.tsv, which goes into the pack, and the manifest are then byte for byte the Mac's. Text read is UTF-8 too
+#   package reads    record_index opens each .bin with os.open(..., os.O_RDONLY) and _rec reads records with os.pread: on Windows os.open needs O_BINARY
+#                    (without it CR LF is read as LF and 0x1a ends the read) and os.pread is a locked lseek + read, as in dm/tools/nup.py
 # Elsewhere (macOS, Linux) nothing is changed: this only runs vk_android_build.py. When vk_android_build.py changes for another reason, these belong in it.
 # Usage: as vk_android_build.py (vk_android_win.py --target vulkan <package dir> <output cache dir> [key...])
-import builtins, functools, io, os, runpy, subprocess, sys, tempfile
+import builtins, functools, io, os, runpy, subprocess, sys, tempfile, threading
 HERE = os.path.dirname(os.path.abspath(__file__))
 BUILD = os.path.join(HERE, 'vk_android_build.py')
 
 
 def install():
-    """The three adaptations above, in this process"""
+    """The four adaptations above, in this process"""
+    if getattr(install, '_done', False): return
+    install._done = True
     sys.path.insert(0, HERE)
     import dmsh_chain, tool_lock
     xlate = os.path.normcase(os.path.abspath(os.environ.get('XLATE', os.path.join(dmsh_chain.XLATE_DIR, 'dmsh_xlate'))))
@@ -44,6 +48,26 @@ def install():
             if newline is None and any(c in mode for c in 'wax+'): newline = '\n'
         return op(file, mode, buffering, encoding, errors, newline, closefd, opener)
     builtins.open = io.open = open_
+
+    oopen = os.open
+    @functools.wraps(oopen)
+    def os_open(path, flags, mode=0o777, *, dir_fd=None):
+        if not (flags & getattr(os, 'O_TEXT', 0)): flags |= getattr(os, 'O_BINARY', 0)
+        return oopen(path, flags, mode) if dir_fd is None else oopen(path, flags, mode, dir_fd=dir_fd)
+    os.open = os_open
+
+    if not hasattr(os, 'pread'):
+        plock = threading.Lock()
+        def pread(fd, n, offset):
+            out = []
+            with plock:
+                os.lseek(fd, offset, os.SEEK_SET)
+                while n > 0:
+                    b = os.read(fd, min(n, 1 << 30))
+                    if not b: break
+                    out.append(b); n -= len(b)
+            return b''.join(out)
+        os.pread = pread
 
 
 if __name__ == '__main__':

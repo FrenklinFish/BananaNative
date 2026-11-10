@@ -76,6 +76,12 @@ PLAT_FN size_t plat_page_size(void);
 // The guest address block: size bytes of inaccessible address space, no memory (Apple: anywhere; Android: at 0x4000000000 when free, always below 1 << 39); NULL when it cannot be had
 PLAT_FN void *plat_mem_reserve(size_t size);
 PLAT_FN int64_t plat_footprint_bytes(void);   // the memory this process is charged with (Apple phys_footprint, Android resident set); -1 unknown
+// The guest block's name in /proc/self/maps for [p, p + n) after a fixed map replaced part of it (Android: anonymous mappings merge again only with neighbours of the same name;
+// Apple: nothing to do)
+PLAT_FN void plat_mem_name_guest(void *p, size_t n);
+// The process's memory maps (Android: lines of /proc/self/maps) and the most it may have (*max: vm.max_map_count); -1 unknown (Apple). Reads into a stack buffer, no
+// allocation: it also answers when the process is at the limit
+PLAT_FN int plat_maps_count(int *max);
 // A private allocation zone (Unreal's heap): its own accounting on Apple, the process heap elsewhere
 typedef struct plat_zone plat_zone_t;
 PLAT_FN plat_zone_t *plat_zone_create(const char *name);
