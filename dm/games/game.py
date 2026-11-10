@@ -143,6 +143,8 @@ def header(g):
     if tds not in ('on', 'off'): sys.exit(f'{g.id}: tex_dyn_slots must be on or off: {tds}')
     tsf = g.get('tex_soft', 'off')   # large block-compressed packaged textures kept without their finest level (Android: vka_tex.c "Soft textures", vka_soft.h; from plumber-racer-2's nvn_mtl.m tex_soft): on / off
     if tsf not in ('on', 'off'): sys.exit(f'{g.id}: tex_soft must be on or off: {tsf}')
+    av1 = g.get('av1_decoder', 'hardware')   # Android: AV1 movies on the phone's hardware decoder (MediaCodec, the default) or dav1d frame-parallel (hle_movie_av1.c mav1_send)
+    if av1 not in ('hardware', 'dav1d'): sys.exit(f'{g.id}: av1_decoder must be hardware or dav1d: {av1}')
     vcr = g.get('vconv_range', 'off')   # vertex attributes converted on the CPU only over the vertices each draw reads (nvn_mtl.m vc_draw_range): on / off
     if vcr not in ('on', 'off'): sys.exit(f'{g.id}: vconv_range must be on or off: {vcr}')
     mml = g.get('mem_map_limit', 'on')   # MapPhysicalMemory refused beyond the application pool, as on Horizon (hle_svc.c): on / off
@@ -272,6 +274,7 @@ def header(g):
          f'#define DM_GAME_GPU_TS_SEGMENT {int(gts == "segment")}',
          f'#define DM_GAME_DRAW_BARRIERS_GAME {int(dbr == "game")}',
          f'#define DM_GAME_VCONV_RANGE {int(vcr == "on")}',
+         f'#define DM_GAME_AV1_DAV1D {int(av1 == "dav1d")}',
          f'#define DM_GAME_ROMFS_SUBST {q(rsub)}',
          f'#define DM_GAME_WINDOW_FN {{{", ".join(wfn) or "{\"\", 0, 0, 0, 0}"}}}', f'#define DM_GAME_NWINDOW_FN {len(wfn)}',
          '#define DM_GAME_SUBGROUP_ONE_LANE {' + (', '.join(sol) or '0') + '}', f'#define DM_GAME_NSUBGROUP_ONE_LANE {len(sol)}',
