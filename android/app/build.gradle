@@ -99,7 +99,10 @@ def windowOf = { String game -> tsvRows(game, 'android_window').with { rs -> rs.
 def decoupleOf = { String game -> tsvRows(game, 'fps_decouple').isEmpty() ? '' : '1' }
 // Whether the host can steer the game's dynamic resolution (game.tsv drs_ctl rows): "1", or empty. The launcher then offers its Dynamic resolution setting (Prefs.drsGame)
 def drsOf = { String game -> tsvRows(game, 'drs_ctl').isEmpty() ? '' : '1' }
-def nxProfiles = nxGames.collect { g -> [g, nameOf(g).replaceAll(/[\t\n\\"]/, ' '), shaderTotalOf(g), shaderInputsOf(g), buildsOf(g), reqsOf(g), statusOf(g), deltaOf(g), stampOf(g), resolutionOf(g), romfsChecksOf(g), gpuTsOf(g), windowOf(g), decoupleOf(g), drsOf(g)].join('\\t') }.join('\\n')
+// The profile's default frame limit (game.tsv fps_limit: frames a second, the host's limiter, hle_fpslock.c), or empty without one (0 = none). The launcher then offers a frame limit
+// as for a paced game, the profile's limit its default (Prefs.limited)
+def fpsLimitOf = { String game -> tsvRows(game, 'fps_limit').with { rs -> rs.isEmpty() || rs[0].size() < 2 || rs[0][1].trim() == '0' ? '' : rs[0][1].trim() } }
+def nxProfiles = nxGames.collect { g -> [g, nameOf(g).replaceAll(/[\t\n\\"]/, ' '), shaderTotalOf(g), shaderInputsOf(g), buildsOf(g), reqsOf(g), statusOf(g), deltaOf(g), stampOf(g), resolutionOf(g), romfsChecksOf(g), gpuTsOf(g), windowOf(g), decoupleOf(g), drsOf(g), fpsLimitOf(g)].join('\\t') }.join('\\n')
 def lockOf = { String key -> def f = new File(repo, 'dm/gfx/tools/dmsh_chain.lock'); f.isFile() ? (f.readLines().find { it.startsWith(key + '\t') }?.split('\t')?.getAt(1) ?: 'unknown') : 'unknown' }
 
 android {

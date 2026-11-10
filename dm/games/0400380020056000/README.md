@@ -78,6 +78,7 @@ The work folder's `run/drive.sh <name> <secs> "<sec> <control line>"…` boots i
 
 ## Found on this game
 
+- [A game whose speed follows its present interval runs slow when frames come late](../../../docs/reference/frame-rate.md#a-game-whose-speed-follows-its-present-interval-runs-slow-when-frames-come-late): the rewriter finds sead's frame-rate controller here (`main+0x3df0e28`, `sdiv w2, w8, w20`, the controller in x0) and leaves it as it is: the profile has no `fps_decouple sead`. Open: whether the game steps by that rate (needs a phone check, which this game does not get).
 - [Prepare stays at 1 % while it rewrites the code](../../../docs/reference/packing.md#prepare-stays-at-1--while-it-rewrites-the-code): resolved, the rewriter's progress lines; its `main` (41 MB, one worker) measured the phases' shares.
 - [Naming the shaders of a GPU fault](https://github.com/seedds/nxnative/blob/main/docs/reference/rendering.md#naming-the-shaders-of-a-gpu-fault): added for the address fault above, which names no pass.
 - [Compatible views for a mismatched declared texture type](../../../docs/reference/rendering.md#compatible-views-for-a-mismatched-declared-texture-type): resolved, a cube in a cube array slot. `d0ce73e71074df85_b` (NigoProc, layer index a literal 0) read texture ID 428 as `texture type mismatch … declares slot 0 as Metal type 6, … is type 5`, 180 binds at frame 0 and none after. With the view the count is 0. The opening looks the same, though the two runs are not frame-aligned, so no pixel comparison was possible.

@@ -36,6 +36,11 @@ sys_resource	0x3000000
 shader_groups	/Shader/=shader /Effect/=effect /Lib/=lib /UI/=layout
 shader_note	Ocarina of Time shaders
 
+# ---- Frame rate ----
+# Android: held to 30 fps by the host's frame limiter by default (the launcher's Frame rate cap and DM_FPS_LIMIT override it). Link's house runs 37-38 fps from cool and
+# 27-32 once hot, the phone 23 C warmer over a run; at 30 every frame is 33.3 ms and it warms 12 C (README.md "Profile"). Kokiri Forest is below 30 anyway
+fps_limit	30
+
 # ---- Graphics ----
 op_mode	handheld
 # agl wraps its clears in render conditions on Donkey Kong Bananza and Splatoon Raiders; the same library here

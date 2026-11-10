@@ -98,6 +98,11 @@ public final class LauncherJvmTest {
                 && sc.resolutionEnv("1280x720").equals(List.of("DM_GRAPHICS_SCALE=2", "DM_OPMODE=0")), "graphics_scale rows: " + sc.resolutionEnv("1280x720"));
         check(sc.resolutionEnv("original").isEmpty() && sc.resolutionEnv("2560x1440").isEmpty(), "a choice without a row: the game's own");
         check(Profile.parse("0400C3F00006E000\tM\t0\tx\t\t\t\t\t\tscale:original=1/console").get(0).resolutionEnv("original").equals(List.of("DM_GRAPHICS_SCALE=1", "DM_OPMODE=1")), "console");
+        // The default frame limit (build.gradle fpsLimitOf, the 16th column): game.tsv fps_limit, 0 without the column, an empty one or a bad value
+        Profile lim = Profile.parse("0400486024DEC000\tO\t0\tx\t\t\t\t\t\t\t\t\t\t\t\t30").get(0);
+        check(lim.fpsLimit == 30 && !lim.decoupled && !lim.drs, "fps_limit column: " + lim.fpsLimit);
+        check(l.get(0).fpsLimit == 0 && Profile.parse("0400486024DEC000\tO\t0\tx\t\t\t\t\t\t\t\t\t\t1\t\t").get(0).fpsLimit == 0
+                && Profile.parse("0400486024DEC000\tO\t0\tx\t\t\t\t\t\t\t\t\t\t\t\tx").get(0).fpsLimit == 0, "no fps_limit: 0");
         check(Profile.versionName(0).equals("the base game") && Profile.versionName(458752).equals("update 458752"), "versionName");
         check(Profile.of("040074A01BF12000") != null && Profile.of("0100000000010000") == null, "Profile.of over BuildConfig.NX_PROFILES");
         check(Profile.missing("0100000000010000", "Mario").startsWith("This app version does not include Mario (0100000000010000).") && Profile.missing("040074A01BF12000", null) == null, "Profile.missing");

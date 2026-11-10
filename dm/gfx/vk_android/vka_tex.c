@@ -20,6 +20,7 @@
 #include "vka_zshare.h"
 #include "vka_gml.h"
 #include "vka_texlimit.h"
+#include "vka_spvpatch.h"
 #include "game_profile.h"
 #include "vka_texown.h"
 
@@ -1557,8 +1558,8 @@ static void vka_tex_prune_locked(void) {
     // A texture a shader reads only through the pool (a bindless handle from a record in a storage buffer: Ocarina of Time's lightmaps) is never bound by a draw,
     // so its last_frame does not move: evicting it rewrote its slot (redirty_ids), write_tex made it again at the next submission, and the cache evicted and
     // remade thousands of images a second (Turnip under 1 fps, a crash in Qualcomm's driver). An image a live pool slot names is in use: it stays, and a working
-    // set over the limit is kept (logged below). DM_VK_EAGER_TEX=0 makes no image for a slot, so nothing to keep
-    int pool_keep = VKA_ENV("DM_VK_EAGER_TEX", 1), npool = 0;
+    // set over the limit is kept (logged below). Only with DM_VK_EAGER_TEX=1 (default 0): without it no image is made for a slot alone, so nothing to keep
+    int pool_keep = VKA_ENV("DM_VK_EAGER_TEX", 0), npool = 0;
     if (pool_keep)
         for (int id = 1; id < g_ntreg; id++) {
             const treg_ent *te = &g_treg[id];
@@ -2082,6 +2083,130 @@ typedef struct { samp_par p; VkSampler s; } samp_ent; static samp_ent *g_samp; s
 static VkSampler *g_sres; static int g_nsres;   // the sampler of each registered ID, found once per registration (sampler_of searches every distinct sampler)
 static VkImageView g_null_view;
 
+// ---------- Texture pool reads (DM_VK_POOL_FB) ----------
+// A shader whose texture handle the translator could not trace to a slot reads the pool (set 1 binding 0) at an ID the host never sees: agl / gsys lit materials read their
+// lightmaps from handles in material records in a storage buffer. A pool slot names only an image already made (write_tex), and no draw binds those textures, so they were
+// never made (Ocarina of Time's black walls in Link's house); making an image for every registered texture instead (DM_VK_EAGER_TEX=1) made 6,000 images, 3-4.5 GiB, and
+// Android's low-memory killer closed the game (issue #97). Here the GPU reports the IDs it reads: every module made carries vka_spv_pool_fb's code (vka_shader.c hook), which
+// sets bit id of a 2^20-bit bitmap (set VKA_POOL_FB_SET binding VKA_POOL_FB_BINDING, a set of its own) before each pool read. Each submission with a draw or dispatch that reads the pool ends with the
+// bitmap's first ceil(registered IDs / 8) bytes copied into a host-visible ring slot and then, behind a barrier, the bitmap cleared (vka_tex_pfb_commit); the next vka_tex_prepare after that
+// submission's fence takes the slot (pfb_consume_locked). An ID read whose slot holds the null view is written again at this submission with its image made (PFB_WANT:
+// write_tex makes it, as a draw's first use would); an ID read whose slot names its image stamps that image used (last_frame, last_fence), so the image cache's LRU prune
+// treats pool reads as uses. An image no longer read goes as any other; its slot gets the null view, and a later read makes it again (one frame of the null view). A
+// texture first read through the pool reads 0 for the frame that reports it. Memory: the bitmap 128 KiB and the ring 8 x 128 KiB of host-visible memory, a byte per ID.
+// The bitmap has a set of its own, bound with the pool's set in one call: in the pool's set (as binding 3 after its 2^20 sampled images, 2^12 samplers and 2^16 storage
+// images) Qualcomm's driver never wrote it (0x8034a02c: no bit in 3,602 readbacks; the probe pfbbisect: not written beside 2^20 sampled images, written beside 2^19 or
+// fewer, and written in another set), while Turnip did.
+// DM_VK_POOL_FB (restart): 1 (default) on, 0 off (the pool's reads name only images made otherwise, as 0.2.2-0.2.7); DM_VK_POOL_FB_EARLY=0: no pixel module gets early
+// depth tests (each one that reads the pool then runs its tests after shading). Needs fragmentStoresAndAtomics and update-after-bind storage buffers beyond set 0's
+// (a vertex-pipeline module also vertexPipelineStoresAndAtomics, else it reports nothing). Idea and bitmap layout after Anka Native's texture-use feedback (MIT, copyright 2026
+// seedds and 2026 EddizEge), which needs a library built with it; here no library change
+enum { PFB_BYTES = 1 << 17, PFB_RING = 8, PFB_WANT = 1, PFB_NULL = 2 };
+static _Atomic int g_pfb = -1;   // -1 not decided; 0 off; 1 on (the bitmap and the ring made)
+static vka_span g_pfb_map, g_pfb_ring;
+static VkDescriptorSetLayout g_pfb_dsl; static VkDescriptorPool g_pfb_dpool; static VkDescriptorSet g_pfb_set;   // the bitmap's set (made in bindless_init)
+static struct { uint64_t fence; uint32_t n; int busy; } g_pfb_r[PFB_RING];   // (under g_tmu)
+static _Atomic int g_pfb_any;   // the submission being recorded has a draw or dispatch that reads the pool
+static uint8_t *g_pfb_st;   // (under g_tmu) per texture ID: PFB_WANT, PFB_NULL (its slot was last written with the null view)
+static uint64_t g_pfb_nrb, g_pfb_skip, g_pfb_hits, g_pfb_wants, g_pfb_made, g_pfb_made_b, g_pfb_logged;   // (under g_tmu)
+static int pfb_avail(void) {
+    int v = atomic_load(&g_pfb);
+    if (v >= 0) return v;
+    static pthread_mutex_t mu = PTHREAD_MUTEX_INITIALIZER;
+    pthread_mutex_lock(&mu);
+    if ((v = atomic_load(&g_pfb)) >= 0) { pthread_mutex_unlock(&mu); return v; }
+    v = VKA_ENV("DM_VK_POOL_FB", 1) != 0 && V.dev && V.uab;
+    if (v && !V.fstores) { VRED("texture pool reads: the device has no fragmentStoresAndAtomics: pool reads are not reported (a texture read only through the pool is not made)"); v = 0; }
+    if (v) {
+        VkPhysicalDeviceVulkan12Properties p12 = {VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_PROPERTIES};
+        VkPhysicalDeviceProperties2 p2 = {VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2, .pNext = &p12}; vk.vkGetPhysicalDeviceProperties2(V.pd, &p2);
+        if (p12.maxPerStageDescriptorUpdateAfterBindStorageBuffers <= DMSH_VK_STAGE_BINDINGS || p12.maxDescriptorSetUpdateAfterBindStorageBuffers <= DMSH_VK_STAGE_BINDINGS) {
+            VRED("texture pool reads: %u / %u update-after-bind storage buffers a stage / a layout leave no room beside set 0's: pool reads are not reported",
+                 p12.maxPerStageDescriptorUpdateAfterBindStorageBuffers, p12.maxDescriptorSetUpdateAfterBindStorageBuffers); v = 0; }
+        else if (V.props.limits.maxBoundDescriptorSets <= VKA_POOL_FB_SET) { VRED("texture pool reads: %u descriptor sets a pipeline: no room for the bitmap's set; pool reads are not reported", V.props.limits.maxBoundDescriptorSets); v = 0; }
+    }
+    if (v) {
+        VkDeviceSize al = V.sb_align > 256 ? V.sb_align : 256;
+        uint8_t *st = calloc(1u << 20, 1);
+        if (!st || !vka_static(PFB_BYTES, al, &g_pfb_map) || !vka_static((VkDeviceSize)PFB_BYTES * PFB_RING, al, &g_pfb_ring)) { free(st); VRED("texture pool reads: no memory for the bitmap: not reported"); v = 0; }
+        else {
+            memset(g_pfb_map.ptr, 0, PFB_BYTES); memset(g_pfb_ring.ptr, 0, (size_t)PFB_BYTES * PFB_RING); g_pfb_st = st;
+            // The bitmap's set (set VKA_POOL_FB_SET of every pipeline layout), written once: made here, at device init, before any module or pipeline layout
+            VkDescriptorSetLayoutBinding fb = {VKA_POOL_FB_BINDING, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, VK_SHADER_STAGE_ALL, NULL};
+            VkDescriptorSetLayoutCreateInfo fli = {VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO, .bindingCount = 1, .pBindings = &fb};
+            VkDescriptorPoolSize fps = {VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1};
+            VkDescriptorPoolCreateInfo fpi = {VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO, .maxSets = 1, .poolSizeCount = 1, .pPoolSizes = &fps};
+            VkDescriptorSetAllocateInfo fai = {VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO, .descriptorSetCount = 1, .pSetLayouts = &g_pfb_dsl};
+            VkResult r;
+            if ((r = vk.vkCreateDescriptorSetLayout(V.dev, &fli, NULL, &g_pfb_dsl)) || (r = vk.vkCreateDescriptorPool(V.dev, &fpi, NULL, &g_pfb_dpool)) ||
+                ((fai.descriptorPool = g_pfb_dpool), (r = vk.vkAllocateDescriptorSets(V.dev, &fai, &g_pfb_set)))) {
+                VRED("texture pool reads: the bitmap's descriptor set: %d; pool reads are not reported", r); g_pfb_set = VK_NULL_HANDLE; v = 0;
+            } else {
+                VkDescriptorBufferInfo bi = {g_pfb_map.buf, g_pfb_map.off, PFB_BYTES};
+                VkWriteDescriptorSet w = {VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, .dstSet = g_pfb_set, .dstBinding = VKA_POOL_FB_BINDING, .descriptorCount = 1, .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, .pBufferInfo = &bi};
+                vk.vkUpdateDescriptorSets(V.dev, 1, &w, 0, NULL);
+            }
+        }
+        if (v) VLOG("texture pool reads: the GPU reports the texture IDs shaders read through the pool (a bitmap in descriptor set %d); their images are made when read and kept while read (DM_VK_POOL_FB=0 off)", VKA_POOL_FB_SET);
+    }
+    atomic_store(&g_pfb, v);
+    pthread_mutex_unlock(&mu);
+    return v;
+}
+unsigned vka_tex_pfb_flags(void) {
+    if (!pfb_avail()) return 0;
+    return (V.vstores ? VKA_PFB_VTX_STORES : 0u) | (VKA_ENV("DM_VK_POOL_FB_EARLY", 1) ? VKA_PFB_EARLY : 0u);
+}
+void vka_tex_pfb_draw(void) { if (atomic_load_explicit(&g_pfb, memory_order_relaxed) > 0) atomic_store_explicit(&g_pfb_any, 1, memory_order_relaxed); }
+void vka_tex_pfb_commit(VkCommandBuffer cb, uint64_t fence) {
+    if (!cb || atomic_load(&g_pfb) <= 0 || !atomic_exchange(&g_pfb_any, 0)) return;
+    pthread_mutex_lock(&g_tmu);
+    uint32_t n = (uint32_t)(((uint64_t)g_ntreg + 31) / 32 * 4), k = PFB_RING; if (n > PFB_BYTES) n = PFB_BYTES;
+    for (uint32_t i = 0; i < PFB_RING && k == PFB_RING; i++) if (!g_pfb_r[i].busy) k = i;
+    if (!n || k == PFB_RING) { g_pfb_skip++; atomic_store(&g_pfb_any, 1); pthread_mutex_unlock(&g_tmu); return; }   // (every slot waiting: the bits stay for the next submission's copy)
+    g_pfb_r[k].fence = fence; g_pfb_r[k].n = n; g_pfb_r[k].busy = 1;
+    pthread_mutex_unlock(&g_tmu);
+    VkMemoryBarrier b0 = {VK_STRUCTURE_TYPE_MEMORY_BARRIER, .srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT, .dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT | VK_ACCESS_TRANSFER_WRITE_BIT};
+    vk.vkCmdPipelineBarrier(cb, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 1, &b0, 0, NULL, 0, NULL);
+    VkBufferCopy c = {g_pfb_map.off, g_pfb_ring.off + (VkDeviceSize)k * PFB_BYTES, n}; vk.vkCmdCopyBuffer(cb, g_pfb_map.buf, g_pfb_ring.buf, 1, &c);
+    // The fill writes what the copy reads (a write-after-read hazard): without this barrier Vulkan lets the two transfers run in any order (a spec fix; Qualcomm's driver
+    // reading no IDs has another cause, docs/reference/rendering.md "Texture pool reads report nothing on Qualcomm's driver")
+    VkMemoryBarrier bm = {VK_STRUCTURE_TYPE_MEMORY_BARRIER, .srcAccessMask = VK_ACCESS_TRANSFER_READ_BIT, .dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT};
+    vk.vkCmdPipelineBarrier(cb, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 1, &bm, 0, NULL, 0, NULL);
+    vk.vkCmdFillBuffer(cb, g_pfb_map.buf, g_pfb_map.off, PFB_BYTES, 0);
+    VkMemoryBarrier b1 = {VK_STRUCTURE_TYPE_MEMORY_BARRIER, .srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT, .dstAccessMask = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT | VK_ACCESS_HOST_READ_BIT};
+    vk.vkCmdPipelineBarrier(cb, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT | VK_PIPELINE_STAGE_HOST_BIT, 0, 1, &b1, 0, NULL, 0, NULL);
+}
+static void dirty(int **list, int *n, int *cap, uint8_t **flag, int nslots, int id);
+// Texture ID id was read through the pool (caller holds g_tmu)
+static void pfb_hit(int id, uint64_t frame, uint64_t fence) {
+    if (id <= 0 || id >= g_ntreg || (uint32_t)id >= g_ntex_slots) return;
+    const treg_ent *e = &g_treg[id];
+    if (!e->t.serial || e->img || (e->t.pool && e->pgen && nvn_pool_live(e->t.pool, NULL, NULL) != e->pgen)) return;   // (a storage image's ID is another table; a finalized pool's: null)
+    g_pfb_hits++;
+    smap_ent *se = map_get(e->t.serial); vka_img *im = se ? se->im : NULL;
+    if (im) { if (im->last_frame < frame) im->last_frame = frame; if (im->last_fence < fence) im->last_fence = fence; }
+    if (im && !(g_pfb_st[id] & PFB_NULL)) return;   // (its slot names its image)
+    if (!(g_pfb_st[id] & PFB_WANT)) { g_pfb_st[id] |= PFB_WANT; g_pfb_wants++; }
+    dirty(&g_tdirty, &g_ntd, &g_tdcap, &g_tdflag, 1 << 20, id);
+}
+static void pfb_consume_locked(void) {
+    if (atomic_load(&g_pfb) <= 0) return;
+    uint64_t done = vka_done(), frame = vka_frame(), fence = vka_fence_last();
+    for (int k = 0; k < PFB_RING; k++) {
+        if (!g_pfb_r[k].busy || g_pfb_r[k].fence > done) continue;
+        const uint32_t *wd = (const uint32_t *)(g_pfb_ring.ptr + (size_t)k * PFB_BYTES);
+        for (uint32_t i = 0, nw = g_pfb_r[k].n / 4; i < nw; i++)
+            for (uint32_t x = wd[i]; x; x &= x - 1) pfb_hit((int)(i * 32 + (uint32_t)__builtin_ctz(x)), frame, fence);
+        g_pfb_r[k].busy = 0; g_pfb_nrb++;
+    }
+    if (g_pfb_nrb >= g_pfb_logged + 1800 || (g_pfb_nrb && !g_pfb_logged)) {
+        g_pfb_logged = g_pfb_nrb;
+        VLOG("texture pool reads: %llu readbacks (%llu put off, every slot waiting), %llu IDs read in them, %llu slots made for a read (%llu images made, %.1f MiB)",
+             (unsigned long long)g_pfb_nrb, (unsigned long long)g_pfb_skip, (unsigned long long)g_pfb_hits, (unsigned long long)g_pfb_wants, (unsigned long long)g_pfb_made, g_pfb_made_b / 1048576.0);
+    }
+}
+
 static void bindless_init(void) {
     static int done; if (done) return; done = 1;
     if (!V.uab) { VRED("no update-after-bind descriptor indexing: the texture and sampler pools have no tables"); return; }
@@ -2097,22 +2222,25 @@ static void bindless_init(void) {
     g_nimg_slots = MIN(1u << 16, HEAD(MIN(p12.maxDescriptorSetUpdateAfterBindStorageImages, p12.maxPerStageDescriptorUpdateAfterBindStorageImages)));
 #undef HEAD
 #undef MIN
-    VkDescriptorSetLayoutBinding b[3] = {{0, VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, g_ntex_slots, VK_SHADER_STAGE_ALL, NULL}, {1, VK_DESCRIPTOR_TYPE_SAMPLER, g_nsamp_slots, VK_SHADER_STAGE_ALL, NULL},
+    VkDescriptorSetLayoutBinding b[4] = {{0, VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, g_ntex_slots, VK_SHADER_STAGE_ALL, NULL}, {1, VK_DESCRIPTOR_TYPE_SAMPLER, g_nsamp_slots, VK_SHADER_STAGE_ALL, NULL},
                                          {2, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, g_nimg_slots, VK_SHADER_STAGE_ALL, NULL}};
-    VkDescriptorBindingFlags bf = VK_DESCRIPTOR_BINDING_UPDATE_AFTER_BIND_BIT | VK_DESCRIPTOR_BINDING_PARTIALLY_BOUND_BIT | VK_DESCRIPTOR_BINDING_UPDATE_UNUSED_WHILE_PENDING_BIT, bfs[3] = {bf, bf, bf};
+    VkDescriptorBindingFlags bf = VK_DESCRIPTOR_BINDING_UPDATE_AFTER_BIND_BIT | VK_DESCRIPTOR_BINDING_PARTIALLY_BOUND_BIT | VK_DESCRIPTOR_BINDING_UPDATE_UNUSED_WHILE_PENDING_BIT, bfs[4] = {bf, bf, bf, 0};
+    VkDescriptorPoolSize ps[4] = {{VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, g_ntex_slots}, {VK_DESCRIPTOR_TYPE_SAMPLER, g_nsamp_slots}, {VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, g_nimg_slots}};
     uint32_t nb = g_nimg_slots ? 3 : 2;
+    int pfb = pfb_avail();   // (the pool reads' bitmap has a set of its own, made with it: "Texture pool reads")
     VkDescriptorSetLayoutBindingFlagsCreateInfo bfi = {VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_BINDING_FLAGS_CREATE_INFO, .bindingCount = nb, .pBindingFlags = bfs};
     VkDescriptorSetLayoutCreateInfo li = {VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO, .pNext = &bfi, .flags = VK_DESCRIPTOR_SET_LAYOUT_CREATE_UPDATE_AFTER_BIND_POOL_BIT, .bindingCount = nb, .pBindings = b};
-    VkDescriptorPoolSize ps[3] = {{VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, g_ntex_slots}, {VK_DESCRIPTOR_TYPE_SAMPLER, g_nsamp_slots}, {VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, g_nimg_slots}};
     VkDescriptorPoolCreateInfo pi = {VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO, .flags = VK_DESCRIPTOR_POOL_CREATE_UPDATE_AFTER_BIND_BIT, .maxSets = 1, .poolSizeCount = nb, .pPoolSizes = ps};
     VkDescriptorSetAllocateInfo ai = {VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO, .descriptorSetCount = 1, .pSetLayouts = &g_dsl};
     VkResult r;
     if ((r = vk.vkCreateDescriptorSetLayout(V.dev, &li, NULL, &g_dsl)) || (r = vk.vkCreateDescriptorPool(V.dev, &pi, NULL, &g_dpool)) || ((ai.descriptorPool = g_dpool), (r = vk.vkAllocateDescriptorSets(V.dev, &ai, &g_set)))) {
         VRED("bindless set (%u textures, %u samplers, %u images): %d", g_ntex_slots, g_nsamp_slots, g_nimg_slots, r); g_set = VK_NULL_HANDLE; return; }
-    VLOG("bindless tables: %u textures, %u samplers, %u images (update after bind)", g_ntex_slots, g_nsamp_slots, g_nimg_slots);
+    VLOG("bindless tables: %u textures, %u samplers, %u images (update after bind)%s", g_ntex_slots, g_nsamp_slots, g_nimg_slots, pfb ? "; the pool reads' bitmap in a set of its own" : "");
 }
 VkDescriptorSet vka_bindless_set(void) { return g_set; }
 VkDescriptorSetLayout vka_bindless_layout(void) { return g_dsl; }
+VkDescriptorSetLayout vka_pfb_layout(void) { return atomic_load(&g_pfb) > 0 ? g_pfb_dsl : VK_NULL_HANDLE; }
+VkDescriptorSet vka_pfb_set(void) { return atomic_load(&g_pfb) > 0 ? g_pfb_set : VK_NULL_HANDLE; }
 
 static void dirty(int **list, int *n, int *cap, uint8_t **flag, int nslots, int id) {
     if (!*flag) *flag = calloc((size_t)nslots, 1);
@@ -2298,10 +2426,15 @@ static int treg_dead(int id, const treg_ent *e) {
 static void write_tex(int id, VkCommandBuffer cb, VkWriteDescriptorSet *w, VkDescriptorImageInfo *ii) {   // caller holds g_tmu; it is let go while the image is made
     treg_ent ent = g_treg[id], *e = &ent;
     if (e->img && VKA_ENV("DM_VK_IMG_UPGRADE", 1)) e->t.d.flags |= NVN_TEXTURE_FLAGS_IMAGE;   // an image registration is image intent (nvn_mtl.m image_prepare), with or without the texture's IMAGE flag
-    // The slot's image is made here (and uploaded) when it is not made yet: a texture a shader reads only through the pool (a bindless handle from a record in a
-    // storage buffer, as agl / gsys lit materials read their lightmaps) has no other first use, and a slot written while its image is not made stays the null view
-    // (reads 0) until something rewrites it. DM_VK_EAGER_TEX=0: only an image already made is named (a319e773 .. this fix; Ocarina of Time's lightmaps read 0 then: black walls)
-    int eager = VKA_ENV("DM_VK_EAGER_TEX", 1);
+    // DM_VK_EAGER_TEX=1: the slot's image is made here (and uploaded) when it is not made yet. A texture a shader reads only through the pool (a bindless handle from a
+    // record in a storage buffer, as agl / gsys lit materials read their lightmaps) has no other first use, and a slot written while its image is not made stays the null
+    // view (reads 0) until something rewrites it (Ocarina of Time's lightmaps: black walls in Link's house). Default 0, only an image already made is named: making one for
+    // every registered texture made an image of every texture the game holds in its pools, kept while the pool lives (vka_tex_prune_locked), on top of the pools themselves:
+    // Ocarina of Time 6,000 images and 3.1-3.6 GiB of them in Link's house instead of 1,400 and 1.6 GiB, up to 4.5 GiB on a roam, and Android's low-memory killer closed it
+    // (docs/reference/rendering.md "Textures read only through the pool were never made", issue #97). Open: make such a texture at its first read through the pool
+    // A slot the GPU read through the pool while it held the null view (PFB_WANT, "Texture pool reads") is made here as a first use: the image the read asked for
+    int want = g_pfb_st && (g_pfb_st[id] & PFB_WANT), eager = want || VKA_ENV("DM_VK_EAGER_TEX", 0);
+    if (want) g_pfb_st[id] &= (uint8_t)~PFB_WANT;
     vka_img *im = NULL;
     if (eager) {
         pthread_mutex_unlock(&g_tmu);
@@ -2324,6 +2457,10 @@ static void write_tex(int id, VkCommandBuffer cb, VkWriteDescriptorSet *w, VkDes
     VkImageView view = (im && !treg_dead(id, e)) ? view_of(e, im, -1, 0, VK_FORMAT_UNDEFINED) : VK_NULL_HANDLE;
     if (!view) view = g_null_view;
     pthread_mutex_lock(&g_tmu);
+    if (g_pfb_st && !e->img) {   // (whether the slot holds the null view: a pool read of it asks for its image, pfb_hit)
+        if (view == g_null_view) g_pfb_st[id] |= PFB_NULL; else g_pfb_st[id] &= (uint8_t)~PFB_NULL;
+        if (want && im) { g_pfb_made++; g_pfb_made_b += im->bytes; }
+    }
     im_unhold_locked(im);
     if (im && e->img) { pthread_mutex_unlock(&g_tmu); vka_img_written(im); pthread_mutex_lock(&g_tmu); }   // an image registration: shaders write it (vka_tex_id_view)
     *ii = (VkDescriptorImageInfo){VK_NULL_HANDLE, view, VK_IMAGE_LAYOUT_GENERAL};
@@ -2343,10 +2480,10 @@ static int dim_view_type(uint8_t dim) {
     default: return -1;
     }
 }
-static VkImageView id_view(int id, VkCommandBuffer cb, uint8_t dim, int storage, vka_img **imo);
+static VkImageView id_view(int id, VkCommandBuffer cb, uint8_t dim, int storage, vka_img **imo, VkFormat force);
 VkImageView vka_tex_id_view(int id, VkCommandBuffer cb, uint8_t dim, int storage, VkImageLayout *layout) {
     if (layout) *layout = VK_IMAGE_LAYOUT_GENERAL;
-    return id_view(id, cb, dim, storage, NULL);
+    return id_view(id, cb, dim, storage, NULL, VK_FORMAT_UNDEFINED);
 }
 static int in_fb(const vka_img *im) { for (int i = 0; i < g_nfb; i++) if (g_fb_im[i] == im) return 1; return 0; }   // (a view of a pass's own target is cut to its other levels: view_of)
 // Texture ID id stands for an image the open pass draws into (any level): a draw sampling it after a game barrier inside the pass needs the pass ended first (vka_draw.c
@@ -2368,14 +2505,14 @@ static inline int vm_hit(const vmemo *m, int id, uint8_t dim) {
 // vka_tex_id_view for the recording thread (one thread at a time: the replay worker, or the submitting thread inline), with the memo; storage images take the full path
 VkImageView vka_tex_id_view_rec(int id, VkCommandBuffer cb, uint8_t dim, int storage, VkImageLayout *layout) {
     if (layout) *layout = VK_IMAGE_LAYOUT_GENERAL;
-    if (storage || id <= 0 || id >= (1 << 20) || !VKA_ENV("DM_VK_TEX_MEMO", 1)) return id_view(id, cb, dim, storage, NULL);
+    if (storage || id <= 0 || id >= (1 << 20) || !VKA_ENV("DM_VK_TEX_MEMO", 1)) return id_view(id, cb, dim, storage, NULL, VK_FORMAT_UNDEFINED);
     vmemo *m = vm_slot(id, dim);
     if (vm_hit(m, id, dim)) {
         if (m->im) { m->im->last_frame = vka_frame(); m->im->last_fence = vka_fence_last(); }
         return m->v;
     }
     uint32_t gen = atomic_load_explicit(&g_tgen, memory_order_acquire), ver = g_tver ? atomic_load_explicit(&g_tver[id], memory_order_acquire) : 0;
-    vka_img *im = NULL; VkImageView v = id_view(id, cb, dim, 0, &im);
+    vka_img *im = NULL; VkImageView v = id_view(id, cb, dim, 0, &im, VK_FORMAT_UNDEFINED);
     if (im) { im->last_frame = vka_frame(); im->last_fence = vka_fence_last(); }
     if (v && im && g_tver && !in_fb(im)) *m = (vmemo){id, dim, ver, gen, im, v};
     return v;
@@ -2408,6 +2545,18 @@ static VkFormat class_twin(VkFormat v, int cls) {
     if (v == VK_FORMAT_R16G16_UNORM || v == VK_FORMAT_R16G16_SNORM) return cls == 1 ? VK_FORMAT_R16G16_UINT : cls == 2 ? VK_FORMAT_R16G16_SINT : VK_FORMAT_UNDEFINED;
     return VK_FORMAT_UNDEFINED;
 }
+// The Vulkan format texture ID id is viewed in (its texture view's, else its own), UNDEFINED for none. Not its image's: textures of one memory and shape share an image made in
+// the first one's format, so an image's own format can be another texture's (Ocarina of Time's RGB9E5 upscaler input lives in a B10G11R11 image; vka_draw.c NDSR)
+VkFormat vka_tex_id_vkfmt(int id) {
+    pthread_mutex_lock(&g_tmu);
+    VkFormat r = VK_FORMAT_UNDEFINED;
+    if (id > 0 && id < g_ntreg && g_treg[id].t.serial) {
+        const treg_ent *e = &g_treg[id]; vka_fmt f;
+        if (vka_fmt_of(e->has_v && e->v.set_format ? e->v.format : e->t.d.format, &f)) r = f.vk;
+    }
+    pthread_mutex_unlock(&g_tmu);
+    return r;
+}
 // The numeric class of the format texture ID id is viewed in (its texture view's, else its own): 1 uint, 2 sint, 0 float / normalized / depth / none. A compute shader's float
 // storage image bound to an integer one is retyped (vka_draw.c img_masks, vka_shader_img_module) instead of reading it through a float view of the same size (class_twin)
 int vka_tex_id_class(int id) {
@@ -2431,7 +2580,14 @@ int vka_tex_id_class_rec(int id) {
     e->id = id; e->ver = ver; e->cls = c;
     return c;
 }
-static VkImageView id_view(int id, VkCommandBuffer cb, uint8_t dim, int storage, vka_img **imo) {
+// The replay's own storage view of texture ID id's image as R32_UINT, its texels' 32-bit words (a 4-byte colour format without storage use of its own: B10G11R11 on
+// Qualcomm's driver), for a host pass that packs the texels itself (vka_draw.c ndsr_fsr). The image's format list learns R32_UINT (remade once, as for a game's own R32_UINT
+// view); the bindless table is not written. VK_NULL_HANDLE when the format is not of 4-byte texels or the view cannot be made
+VkImageView vka_tex_id_view_bits(int id, VkCommandBuffer cb, VkImageLayout *layout) {
+    if (layout) *layout = VK_IMAGE_LAYOUT_GENERAL;
+    return id_view(id, cb, 1, 1, NULL, VK_FORMAT_R32_UINT);   // (dim 1: 2D)
+}
+static VkImageView id_view(int id, VkCommandBuffer cb, uint8_t dim, int storage, vka_img **imo, VkFormat force) {
     pthread_mutex_lock(&g_tmu);
     if (id <= 0 || id >= g_ntreg || !g_treg[id].t.serial) { pthread_mutex_unlock(&g_tmu); return VK_NULL_HANDLE; }
     treg_ent e = g_treg[id];
@@ -2449,7 +2605,10 @@ static VkImageView id_view(int id, VkCommandBuffer cb, uint8_t dim, int storage,
     vka_fmt vf = view_fmt(&e, im);
     int want = dim & DMSH_VK_DIM_SINT ? 2 : dim & DMSH_VK_DIM_UINT ? 1 : 0, have = vf.kind == 1 ? 1 : vf.kind == 2 ? 2 : 0;
     VkFormat ovr = VK_FORMAT_UNDEFINED;
-    if (want != have && !(vf.kind >= 3 && want == 0)) {
+    if (force) {   // (vka_tex_id_view_bits: a colour format of 4-byte texels)
+        if (vf.bw != 1 || vf.bh != 1 || vf.bpb != 4 || im->aspect != VK_IMAGE_ASPECT_COLOR_BIT) { pthread_mutex_lock(&g_tmu); im_unhold_locked(im); pthread_mutex_unlock(&g_tmu); return VK_NULL_HANDLE; }
+        ovr = force;
+    } else if (want != have && !(vf.kind >= 3 && want == 0)) {
         // Another class (a compute pass reading a UINT texture as float, or the reverse: Ocarina of Time's UI pass, R16G16_UINT): a view in the same-size format of the shader's
         // class when the image's format list takes it (learned on first use: vka_view, then the next images of this format and size are made with it). Not the bits' own class
         // otherwise: that reads as unbound
@@ -2469,7 +2628,7 @@ static VkImageView id_view(int id, VkCommandBuffer cb, uint8_t dim, int storage,
     // its image format, and the image's own bits in another one are not what it reads or writes
     VkImageView vw; t_view_strict = ovr != VK_FORMAT_UNDEFINED || (storage && vf.vk != im->f.vk); vw = view_of(&e, im, vt, storage, ovr); t_view_strict = 0;
     pthread_mutex_lock(&g_tmu); im_unhold_locked(im); pthread_mutex_unlock(&g_tmu);
-    if (g_set && vw && id > 0 && id < (int)(e.img ? g_nimg_slots : g_ntex_slots)) {
+    if (g_set && vw && !force && id > 0 && id < (int)(e.img ? g_nimg_slots : g_ntex_slots)) {
         VkDescriptorImageInfo di = {VK_NULL_HANDLE, vw, VK_IMAGE_LAYOUT_GENERAL};
         VkWriteDescriptorSet wr = {VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, .dstSet = g_set, .dstBinding = e.img ? 2 : 0, .dstArrayElement = (uint32_t)id, .descriptorCount = 1,
                                    .descriptorType = e.img ? VK_DESCRIPTOR_TYPE_STORAGE_IMAGE : VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, .pImageInfo = &di};
@@ -2584,6 +2743,7 @@ void vka_tex_prepare(VkCommandBuffer cb) {
     bindless_init();
     nvn_pool_use(1);   // the re-uploads below read guest storage: no pool is finalized (and unmapped) under them. Taken before g_tmu, as write_tex does
     pthread_mutex_lock(&g_tmu);
+    pfb_consume_locked();   // the texture IDs read through the pool in submissions done: their images stamped used, null slots written again with their images ("Texture pool reads")
     vka_tex_prune_locked();   // (the limit measured again every 60 frames; nothing to do under it)
     int n_up = 0;
     for (int i = 0; i < g_nredo; i++) {   // CPU writes to textures that already have an image (WriteTexels): from now on they follow their storage
