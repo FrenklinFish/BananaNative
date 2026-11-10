@@ -1,9 +1,10 @@
 #!/bin/sh
-# One scripted test run on the phone: starts a game with extra switches, waits until it is in the level,
+# One scripted test run on the phone: starts a game with extra switches, waits until it is in the level, optionally puts the player at a bookmark,
 # then plays live control lines one step at a time and checks each step for a GPU hang or a crash, or takes a screenshot of the game frame.
 #   nxrun -t <title id> [options] <game folder or .nup>
 #     -e KEY=VALUE   a switch for this run (repeatable); the game's env-<title id>.txt gets it, plus DM_FASTBOOT=1, and is put back once the game has read it
 #     -a '<line>'    a control line sent once the game is in the level, before the steps (repeatable; e.g. 'Plus~1.5' holds + to skip a title card)
+#     -p <name>      a dkpose bookmark loaded before the steps (a game with a devtools row in its profile: Donkey Kong Bananza; needs -e DM_DEVTOOLS=1)
 #     -s '<lines>'   the steps: control lines separated by spaces, e.g. 'RLeft~0.35 RLeft~0.35 RDown~0.35'
 #     -d <seconds>   time per step (default 1.2)
 #     -o <folder>    a screenshot of the game frame after each step, <folder>/step-<n>.png
@@ -14,12 +15,12 @@ T=$(dirname "$0")
 PKG=${NX_PKG:-dev.nxnative.android}
 FILES=/sdcard/Android/data/$PKG/files
 A="adb${NX_SERIAL:+ -s $NX_SERIAL}"
-id=; envs=; acts=; steps=; dt=1.2; shots=
-while getopts t:e:a:s:d:o: o; do
+id=; envs=; acts=; pose=; steps=; dt=1.2; shots=
+while getopts t:e:a:p:s:d:o: o; do
     case $o in
     t) id=$OPTARG;; e) envs="$envs$OPTARG
 ";; a) acts="$acts$OPTARG
-";; s) steps=$OPTARG;; d) dt=$OPTARG;; o) shots=$OPTARG;;
+";; p) pose=$OPTARG;; s) steps=$OPTARG;; d) dt=$OPTARG;; o) shots=$OPTARG;;
     *) sed -n '2,12p' "$0"; exit 2;;
     esac
 done
@@ -57,6 +58,7 @@ done
 sleep 3; restore
 if [ -z "$log" ] || ! $A shell "grep -q '\[mark\]' '$log'"; then echo "NOSTART (no level within 150 s; a dialog may be waiting on the phone)"; exit 3; fi
 printf '%s' "$acts" | while IFS= read -r a; do [ -n "$a" ] && { ctl "$a"; sleep 2; }; done
+[ -n "$pose" ] && "$T/dkpose" load "$pose"
 [ -n "$shots" ] && mkdir -p "$shots"
 
 # The steps

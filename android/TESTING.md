@@ -294,6 +294,10 @@ GPU time and the frame's timeline, live: `nxctl.sh env DM_VK_GPUPROF=50` times o
 
 `android/tools/nxrun -t <title id> [-e KEY=VALUE]… [-a '<control line>']… [-s '<steps>'] [-o <folder>] <game>` starts a game with extra switches (into its `env-<title id>.txt`, put back once the game has read it, with `DM_FASTBOOT=1`), waits for the `[mark]` line, answers the readiness check's "Ready, with limits" notice, then plays live control lines one step at a time (`-s 'RLeft~0.35 RLeft~0.35'`) and checks each step for a GPU hang (`fence … not reached`) or a crash, or saves a screenshot of the game frame. It prints OK, `HANG after step n`, `CRASH after step n` or NOSTART, so a camera sweep that froze the GPU at one spot became a 50-second repeatable test.
 
+### Bookmarks and teleport (Donkey Kong Bananza)
+
+With `DM_DEVTOOLS=1`, `android/tools/dkpose save|load <name>` keeps DK's position and facing as a bookmark (`DM_POSE_GET`, `DM_POSE_SET`), `nxrun -p <name>` puts him back there before the steps, and `DM_TELEPORT=<stage>,<arrival GUID>` enters a stage the way a door does (`DM_TELEPORT=?` logs the last door's pair). They work only on the main build named in the game profile's `devtools` row, which also holds the code offsets they use (`dm/games/040074A01BF12000/game.tsv`); another build gets a `[RED]` line.
+
 ### Which shader is it
 
 `DM_VK_SHADER_STATS=1` logs the shader sets a scene spends its draws and vertices on; `DM_VK_BISECT=<stage>:<mask>:<value>` drops the draws whose shader of that stage matches, live, to halve your way to one shader; `DM_VK_SKIP_FS` drops one pixel shader's draws; `DM_VK_SPV_OVERRIDE=<original.spv>:<patched.spv>` swaps a hand-edited module in (matched by its bytes, restart), so a fix can be tried in the shader before the translator or the host is touched ([env switches](../docs/env_switches.tsv)).
