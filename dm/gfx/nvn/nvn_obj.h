@@ -108,6 +108,7 @@ enum {
     OP_STENCIL, OP_POLY_OFFSET, OP_DRAW, OP_DRAW_IDX, OP_DISPATCH, OP_BARRIER,
     OP_SET_TEX_POOL, OP_SET_SAMP_POOL, OP_COPY_B2T, OP_COPY_STRIDE, OP_BLEND_COLOR, OP_COPY_T2B, OP_BIND_IMG, OP_COPY_T2T, OP_RESET_COUNTER, OP_CLEAR_TEX, OP_CLEAR_BUF, OP_DEPTH_CLAMP, OP_RENDER_COND, OP_FENCE_SYNC, OP_TF_BIND, OP_TF_STATE, OP_RAST_DISCARD, OP_VP_SWIZZLE, OP_BIND_TEX1, OP_PRIM_RESTART, OP_BIND_UBO_SMALL, OP_BIND_VBUF1, OP_DRAW_TEX, OP_ALPHA_REF, OP_PUSH_CONST,
     OP_WAIT_EVENT, OP_WAIT_SYNC,   // GPU waits: the queue goes on past them once the event or sync is reached (vk_android/vka_qsched.h; the Metal replay passes them at once)
+    OP_DLSS,   // NVN2's DLSS evaluation (p_dlss; hle_nvn.c "NVN2's DLSS")
     OP_COUNT_
 };
 // Payload (immediately follows op_hdr)
@@ -189,6 +190,9 @@ typedef struct { uint64_t src; const tex_t *tex; view_t view; uint8_t has_view; 
 typedef struct { const tex_t *src, *dst; view_t sv, dv; uint8_t has_sv, has_dv; NVNcopyRegion sr, dr; int32_t flags; } p_copy_t2t;   // Reused for T2B: src stores the destination buffer address
 typedef struct { const tex_t *tex; view_t view; uint8_t has_view, is_uint; NVNcopyRegion r; int32_t mask; union { float f[4]; uint32_t u[4]; } c; } p_clear_tex;
 typedef struct { int64_t stride; int image; } p_copy_stride;   // image: SetCopyImageStride (bytes per layer / depth slice) instead of SetCopyRowStride
+// NVN2's DLSS evaluation: the parameters at the time of the call, each texture snapped after the record (hle_nvn.c "NVN2's DLSS"; vka_exec.c dlss_eval)
+enum { DLSS_COLOR, DLSS_DEPTH, DLSS_MOTION, DLSS_OUTPUT, DLSS_BIAS, DLSS_EXPOSURE, DLSS_TEXTURES };
+typedef struct { const tex_t *tex[DLSS_TEXTURES]; uint64_t net; int32_t iw, ih, ow, oh, base[DLSS_TEXTURES][2]; float mv[2], jitter[2], pre_exposure; uint32_t flags, reset; } p_dlss;
 typedef struct { uint64_t addr, size; uint32_t value, _pad; } p_clear_buf;   // buffer filled with a 32-bit value (ClearBuffer)
 typedef struct { float rgba[4]; } p_blend_color;
 typedef struct { float ref; } p_alpha_ref;
