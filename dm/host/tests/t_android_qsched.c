@@ -78,11 +78,10 @@ static int t_run(void *ctx, qs_sub *s) {
 }
 static uint64_t t_done(void *c) { (void)c; return g_done; }
 static uint64_t t_now(void *c) { (void)c; return g_now; }
-static uint64_t t_want(void *c) { (void)c; return g_want; }
 static void t_timeout(void *c, const qs_sub *s) { (void)c; (void)s; g_timeouts++; }
 static void reset(void) {
-    memset(&sc, 0, sizeof sc);
-    sc.run = t_run; sc.done = t_done; sc.now = t_now; sc.cpu_want = t_want; sc.timeout = t_timeout; sc.park_ns = 200000000;
+    qs_ev_free(&sc); memset(&sc, 0, sizeof sc);
+    sc.run = t_run; sc.done = t_done; sc.now = t_now; sc.timeout = t_timeout; sc.park_ns = 200000000;
     g_done = g_now = g_want = 0; g_norder = g_ncommit = g_neffects = g_npend = g_timeouts = g_ncur_eff = 0;
 }
 static uint64_t g_fence;
@@ -274,15 +273,91 @@ static void test_valves(void) {
     reset(); g_fence = 0; e = 0;
     submit1(5, &c); g_now = 100000000; qs_poll(&sc); CHECK(qs_parked(&sc) && !g_timeouts, "within the park time");
     g_now = 300000000; qs_poll(&sc); CHECK(!qs_parked(&sc) && g_timeouts == 1 && sc.n_force[QS_WHY_TIMEOUT] == 1 && g_norder == 2, "past it: logged and released");
-    // A CPU thread already waits for this fence or a later one: the wait passes
-    reset(); g_fence = 0; e = 0; g_want = 1;
-    submit1(5, &c);
-    CHECK(!qs_parked(&sc) && sc.n_pass_cpu == 1 && g_norder == 2, "passed for a CPU wait");
+}
+// Issue #98: queues 1 and 5 hand each other events within one frame (Ocarina of Time) while a CPU thread already waits for queue 1's fence. Each wait parks until its
+// producer is replayed, whatever the CPU waits for (the scheduler has no CPU-wait pass; the worker releases parks only once it is stuck): the consumer's last part
+// never runs before the producer's part that signals it
+static void test_pingpong(void) {
+    reset(); g_fence = 0;
+    volatile uint32_t a = 0, b = 0, c2 = 0;
+    list_t q5 = {0}, q1 = {0};
+    work(&q5, 50); ev(&q5, T_WAIT, &a, 1, 1); work(&q5, 51); ev(&q5, T_SIGNAL, &b, 1, 1); ev(&q5, T_WAIT, &c2, 1, 1); work(&q5, 52); end(&q5);
+    work(&q1, 10); ev(&q1, T_SIGNAL, &a, 1, 1); ev(&q1, T_WAIT, &b, 1, 1); work(&q1, 11); ev(&q1, T_SIGNAL, &c2, 1, 1); work(&q1, 12); end(&q1);
+    submit1(5, &q5); submit1(1, &q1);
+    static const uint32_t want[] = {50, 10, 51, 11, 12, 52};
+    CHECK(order_is(want, 6), "each part after its producer"); if (!order_is(want, 6)) print_order();
+    CHECK(!qs_parked(&sc) && sc.n_park == 3 && sc.n_release == 3, "three parks, each released by its producer (%llu %llu)", (unsigned long long)sc.n_park, (unsigned long long)sc.n_release);
 }
 
+// Waits for the CPU (gates): Ocarina of Time's main submission (queue 1) begins with a wait on an event its CPU sets after its SyncWait on the previous frame. Parked, its
+// replay (and that of every queue waiting on it) began only at the CPU's signal; after two releases by memory the word is a CPU event and its waits are gates: the replay
+// goes on and the stand-in GPU waits. A word a replayed signal released is not learned; a banned word parks again
+static int g_ngates, g_gate_ok = 1; static uint32_t g_gate_at[16];
+static int t_gate(void *c, qs_sub *s, volatile uint32_t *w, uint32_t mode, uint32_t value) { (void)c; (void)s; (void)w; (void)mode; (void)value; if (!g_gate_ok) return 0; g_gate_at[g_ngates++] = (uint32_t)g_norder; return 1; }
+static void test_gate(void) {
+    reset(); g_fence = 0; sc.gate = t_gate; g_ngates = 0; g_gate_ok = 1;
+    volatile uint32_t cpu = 0, sh = 0;
+    list_t m = {0}, k = {0};
+    // the main submission: its CPU gate first, then work that signals the SH event; the consumer (queue 5) waits for the SH event
+    ev(&m, T_WAIT, &cpu, 0, 1); work(&m, 10); ev(&m, T_SIGNAL, &sh, 1, 1); work(&m, 11); end(&m);
+    for (int frame = 0; frame < 2; frame++) {
+        cpu = 0;
+        list_t *kk = &k; k.n = 0; work(kk, 50); ev(kk, T_WAIT, &sh, 1, (uint32_t)frame + 1); work(kk, 51); end(kk);
+        qs_sub *s = calloc(1, sizeof *s); s->serial = 5; s->fence = ++g_fence; s->nh = 1; const uint8_t **h = malloc(sizeof *h); h[0] = k.b; s->h = h; qs_submit(&sc, s);
+        submit1(1, &m);
+        CHECK(qs_parked(&sc) && !g_ngates, "frame %d: the main submission parks at its CPU wait (not learned yet)", frame);
+        cpu = 1; qs_poll(&sc);   // the CPU's signal (memory)
+        CHECK(!qs_parked(&sc), "frame %d: released by the CPU's signal", frame);
+        sh = qs_ev_value(&sc, &sh); g_done = g_fence;   // the frame completes: its signals land
+    }
+    CHECK(qs_gw_cpu(&sc, &cpu) && !qs_gw_cpu(&sc, &sh), "the CPU word is learned (%d), the SH word (released by a replayed signal) is not", sc.gw[0].cpu);
+    // Frame 3: gated: replayed at once, the gate asked once (its first wait), the consumer goes on after the main work, nothing parks
+    cpu = 0; g_norder = 0; uint64_t parks = sc.n_park;
+    k.n = 0; work(&k, 50); ev(&k, T_WAIT, &sh, 1, 3); work(&k, 51); end(&k);
+    qs_sub *s = calloc(1, sizeof *s); s->serial = 5; s->fence = ++g_fence; s->nh = 1; const uint8_t **h = malloc(sizeof *h); h[0] = k.b; s->h = h; qs_submit(&sc, s);
+    s = calloc(1, sizeof *s); s->serial = 1; s->fence = ++g_fence; s->nh = 1; h = malloc(sizeof *h); h[0] = m.b; s->h = h;
+    s->w0kind = 1; s->w0word = &cpu; s->w0mode = 0; s->w0value = 1;
+    qs_submit(&sc, s); qs_poll(&sc);
+    static const uint32_t want[] = {50, 10, 11, 51};
+    CHECK(order_is(want, 4), "gated: the main work and the consumer's rest replayed before the CPU's signal"); if (!order_is(want, 4)) print_order();
+    CHECK(g_ngates == 1 && g_gate_at[0] == 1 && sc.n_gate == 1 && sc.n_park == parks + 1 && !qs_parked(&sc), "one gate, before the main work (gates %d at %u; parks %llu)",
+          g_ngates, g_gate_at[0], (unsigned long long)(sc.n_park - parks));
+    // Banned (the gate could not be made): it parks as before
+    g_gate_ok = 0; cpu = 0; g_norder = 0; g_done = g_fence;
+    s = calloc(1, sizeof *s); s->serial = 1; s->fence = ++g_fence; s->nh = 1; h = malloc(sizeof *h); h[0] = m.b; s->h = h;
+    s->w0kind = 1; s->w0word = &cpu; s->w0mode = 0; s->w0value = 1;
+    qs_submit(&sc, s);
+    CHECK(qs_parked(&sc) && !g_norder, "no gate: parked whole");
+    cpu = 1; qs_poll(&sc); CHECK(!qs_parked(&sc) && g_norder == 2, "released by the CPU's signal");
+    qs_gate_ban(&sc, &cpu); CHECK(!qs_gw_cpu(&sc, &cpu), "a banned word is not a CPU event");
+}
+
+// Many words in flight (more than the 256 the table held before): every one is seen by a wait, none falls back to memory
+static void test_many_words(void) {
+    reset(); g_fence = 0;
+    enum { N = 3000 };
+    static volatile uint32_t w[N]; static list_t c;
+    memset((void *)w, 0, sizeof w); memset(&c, 0, sizeof c);
+    qs_sub prod = {0}; prod.fence = ++g_fence; sc.cur = &prod;   // one producer submission replays N signals (WRITE 1), not done yet
+    for (int i = 0; i < N; i++) qs_event_replayed(&sc, &w[i], 0, 1);
+    sc.cur = NULL;
+    int seen = 1; for (int i = 0; i < N; i++) seen &= qs_ev_value(&sc, &w[i]) == 1;
+    CHECK(seen && w[0] == 0 && sc.evcap >= 4 * N / 2, "%d words signalled and not done: the replay sees each one's value (table %u)", N, sc.evcap);
+    work(&c, 1); ev(&c, T_WAIT, &w[N - 1], 0, 1); ev(&c, T_WAIT, &w[0], 0, 1); work(&c, 2); end(&c);
+    submit1(5, &c);
+    CHECK(g_norder == 2 && !sc.n_park, "a wait on the 3000th word goes on at once");
+    g_done = g_fence; w[5] = 7;
+    CHECK(qs_ev_value(&sc, &w[5]) == 7, "done: the word in memory");
+    qs_sub next = {0}; next.fence = ++g_fence; sc.cur = &next;   // signals after they are done: an ADD on memory's value; the done words go at the next rebuild
+    qs_event_replayed(&sc, &w[1], 1, 2);
+    for (int i = 0; i < N; i++) qs_event_replayed(&sc, &w[i], 0, 3);
+    sc.cur = NULL;
+    CHECK(qs_ev_value(&sc, &w[1]) == 3 && qs_ev_value(&sc, &w[N - 1]) == 3 && sc.nev <= N + 1, "after they are done: the new values, %u words kept", sc.nev);
+    reset();
+}
 int main(void) {
-    test_pred(); test_wait_event(); test_whole(); test_queued_values(); test_backlog(); test_nested(); test_wait_sync(); test_valves();
+    test_many_words(); test_pred(); test_wait_event(); test_whole(); test_queued_values(); test_backlog(); test_nested(); test_wait_sync(); test_valves(); test_pingpong(); test_gate();
     if (g_fail) { printf("t_android_qsched: %d FAILED\n", g_fail); return 1; }
-    printf("PASS: GPU waits across NVN queues (vka_qsched.h): parks, producers, predicates, syncs, signals, valves\n");
+    printf("PASS: GPU waits across NVN queues (vka_qsched.h): parks, producers, predicates, syncs, signals, valves, gates\n");
     return 0;
 }

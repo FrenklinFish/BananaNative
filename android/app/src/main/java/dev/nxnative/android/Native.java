@@ -138,6 +138,10 @@ final class Native {
     static native int pinThreads();
     /** The frame limit while the game runs (games whose speed follows the measured rate: Prefs.paced); 0 = none */
     static native void fpsLimitSet(int fps);
+    /** Full game speed at low frame rates while the game runs (games whose profile has fps_decouple sead: Prefs.paced; hle_fpslock.c nxhost_fps_decouple_set) */
+    static native void decoupleSet(boolean on);
     /** Donkey Kong Bananza's dynamic resolution range while it runs, % of the window (probe.c nxhost_drs_set); 100, 100 = off (the native size) */
     static native void drsSet(int minPct, int maxPct);
+    /** Whether the running game has dispatched a neural upscaler network that the Upscaler can replace (vka_draw.c nxhost_ndsr_status): 1 yes, 0 not yet, -1 this host cannot say */
+    static native int ndsrStatus();
 }
