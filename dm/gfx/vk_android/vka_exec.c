@@ -961,6 +961,15 @@ static void copy_t2t(const p_copy_t2t *c) {
     vka_img *s = vka_tex_get(c->src, g_cb), *d = vka_tex_get(c->dst, g_cb);
     if (!s || !d) return;
     vka_tex_own(d, g_cb);
+    if ((c->flags & DM_COPY_DLSS) && VKA_ENV("DM_VK_DLSS_FSR3", 1)) {
+        const p_dlss_t2t *o = (const p_dlss_t2t *)c;   // DLSS records carry the temporal upscaler's inputs after the copy (hle_nvn.c nvnCommandBufferEvaluateDlss)
+        vka_img *z = o->depth ? vka_tex_get(o->depth, g_cb) : NULL, *m = o->motion ? vka_tex_get(o->motion, g_cb) : NULL;
+        if (vka_dlss_fsr3(g_cb, s, d, z, m, o)) {
+            vka_img_written(d);
+            g_stat_ops++;
+            return;
+        }
+    }
     unsigned sl = c->has_sv && c->sv.set_levels ? c->sv.base_level : 0, dl = c->has_dv && c->dv.set_levels ? c->dv.base_level : 0;
     unsigned sz0 = c->has_sv && c->sv.set_layers ? c->sv.min_layer : 0, dz0 = c->has_dv && c->dv.set_layers ? c->dv.min_layer : 0;
     vka_tex_soft_copy(s, -1, g_cb); vka_tex_soft_copy(d, (int)dl, g_cb);   // (a soft texture copied from, or into at level 0: made whole first)
@@ -1181,6 +1190,7 @@ static int exec(const uint8_t *p, int depth) {   // 1: parked at a wait (g_pk ho
             }
             break;
         case OP_REPORT_COUNTER: { uint64_t t, ad; memcpy(&t, a, 8); memcpy(&ad, (const uint8_t *)a + 8, 8);
+            if (VKA_ENV("DM_VK_OCCLOG", 0) && t != NVN_COUNTER_TYPE_TIMESTAMP && t != NVN_COUNTER_TYPE_TIMESTAMP_TOP) VLOG("occlog frame %llu report type %llu at %#llx after draw %llu", (unsigned long long)g_frame, (unsigned long long)t, (unsigned long long)ad, (unsigned long long)(g_stat_draws - g_sub_draws0));
             uint32_t q = 0;
             if (g_sqp && g_cb && g_sq_n < SEGQ && (t == NVN_COUNTER_TYPE_TIMESTAMP || t == NVN_COUNTER_TYPE_TIMESTAMP_TOP)) {
                 q = (uint32_t)(g_sq_base + g_sq_n++) + 1;

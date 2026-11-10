@@ -195,16 +195,21 @@ static int init_once(void) {
     VkPhysicalDeviceVulkan11Features f11 = {VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_1_FEATURES, .pNext = &f12};
     VkPhysicalDeviceFeatures2 f2 = {VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2, .pNext = &f11};
     vk.vkGetPhysicalDeviceFeatures2(V.pd, &f2);
-    f2.features.robustBufferAccess = VK_FALSE; f13.robustImageAccess = VK_FALSE;
+    // DM_VK_ROBUST=1 (at start): buffer robustness stays on (robustBufferAccess, and robustBufferAccess2 where the device has it): out-of-range buffer and vertex
+    // reads read zeros (or in-range data) as Maxwell / Ampere's do, instead of whatever memory follows
+    { const char *e = getenv("DM_VK_ROBUST"); V.robust = e && atoi(e) > 0; }
+    if (!V.robust) f2.features.robustBufferAccess = VK_FALSE;
+    f13.robustImageAccess = VK_FALSE;
     f12.bufferDeviceAddressCaptureReplay = VK_FALSE; f12.bufferDeviceAddressMultiDevice = VK_FALSE;
-    frob.robustBufferAccess2 = VK_FALSE; frob.robustImageAccess2 = VK_FALSE;   // only nullDescriptor: unbound slots read a null descriptor
+    if (!V.robust || !f2.features.robustBufferAccess) frob.robustBufferAccess2 = VK_FALSE;
+    frob.robustImageAccess2 = VK_FALSE;   // only nullDescriptor: unbound slots read a null descriptor
     ffault.deviceFaultVendorBinary = VK_FALSE; g_fault_on = x_fault && ffault.deviceFault;   // (the vendor's binary dump: not read)
     // Mesh shading: the task and mesh stages only (multiview, shading-rate and query support each need more of the device than the replay enables or uses)
     fmesh.multiviewMeshShader = VK_FALSE; fmesh.primitiveFragmentShadingRateMeshShader = VK_FALSE; fmesh.meshShaderQueries = VK_FALSE;
     if (x_mesh && !fmesh.meshShader) fmesh.taskShader = VK_FALSE;   // (task shading is of no use without mesh shading)
     V.push_desc = x_push; V.vin_dyn = x_vin && fvin.vertexInputDynamicState; V.null_desc = x_rob && frob.nullDescriptor; V.idx8 = x_i8 && fi8.indexTypeUint8;
     V.divisor = x_div && fdiv.vertexAttributeInstanceRateDivisor; V.logic_op = f2.features.logicOp; V.dual_src = f2.features.dualSrcBlend; V.geom = f2.features.geometryShader;
-    V.tess = f2.features.tessellationShader; V.depth_clamp = f2.features.depthClamp; V.fill_lines = f2.features.fillModeNonSolid; V.depth_bias_clamp = f2.features.depthBiasClamp;
+    V.tess = f2.features.tessellationShader; V.depth_clamp = f2.features.depthClamp; V.depth_bounds = f2.features.depthBounds; V.fill_lines = f2.features.fillModeNonSolid; V.depth_bias_clamp = f2.features.depthBiasClamp;
     V.multi_vp = f2.features.multiViewport; V.a2c = 1; V.vstores = f2.features.vertexPipelineStoresAndAtomics; V.fstores = f2.features.fragmentStoresAndAtomics; V.mesh = x_mesh && fmesh.meshShader; V.task = V.mesh && fmesh.taskShader;
     if (!f12.timelineSemaphore || !f13.dynamicRendering) { VRED("the device lacks timeline semaphores (%d) or dynamic rendering (%d)", f12.timelineSemaphore, f13.dynamicRendering); return 0; }
     V.imageless = f12.imagelessFramebuffer;   // (enabled with the rest of f12)

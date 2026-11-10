@@ -2,9 +2,24 @@
 // Host: returns host static objects; when hooking up Metal, the native window corresponds to the front end's CAMetalLayer (front_metal_layer()).
 #include "../host/hle.h"
 #include <stdatomic.h>
+#include <stdlib.h>
 
 static struct { uint32_t magic; } g_display = {0x50534944}, g_layer = {0x5259414c};
 static struct { uint32_t magic; void *layer; } g_native = {0x4e49574e, 0};
+
+#ifdef __ANDROID__
+// NVN2 chooses its scene and upscaler sizes from this display buffer mode.
+HLE_FORCE("_ZN2nn2vi31QueryDisplayBufferMaxResolutionEPNS0_19BufferMaxResolutionEPKNS0_7DisplayE",
+          "display buffer mode for the Android host", Result, h_vi_BufMaxRes, uint32_t *out, const void *disp) {
+    (void)disp;
+    const char *setting = getenv("DM_VI_MAX_RES");
+    uint32_t mode = setting && atoi(setting) == 1080 ? 1 : 0;
+    static atomic_int once;
+    if (!atomic_exchange(&once, 1)) LOG("vi::QueryDisplayBufferMaxResolution: %s", mode ? "1920x1080" : "1280x720");
+    if (out) *out = mode;
+    return RES_OK;
+}
+#endif
 
 HLE_FORCE("_ZN2nn2vi10InitializeEv", "display service init; the host has no vi service", void, h_vi_Init, void) {}
 HLE_FORCE("_ZN2nn2vi18OpenDefaultDisplayEPPNS0_7DisplayE", "open default display; the host returns a static object", Result, h_vi_OpenDisp, void **out) {

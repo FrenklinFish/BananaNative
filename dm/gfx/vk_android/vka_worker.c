@@ -405,7 +405,8 @@ void mtl_exec(const uint8_t *handle) {
     g_cur.h[g_cur.nh++] = handle;
 }
 uint64_t mtl_sub_commit(void) {
-    if (!g_in_sub) { uint64_t f = vka_fp_host(NULL), r = vka_rp_sub_commit(0); vka_fp_back(f); return r; }
+    // DM_VK_SUB_WAIT=1 (diagnostic, with DM_VK_WORKER=0): each submission waits for the GPU before the game goes on (CPU and GPU serialized)
+    if (!g_in_sub) { uint64_t f = vka_fp_host(NULL), r = vka_rp_sub_commit(0); vka_fp_back(f); if (VKA_ENV("DM_VK_SUB_WAIT", 0)) vka_wait_done(r, UINT64_MAX); return r; }
     g_in_sub = 0;
     job_t j = {J_SUB}; j.serial = g_pend_serial; j.origin_ll = g_pend_origin; j.nh = g_cur.nh;
     j.h = malloc((size_t)(j.nh ? j.nh : 1) * sizeof *j.h); if (j.nh) memcpy(j.h, g_cur.h, (size_t)j.nh * sizeof *j.h);

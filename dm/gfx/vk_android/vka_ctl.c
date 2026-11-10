@@ -69,7 +69,7 @@ static const char *const g_live[] = {"DM_VK_DRAW", "DM_VK_STATS", "DM_VK_HANG_S"
                                      "DM_VK_CHUNK", "DM_VK_PASS_CLEARS", "DM_VK_PASS_KEEP", "DM_VK_DYN_FILTER", "DM_VK_PROF", "DM_VK_ROWS", "DM_VK_SYNCLOG", "DM_VK_UBWC", "DM_VK_IMG_UPGRADE", "DM_VK_DONE_LAST", "DM_VK_AFF_REPLAY", "DM_VK_AFF_ALL",
                                      "DM_VK_NANSCAN_DUMP", "DM_VK_TEX_STATS", "DM_VK_TEX_STATS_LINES", "DM_VK_TEX_STATS_DRAWS", "DM_VK_TEX_STATS_TABLE", "DM_VK_RT_LOG", "DM_VK_RT_LOG_LINES", "DM_VK_VB_FILTER", "DM_VK_ENC_BATCH", "DM_VK_ENC_SPIN", "DM_VK_BAR_KEEP", "DM_VK_DRV_MEMO", "DM_VK_PUSH_DELTA", "DM_VK_UPLOAD_MT", "DM_VK_UPLOAD_MT_MIN",
                                      "DM_LSFG", "DM_LSFG_MULT", "DM_LSFG_TARGET", "DM_LSFG_FLOW", "DM_VK_DISPATCH_ORDER",
-                                     "DM_VK_NDSR", "DM_VK_NDSR_SHARP", "DM_VK_NDSR_INPUT", "DM_VK_PRESENT_NEAREST", NULL};   // (the Upscaler: the in-game panel sends the first, second and fourth)
+                                     "DM_VK_NDSR", "DM_VK_NDSR_SHARP", "DM_VK_NDSR_INPUT", "DM_VK_PRESENT_NEAREST", "DM_VK_DRAW_SKIP_KEY", "DM_VK_SKIP_COUNT", "DM_VK_FOCUS", "DM_VK_FOCUS_COUNT", "DM_VK_PRESENT_FILTER", "DM_VK_PICTURE_ASPECT", NULL};   // (the Upscaler: the in-game panel sends the first, second and fourth)
 static int in(const char *const *t, const char *k) { for (; *t; t++) if (!strcmp(*t, k)) return 1; return 0; }
 
 void dm_gfx_ctl_env(const char *key, const char *val) {   // the control thread
@@ -292,6 +292,7 @@ int dm_gfx_ctl(const char *line) {   // the control thread (hle_hid.c ctl_main):
         dm_gfx_shot_at(1, p); VLOG("ctl: screenshot of the next frame queued%s%s", *p ? " → " : "", p); return 1;
     }
     if (!strcmp(line, "stats")) { atomic_store(&g_stats, 1); return 1; }
+    if (!strcmp(line, "nvncap")) { void nvn_cap_now(void); nvn_cap_now(); return 1; }
     return 0;
 }
 #endif
