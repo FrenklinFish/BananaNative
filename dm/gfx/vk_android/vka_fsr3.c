@@ -2,13 +2,14 @@
 // frame and hands DLSS the jittered colour, depth, motion vectors and the jitter; a spatial scaler (the linear copy, FSR 1) keeps the jitter, so the whole scene shakes by a
 // fraction of a pixel every frame. FSR 3.1 takes the same inputs as DLSS and accumulates the frames along the motion vectors, which removes the jitter and the aliasing.
 // The passes, internal images and constants follow AMD's ffx_fsr3upscaler.cpp (FidelityFX SDK 1.1.4, FSR 3.1.4); the shaders (fsr3/*.h, dm/third_party/fidelityfx-fsr3, MIT) are
-// the SDK's GLSL passes compiled for reversed depth, HDR colour, render-size motion vectors, no half precision, the SPD passes with and without wave operations.
+// the SDK's GLSL passes compiled for reversed depth, HDR colour, render-size motion vectors, no half precision, the SPD passes with and without wave operations. Rebuilt and checked by dm/tools/fsr3_shaders.py.
 // Here each pass is a compute pipeline with push descriptors (set 0: its bindings in the SDK's order, then the point and linear samplers at 1000 and 1001), recorded into the
 // replay's command buffer where the game's DLSS evaluation is. Every image stays in GENERAL. DM_VK_DLSS=4 picks it (the Upscaler row's FSR 3.1) (the caller then uses FSR 1 or the linear copy)
 #if defined(__ANDROID__)
 #include "vka.h"
 #include <float.h>
 #include <math.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
@@ -107,9 +108,46 @@ static int tex_make(f3_tex *t, VkFormat fmt, uint32_t w, uint32_t h, uint32_t le
     return 1;
 }
 
+// What the passes need from the device, checked before anything is made (the caller then uses FSR 1): push descriptors (every pass binds that way), the storage image features
+// the SPIR-V declares (StorageImageExtendedFormats, StorageImageWriteWithoutFormat; vka_dev.c enables every feature the device has, so supported means enabled), and each
+// internal format as a sampled + storage image (R32_UINT also with atomics: the pyramids' counter and the previous depth)
+static const VkFormat g_storage_fmts[] = {VK_FORMAT_R8_UNORM, VK_FORMAT_R16_SFLOAT, VK_FORMAT_R8G8B8A8_UNORM, VK_FORMAT_R16G16B16A16_SFLOAT, VK_FORMAT_R16G16_SFLOAT,
+                                          VK_FORMAT_R32_SFLOAT, VK_FORMAT_R32_UINT, VK_FORMAT_R32G32B32A32_SFLOAT};
+static const char *f3_missing(void) {
+    if (!V.push_desc || !vk.vkCmdPushDescriptorSetKHR) return "push descriptors (VK_KHR_push_descriptor)";
+    if (V.max_push < 15) return "15 push descriptors per set";   // the largest pass: 13 bindings and the 2 samplers
+    VkPhysicalDeviceFeatures pf; vk.vkGetPhysicalDeviceFeatures(V.pd, &pf);
+    if (!pf.shaderStorageImageExtendedFormats) return "shaderStorageImageExtendedFormats";
+    if (!pf.shaderStorageImageWriteWithoutFormat) return "shaderStorageImageWriteWithoutFormat";
+    for (size_t i = 0; i < sizeof g_storage_fmts / sizeof *g_storage_fmts; i++) {
+        VkFormatProperties fp; vk.vkGetPhysicalDeviceFormatProperties(V.pd, g_storage_fmts[i], &fp);
+        VkFormatFeatureFlags need = VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT | VK_FORMAT_FEATURE_STORAGE_IMAGE_BIT | (g_storage_fmts[i] == VK_FORMAT_R32_UINT ? VK_FORMAT_FEATURE_STORAGE_IMAGE_ATOMIC_BIT : 0);
+        if ((fp.optimalTilingFeatures & need) != need) { static char b[64]; snprintf(b, sizeof b, "storage format %d", g_storage_fmts[i]); return b; }
+    }
+    VkFormatProperties fp; vk.vkGetPhysicalDeviceFormatProperties(V.pd, VK_FORMAT_R16_SNORM, &fp);
+    if (!(fp.optimalTilingFeatures & VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT)) return "sampled R16_SNORM";
+    return NULL;
+}
+static void f3_teardown(void) {   // a setup that failed part way: what was made goes, F.state stays -1
+    for (int p = 0; p < P_N; p++) {
+        if (F.pipe[p]) vk.vkDestroyPipeline(V.dev, F.pipe[p], NULL);
+        if (F.lay[p]) vk.vkDestroyPipelineLayout(V.dev, F.lay[p], NULL);
+        if (F.dsl[p]) vk.vkDestroyDescriptorSetLayout(V.dev, F.dsl[p], NULL);
+        F.pipe[p] = VK_NULL_HANDLE; F.lay[p] = VK_NULL_HANDLE; F.dsl[p] = VK_NULL_HANDLE;
+    }
+    if (F.ubo_map) vk.vkUnmapMemory(V.dev, F.ubo_mem);
+    if (F.ubo) vk.vkDestroyBuffer(V.dev, F.ubo, NULL);
+    if (F.ubo_mem) vk.vkFreeMemory(V.dev, F.ubo_mem, NULL);
+    if (F.point) vk.vkDestroySampler(V.dev, F.point, NULL);
+    if (F.linear) vk.vkDestroySampler(V.dev, F.linear, NULL);
+    F.ubo_map = NULL; F.ubo = VK_NULL_HANDLE; F.ubo_mem = VK_NULL_HANDLE; F.point = F.linear = VK_NULL_HANDLE;
+}
+
 static int f3_ready(void) {
     if (F.state) return F.state > 0;
     F.state = -1;
+    const char *miss = f3_missing();
+    if (miss) { VRED("FSR 3.1: the device lacks %s; the scene is scaled with FSR 1", miss); return 0; }
     VkSamplerCreateInfo si = {VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO, .magFilter = VK_FILTER_NEAREST, .minFilter = VK_FILTER_NEAREST, .mipmapMode = VK_SAMPLER_MIPMAP_MODE_NEAREST,
         .addressModeU = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE, .addressModeV = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE, .addressModeW = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE,
         .maxAnisotropy = 1, .maxLod = VK_LOD_CLAMP_NONE};
@@ -117,11 +155,13 @@ static int f3_ready(void) {
     si.magFilter = si.minFilter = VK_FILTER_LINEAR; si.mipmapMode = VK_SAMPLER_MIPMAP_MODE_LINEAR;
     if (!r) r = vk.vkCreateSampler(V.dev, &si, NULL, &F.linear);
     VkSampler samplers[2] = {F.point, F.linear};
-    // The SPD pyramids reduce with quad shuffles where compute has them (the wave-free build otherwise). DM_VK_FSR3_WAVE=0: wave-free
+    // The SPD pyramids reduce with quad shuffles on Turnip, where they were tested, when compute reports them; the wave-free build everywhere else (Qualcomm's driver among them),
+    // as the SDK does without wave support. DM_VK_FSR3_WAVE=1: quad shuffles on any driver that reports them; 0: wave-free on Turnip too
     VkPhysicalDeviceSubgroupProperties sg = {VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SUBGROUP_PROPERTIES};
     VkPhysicalDeviceProperties2 pp = {VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2, .pNext = &sg};
     if (vk.vkGetPhysicalDeviceProperties2) vk.vkGetPhysicalDeviceProperties2(V.pd, &pp);
-    int quads = (sg.supportedOperations & VK_SUBGROUP_FEATURE_QUAD_BIT) && (sg.supportedStages & VK_SHADER_STAGE_COMPUTE_BIT) && VKA_ENV("DM_VK_FSR3_WAVE", 1);
+    int quads = (sg.supportedOperations & VK_SUBGROUP_FEATURE_QUAD_BIT) && (sg.supportedStages & VK_SHADER_STAGE_COMPUTE_BIT) &&
+                VKA_ENV("DM_VK_FSR3_WAVE", V.driver_id == VK_DRIVER_ID_MESA_TURNIP);
     if (quads) {
         g_code[P_LUMA].code = FSR3_UPSCALER_LUMA_PYRAMID_COMP_SPV; g_code[P_LUMA].size = sizeof FSR3_UPSCALER_LUMA_PYRAMID_COMP_SPV;
         g_code[P_SCP].code = FSR3_UPSCALER_SHADING_CHANGE_PYRAMID_COMP_SPV; g_code[P_SCP].size = sizeof FSR3_UPSCALER_SHADING_CHANGE_PYRAMID_COMP_SPV;
@@ -154,7 +194,7 @@ static int f3_ready(void) {
     if (!r) r = vk.vkAllocateMemory(V.dev, &ai, NULL, &F.ubo_mem);
     if (!r) r = vk.vkBindBufferMemory(V.dev, F.ubo, F.ubo_mem, 0);
     if (!r) r = vk.vkMapMemory(V.dev, F.ubo_mem, 0, VK_WHOLE_SIZE, 0, (void **)&F.ubo_map);
-    if (r) { VRED("FSR 3.1: setup %d; the scene is scaled without it", r); return 0; }
+    if (r) { VRED("FSR 3.1: setup %d; the scene is scaled with FSR 1", r); f3_teardown(); return 0; }
     F.state = 1;
     VLOG("FSR 3.1 upscaler ready (DLSS replacement; pyramids %s; DM_VK_DLSS=4, DM_VK_FSR3_SHARP sharpness 0-1)", quads ? "with quad shuffles" : "wave-free");
     return 1;
