@@ -242,19 +242,25 @@ _UI_V14 = [
 
 # Scissor panes at 4:3 (with the v11 words): ui2d's scissor-pane draw (main+0x5975a0) turns the pane's global matrix into a pixel
 # scissor without the v11 UI squeeze, so the Dagsion minimap's S_Scissor (256x256 at y 553) clipped 1626,0 256x115 instead of
-# 29..221: the map spilled above its frame and its lower half was cut (also in PC emulators). On the 1080-high screen the pane's
-# y scale (s16) and y translation (s6) get the same 0.75 as the projection. Caves 0x59afa4 (7 words) and 0x59c544 (2 words)
+# 29..221: the map spilled above its frame and its lower half was cut (also in PC emulators). On a screen-sized target (16:9, at least
+# 720 high: handheld 1920x1080, docked 2048x1152, 1280x720; s5 x s4 is the target's size) the pane's y scale (s16) and y translation
+# (s6) get the same 0.75 as the projection; other targets keep the game's scissor. Caves 0x59afa4 and 0x59c544 (7 words each, all used)
 _SCISSOR43 = [
     (0x005975ec, '450c251e', '6e0e0014', 'scissor 4:3: b 0x59afa4'),
     (0x0059afa4, '00000000', '450c251e', 'scissor 4:3: fcsel s5, s2, s5, eq (moved)'),
-    (0x0059afa8, '00000000', '8a00381e', 'scissor 4:3: fcvtzs w10, s4'),
-    (0x0059afac, '00000000', '5fe11071', 'scissor 4:3: cmp w10, #1080'),
-    (0x0059afb0, '00000000', '0132fe54', 'scissor 4:3: b.ne 0x5975f0'),
-    (0x0059afb4, '00000000', '15102d1e', 'scissor 4:3: fmov s21, #0.75'),
-    (0x0059afb8, '00000000', '100a351e', 'scissor 4:3: fmul s16, s16, s21'),
+    (0x0059afa8, '00000000', '8a00381e', 'scissor 4:3: fcvtzs w10, s4 (target height)'),
+    (0x0059afac, '00000000', 'a900381e', 'scissor 4:3: fcvtzs w9, s5 (target width)'),
+    (0x0059afb0, '00000000', '5f410b71', 'scissor 4:3: cmp w10, #720'),
+    (0x0059afb4, '00000000', 'eb31fe54', 'scissor 4:3: b.lt 0x5975f0'),
+    (0x0059afb8, '00000000', '4a6d1c53', 'scissor 4:3: lsl w10, w10, #4 (height x 16)'),
     (0x0059afbc, '00000000', '62050014', 'scissor 4:3: b 0x59c544'),
-    (0x0059c544, '00000000', 'c608351e', 'scissor 4:3: fmul s6, s6, s21'),
-    (0x0059c548, '00000000', '2aecff17', 'scissor 4:3: b 0x5975f0'),
+    (0x0059c544, '00000000', '290d090b', 'scissor 4:3: add w9, w9, w9, lsl #3 (width x 9)'),
+    (0x0059c548, '00000000', '3f010a6b', 'scissor 4:3: cmp w9, w10 (16:9)'),
+    (0x0059c54c, '00000000', '2185fd54', 'scissor 4:3: b.ne 0x5975f0'),
+    (0x0059c550, '00000000', '15102d1e', 'scissor 4:3: fmov s21, #0.75'),
+    (0x0059c554, '00000000', '100a351e', 'scissor 4:3: fmul s16, s16, s21'),
+    (0x0059c558, '00000000', 'c608351e', 'scissor 4:3: fmul s6, s6, s21'),
+    (0x0059c55c, '00000000', '25ecff17', 'scissor 4:3: b 0x5975f0'),
 ]
 
 # v15:
