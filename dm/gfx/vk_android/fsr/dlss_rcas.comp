@@ -1,6 +1,6 @@
 #version 450
 #extension GL_GOOGLE_include_directive : require
-// NVN2's DLSS stand-in (vka_dlss.c): AMD's RCAS on the output-size work image (FSR 1's EASU output, tonemapped), then, with pc.itm, the tonemap
+// NVN2's DLSS stand-in (vka_dlss.c): AMD's RCAS on the output-size work image (FSR 1's EASU or GSR2's scene colour, both tonemapped), then, with pc.itm, the tonemap
 // undone (c / (1 - max(c))) back to the linear HDR the game's post chain expects. con0.x is RCAS's sharpness as a linear factor (DM_VK_DLSS_SHARP / 100)
 layout(local_size_x = 8, local_size_y = 8) in;
 layout(set = 0, binding = 0) uniform sampler2D tex;

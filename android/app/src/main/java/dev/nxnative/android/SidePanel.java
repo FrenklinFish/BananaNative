@@ -430,7 +430,7 @@ final class SidePanel extends FrameLayout {
             box.addView(full);
         }
         fpsNow = note("");
-        if (GameUpscaler.shown(act, game())) {   // right under the frame rate cap: the Upscaler (the game's own upscaler and the window's scaling to the screen), for games whose network it replaces
+        if (Prefs.dlssGame(game()) || GameUpscaler.shown(act, game())) {   // right under the frame rate cap: the Upscaler (the game's own upscaler and the window's scaling to the screen), for games whose network it replaces; for a game on the DLSS stand-in (no network to replace), the stand-in's modes with Motion clarity / sharpness
             GameUpscaler.rows(act, game(), box);
             note(act instanceof GameActivity && ((GameActivity) act).live() ? "Applies from the next frame, kept for this game (the same setting as Game settings › Upscaler)."
                     : "Applies at the next start (this run takes no live changes: DM_CTL is off).");

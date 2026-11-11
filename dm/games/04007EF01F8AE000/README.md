@@ -81,7 +81,7 @@ Keyboard in a window: J K U I are A B X Y, WASD the left stick, Shift + arrows t
 
 ## Android
 
-- **Playable** (`readiness.tsv`): on the OnePlus Pad 3 the game was played from the intro through many battles to the hub area Dagsion with no significant issue, on Turnip Gen8 V39 and on the stock driver. On the AYN Thor (Adreno 740) pick Turnip (below). The profile is the Mac's, with `fps_target 30` (the game's own gameplay rate, menus included; the in-game panel's cap picks 60) and no `fps_max`, plus two Android keys: `subgroup_one_lane 35d12d6f98fa05e2` and `av1_decoder dav1d` ([`dm/games/README.md`](../README.md)).
+- **Playable** (`readiness.tsv`): on the OnePlus Pad 3 the game was played from the intro through many battles to the hub area Dagsion with no significant issue, on Turnip Gen8 V39 and on the stock driver. On the AYN Thor (Adreno 740) pick Turnip (below). The profile is the Mac's, with `fps_target 30` (the game's own gameplay rate, menus included; the in-game panel's cap picks 60) and no `fps_max`, plus three Android keys: `dlss_standin 1`, `subgroup_one_lane 35d12d6f98fa05e2` and `av1_decoder dav1d` ([`dm/games/README.md`](../README.md)).
 - The display's largest buffer answers the 1080p screen in handheld mode (`hle_vi.c`), so the game picks its 1080p output. Docked it renders 1024x576 and DLSS takes it to 2048x1152; handheld (`DM_OPMODE=0`) 960x540 to 1920x1080. The game takes its render size from its own resolution tables, not from DLSS's optimal settings: an answer of 1366x768 left it at 1024x576.
 
 ### Tested devices
@@ -96,17 +96,26 @@ Keyboard in a window: J K U I are A B X Y, WASD the left stick, Shift + arrows t
 | AYN Thor | Adreno 740 | Qualcomm v863.1 (Vulkan 1.3.295) | Not recommended: characters correct, but full-screen tile corruption from time to time, and the footprint grows from 3.4 to 5.5 GB. Dungeon 28.2 fps |
 
 - Memory: on the Pad 3 the dungeon takes PSS 3.72-3.78 GB, and MemAvailable falls by 5.25 GB from launch. On the Thor on Turnip Gen8 V39: a footprint of 3.75 GB with MemAvailable at least 3.3 GB; PSS 3.94-3.97 GB on the stock driver, where the driver's own memory (below) is not counted in it.
-- The Pad 3's panel ran at 50 Hz in some 30 fps sessions, holding frames for 20 or 40 ms (on-screen p99 39.94 ms), and at 60 Hz in others (33.33 ms); what picks 50 Hz is not known. At 60 fps (`DM_FPS_TARGET=60`) the Pad 3 runs the game (GPU busy p50 13.7 ms with the FSR 1 stand-in) but reached 93-96 °C on the GPU within 3 minutes, and a 50 Hz panel shows only about 40 frames a second, so 30 stays the profile's rate.
+- The Pad 3's panel ran at 50 Hz in some 30 fps sessions, holding frames for 20 or 40 ms (on-screen p99 39.94 ms), and at 60 Hz in others (33.33 ms); what picks 50 Hz is not known. At 60 fps (`DM_FPS_TARGET=60`) the Pad 3 runs the game (GPU busy p50 14.4 ms with GSR 2, 13.7 ms with FSR 1) but reached 93-96 °C on the GPU within 3 minutes, and a 50 Hz panel shows only about 40 frames a second, so 30 stays the profile's rate.
 - Known on the stock 512.676 (open): the cause of the dark characters and foliage is not found. Ruled out by A/B: the light grid's compute shader and the integer view of its 3D image (`DM_VK_TEX_RETYPE=0`, `DM_VK_IMG_RETYPE=0`).
 
 ### DLSS on a stand-in
 
 NVN2's DLSS is recorded as `OP_DLSS` (`hle_nvn.c`, "NVN2's DLSS"). Vulkan has no counterpart of the network, so the replay writes the evaluation's output texture with an upscaler of its own (`dm/gfx/vk_android/vka_dlss.c`, picked in `vka_exec.c` `dlss_eval`). Without one the evaluation was dropped, the output never written, and the 3D picture black.
 
-- **FSR 1** (`DM_VK_DLSS=2`, the default): EASU and RCAS on the tonemapped input. The game jitters every frame (Halton(2,3), ±0.5 input pixels), which a spatial upscaler shows as crawling edges, so EASU's sampling moves with the frame's jitter (`DM_VK_DLSS_UNJITTER`, default 1); this cuts still-edge crawl by 15-30 %, not to zero. 1.30 ms on the Pad 3. RCAS strength `DM_VK_DLSS_SHARP` (0..100, default 15).
+- **GSR 2** (`DM_VK_DLSS=3`, the default): Snapdragon Game Super Resolution 2, the 3-pass version (convert, activate, upscale; Qualcomm's shaders under the BSD 3-Clause licence in [`dm/gfx/vk_android/gsr2/LICENSE`](../../gfx/vk_android/gsr2/LICENSE)), then RCAS. Its history accumulation does the temporal anti-aliasing DLSS did. The default tune, m2, cuts the ghosting of the earlier one: each output pixel takes the motion of its nearest render texel instead of a bilinear one, history is rejected where the motion changes from the last frame (velocity rejection at half strength), the history box shrinks further on moving pixels, and the box of still pixels is capped at 4 (20 upstream). On the Pad 3 it costs 1.76 ms of GPU a frame (m1 1.75 ms, c4 1.79 ms).
+- **FSR 1** (`DM_VK_DLSS=2`): EASU and RCAS on the tonemapped input. The game jitters every frame (Halton(2,3), ±0.5 input pixels), which a spatial upscaler shows as crawling edges, so EASU's sampling moves with the frame's jitter (`DM_VK_DLSS_UNJITTER`, default 1); this cuts still-edge crawl by 15-30 %, not to zero. 1.30 ms on the Pad 3. RCAS strength `DM_VK_DLSS_SHARP` (0..100, default 15).
 - **Bilinear** (`DM_VK_DLSS=1`): a blit. 0.08 ms.
 
-Both are read live, at every evaluation. The stand-in's output then reaches the screen through the present's own scaling, the launcher's Upscaler setting.
+With `dlss_standin 1` the launcher's Upscaler row (a game's ⋯ Manage › Game settings, and live in the in-game panel's Performance tab) offers the stand-in's modes in place of the generic choices, with its sliders beside it (`DlssTune.java`, `GameUpscaler.java`, `GameSettings.java`):
+
+| Row | Choices | Default | Lever |
+|---|---|---|---|
+| Upscaler | GSR 2 (smooth images) / FSR 1 (sharp, fast) / Bilinear (fastest, softest) | GSR 2 | `DM_VK_DLSS` 3 / 2 / 1 |
+| Motion clarity (GSR 2 only) | Steadiest / Steady / Balanced / Clear / Clearest (may flicker in combat): steps c0..c4, more history on the left (steadier, more ghosting), less ghosting on the right | Balanced (c2 = tune m2) | `DM_VK_GSR2_CLARITY` 0..4; `DM_VK_GSR2_TUNE` forces a row (0 = m1) |
+| Temporal sharpness (GSR 2) / FSR sharpness (FSR 1) | Off, 5, 10 … 30 | 15 | `DM_VK_DLSS_SHARP` (the host takes 0..100) |
+
+The stand-in's output then reaches the screen through the present's own scaling, which follows the main screen's (or an earlier per-game) Upscaler choice: SGSR 1 (the default) and FSR 1 give FSR 1 (`DM_VK_FSR=1`), Bilinear and Native bilinear, Nearest neighbor nearest (`DM_VK_PRESENT_NEAREST=1`); no `DM_VK_NDSR` line is sent for the game. Every one is read live (the stand-in's at every evaluation, the screen's at every present), so the panel changes the picture at once. The tune's other fields have diagnostic levers (`DM_VK_GSR2_VREJ`, `_VLO`, `_VK`, `_SFCAP`, `_MVNEAR`, `_BOXMOTW`, `_BSMOV`; `docs/env_switches.tsv`).
 
 ### AV1 movies on dav1d
 

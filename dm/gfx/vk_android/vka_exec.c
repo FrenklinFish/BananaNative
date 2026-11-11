@@ -1010,13 +1010,12 @@ static void copy_t2t(const p_copy_t2t *c) {
 }
 
 // NVN2's DLSS (OP_DLSS, hle_nvn.c "NVN2's DLSS"): the network has no Vulkan counterpart, so the replay writes the output texture itself, so the game's post chain reads a
-// picture (Fire Emblem Fortune's Weave's 3D was black with the evaluation dropped). DM_VK_DLSS (live) picks how: 2 = FSR 1 with the jitter taken out (the default; higher
-// values are taken as 2), in vka_dlss.c; 1 = a bilinear blit of the input subrectangle to the output size (also what 2 falls back to); 0 leaves the output unwritten (A/B)
+// picture (Fire Emblem Fortune's Weave's 3D was black with the evaluation dropped). DM_VK_DLSS (live) picks how: 3 = Snapdragon GSR2 3-pass (the default), 2 = FSR 1 with
+// the jitter taken out, both in vka_dlss.c; 1 = a bilinear blit of the input subrectangle to the output size (also what 2 and 3 fall back to); 0 leaves the output unwritten (A/B)
 static void dlss_eval(const p_dlss *o) {
     static uint64_t n;
-    int mode = VKA_ENV("DM_VK_DLSS", 2);
+    int mode = VKA_ENV("DM_VK_DLSS", 3);
     if (mode <= 0) return;
-    if (mode > 2) mode = 2;
     const tex_t *ct = o->tex[DLSS_COLOR], *ot = o->tex[DLSS_OUTPUT];
     if (!ct || !ot) { VRED_ONCE("DLSS evaluation without an input colour or an output texture: skipped"); return; }
     vka_img *s = vka_tex_get(ct, g_cb), *d = vka_tex_get(ot, g_cb);
