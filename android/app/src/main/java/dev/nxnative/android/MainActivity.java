@@ -963,6 +963,10 @@ public final class MainActivity extends Activity {
         if (single) {
             Pick k = picks.get(0);
             if (k.error != null) { error(k.error); return; }
+            // a dump nothing can be made from (a flat one-version folder, an incomplete dump) is said at once: asking first to replace the other dump of the
+            // game on the list led to that dialog, a tap and then nothing, as the explanation came only after it
+            boolean unusable = k.pack == null && k.found != null && k.found.error != null && !k.found.otherBuild;
+            if (!k.others.isEmpty() && unusable) k.others.clear();
             askReplace(k.name, k.game, k.others, replace -> {
                 if (k.pack != null) { addWithPack(k.game, k.id, k.pack.dir, replace); return; }
                 if (replace != null) removeEntries(replace);   // the user chose this dump: the other's card goes now (nothing is deleted), this one's comes with its pack

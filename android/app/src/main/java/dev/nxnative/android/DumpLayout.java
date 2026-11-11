@@ -185,8 +185,7 @@ final class DumpLayout {
         } else if (!dump.isDirectory()) return dump + " is not a folder this app can read. Check that All files access is on.";
         List<Long> have = versions(dump);
         if (have.isEmpty()) {
-            if (!nup && new File(dump, "exefs/main.npdm").isFile())
-                return fn + " is one version's folder. Pick the dump folder above it, the one with base/ (and updates/).";
+            if (!nup && new File(dump, "exefs/main.npdm").isFile()) return flatFolder(dump);
             return nup ? fn + " holds no game code: no exefs/main in its base or an update package."
                     : dump + " is not a dump folder: it has no base/exefs/main and no updates/<version>/exefs/main. Pick the folder with base/ or updates/ (and dlc/).";
         }
@@ -279,6 +278,36 @@ final class DumpLayout {
             }
         }
         return out;
+    }
+
+    /**
+     * What to do with a one-version folder (exefs/ and romfs/ at its top, as extraction tools write them): this layout carries no version number, so Prepare
+     * cannot place it. The version is told by its main's build ID against the profile's build rows: "move it into updates/<version>/" names the exact folder
+     */
+    static String flatFolder(File dump) {
+        String fn = dump.getName(), what = "one version of a game", sub = "updates/<version number>";
+        try {
+            String id = Pack.programId(new File(dump, "exefs/main.npdm"));
+            Profile prof = Profile.of(id);
+            String build;
+            try (java.io.InputStream in = new java.io.FileInputStream(new File(dump, "exefs/main"))) { build = BuildCheck.nsoBuildId(in.readNBytes(0x60), fn + "/exefs/main"); }
+            if (prof != null) {
+                what = prof.name;
+                for (Map.Entry<Long, Map<String, String>> row : prof.buildMap().entrySet()) {
+                    String want = row.getValue().get("main");
+                    if (want != null && build.toLowerCase(Locale.ROOT).startsWith(want.toLowerCase(Locale.ROOT))) {
+                        long v = row.getKey();
+                        what = prof.name + " (" + Profile.versionName(v) + ")";
+                        sub = v == 0 ? "base" : "updates/" + v;
+                        break;
+                    }
+                }
+            }
+        } catch (IOException | RuntimeException e) {
+            // an unreadable main.npdm or main: the general advice below
+        }
+        return fn + " holds " + what + " as one flat folder (exefs/ and romfs/ at its top), which has no version number Prepare can place. Move its exefs and romfs "
+                + "folders into " + fn + "/" + sub + "/ (or convert the dump to a .nup), then pick " + fn + " again.";
     }
 
     /** The program ID of a version's main.npdm (its own, else the base's) */
