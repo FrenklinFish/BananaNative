@@ -22,6 +22,7 @@ final class Profile {
     String resolution = "";   // what Game resolution sets (build.gradle resolutionOf): "window", "scale:<choice>=<scale>/<console|handheld>,…" or "" (nothing: not offered)
     String gpuTs = "submission";   // game.tsv gpu_timestamps (build.gradle gpuTsOf): "segment" or "submission", what the host does without DM_NVN_GPU_TS (Game settings › GPU timing)
     String window = "";   // game.tsv android_window (build.gradle windowOf): the default Game resolution when the player chose none (Prefs.gameWindow), "" for the main screen's
+    boolean vegetationDetail;
     boolean steps;   // game.tsv has fps_steps rows (build.gradle stepsOf): a framework of whole fixed steps a frame, which Hold 60 fps keeps at one (Prefs.steps)
     boolean presentOnly;   // game.tsv fps_limit_present 1 (build.gradle presentOnlyOf): the frame limit only paces the presents, the game's own logic is not known to follow it (Prefs.presentOnly)
     int fpsLimit;   // game.tsv fps_limit (build.gradle fpsLimitOf): the host's frame limit by default, frames a second (0 = none); the launcher offers a frame limit for it (Prefs.limited)
@@ -146,6 +147,7 @@ final class Profile {
             p.dlss = c.length > 16 && c[16].equals("1");
             p.presentOnly = c.length > 17 && c[17].equals("1");
             p.steps = c.length > 18 && c[18].equals("1");
+            p.vegetationDetail = c.length > 19 && c[19].equals("1");
             out.add(p);
         }
         return Collections.unmodifiableList(out);

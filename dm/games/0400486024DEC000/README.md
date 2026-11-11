@@ -143,3 +143,10 @@ For a run past the opening, copy the committed save folder to the new run's `DM_
 - [Memory-map compaction stops the host on an exported-alias pool](../../../docs/reference/memory.md#memory-map-compaction-stops-the-host-on-an-exported-alias-pool-android): a player's v0.3.1 log on Qualcomm's driver, `FATAL compacting pool memory … failed (0)` after a long session. Resolved (2026-11-11): compaction leaves exported-alias segments out.
 - [A framework's own mode drops to 30 fps at the first long frame](../../../docs/reference/frame-rate.md#a-frameworks-own-mode-drops-to-30-fps-at-the-first-long-frame-android): players saw the frame step lock to 30, or to 20 at a 60 cap. Hold 60 fps (2026-11-11) turns the step's hold off: frames shown as soon as they are ready, full speed down to 30 fps (phone check open).
 - The Kokiri Forest checkpoint save (`slot_00/progress.sav` and `slot_00/caption.sav`) must be present in `DM_SAVE` to load directly into active 3D gameplay; without it, the game remains in attract/title sequence.
+
+
+### Vegetation detail on Android
+
+[Full vegetation](../../../docs/reference/rendering.md#dense-vegetation-in-the-kokiri-forest) is on by default in Game settings. Turning it off removes some grass and tree foliage at the next launch. The profile lists seven depth and colour pairs. Three other pairs include shaders that declare guest writes and stay active.
+
+In the warmed Kokiri Forest view on an Odin 3 with Qualcomm 891.14, four alternating 112-frame samples on the compute-mesh integration build gave 30.29/33.36/30.30/33.39 FPS (full/lower/full/lower). The median GPU times were 31.23/28.77/31.23/28.76 ms. The scene was 960x540 with 1280x720 output through SGSR1 and frame generation off. Foliage density changes visibly. The screenshots retained fog, particles and the characters in the sampled view. The native path on another driver and broader areas remain to be measured.

@@ -78,3 +78,12 @@ mesh_prepass_cut	eebdb9347d09b344	604134a5262ff670
 mesh_prepass_cut	d98076e4148db34f	fed302d791a4ba43
 mesh_prepass_cut	a667b8bba94befa2	3fa631a86435d3e8
 mesh_prepass_cut	839241636fce850a	4c7d6be5a7717c8d
+
+# Optional lower vegetation detail. Each pair was checked for guest-memory writes.
+mesh_vegetation_cut	0c1ffecd02018fb0	eed1add7c89f5d34
+mesh_vegetation_cut	25c4a740753e7d7a	73dc0b90c4082e43
+mesh_vegetation_cut	101ecb327aafe9b1	17c8ab6419068d4b
+mesh_vegetation_cut	5b737961ae3e1b10	ecead5cd0569091f
+mesh_vegetation_cut	eebdb9347d09b344	604134a5262ff670
+mesh_vegetation_cut	d98076e4148db34f	fed302d791a4ba43
+mesh_vegetation_cut	839241636fce850a	4c7d6be5a7717c8d

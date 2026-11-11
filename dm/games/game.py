@@ -220,6 +220,13 @@ def header(g):
             sys.exit(f'{g.id}: mesh_prepass_cut takes <prepass mesh shader key> <colour pass mesh shader key>, two different keys of 16 lowercase hex digits: {r}')
         mpc.append(f'{{0x{r[0]}ull, 0x{r[1]}ull}}')
     if len(mpc) > 64: sys.exit(f'{g.id}: mesh_prepass_cut: at most 64 pairs')
+    vegetation = []
+    for row in g.values('mesh_vegetation_cut'):
+        if len(row) != 2 or not all(re.fullmatch(r'[0-9a-f]{16}', key) for key in row) or row[0] == row[1]:
+            sys.exit(f'{g.id}: mesh_vegetation_cut takes two different mesh shader keys: {row}')
+        vegetation.extend(row)
+    if len(vegetation) > 128 or len(vegetation) != len(set(vegetation)):
+        sys.exit(f'{g.id}: mesh_vegetation_cut: at most 64 pairs, with unique keys')
     # Shaders whose subgroup operations run as subgroups of one invocation on Qualcomm's own driver even where the device has them (vka_shader.c single_lane, one_lane_forced;
     # a workaround, Android): one key per row
     sol = []
@@ -278,6 +285,8 @@ def header(g):
          f'#define DM_GAME_ROMFS_SUBST {q(rsub)}',
          f'#define DM_GAME_WINDOW_FN {{{", ".join(wfn) or "{\"\", 0, 0, 0, 0}"}}}', f'#define DM_GAME_NWINDOW_FN {len(wfn)}',
          '#define DM_GAME_SUBGROUP_ONE_LANE {' + (', '.join(sol) or '0') + '}', f'#define DM_GAME_NSUBGROUP_ONE_LANE {len(sol)}',
+         '#define DM_GAME_MESH_VEGETATION_CUT {' + (', '.join(f'0x{k}ull' for k in vegetation) or '0') + '}',
+         f'#define DM_GAME_NMESH_VEGETATION_CUT {len(vegetation)}',
          '#define DM_GAME_MESH_PREPASS_CUT {' + (', '.join(mpc) or '{0, 0}') + '}', f'#define DM_GAME_NMESH_PREPASS_CUT {len(mpc)}',
 
          '#define DM_GAME_FPS_STEPS {' + (', '.join(fst) or '{"", 0, 0, 0, 0, {0}}') + '}', f'#define DM_GAME_NFPS_STEPS {len(fst)}',
