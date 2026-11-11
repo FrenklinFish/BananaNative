@@ -2,6 +2,8 @@
 (a member's source reduced to its RomFS file) are scanned, and the result is kept only when its tables are the profile's byte for byte; otherwise every file is scanned,
 with a line saying why. Either way the outputs are the full split's. A file that holds only shaders found earlier but pairs them anew makes the targeted pairs differ,
 so that dump takes the full scan; with DM_SPLIT_RESUME a stopped fall back resumes as the full scan. No game files needed: a synthetic RomFS and profile."""
+import contextlib
+import io
 import os
 import shutil
 import struct
@@ -10,6 +12,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 REPO = Path(__file__).resolve().parents[3]
 sys.path.insert(0, str(REPO / 'dm/gfx/tools'))
@@ -149,6 +152,44 @@ class Targeted(unittest.TestCase):
         t, said = self.split('targeted', True)
         self.assertIn("names /Shader/a.bnsh#BNSH", said); self.assertIn('and the dump has no such file: every file is scanned', said)
         self.same(full2, t)
+
+    def test_a_build_without_optional_keys_takes_the_targeted_scan(self):   # shader_optional.tsv: Mario Kart World 1.8.0 as update 917504 lacks one shader of the map
+        self.write('Shader/pack.sarc', sarc([(b'a0.bnsh', bnsh(vs(3), ps(3))), (b'b.bnsh', bnsh(vs(2), ps(2)))]))   # the extra shaders come first: later rows renumber
+        full, _ = self.split('full', False); self.profile_from(full)
+        gone = (self.key(vs(3)), self.key(ps(3)))
+        self.assertIn(f'{gone[0]}\t{gone[1]}\n', (full / 'shader_pairs.tsv').read_text())
+        self.write('Shader/pack.sarc', sarc([(b'b.bnsh', bnsh(vs(2), ps(2)))]))   # the other build's RomFS
+        full2, _ = self.split('full2', False)
+        t, said = self.split('without', True)
+        self.assertIn('not taken, the targeted scan made a shader_map.tsv that differs', said)   # not yet optional: the full scan
+        self.same(full2, t)
+        (self.prof / 'shader_optional.tsv').write_text('# key <TAB> which dumps have it\n' + ''.join(f'{k}\tthe first build only\n' for k in gone))
+        t, said = self.split('optional', True)
+        self.assertIn("compared with the profile's tables less the 2 shader(s) of shader_optional.tsv this dump does not have", said)
+        self.assertIn("its tables are the profile's, byte for byte", said)
+        self.assertIn('progress: 2/2', said)
+        self.same(full2, t)
+        (self.prof / 'shader_optional.tsv').write_text(f'{gone[0]}\tthe first build only\n')   # one of the two missing keys is not optional: the full scan
+        t, said = self.split('half', True)
+        self.assertIn('not taken', said)
+        self.same(full2, t)
+
+    def test_the_zip_probe_opens_only_wanted_files(self):   # a large RomFS (Mario Kart World: 206,326 files) is not opened file by file before the targeted scan
+        files = [(str(self.tmp / 'missing' / f'f{i}'), f'f{i}') for i in range(3)] + [(str(self.rom / 'Shader/a.bnsh'), 'Shader/a.bnsh')]
+        big, todo = ss.scan_jobs(files, {'Shader/a.bnsh'})   # the missing files would raise if they were opened
+        self.assertEqual((big, [f[1] for f in todo]), ([], ['Shader/a.bnsh']))
+        with self.assertRaises(FileNotFoundError): ss.scan_jobs(files)
+
+    def test_the_full_zip_probe_prints_progress(self):   # the full scan's probe of every file counts them for the phone's card ('progress: <done>/<total>')
+        files = [(str(self.rom / 'Shader/a.bnsh'), f'f{i}') for i in range(1000)]
+        clock = iter(range(0, 10 ** 6))
+        out = io.StringIO()
+        with mock.patch.object(ss.time, 'monotonic', lambda: next(clock)), contextlib.redirect_stdout(out): ss.zip_jobs(files)
+        lines = out.getvalue().splitlines()
+        self.assertTrue(lines and all(ln.startswith('progress: ') and ln.endswith('/1000') for ln in lines), lines[:3])
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out): ss.zip_jobs(files[:999])   # a small RomFS: no lines
+        self.assertEqual(out.getvalue(), '')
 
     def test_no_map_takes_the_full_scan(self):
         full, _ = self.split('full', False)

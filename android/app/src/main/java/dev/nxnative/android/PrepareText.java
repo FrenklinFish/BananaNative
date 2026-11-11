@@ -127,10 +127,39 @@ final class PrepareText {
             if (during) s.append(String.format(Locale.getDefault(), "  ·  %,d shaders left", Math.max(0, total - done)));
             else if (done > 0) s.append(String.format(Locale.getDefault(), "  ·  %,d of %,d shaders", done, total));
             else s.append(String.format(Locale.getDefault(), "  ·  %,d shaders to make", total));
+        } else if (kept > 0) {
+            s.append("  ·  shaders up to date: nothing to translate");
         }
         if (during && eta != null && !eta.isEmpty()) s.append("  ·  ").append(eta);
-        if (kept > 0) s.append(String.format(Locale.getDefault(), "  ·  %,d unchanged kept", kept));
+        if (kept > 0 && total > 0) s.append(String.format(Locale.getDefault(), "  ·  the other %,d are reused", kept));
         return s.toString();
+    }
+
+    /**
+     * A step and what its tool says it is doing now (a "stage: <text>" line), with a count when there is one: "Finding the shaders: reading the game's program",
+     * "Rewriting the game's code: rewriting main (1 of 3)". The tools write the text in lower case after the colon
+     */
+    static String withNote(String step, String note, String count) {
+        return step + (note == null || note.isEmpty() ? "" : ": " + note) + (count == null || count.isEmpty() ? "" : " · " + count);
+    }
+
+    /**
+     * " · still working, last update 3 min ago" after a minute or more without a line from the running step's tool, else "": a phase that prints nothing for long
+     * (a large file read, a storage flush) shows that the app has not stopped watching it, and how long it has been
+     */
+    static String quietText(long seconds) {
+        if (seconds < 60) return "";
+        long m = seconds / 60;
+        return m < 60 ? " · still working, last update " + m + " min ago"
+                : String.format(Locale.getDefault(), " · still working, last update %d h %02d min ago", m / 60, m % 60);
+    }
+
+    /**
+     * The shaders step while a delta update writes out the shaders it keeps from the older library (vk_android_build.py's "keep" stage, before it translates the
+     * others): "Keeping the shaders already translated: 12,000 of 42,800"
+     */
+    static String keepText(long done, long total) {
+        return "Keeping the shaders already translated" + (total > 0 ? String.format(Locale.getDefault(), ": %,d of %,d", Math.min(done, total), total) : "");
     }
 
     /**
@@ -138,6 +167,13 @@ final class PrepareText {
      * reads, not shaders (shader_split.py's "progress: <files done>/<files>"), so its count says so: "Finding the shaders: 1,203 of 1,890 files". part: the
      * tool's "<n>%" inside a large file, added as "(40 % of a large file)"
      */
+    /** A step's count alone, for after its stage text (withNote): "203 of 1,442 files", "40 % of a large file"; "" while it has none */
+    static String countText(boolean files, long done, long total, String part) {
+        String c = total > 0 ? String.format(Locale.getDefault(), files ? "%,d of %,d " + (total == 1 ? "file" : "files") : "%,d / %,d", done, total) : "";
+        String p = part != null && part.matches("\\d+%") ? part.replace("%", " %") + " of a large file" : "";
+        return c.isEmpty() ? p : p.isEmpty() ? c : c + " (" + p + ")";
+    }
+
     static String stepCountText(String step, boolean files, long done, long total, String part) {
         String count = files ? (total > 0 ? String.format(Locale.getDefault(), ": %,d of %,d %s", done, total, total == 1 ? "file" : "files") : "")
                 : total > 1 ? String.format(Locale.getDefault(), " %,d / %,d", done, total) : total == 1 || done == 0 ? "" : String.format(Locale.getDefault(), " %,d", done);
@@ -150,7 +186,7 @@ final class PrepareText {
      */
     static String needsPreparing(boolean packThere, boolean unfinished, boolean jobStopped) {
         if (jobStopped) return "Preparing was not finished. Tap Continue to go on where it stopped.";
-        if (unfinished) return "The pack's game code was left unfinished. Prepare finishes it.";
+        if (unfinished) return "The pack's game code was left unfinished. Prepare finishes it (a few minutes; shaders are kept).";
         if (packThere) return "The pack cannot be read. Prepare makes it again.";
         return "No pack yet. Prepare makes one from your dump.";
     }

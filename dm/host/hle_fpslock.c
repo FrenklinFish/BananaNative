@@ -215,6 +215,15 @@ static void fb_tick(int target, const char *src) {
     }
 }
 
+// The row of a target frame rate the game steps by, at the place the rewriter found (dm/tools/fps_target.py; main's fixups FPS_TARGET_PTR, FPS_TARGET_FIELD): an int32 frame rate in the
+// object a global points to, which the game's readers divide 60.0 by to step it, and which the game sets to 30 or 60 itself. Fire Emblem Fortune's Weave's gxc graphics object holds it
+// (+0x1dc; its present asks for interval 60 / target), so at 60 the game asks for interval 1 and steps by 1.0 a frame. 0 rows: not found in this main
+static int target_row(const module_t *m, lock_t *out) {
+    if (!m->fps_target_ptr) return 0;
+    *out = (lock_t){ "", "target frame rate", m->fps_target_ptr, m->fps_target_field, FPS_I32, 1, 0 };
+    return 1;
+}
+
 // The Unreal rows of this main: the profile's frame-limit variable and the present intervals, at the objects the rewriter found (0 rows: not an Unreal main). *missing: an Unreal main
 // (the rewriter found some of its variables) without the profile's frame-limit variable
 static int ue_rows(const module_t *m, lock_t *out, int *missing) {
@@ -230,13 +239,14 @@ static int ue_rows(const module_t *m, lock_t *out, int *missing) {
 }
 
 // The running main's engine limiters, found once: by the first present (dm_fps_lock_tick) or by the graphics layer's present cap, which may ask first (dm_fps_lock_engine, from the acquire)
-#define NROWS (NLOCKS + 3 + NSTEPS)
-static lock_t ue[3], steps[NSTEPS > 0 ? NSTEPS : 1]; static const lock_t *rows[NROWS]; static int nrow, nier, ue_missing; static uint8_t *base; static uint32_t display;
+#define NROWS (NLOCKS + 4 + NSTEPS)
+static lock_t ue[3], target_lock, steps[NSTEPS > 0 ? NSTEPS : 1]; static const lock_t *rows[NROWS]; static int nrow, nier, ue_missing; static uint8_t *base; static uint32_t display;
 static pthread_once_t g_found = PTHREAD_ONCE_INIT;
 static void lock_find(void) {
     for (int i = 0; i < g_nmod; i++) if (!strcmp(g_mod[i].name, "main")) {
         for (int k = 0; k < (int)(sizeof k_nier_dr / sizeof *k_nier_dr); k++) if (!strcmp(g_mod[i].build_id, k_nier_dr[k].build)) { base = g_mod[i].base; nier = 1; display = k_nier_dr[k].display; }
         for (int k = 0; k < NLOCKS; k++) if (!strcmp(g_mod[i].build_id, k_locks[k].build)) { rows[nrow++] = &k_locks[k]; base = g_mod[i].base; }
+        if (target_row(&g_mod[i], &target_lock)) { rows[nrow++] = &target_lock; base = g_mod[i].base; }
         int nue = ue_rows(&g_mod[i], ue, &ue_missing);
         for (int k = 0; k < nue; k++) { rows[nrow++] = &ue[k]; base = g_mod[i].base; }
         for (int k = 0; k < NSTEPS; k++) if (k_steps[k].build[0] && !strcmp(g_mod[i].build_id, k_steps[k].build)) {   // a step count: field = the count, scale = the mode field
@@ -539,20 +549,36 @@ static void fps_limit_wait(void) {
 // 2: the mode that picks 2, the game's own 30 fps form. 3: STEPS_HOLD and the count 3 (the game's mode adjustments for 30 fps, made where the mode is 2, then take their 60 fps
 // values; README of the game). The mode the game had is given back when the cap goes up again; one it sets meanwhile (a scene's setup) is the one given back, and the host's
 // goes in again over it while the cap holds. One frame may run the game's own pick at a change: the gate is the game's own procFrame, which reads the mode before the count
+// Hold 60 fps (DM_FPS_HOLD60=1 at start, the Android launcher's Game settings; its in-game panel live: nxhost_fps_hold60_set): with no cap below 60, where the game's own
+// mode is 0 (2 steps on a frame its work overran: a drop to 30 fps at the first long frame, Mario Kart World's free roam), the host writes mode 1, one step every frame. A long
+// frame then plays slower (one 1/60 s step for a longer frame) instead of halving the frame rate. The game's own other modes stay (2: its 30 fps form for three or four players)
+static _Atomic int g_hold60 = -1;
+__attribute__((visibility("default"))) void nxhost_fps_hold60_set(int on) { atomic_store(&g_hold60, on != 0); LOG("main: hold 60 fps %s (the launcher's in-game panel)", on ? "on" : "off"); }
+static int hold60_on(void) {
+    int v = atomic_load(&g_hold60);
+    if (v >= 0) return v;
+    const char *e = getenv("DM_FPS_HOLD60"); int was = -1; v = e && atoi(e) > 0;
+    if (atomic_compare_exchange_strong(&g_hold60, &was, v) && v) LOG("main: hold 60 fps on (DM_FPS_HOLD60=1): one framework step a frame where the game's own mode would drop to 30 fps");
+    return atomic_load(&g_hold60);
+}
+// The host's frame step (hle_nvn.c fstep_hold, a game with FRAME_STEP stubs: Ocarina of Time) takes Hold 60 fps as fps_hold off: frames are not held longer than the cap's
+// vsyncs, each shown as soon as it is ready, and a late frame's time is paid back one extra step a frame (game time = real time down to 30 fps) instead of the hold going to 2
+int dm_fps_hold60(void) { return PLAT_ANDROID && hold60_on(); }
 static struct { int32_t game, mine; uint8_t ours; int nlog; } g_st[NROWS];   // ours: the mode in is the host's (mine); game: the game's own, given back
 static int steps_cap(int target) { int c = limit_step(target), l = limit_step(limit_raw()); return l && (!c || l < c) ? l : c; }
 static void steps_tick(const lock_t *L, int r, int target, const char *src) {
     uint64_t obj = row_obj(L); int32_t cur, cnt;
     if (!obj || !rd(obj + L->scale, &cur, sizeof cur) || !rd(obj + L->field, &cnt, sizeof cnt)) return;   // not made yet
-    int c = steps_cap(target), n = c ? 60 / c : 1, want = n <= 1 ? -1 : n == 2 ? 2 : STEPS_HOLD;
+    int c = steps_cap(target), n = c ? 60 / c : 1, want = n == 2 ? 2 : STEPS_HOLD;
     int32_t *mode = (int32_t *)(uintptr_t)(obj + L->scale), *count = (int32_t *)(uintptr_t)(obj + L->field);
     if (g_st[r].ours && cur != g_st[r].mine) g_st[r].ours = 0;   // the game set its own since (a scene's setup): that is the one to give back
     if (!g_st[r].ours) g_st[r].game = cur;
+    if (n <= 1) want = hold60_on() && g_st[r].game == 0 ? 1 : -1;   // 60 or no cap: the game's own mode, or one step a frame where its own is 0 (Hold 60 fps)
     if (want >= 0) {
         if (want == STEPS_HOLD && cnt != n) { dm_guest_write_prepare(count, sizeof *count); __atomic_store_n(count, n, __ATOMIC_RELAXED); }   // the count before the mode that keeps it
         if (cur != want) {
             dm_guest_write_prepare(mode, sizeof *mode); __atomic_store_n(mode, want, __ATOMIC_RELAXED); g_st[r].ours = 1; g_st[r].mine = want;
-            if (g_st[r].nlog < 16) { g_st[r].nlog++; LOG("main: %s %d a frame at %d fps: its mode %d → %d (%s%s)", L->what, n, c, cur, want, src, c != limit_step(target) ? "; held by the frame limit" : ""); }
+            if (g_st[r].nlog < 16) { g_st[r].nlog++; LOG("main: %s %d a frame at %d fps: its mode %d → %d (%s%s%s)", L->what, n, c ? c : 60, cur, want, src, want == 1 ? ", hold 60 fps" : "", c != limit_step(target) ? "; held by the frame limit" : ""); }
         }
     } else if (g_st[r].ours) {
         dm_guest_write_prepare(mode, sizeof *mode); __atomic_store_n(mode, g_st[r].game, __ATOMIC_RELAXED); g_st[r].ours = 0;

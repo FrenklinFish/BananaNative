@@ -30,7 +30,7 @@ import java.util.Locale;
 final class Job {
     static final int FORMAT = 2;   // 2: the shaders step writes the library too (vk_android_build.py's result cache); 1 had a library step of its own
     static final String[] STEPS = {"identify", "rewrite", "split", "shaders", "pack"};
-    static final String[] STEP_TEXT = {"Checking the dump", "Rewriting the game code", "Finding the shaders", "Translating shaders", "Finishing the pack"};
+    static final String[] STEP_TEXT = {"Checking the dump", "Rewriting the game's code", "Finding the shaders", "Translating shaders", "Finishing the pack"};
     /** Each step's share of the progress bar, roughly its time on the phone (ONDEVICE.md "Time and power"); the shaders' share is counted by shader */
     private static final int[] WEIGHT = {1, 5, 12, 78, 4};
     static final int REWRITE = 1, SHADERS = 3, PACK = 4;
@@ -303,8 +303,11 @@ final class Job {
 
     synchronized void stepState(String s, String state) {
         try {
-            step0(s).put("state", state);
-            if (state.equals("running")) o.put("step", s);
+            JSONObject j = step0(s).put("state", state);
+            if (state.equals("running")) {   // a step that starts again: what an earlier run of it last said is not what this one does
+                o.put("step", s);
+                j.remove("note"); j.remove("note_at"); j.put("seen", System.currentTimeMillis());
+            }
         } catch (JSONException e) {
             throw new IllegalStateException(e);
         }
@@ -333,11 +336,39 @@ final class Job {
     /** A step's count from the tool's progress lines */
     synchronized void stepProgress(String s, long done, long total, String stage) {
         try {
-            JSONObject j = step0(s).put("done", done).put("total", total).put("stage", stage == null ? "" : stage);
+            long now = System.currentTimeMillis();
+            JSONObject j = step0(s).put("done", done).put("total", total).put("stage", stage == null ? "" : stage).put("progress_at", now).put("seen", now);
             if (s.equals(STEPS[SHADERS])) j.put("eta", shadersEta(done, total, stage));
         } catch (JSONException e) {
             throw new IllegalStateException(e);
         }
+    }
+
+    /**
+     * What the step's tool says it is doing now: its "stage: <text>" lines (the tools print one at each phase, and a count in it at most twice a second during a long
+     * one), shown on the card with the step's name so a long phase does not look stalled (PrepareText.withNote)
+     */
+    synchronized void stepNote(String s, String text) {
+        try {
+            long now = System.currentTimeMillis();
+            step0(s).put("note", text).put("note_at", now).put("seen", now);
+        } catch (JSONException e) {
+            throw new IllegalStateException(e);
+        }
+    }
+
+    /** The current step's last stage line, "" when it has none or a progress line came after it (the count then says more) */
+    private String note(int i) {
+        JSONObject j = step(STEPS[i]);
+        String n = j.optString("note");
+        return n.isEmpty() || j.optLong("progress_at") > j.optLong("note_at") ? "" : n;
+    }
+
+    /** " · still working, last update 3 min ago" when the running step's tool has printed nothing for a minute or more (PrepareText.quietText), else "" */
+    synchronized String quietText() {
+        if (!"running".equals(state())) return "";
+        long seen = step(STEPS[current()]).optLong("seen");
+        return seen <= 0 ? "" : PrepareText.quietText((System.currentTimeMillis() - seen) / 1000);
     }
 
     // The shaders step's speed in this run (the service's Job only; not saved): the first sample of the translate stage, and the time left from the rate since then
@@ -431,7 +462,7 @@ final class Job {
             all += WEIGHT[i];
             JSONObject j = step(STEPS[i]);
             if ("done".equals(j.optString("state"))) sum += WEIGHT[i];
-            else if (j.optLong("total") > 0) sum += WEIGHT[i] * Math.min(1.0, (double) j.optLong("done") / j.optLong("total"));
+            else if (j.optLong("total") > 0 && !(i == SHADERS && keeping())) sum += WEIGHT[i] * Math.min(1.0, (double) j.optLong("done") / j.optLong("total"));
         }
         return sum / all;
     }
@@ -444,14 +475,21 @@ final class Job {
     // the tool's total once it reported one: the shaders it translates (a delta update keeps the others, android/SHADERS.md#delta-updates), else the profile's count
     synchronized long shadersTotal() { long t = stepTotal(SHADERS); Profile p = Profile.of(titleId()); return t > 1 || !step(STEPS[SHADERS]).optString("stage").isEmpty() ? t : p != null ? p.shaderTotal : 0; }
 
+    /**
+     * Whether the shaders step is writing out the shaders a delta update keeps from the older library (vk_android_build.py's "progress <n> <of> keep" lines, before
+     * the translation's own count): its count is of those, not of the shaders to translate
+     */
+    synchronized boolean keeping() { return "keep".equals(step(STEPS[SHADERS]).optString("stage")) && !"done".equals(stepState(STEPS[SHADERS])); }
+
     /** Shaders still to translate */
     synchronized long shadersLeft() { return Math.max(0, shadersTotal() - shadersDone()); }
 
     /** Shaders a delta update keeps unchanged from the older library (the profile's count less the tool's total), 0 for a full build or before the tool reports */
     synchronized long shadersKept() {
+        if (keeping()) return 0;
         Profile p = Profile.of(titleId());
         long t = stepTotal(SHADERS);
-        return p == null || step(STEPS[SHADERS]).optString("stage").isEmpty() || t <= 0 ? 0 : Math.max(0, p.shaderTotal - t);
+        return p == null || step(STEPS[SHADERS]).optString("stage").isEmpty() ? 0 : Math.max(0, p.shaderTotal - t);
     }
 
     /** Seconds left for the shaders step, -1 while unknown */
@@ -471,8 +509,27 @@ final class Job {
         return String.format(Locale.getDefault(), "%,d of %,d · %,d left", shadersDone(), shadersTotal(), shadersLeft()) + (eta.isEmpty() ? "" : " · " + eta);
     }
 
-    /** The card's line under the bar: "37 % · 21,548 shaders left · about 35 min left · 70 unchanged kept" (the parts it knows) */
+    /** The shaders step's main text: delta update reuse, up-to-date state, or count during translation */
+    synchronized String shadersStepText() {
+        long done = shadersDone(), total = shadersTotal(), kept = shadersKept(), left = shadersLeft();
+        String eta = etaText(shadersEta());
+        if (total == 0 && (kept > 0 || "done".equals(stepState(STEPS[SHADERS])))) {
+            return "Shaders up to date: nothing to translate";
+        }
+        if (kept > 0) {
+            String base = String.format(Locale.getDefault(), "Translating %,d new shaders (the other %,d are reused)", total, kept);
+            if (done > 0) {
+                base += String.format(Locale.getDefault(), ": %,d of %,d · %,d left", done, total, left);
+            }
+            if (!eta.isEmpty()) base += " · " + eta;
+            return base;
+        }
+        return STEP_TEXT[SHADERS] + ": " + shadersCountText();
+    }
+
+    /** The card's line under the bar: "37 % · 21,548 shaders left · about 35 min left · the other 70 are reused" (the parts it knows) */
     synchronized String detailText() {
+        if (keeping()) return PrepareText.progressLine(Math.round(overall() * 100), false, 0, 0, "", 0);
         boolean during = !"done".equals(stepState(STEPS[SHADERS])) && !step(STEPS[SHADERS]).optString("stage").isEmpty();
         return PrepareText.progressLine(Math.round(overall() * 100), during, shadersDone(), shadersTotal(), etaText(shadersEta()), shadersKept());
     }
@@ -480,16 +537,29 @@ final class Job {
     /** "Translating shaders: 12,345 of 22,852" during the shaders step ("Writing the shader library" at its end), else the step and its count when it has one */
     synchronized String stepText() {
         int i = current();
+        String note = note(i);
         if (i == SHADERS) {
             String stage = step(STEPS[i]).optString("stage");
+            if (!note.isEmpty())   // after the translation the step's own name would mislead: "Writing the shader library: 120 of 720 MB"
+                return stage.equals("library") || stage.equals("check") || stage.equals("done") ? PrepareText.capital(note) : PrepareText.withNote(STEP_TEXT[i], note, "");
             if (stage.equals("library") || stage.equals("done")) return "Writing the shader library";
             if (stage.equals("check")) return "Checking the shader library";
-            return STEP_TEXT[i] + ": " + shadersCountText();
+            if (keeping()) return PrepareText.keepText(stepDone(i), stepTotal(i));
+            return shadersStepText();
         }
+        if (i == REWRITE) {
+            long d = stepDone(i), t = stepTotal(i);
+            String part = step(STEPS[i]).optString("stage");
+            // the module being rewritten stays on the card while the rewriter's progress lines give its share (pack_android.py's "stage: rewriting main (1 of 3)")
+            String what = step(STEPS[i]).optString("note");
+            String base = what.isEmpty() ? STEP_TEXT[i] + " (a few minutes)" : PrepareText.withNote(STEP_TEXT[i], what, "");
+            return part.equals("code") && t > 0 ? base + " (" + Math.min(100, d * 100 / t) + " %)" : base;
+        }
+        if (!note.isEmpty()) return PrepareText.withNote(STEP_TEXT[i], note, "");
         long d = stepDone(i), t = stepTotal(i);
         String part = step(STEPS[i]).optString("stage");   // shader_split.py's "progress: <done>/<total> <n>%" inside a large file
-        // the rewrite's "progress <n> 1000 code" (pack_android.py --in-process: the step's share of each module's rewrite): a percentage, not a count
-        if (part.equals("code") && t > 0) return STEP_TEXT[i] + String.format(Locale.getDefault(), " (%d %%)", Math.min(100, d * 100 / t));
+        String what = step(STEPS[i]).optString("note");   // the phase the count is of: "Finding the shaders: reading 1,442 files · 203 of 1,442 files"
+        if (!what.isEmpty()) return PrepareText.withNote(STEP_TEXT[i], what, PrepareText.countText(STEPS[i].equals("split"), d, t, part));
         return PrepareText.stepCountText(STEP_TEXT[i], STEPS[i].equals("split"), d, t, part);   // the split counts files: "Finding the shaders: 1,203 of 1,890 files"
     }
 
@@ -503,7 +573,7 @@ final class Job {
             case "pending": return "Not started yet.";
             case "paused": return "Paused: " + reasonText(reason()) + ". " + stepText() + "." + (reasonDetail().isEmpty() ? "" : "\n" + capital(reasonDetail()) + ".")
                     + (canGoOn() && serviceAlive ? "\nIf the phone is not hot, tap Go on anyway." : "");
-            case "running": return serviceAlive ? stepText() + " (" + step + ")."
+            case "running": return serviceAlive ? stepText() + " (" + step + ")" + quietText() + "."
                     : "Interrupted at " + stepText() + ". Tap Resume to go on.";
             default: return s;
         }

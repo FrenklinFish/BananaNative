@@ -33,7 +33,7 @@ import game
 sys.path.insert(0, str(REPO / 'dm/gfx/tools'))
 import dmsh_chain
 
-REWRITER = ('patch_nso.py', 'nso.py', 'nso_code.py', 'nso_asm.py', 'nso_match.py', 'sdk_patches.py', 'ue_cvar.py', 'ue_malloc.py', 'ue_region.py', 'loader_census.py')
+REWRITER = ('patch_nso.py', 'nso.py', 'nso_code.py', 'nso_asm.py', 'nso_match.py', 'sdk_patches.py', 'ue_cvar.py', 'ue_malloc.py', 'fps_target.py', 'ue_region.py', 'loader_census.py')
 FORMAT = 1   # pack.tsv format; the launcher refuses another
 
 
@@ -45,6 +45,29 @@ WINDOWS = os.name == 'nt'
 
 def write_lf(path, text):   # a text file with '\n' line ends in UTF-8 on every system (Windows' text mode writes CR LF in its ANSI code page): the launcher reads these bytes
     with open(path, 'w', encoding='utf-8', newline='\n') as f: f.write(text)
+
+
+_stage_at = [0.0]
+
+
+def stage(text, every=0.0):
+    """'stage: <text>': what this step is doing now, which Prepare's card shows after the step's name (PackService, Job.stepNote). every: at most once in that many
+    seconds (a count inside a long phase); 0: always (a new phase)"""
+    now = time.monotonic()
+    if every and now - _stage_at[0] < every: return
+    _stage_at[0] = now
+    print(f'stage: {text}', flush=True)
+
+
+def copy_counted(src, dst, what):
+    """shutil.copy2 in 8 MiB pieces with 'stage: <what>: <n> of <m> MB' at most twice a second: the shader library (700 MB for Ocarina of Time) to shared storage"""
+    total = os.path.getsize(src); done = 0
+    stage(f'{what}: 0 of {total >> 20:,} MB')
+    with open(src, 'rb') as i, open(dst, 'wb') as o:
+        while b := i.read(8 << 20):
+            o.write(b); done += len(b)
+            stage(f'{what}: {done >> 20:,} of {total >> 20:,} MB', 0.5)
+    shutil.copystat(src, dst)
 
 
 def child_env(**kw):
@@ -302,14 +325,19 @@ def rewrite(py, srcs, out, jobs, g, in_process=False):
         todo[m] = (src, key)
     for m in todo: (out / f'{m}.android.key').unlink(missing_ok=True)   # every module to rewrite is unfinished from here on: no mix of old and new modules passes
     if in_process:
+        if not todo:
+            print('progress 1000 1000 code', flush=True)
+            return
         # Prepare's bar (the phone's rewrite step): each module a share of the step's 1000 by the size of its code, the rewriter's progress lines placed in it
+        stage('reading the game\'s code')   # a .nup's modules are copied out first (rewriter_src)
         files = {m: rewriter_src(src, out, m) for m, (src, key) in todo.items()}
         size = {m: max(1, nso_text_size(f)) for m, f in files.items()}
         base, total = 0, sum(size.values())
         if todo: print('progress 0 1000 code', flush=True)
-        for m, (src, key) in todo.items():
+        for n, (m, (src, key)) in enumerate(todo.items(), 1):
             kf = out / f'{m}.android.key'; kf.unlink(missing_ok=True)
             shutil.rmtree(staging(out, m), ignore_errors=True)
+            stage(f'rewriting {m} ({n} of {len(todo)})')
             print(f'  {m}: rewriting {src} (in process)', flush=True)
             t0 = time.monotonic()
             width = 1000 * size[m] // total
@@ -432,6 +460,7 @@ def pack_shaders(a, g, work, out, vdir, parts=None):
     v = vk_chain(); name = VK_PREFIX + v
     cache = (a.shader_cache or work / 'android-shaders' / 'lib').resolve(); lib = cache / name
     dst = out / 'shaders' / name
+    stage('checking the shader library')
     if not library_current(lib, g):
         if a.in_process: raise Error(f'no current shader library {lib}: --in-process does not build one yet (vk_android_build.py starts the translator and spirv-val as programs); --no-shaders packs without')
         pkg = (a.shader_pkg or work / 'android-shaders' / 'pkg').resolve()
@@ -455,7 +484,10 @@ def pack_shaders(a, g, work, out, vdir, parts=None):
     for f in (VK_LIB, dmsh_chain.STAMP):
         s_, d_ = lib / f, dst / f
         if d_.is_file() and d_.stat().st_size == s_.stat().st_size and d_.stat().st_mtime_ns == s_.stat().st_mtime_ns: continue
-        tmp = d_.with_name(f + '.partial'); shutil.copy2(s_, tmp); os.replace(tmp, d_)   # replace: Windows' rename does not take an existing name
+        tmp = d_.with_name(f + '.partial')
+        if f == VK_LIB: copy_counted(s_, tmp, 'copying the shader library into the pack')
+        else: shutil.copy2(s_, tmp)
+        os.replace(tmp, d_)   # replace: Windows' rename does not take an existing name
     others = sorted(o.name for o in (out / 'shaders').iterdir() if o.name != name and o.name.startswith(VK_PREFIX) and o.is_dir())
     if others:   # kept: another APK (the test and the play app, an older build) may load one of them from this pack; delete by hand to save the space
         print(f'shaders: kept the libraries of other versions in {out / "shaders"}: {", ".join(others)} (about 350 MB each)')
@@ -518,6 +550,7 @@ def main():
         print(f'{app:016X} {g.get("name", "?")} version {ver}: {vdir}', flush=True)
         for m, known in unregistered(g, ids).items(): print(f'[RED] {m} build {ids[m]} is none of the profile\'s builds ({", ".join(known)}): build-gated cuts do not apply')
         if a.keep_code:
+            stage('checking the rewritten code')
             # each module needs its rewritten code and, written last by the rewrite, its key: a module without the key is a rewrite that did not finish (or one from before keys)
             gaps = [f'{m} ({" and ".join(f for f in (f"{m}.patched.bin", f"{m}.android.key") if not (out / f).is_file())} missing)'
                     for m in mods if not (out / f'{m}.patched.bin').is_file() or not (out / f'{m}.android.key').is_file()]
@@ -536,6 +569,7 @@ def main():
                 ('modules', ' '.join(mods)), *[('build', f'{m}={ids[m]}') for m in mods], ('romfs', rel(romfs)),
                 *[('aoc', f'{tid - app - 0x1000}\t{rel(p)}') for tid, p in sorted(dlc.items())],
                 *([('shaders', shaders.relative_to(out).as_posix())] if shaders else []), ('packer', commit()), *([('made_by', a.made_by)] if a.made_by else [])]
+        stage('writing the pack\'s list of files')
         tmp = out / 'pack.tsv.partial'
         write_lf(tmp, ''.join(f'{k}\t{v}\n' for k, v in rows)); os.replace(tmp, out / 'pack.tsv')
         size = sum(f.stat().st_size for f in out.rglob('*') if f.is_file())

@@ -98,6 +98,11 @@ STAGE_NAME = {'vs': 'vertex', 'hs': 'hull', 'ds': 'domain', 'gs': 'geometry', 'p
 
 def red(msg): sys.exit('[RED] ' + msg)
 
+
+def stage(text):
+    """'stage: <text>': the phase the split is in, which Prepare's card shows after "Finding the shaders" (PackService, Job.stepNote); its progress lines then count it"""
+    print(f'stage: {text}', flush=True)
+
 def field(d, fmt, at, where):
     """struct.unpack_from(fmt, d, at) of a field a header or table points at: red() naming where and the offset when it is not inside d (a damaged or cut file)"""
     if not 0 <= at <= len(d) - struct.calcsize(fmt): red(f'{where}: {struct.calcsize(fmt):#x} bytes at {at:#x} lie outside the {len(d):#x} bytes there are')
@@ -900,8 +905,11 @@ def zip_jobs(files, parts=64):
     """Every member of every zip archive in ranges of about equal length (Portal: the whole game in game.zip, 41,416 members, 4.6 GB inflated, Deflate or stored; its GLSLC outputs are the
     221 nxcontent/nvsb/*.nvsb files, but no name is relied on). → ([(path, rel, (ZIP, members)), …], the zip paths). An archive zipfile cannot read is scanned as one file, as before"""
     import zipfile
-    zs = []
-    for p, r in files:
+    zs, shown = [], time.monotonic()
+    for i, (p, r) in enumerate(files):
+        # the full scan gives every RomFS file (186,583 in Ocarina of Time): a 'progress' line at most twice a second, so the phone's card counts them instead of
+        # standing still (the scan's own lines start again from 0 after it)
+        if len(files) >= 1000 and time.monotonic() - shown >= 0.5: print(f'progress: {i}/{len(files)}', flush=True); shown = time.monotonic()
         with open(p, 'rb') as f: h = f.read(4)
         if h != ZIP: continue
         try:
@@ -3108,8 +3116,11 @@ def main():
     files, results, common, dumps = [], [], None, []
     for i, (romfs, mainnso) in enumerate(zip(romfs_v, main_v)):
         tag = os.path.basename(os.path.dirname(os.path.abspath(romfs))) if i else ''
+        stage('listing the game\'s files')
         files += sorted(((os.path.join(dp, f), (tag + '/' if tag else '') + posix_rel(os.path.join(dp, f), romfs)) for dp, _, fs in os.walk(romfs) for f in fs), key=lambda t: t[1])   # by the '/' path: the same order on every system
+        stage('reading the game\'s program')
         img = nso_image(mainnso)
+        stage('looking for shaders in the game\'s program')
         if not i:
             import unityfs
             try: common = unityfs.common_strings(img)
@@ -3159,8 +3170,10 @@ def main():
             if failed and os.path.isfile(failed) and open(failed).read().strip() == dg: why = 'an earlier run on these inputs found the targeted scan\'s tables differ from the profile\'s'
             else:
                 print(f'targeted split: {len(want):,} of {len(files):,} RomFS files hold the shaders of the profile\'s shader_map.tsv (main build {", ".join(build_id(m) for m in main_v)}); only these are scanned', flush=True)
+                stage(f'reading the {len(want):,} files that hold shaders')
                 try:
                     out = split_tables(list(results), big, todo, dumps, J, common, zdicts, ScanCache(os.path.join(rd, 'targeted'), dg) if rd else None, targeted=True)
+                    stage('comparing the shaders found with the app\'s list')
                     why = profile_differs(out, pairsout, psopairsout)
                 except Fallback as e: why = str(e)
                 if why:
@@ -3170,9 +3183,13 @@ def main():
                 else: print('targeted split: its tables are the profile\'s, byte for byte', flush=True)
         if out is None: print(f'targeted split: not taken, {why}: every file is scanned', flush=True)
     if out is None:
+        print(f'split: looking for archives among {len(files):,} RomFS files', flush=True)   # each file is opened (zip_jobs): a minute or more on a large RomFS, before the first progress line
+        stage(f'looking for archives among {len(files):,} files')
         big, todo = scan_jobs(files)
+        stage(f'reading every file of the game ({len(files):,})')
         cd = (os.path.join(rd, 'full') if targeted else rd) if rd else None
         out = split_tables(list(results), big, todo, dumps, J, common, zdicts, ScanCache(cd, scan_digest(inputs, big + todo + mains)) if cd else None)
+    stage('writing the shaders found')
     write_outputs(out, pkg, mapout, factsout, pairsout, psopairsout)
 
 class Fallback(Exception): pass   # the targeted scan cannot give the full scan's outputs (split_tables)
@@ -3217,13 +3234,43 @@ def profile_files(files, main_v):
 def profile_differs(t, pairsout, psopairsout):
     """None when each table the targeted scan made is the profile's byte for byte (the profile's tables are a full scan's of the same build), else which is not.
     A file that holds only shaders found earlier is named in no row's source, but its variations can still pair them (var_pairs, mesh_facts): unless the profile's
-    shader_files.tsv lists it, the targeted scan leaves it out, and this comparison sends such a dump to the full scan. A table the profile does not have is not compared"""
+    shader_files.tsv lists it, the targeted scan leaves it out, and this comparison sends such a dump to the full scan. A table the profile does not have is not compared.
+    A registered build may lack keys of the map (shader_optional.tsv: Mario Kart World 1.8.0 as update 917504 lacks one agl compute program). The targeted scan reads the
+    file each such key's row names, so a key it did not find is not in the dump: the profile's tables less those keys (absent_tables) are what a full scan of it makes"""
+    have = {r[3] for r in t['rows']}
+    absent = optional_keys() & (map_keys(GAME.table('shader_map.tsv')) - have)
     for name, text in (('shader_map.tsv', t['map']), ('shader_facts.tsv', t['facts']), ('shader_pairs.tsv', t['pairs'] if pairsout else None), ('pso_pairs.tsv', t['pso'] if psopairsout else None)):
         p = GAME.table(name)
         if text is None or not os.path.isfile(p): continue
-        with open(p, 'rb') as f:
-            if f.read() != text.encode(): return f'made a {name} that differs from the profile\'s'
+        with open(p, encoding='utf-8', newline='') as f: want = absent_tables(name, f.read(), absent)
+        if want != text: return f'made a {name} that differs from the profile\'s'
+    if absent: print(f'targeted split: compared with the profile\'s tables less the {len(absent)} shader(s) of shader_optional.tsv this dump does not have ({", ".join(sorted(absent)[:3])})', flush=True)
     return None
+
+def optional_keys():
+    """The keys of the profile's shader_map.tsv that only some of its registered builds have (shader_optional.tsv; scripts/pack_android.py optional_keys)"""
+    p = GAME.table('shader_optional.tsv')
+    if not os.path.isfile(p): return set()
+    with open(p, encoding='utf-8') as f: return {ln.split('\t')[0] for ln in f.read().splitlines() if ln and not ln.startswith('#')}
+
+def map_keys(path):
+    """The keys of a shader_map.tsv's package rows (column 4)"""
+    with open(path, encoding='utf-8') as f: return {c[3] for c in (ln.rstrip('\n').split('\t') for ln in f) if len(c) > 4 and c[0].endswith('.bin')}
+
+def absent_tables(name, text, absent):
+    """A profile table as the split of a dump without the keys absent writes it: their rows left out, and in shader_map.tsv the later rows of each package
+    renumbered (split_tables counts a package's rows as it writes them). The comment and header lines stay"""
+    if not absent: return text
+    out, idx = [], collections.Counter()
+    for ln in text.splitlines(keepends=True):
+        c = ln.rstrip('\n').split('\t')
+        if ln.startswith('#') or len(c) < 2: out.append(ln); continue
+        if name == 'shader_map.tsv':
+            if len(c) <= 4 or not c[0].endswith('.bin'): out.append(ln); continue   # the column header
+            if c[3] in absent: continue
+            c[1] = str(idx[c[0]]); idx[c[0]] += 1; out.append('\t'.join(c) + '\n')
+        elif not absent.intersection(c): out.append(ln)
+    return ''.join(out)
 
 def scan_jobs(files, want=None):
     """The scan's jobs: (archive ranges, the other files). Each archive kind's index sees every file (a PAK's newest copy of a path, an index beside its data); with
@@ -3236,7 +3283,9 @@ def scan_jobs(files, want=None):
     arc_jobs, arcs = smash_arc_jobs(files)   # Super Smash Bros. Ultimate's data.arc: its current files, in ranges
     pz_jobs, pkzs = pkz_jobs(files)   # Bayonetta 3's PKZ archives, Oodle Kraken decoded by the game's own decoder in the Mac host
     ck_jobs, cpks = cpk_jobs(files)   # Bayonetta 2's CRI CPK archives (CRILAYLA entries)
-    zp_jobs, zips = zip_jobs(files)   # Portal's game.zip (Deflate members)
+    # Portal's game.zip (Deflate members). A zip is found by its first bytes, so this opens each file it is given: only the wanted ones, since a zip needs no other file
+    # (Mario Kart World's 206,326 RomFS files took 29 s here on a Mac and minutes on a Windows PC before the targeted scan had printed anything)
+    zp_jobs, zips = zip_jobs(files if want is None else [f for f in files if f[1] in want])
     ah_jobs, arhs = arh_jobs(files)   # Monolith's ARH1/ARD archives and embedded XBC1/HCPS programs
     fb_jobs, fbs = frostbite_jobs(files)   # EA SPORTS FC 27's Frostbite bundles, Oodle Leviathan decoded by the game's own decoder in the Mac host
     big += pak_jobs + tr_jobs + ue_jobs + bd_jobs + arc_jobs + pz_jobs + ck_jobs + zp_jobs + ah_jobs + fb_jobs
@@ -3252,6 +3301,7 @@ def split_tables(results, big, files, dumps, J, common, zdicts, cache, targeted=
     with pool(J, common, {}, zdicts) as ex:
         n = len(big) + len(files)
         results += pooled(ex, big, n, cache=cache) + pooled(ex, files, n, len(big), chunk=16, cache=cache)
+    stage('sorting the shaders found')
     trees, defer = {}, []
     for rel, uniq, pr, extra in results:
         if extra == 'defer': defer.append(rel)

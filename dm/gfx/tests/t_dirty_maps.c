@@ -56,7 +56,7 @@ static result play(int budget) {   // 0 unbounded, 1 budget, 2 late
             if (want > nvn_dirty_block_bytes()) nvn_dirty_block_at_least(want);
             long shed = vkmb_shed(maps(), MODEL_MAX, VKMB_BUDGET_PCT, VKMB_TARGET_PCT);
             int pieces = (int)(g_ncut + 1), idx; long covered = 0;
-            if (shed > 0 && vkmb_pick(&pieces, 1, shed, &idx, 1, &covered)) {   // compaction: the tracker held (its pages released and stamped), the map made again in one piece
+            if (shed > 0 && vkmb_pick(&pieces, NULL, 1, shed, &idx, 1, &covered)) {   // compaction: the tracker held (its pages released and stamped), the map made again in one piece
                 nvn_dirty_hold(g_pool, POOL); memset(g_cut, 0, g_np); g_ncut = 0; nvn_dirty_unhold(); r.compactions++;
             }
         }
