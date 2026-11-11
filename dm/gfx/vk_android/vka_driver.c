@@ -71,16 +71,18 @@ static int adreno_system_version(void) {   // the system driver's version (863 f
     }
     close(fd); return v;
 }
+static char g_ubwc_note[200];   // what the hint did, logged at device creation (vka_driver_notes): the driver is opened before the game's log is
 static void ubwc_hint(void) {
-    if (getenv("FD_DEV_FEATURES") || !VKA_ENV("DM_VK_TU_UBWC_HINT", 1)) return;
+    if (getenv("FD_DEV_FEATURES") || !VKA_ENV("DM_VK_TU_UBWC_HINT", 1)) { snprintf(g_ubwc_note, sizeof g_ubwc_note, "Turnip: FD_DEV_FEATURES %s", getenv("FD_DEV_FEATURES") ? "set by the environment, kept" : "left alone (DM_VK_TU_UBWC_HINT=0)"); return; }
     char m[64] = ""; int fd = open("/sys/class/kgsl/kgsl-3d0/gpu_model", O_RDONLY | O_CLOEXEC);
     if (fd >= 0) { ssize_t n = read(fd, m, sizeof m - 1); close(fd); if (n > 0) m[n] = 0; }
-    if (strncmp(m, "Adreno740", 9)) return;
+    if (strncmp(m, "Adreno740", 9)) { snprintf(g_ubwc_note, sizeof g_ubwc_note, "Turnip: not an Adreno 740 (gpu_model \"%s\"): FD_DEV_FEATURES left alone", m); return; }
     int v = adreno_system_version();
-    if (!v) { VLOG("Turnip on an Adreno 740: the system driver's version was not found, FD_DEV_FEATURES left alone"); return; }
+    if (!v) { snprintf(g_ubwc_note, sizeof g_ubwc_note, "Turnip on an Adreno 740: the system driver's version was not found, FD_DEV_FEATURES left alone"); return; }
     setenv("FD_DEV_FEATURES", v >= 700 ? "enable_tp_ubwc_flag_hint=1" : "enable_tp_ubwc_flag_hint=0", 0);
-    VLOG("Turnip on an Adreno 740, system driver V@%04d: FD_DEV_FEATURES=%s (DM_VK_TU_UBWC_HINT)", v, getenv("FD_DEV_FEATURES"));
+    snprintf(g_ubwc_note, sizeof g_ubwc_note, "Turnip on an Adreno 740 (%s), system driver V@%04d: FD_DEV_FEATURES=%s (DM_VK_TU_UBWC_HINT)", m, v, getenv("FD_DEV_FEATURES"));
 }
+void vka_driver_notes(void) { if (g_ubwc_note[0]) { VLOG("%s", g_ubwc_note); g_ubwc_note[0] = 0; } }   // at device creation, once the log is open
 
 static void *driver_open(void) {
     const char *drv = getenv("DM_VK_DRIVER");
