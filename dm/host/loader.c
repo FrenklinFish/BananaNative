@@ -248,6 +248,7 @@ static void read_layout(module_t *m, const char *dir) {
         else if (!strcmp(key, "RO_OFF")) m->ro_off = v;
         else if (!strcmp(key, "DATA_OFF")) m->data_off = v;
         else if (!strcmp(key, "FPS_STATE_OFF")) m->fps_state_off = v;
+        else if (!strcmp(key, "OOT_PATCHES")) m->oot_patches = v == 1;
         else if (!strcmp(key, "UE_MALLOC_VT")) m->ue_malloc_vt = v;
         else if (!strcmp(key, "UE_MALLOC_SLOT")) m->ue_malloc_slot = (unsigned)v;
         else if (!strcmp(key, "FPS_TARGET_PTR")) m->fps_target_ptr = v;
@@ -281,14 +282,35 @@ static void read_layout(module_t *m, const char *dir) {
 // (hle_nvn.c fstep_tick)
 uint8_t *dm_fps_state;
 static const char *g_fps_mod;   // the module holding the state page (for the log)
+static unsigned g_oot_patches;
 static void install_fps_state(module_t *m) {
-    if (m->fps_state_off + 0x40 > m->size || m->fps_state_off < m->key_page_off + m->key_page_size) die("%s: frame step state page out of range", m->name);
+    size_t used = m->oot_patches ? 0x48 : 0x40;
+    if (m->fps_state_off + used > m->size || m->fps_state_off < m->key_page_off + m->key_page_size) die("%s: frame step state page out of range", m->name);
     dm_fps_state = m->base + m->fps_state_off; g_fps_mod = m->name;
+    g_oot_patches = m->oot_patches;
+}
+
+static void oot_patches_apply(void) {
+    const char *res = getenv("DM_OOT_MAX_RESOLUTION");
+    const char *pool = getenv("DM_OOT_TEXTURE_POOL_X2");
+    const char *unlock = getenv("DM_OOT_FPS_UNLOCK");
+    int max_res = res && !strcmp(res, "1");
+    int pool_x2 = max_res || (pool && !strcmp(pool, "1"));
+    int fps_unlock = unlock && !strcmp(unlock, "1");
+    uint32_t flags = (uint32_t)(max_res | pool_x2 << 1 | fps_unlock << 2);
+    if (!g_oot_patches) {
+        if (flags) LOG("[RED] Ocarina add-ons require a rewritten main with OOT_PATCHES support");
+        return;
+    }
+    memcpy(dm_fps_state + 0x38, &flags, sizeof flags);
+    LOG("%s: Ocarina add-ons: Max Resolution %s, Texture Pool x2 %s, FPS Unlock %s", g_fps_mod,
+        max_res ? "on" : "off", pool_x2 ? "on" : "off", fps_unlock ? "on" : "off");
 }
 // The settings in the state page, written when the game starts (main.c, after host loading): on iOS the loading runs at app launch, before the launcher has set DM_FPS_TARGET and
 // DM_RENDER_SCALE (Launcher.swift), and nothing reads the page before the game runs
 __attribute__((weak)) void dm_fps_step_fold(void) {}   // hle_fpslock.c; tests that link the loader alone have no limiter
 void dm_fps_state_apply(void) {
+    oot_patches_apply();
     if (!dm_fps_state) return;
     const char *e = getenv("DM_FPS_TARGET"); int t = e ? atoi(e) : DM_GAME_FPS_TARGET;
     if (t != 0 && t != 30 && t != 60) { LOG("[RED] DM_FPS_TARGET=%s: must be 0, 30 or 60; using the game's own frame step", e); t = 0; }

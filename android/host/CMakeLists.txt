@@ -128,9 +128,12 @@ add_library(nxadreno SHARED ${ADT}/src/driver.cpp)
 target_include_directories(nxadreno PRIVATE ${ADT}/include ${ADT})
 target_compile_options(nxadreno PRIVATE -O2 -w)
 target_link_libraries(nxadreno PRIVATE nx_linkernsbypass android log dl)
-add_library(hook_impl SHARED ${ADT}/src/hook/hook_impl.cpp)
+add_library(hook_impl SHARED ${ADT}/src/hook/hook_impl.cpp ${CMAKE_CURRENT_SOURCE_DIR}/adreno_binder_compat.c)
 target_include_directories(hook_impl PRIVATE ${ADT}/include)
 target_compile_options(hook_impl PRIVATE -O2 -w)
+# Each driver namespace preloads hook_impl, not main_hook. Its Binder annotation
+# must be in that namespace's global lookup group to satisfy a driver's imports.
+target_link_options(hook_impl PRIVATE -Wl,-z,global)
 set_target_properties(hook_impl PROPERTIES CXX_VISIBILITY_PRESET hidden)
 target_link_libraries(hook_impl PRIVATE nx_linkernsbypass android log dl)
 add_library(main_hook SHARED ${ADT}/src/hook/main_hook.c)

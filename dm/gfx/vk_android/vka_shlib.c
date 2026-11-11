@@ -119,6 +119,32 @@ const dmsh_vk_module *vka_shlib_module(const vka_shlib *L, const dmsh_vk_entry *
     return NULL;
 }
 
+// DM_VK_SPV_OVERRIDE=<original.spv>:<patched.spv>[,...] (read once at the first module): a library module whose SPIR-V is byte for byte the original file is replaced by the
+// patched one, on every path that unpacks it (the base module and every variant made from it), to test a hand-made fix of one shader's translation
+static uint8_t *ov_read(const char *path, size_t *n) {
+    FILE *f = fopen(path, "rb"); if (!f) return NULL;
+    fseek(f, 0, SEEK_END); long sz = ftell(f); fseek(f, 0, SEEK_SET);
+    uint8_t *b = sz > 0 ? malloc((size_t)sz) : NULL;
+    if (b && fread(b, 1, (size_t)sz, f) != (size_t)sz) { free(b); b = NULL; }
+    fclose(f); *n = b ? (size_t)sz : 0; return b;
+}
+static uint32_t *spv_override(uint32_t *w, size_t *nb) {   // DM_VK_SPV_OVERRIDE=<orig>:<patched>[,<orig>:<patched>...] (up to 4 pairs)
+    static int ready, n; static uint8_t *orig[4], *patched[4]; static size_t no[4], np[4];
+    if (!ready) { ready = 1; const char *e = getenv("DM_VK_SPV_OVERRIDE"); char a[2048];
+        if (e && strlen(e) < sizeof a) { strcpy(a, e); char *save = NULL;
+            for (char *t = strtok_r(a, ",", &save); t && n < 4; t = strtok_r(NULL, ",", &save)) { char *c = strchr(t, ':'); if (!c) continue; *c = 0;
+                orig[n] = ov_read(t, &no[n]); patched[n] = ov_read(c + 1, &np[n]);
+                if (orig[n] && patched[n]) fprintf(stderr, "[dm] spv override %d: on (original %zu bytes, patched %zu bytes)\n", n, no[n], np[n]); else fprintf(stderr, "[dm] [RED] spv override %d: files not read (original %zu bytes, patched %zu bytes)\n", n, no[n], np[n]); n++; } } }
+    for (int i = 0; i < n; i++) {
+        if (!orig[i] || !patched[i] || *nb != no[i] || memcmp(w, orig[i], no[i])) continue;
+        uint32_t *o = malloc(np[i]); if (!o) return w;
+        memcpy(o, patched[i], np[i]); free(w); *nb = np[i];
+        static int nlog; if (nlog++ < 8) fprintf(stderr, "[dm] spv override: a module replaced by patched file %d (%zu -> %zu bytes)\n", i, no[i], np[i]);
+        return o;
+    }
+    return w;
+}
+
 uint32_t *vka_shlib_spirv(const vka_shlib *L, const dmsh_vk_module *m, size_t *nbytes, char *err, size_t errn) {
     uint32_t *w = malloc(m->size);
     if (!w) { fail(err, errn, "%u bytes for a module", m->size); return NULL; }
@@ -129,6 +155,7 @@ uint32_t *vka_shlib_spirv(const vka_shlib *L, const dmsh_vk_module *m, size_t *n
         if (ZSTD_isError(r) || r != m->size) { fail(err, errn, "zstd: %s (%zu of %u bytes)", ZSTD_isError(r) ? ZSTD_getErrorName(r) : "short frame", ZSTD_isError(r) ? 0 : r, m->size); free(w); return NULL; }
     }
     if (w[0] != 0x07230203u) { fail(err, errn, "not SPIR-V (first word %#x)", w[0]); free(w); return NULL; }
-    if (nbytes) *nbytes = m->size;
+    size_t nb = m->size; w = spv_override(w, &nb);
+    if (nbytes) *nbytes = nb;
     return w;
 }

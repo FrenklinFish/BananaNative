@@ -22,6 +22,7 @@ final class Profile {
     String resolution = "";   // what Game resolution sets (build.gradle resolutionOf): "window", "scale:<choice>=<scale>/<console|handheld>,…" or "" (nothing: not offered)
     String gpuTs = "submission";   // game.tsv gpu_timestamps (build.gradle gpuTsOf): "segment" or "submission", what the host does without DM_NVN_GPU_TS (Game settings › GPU timing)
     String window = "";   // game.tsv android_window (build.gradle windowOf): the default Game resolution when the player chose none (Prefs.gameWindow), "" for the main screen's
+    boolean vegetationDetail;
     boolean steps;   // game.tsv has fps_steps rows (build.gradle stepsOf): a framework of whole fixed steps a frame, which Hold 60 fps keeps at one (Prefs.steps)
     boolean presentOnly;   // game.tsv fps_limit_present 1 (build.gradle presentOnlyOf): the frame limit only paces the presents, the game's own logic is not known to follow it (Prefs.presentOnly)
     int fpsLimit;   // game.tsv fps_limit (build.gradle fpsLimitOf): the host's frame limit by default, frames a second (0 = none); the launcher offers a frame limit for it (Prefs.limited)
@@ -92,6 +93,48 @@ final class Profile {
         return size(c) == null ? name : name + " \u00b7 draws " + c + " here";
     }
 
+    static final String[] MODE_NAMES = {"Docked", "Handheld"};
+
+    /**
+     * The two-choice form of Game resolution: a game whose graphics_scale rows are one console row and one handheld row, both sizes (the game's docked and handheld
+     * outputs, nothing between them), gets the choices Docked and Handheld instead of the phone sizes (Game settings, the in-game panel). {the console row's size,
+     * the handheld row's size}: the values the two choices store. Null for any other game
+     */
+    String[] modes() {
+        if (!resolution.startsWith("scale:")) return null;
+        String[] rs = resolution.substring(6).split(",");
+        if (rs.length != 2) return null;
+        String[] m = new String[2];
+        for (String r : rs) {
+            int eq = r.indexOf('='), sl = r.indexOf('/');
+            if (eq <= 0 || sl < eq || size(r.substring(0, eq)) == null) return null;
+            String mode = r.substring(sl + 1);
+            int k = mode.equals("console") ? 0 : mode.equals("handheld") ? 1 : -1;
+            if (k < 0 || m[k] != null) return null;
+            m[k] = r.substring(0, eq);
+        }
+        return m;
+    }
+
+    /** A two-choice form's label (k: 0 docked, 1 handheld): "Docked (1152p)" for a console row of 2048x1152, "Handheld (1080p)" for a handheld row of 1920x1080; null without the form */
+    String modeLabel(int k) {
+        String[] m = modes();
+        return m == null ? null : MODE_NAMES[k] + " (" + size(m[k])[1] + "p)";
+    }
+
+    /**
+     * Which of the two choices a Game resolution value takes (the row resolutionEnv takes): 0 docked, 1 handheld; -1 without the form. Original takes no row and starts the
+     * game as its profile's op_mode says; it shows as Docked (an older choice, or Settings' default), and picking Docked stores the console row's size
+     */
+    int modeOf(String choice) {
+        String[] m = modes();
+        if (m == null) return -1;
+        String r = scalePick(choice);
+        if (r == null) return choice.equals("original") ? 0 : -1;
+        String c = r.substring(0, r.indexOf('='));
+        return c.equals(m[0]) ? 0 : c.equals(m[1]) ? 1 : -1;
+    }
+
     /** The graphics_scale row a choice takes ("WxH=scale/mode"): its own, else the largest that fits in it, else the smallest; null without rows */
     private String scalePick(String choice) {
         if (!resolution.startsWith("scale:")) return null;
@@ -153,7 +196,8 @@ final class Profile {
             p.dlss = c.length > 16 && c[16].equals("1");
             p.presentOnly = c.length > 17 && c[17].equals("1");
             p.steps = c.length > 18 && c[18].equals("1");
-            p.variants = c.length > 19 ? c[19] : "";
+            p.vegetationDetail = c.length > 19 && c[19].equals("1");
+            p.variants = c.length > 20 ? c[20] : "";
             out.add(p);
         }
         return Collections.unmodifiableList(out);

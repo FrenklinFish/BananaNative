@@ -13,6 +13,80 @@ CUTS = {
 
 from nso_asm import ADRP, B
 
+def lichii_options(ctx):
+    """Native equivalents of Lichii's resolution, texture pool and frame timing add-ons."""
+    here, emit, site, put, state = ctx.here, ctx.emit, ctx.site, ctx.put, ctx.state
+
+    resolution, full_scale = 0x805bd0, 0x80640c
+    site(resolution, 'e8410036')             # tbz w8,#0,full_scale
+    start = here()
+    emit(0xa9bf47f0)                       # stp x16,x17,[sp,#-16]!
+    emit(ADRP(16, here(), state))
+    emit(0xb9403a10)                       # ldr w16,[x16,#0x38]
+    emit(0x37000090)                       # tbnz w16,#0,full
+    emit(0x36000068)                       # tbz w8,#0,full (original condition)
+    emit(0xa8c147f0)                       # ldp x16,x17,[sp],#16
+    emit(B(here(), resolution + 4))
+    emit(0xa8c147f0)                       # full: ldp x16,x17,[sp],#16
+    emit(B(here(), full_scale))
+    put(resolution, [B(resolution, start)], 'Max Resolution: optional full-scale branch of the dynamic resolution controller')
+
+    texture_pool = 0xc2a36c
+    site(texture_pool, 'e82701a9')           # stp x8,x9,[sp,#0x10]
+    start = here()
+    emit(0xa9bf47f0)                       # stp x16,x17,[sp,#-16]!
+    emit(ADRP(16, here(), state))
+    emit(0xb9403a10)                       # ldr w16,[x16,#0x38]
+    emit(0x36080050)                       # tbz w16,#1,store
+    emit(0xd37ff908)                       # lsl x8,x8,#1
+    emit(0xa8c147f0)                       # store: ldp x16,x17,[sp],#16
+    emit(0xa90127e8)                       # stp x8,x9,[sp,#0x10] (original store)
+    emit(B(here(), texture_pool + 4))
+    put(texture_pool, [B(texture_pool, start)], 'Texture Pool x2: optional doubling of the initial graphics allocation')
+
+    # This update adds s8 to the game's accumulator. The original divides a 30 or 60 Hz
+    # reference (s1) by the integer frame-rate field; the alternative multiplies it by
+    # elapsed guest seconds. Presentation is still governed by the separate frame controller.
+    game_step = 0x6e6cc4
+    site(game_step, '2818201e')             # fdiv s8,s1,s0
+    start = here()
+    emit(0x1e201828)                       # fdiv s8,s1,s0 (also the first sample's fallback)
+    emit(0xa9bd2fea)                       # stp x10,x11,[sp,#-48]!
+    emit(ADRP(10, here(), state))
+    emit(0xb940394a)                       # ldr w10,[x10,#0x38]
+    emit(0x3710006a)                       # tbnz w10,#2,measure
+    emit(0xa8c32fea)                       # ldp x10,x11,[sp],#48
+    emit(B(here(), game_step + 4))
+    emit(0xf9000bec)                       # measure: str x12,[sp,#16]
+    emit(0x3d800bf0)                       # str q16,[sp,#32]
+    ctx.counter(10, game_step)             # x10 = the host's 31.25 MHz Switch 2 clock
+    emit(ADRP(11, here(), state))
+    for word in (
+        0xf940216c,                       # ldr x12,[x11,#0x40] (previous sample)
+        0xf900216a,                       # str x10,[x11,#0x40]
+        0xb40001cc,                       # cbz x12,restore
+        0xcb0c014a,                       # sub x10,x10,x12
+        0x9e220148,                       # scvtf s8,x10
+        0x528e0beb,                       # movz w11,#0x705f
+        0x72a6612b,                       # movk w11,#0x3309,lsl #16
+        0x1e270170,                       # fmov s16,w11 (1 / 31,250,000)
+        0x1e300908,                       # fmul s8,s8,s16
+        0x1e2703f0,                       # fmov s16,wzr
+        0x1e306908,                       # fmaxnm s8,s8,s16
+        0x529999ab,                       # movz w11,#0xcccd
+        0x72a7b98b,                       # movk w11,#0x3dcc,lsl #16
+        0x1e270170,                       # fmov s16,w11 (0.1 s; cap after a stall)
+        0x1e307908,                       # fminnm s8,s8,s16
+        0x1e210908,                       # fmul s8,s8,s1
+        0x3dc00bf0,                       # restore: ldr q16,[sp,#32]
+        0xf9400bec,                       # ldr x12,[sp,#16]
+        0xa8c32fea,                       # ldp x10,x11,[sp],#48
+    ):
+        emit(word)
+    emit(B(here(), game_step + 4))
+    put(game_step, [B(game_step, start)], 'FPS Unlock: optional fractional update step from the host guest clock')
+    ctx.oot_patches = 1
+
 # v131072 main: the frame step (patch_nso.py "Frame step in whole vsyncs"). The game has its own frame-rate controller (main+0x3b4ef60, called once a frame with x20 = its
 # config): from the measured frame time it picks a vsync interval between config +0x0 and +0x4 (with hysteresis, +0x50 / +0x54), stores it at +0x48 and fps = 60 / interval
 # at +0x58, then at main+0x3b4f074 (where its paths meet) calls main+0x3b4f160, which hands +0x58 to setFrameRate (main+0x4dc0f0), and the framework's setInterval
@@ -39,12 +113,20 @@ def frame_step(ctx):
         emit(w)
     emit(B(here(), site + 4))
     fs_put(site, [B(site, start)], "frame step: the frame-rate controller's interval and fps follow the host's vsyncs (state page target fps; 0 = the game's own choice)")
+    if ctx.build_id in (None, 'e0f3ccfaf50065ae4ea01eb5aeb13b1a45da3348000000000000000000000000'):
+        lichii_options(ctx)
 
 FRAME_STEP = {'e0f3ccfaf50065ae4ea01eb5aeb13b1a': frame_step}
 
 # How general each patch is and could be (dm/tools/docs_patches.py "Binding", listed in docs/agents/game-patches.md): what, its binding now, the loosest it could have (goal),
 # purpose, why; blocked or kept: why the gap stays open (cannot close yet, or left open on purpose); checked: what was checked on game files (else a judgement)
 BINDING = [
+    {'what': 'Max Resolution: optional full-scale dynamic resolution path', 'now': 'build', 'goal': 'game', 'purpose': 'rendering',
+     'why': 'the title has its own dynamic resolution controller and full-scale branch', 'blocked': 'one full build ID and branch verified'},
+    {'what': 'Texture Pool x2: optional larger initial graphics allocation', 'now': 'build', 'goal': 'game', 'purpose': 'memory',
+     'why': 'the allocator is in the game and full-scale rendering can exhaust the original pool', 'blocked': 'one full build ID and allocator call verified'},
+    {'what': 'FPS Unlock: optional elapsed-time update step', 'now': 'build', 'goal': 'game', 'purpose': 'frame rate',
+     'why': 'the game update derives a fractional step from its integer frame rate', 'blocked': 'one full build ID and update hook verified'},
     {'what': "frame step: the frame-rate controller's interval and fps from the host", 'now': 'build', 'goal': 'game', 'purpose': 'frame rate',
      'why': "the game's own 30 fps mode (interval 2), chosen by the host's step so presentation and game time agree",
      'blocked': 'frame-step stubs have no function-matched form yet'},

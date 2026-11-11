@@ -608,6 +608,7 @@ static inline void chunk_check(void) {
     int cp = VKA_ENV("DM_VK_CHUNK_PASS", 600);
     if (cp > 0 && in >= (uint64_t)cp && vka_rp_open_for(&S.rt, S.has_rt)) {
         uint32_t w = 0, h = 0; int dep = vka_rp_depth(&w, &h);
+        if ((uint64_t)w * h >= (16ull << 20)) return;   // a 6400x6400 ink map costs ~400 MB to store and load on a tiler: never split it mid-pass for chunking
         if (VKA_ENV("DM_VK_PARTLOG", 0)) VLOG("part split inside a pass of %ux%u%s", w, h, dep ? " with depth" : "");
         vka_rp_end(); chunk();
     }
@@ -1244,8 +1245,8 @@ static int exec(const uint8_t *p, int depth) {   // 1: parked at a wait (g_pk ho
         if (h.op == OP_DRAW || h.op == OP_DRAW_IDX) chunk_check();   // before a draw that opens a new pass
         switch (h.op) {   // a render pass a draw opened stays open across draws and state; anything else closes it first
         case OP_END: case OP_BEGIN: case OP_JUMP: case OP_CALL: case OP_SIGNAL_EVENT: case OP_REPORT_COUNTER: case OP_FENCE_SYNC: case OP_RENDER_COND: case OP_RESET_COUNTER: case OP_WAIT_EVENT: case OP_WAIT_SYNC:
-        case OP_SCISSOR: case OP_COPY_STRIDE: case OP_DRAW: case OP_DRAW_IDX: break;
-        case OP_SET_RT: if (g_cb && !vka_pass_keep()) vka_rp_end(); break;
+        case OP_SCISSOR: case OP_COPY_STRIDE: case OP_UPDATE_UB: case OP_DRAW: case OP_DRAW_IDX: break;
+        case OP_SET_RT: if (g_cb && !vka_pass_keep()) vka_rp_end(); else if (g_cb) vka_rp_set_rt((const p_set_rt *)a); break;
         case OP_BARRIER: if (g_cb) { int32_t bits; memcpy(&bits, a, 4); bar_kept = vka_rp_game_barrier((uint32_t)bits); if (!bar_kept) vka_rp_end(); } break;
         case OP_CLEAR_COLOR: case OP_CLEAR_DS: break;   // the pass is ended by the next draw over other targets, or the clear (vka_rp_clear)
         default: if (g_cb && !vka_state_op(&S.d, h.op, a)) vka_rp_end(); else if (!g_cb) vka_state_op(&S.d, h.op, a); break;
@@ -1288,7 +1289,7 @@ static int exec(const uint8_t *p, int depth) {   // 1: parked at a wait (g_pk ho
         case OP_RESET_COUNTER: { uint64_t t; memcpy(&t, a, 8); if (t == NVN_COUNTER_TYPE_SAMPLES_PASSED) oq_reset(); break; }
         case OP_CLEAR_BUF: mdx_write(); if (g_cb) { const p_clear_buf *cb = a; vka_rw_pre(g_cb); buf_fill(cb->addr, cb->size, cb->value); vka_barrier(g_cb); vka_rw_point(g_cb, 'f', 0, cb->value, cb->addr); } break;
         case OP_COPY_B2B: mdx_write(); if (g_cb) { uint64_t s_, d, n; memcpy(&s_, a, 8); memcpy(&d, (const uint8_t *)a + 8, 8); memcpy(&n, (const uint8_t *)a + 16, 8); vka_rw_pre(g_cb); buf_copy(s_, d, n); vka_barrier(g_cb); vka_rw_point(g_cb, 'c', 0, s_, d); } break;
-        case OP_UPDATE_UB: mdx_write(); g_n_ub++; if (g_cb) { uint64_t d, n; memcpy(&d, a, 8); memcpy(&n, (const uint8_t *)a + 8, 8); vka_rw_pre(g_cb); buf_update((const uint8_t *)a + 16, d, n); vka_barrier(g_cb); vka_rw_point(g_cb, 'u', 0, n, d); } break;
+        case OP_UPDATE_UB: mdx_write(); g_n_ub++; if (g_cb) { uint64_t d, n; memcpy(&d, a, 8); memcpy(&n, (const uint8_t *)a + 8, 8); if (!vka_rp_ub_defer(d, n, (const uint8_t *)a + 16)) { vka_rp_end(); vka_rw_pre(g_cb); buf_update((const uint8_t *)a + 16, d, n); vka_barrier(g_cb); vka_rw_point(g_cb, 'u', 0, n, d); } } break;
         case OP_SET_RT: S.rt = *(const p_set_rt *)a; S.has_rt = 1; break;
         case OP_SCISSOR: S.sc = *(const p_scissor *)a; S.has_sc = 1; break;
         case OP_COPY_STRIDE: { const p_copy_stride *cs = a; if (cs->image) S.copy_img_stride = cs->stride; else S.copy_stride = cs->stride; break; }

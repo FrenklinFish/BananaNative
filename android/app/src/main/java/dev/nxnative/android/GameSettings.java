@@ -31,6 +31,12 @@ final class GameSettings {
         Profile prof = Profile.of(id);
         if (prof != null && prof.hasResolution())   // only where it does something: a profile with window_fn or graphics_scale rows
             Ui.add(box, new Ui.Setting(a, "🖼️", "Game resolution", v -> resolution(a, g, again)).value(windowLabel(a, id)).chevron(a).view, 8);
+        if (prof != null && prof.vegetationDetail) {
+            Ui.Setting vegetation = new Ui.Setting(a, "🌿", "Full vegetation", null)
+                    .toggle(a, Prefs.fullVegetation(a, id), (button, on) -> Prefs.fullVegetation(a, id, on));
+            vegetation.value("Turn off to hide some grass and foliage and reduce GPU work. Applies at the next start.");
+            Ui.add(box, vegetation.view, 0);
+        }
         if (!Prefs.limited(id) && Prefs.ownRate(a, id)) {   // the host found no limiter it can hold for this game: choices would do nothing (the host's frame limiter holds a limited game)
             Ui.Setting fixed = new Ui.Setting(a, "⏱️", "Frame rate cap", null).value("This game picks its own frame rate");
             fixed.view.setClickable(false);
@@ -105,6 +111,8 @@ final class GameSettings {
 
     static String windowLabel(MainActivity a, String id) {
         String w = Prefs.gameWindow(a, id);
+        Profile p = Profile.of(id);
+        if (p != null && p.modeOf(w) >= 0) return p.modeLabel(p.modeOf(w));   // the two-choice form (Profile.modes): Docked or Handheld
         String l = Prefs.windowName(w, false);
         return Prefs.ownWindow(a, id) ? l : "Default · " + l;
     }
@@ -179,6 +187,17 @@ final class GameSettings {
     }
 
     private static void resolution(MainActivity a, Game g, Runnable done) {
+        Profile mp = Profile.of(g.titleId);
+        String[] modes = mp != null ? mp.modes() : null;
+        if (modes != null) {   // a game with one docked and one handheld row (Profile.modes): those two choices only, as Display shows its two
+            new AlertDialog.Builder(a).setTitle("Game resolution · " + g.name).setSingleChoiceItems(new String[] {mp.modeLabel(0), mp.modeLabel(1)},
+                    mp.modeOf(Prefs.gameWindow(a, g.titleId)), (x, w) -> {
+                Prefs.gameWindow(a, g.titleId, modes[w]);
+                x.dismiss();
+                done.run();
+            }).setNegativeButton("Cancel", null).show();
+            return;
+        }
         String[] labels = new String[Prefs.WINDOWS.length + 1];
         labels[0] = "Default (" + Prefs.windowName(Prefs.defaultWindow(a, g.titleId), false) + ")";
         { Profile lp = Profile.of(g.titleId); for (int li = 0; li < Prefs.WINDOWS.length; li++) labels[li + 1] = lp != null ? lp.windowLabel(Prefs.WINDOWS[li], Prefs.WINDOW_NAMES[li]) : Prefs.WINDOW_NAMES[li]; }   // a choice the game draws at another size says so (Profile.windowLabel)

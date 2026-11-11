@@ -458,16 +458,20 @@ def emit_gate_call():
         the guest's original value, since the crash backtrace walks the x29 chain."""
     emit_tp(30); emit_slot_addr(30, 29, 'KGATE'); emit(LDRX(30, 30)); emit(LDRX(29, 31))
 
-def site_gate(ins, kind, arg):
-    """svc / mrs cntpct_el0 → host gate. The gate address is taken from thread slot KGATE; the gate looks up gates.tsv by return point (the address of this block's ldp)."""
-    start = here()
+def emit_registered_gate(kind, arg, off):
+    """Call the host and continue in this stub. gates.tsv keys the call by the address of its ldp."""
     emit(STP_PRE(29, 30, 31, -16))
     emit_gate_call()
     emit(BLR(30))
     ret = here()
     emit(LDP_POST(29, 30, 31, 16))
+    gates.append((ret, kind, arg, off))
+
+def site_gate(ins, kind, arg):
+    """svc / mrs cntpct_el0 → host gate. The gate address is taken from thread slot KGATE."""
+    start = here()
+    emit_registered_gate(kind, arg, ins.address)
     emit(B(here(), ins.address + 4))
-    gates.append((ret, kind, arg, ins.address))
     return start
 
 def site_obs(off, oid, word):
@@ -1454,19 +1458,21 @@ obs += region_obs
 # State page = the page after the key page (zero in the file, read-write in both loaders): +0 float target fps written by the loader (fps_target, DM_FPS_TARGET; 0 = every stub
 # runs the original instructions), +4 30 fps movie/cinematic flag, +8 double lead (TOTK), +0x10 float render scale (TOTK, BotW), +0x18 double game seconds (TOTK),
 # +0x20 u32 step in vsyncs (host; 0 = not decided yet), +0x24 u32 a step the game fixes itself (BotW's VFR override; 0 = none), +0x28 u32 AoC's vsyncs per update, marked by
-# its first stub (0 = off), +0x30 u64 vsyncs stepped (the stubs; logged by the host to check the game's speed). Stub bodies assembled with clang
+# its first stub (0 = off), +0x30 u64 vsyncs stepped (the stubs; logged by the host to check the game's speed). Ocarina's opt-in patches use +0x38 for flags
+# and +0x40 for the previous guest tick. Stub bodies assembled with clang
 # A build's stubs are FRAME_STEP[build ID](ctx) in its patches.py: ctx.here() / ctx.emit(word) assemble into the patch area, ctx.site(offset, original bytes) asserts a site and that it is
 # no rewrite site, ctx.put(offset, words, reason) writes it (listed with the cuts), ctx.state is the state page's offset, and ctx.render_scale = 1 marks a render-scale stub
 FRAME_STEP = PATCHES['FRAME_STEP']
 FS_STATE_OFF = 0
 RENDER_SCALE = 0   # 1 = the build has a render-scale stub (state +0x10): the fixups table says so (RENDER_SCALE), and the iOS launcher offers the setting (dm/games/settings.tsv)
+OOT_PATCHES = 0
 if BUILD_ID in FRAME_STEP and NAME == 'main':
     FS_STATE_OFF = KEY_PAGE_OFF + 0x4000
     if FAR:
         # The loader supplies zero-filled BSS/key pages for a front patch area.
         # Reserve the frame state after the key page there too; stubs reach it by ADRP.
         IMAGE_SIZE = FS_STATE_OFF + 0x4000
-    assert FS_STATE_OFF % 0x1000 == 0 and (FAR or FS_STATE_OFF + 0x40 <= PATCH_OFF) and not any(IMG[FS_STATE_OFF:]), 'frame step state page'
+    assert FS_STATE_OFF % 0x1000 == 0 and (FAR or FS_STATE_OFF + 0x48 <= PATCH_OFF) and not any(IMG[FS_STATE_OFF:]), 'frame step state page'
     def fs_site(off, orig):
         ob = bytes.fromhex(orig)
         assert IMG[off:off + len(ob)] == ob, f'frame step original bytes mismatch {off:#x}: {bytes(IMG[off:off + len(ob)]).hex()}'
@@ -1477,8 +1483,10 @@ if BUILD_ID in FRAME_STEP and NAME == 'main':
         for i, w in enumerate(words): struct.pack_into('<I', IMG, off + 4 * i, w)
         cuts.append((off, old.hex(), bytes(IMG[off:off + 4 * len(words)]).hex(), why)); stat('frame_step')
 if FS_STATE_OFF:   # the build's stubs (FRAME_STEP of its patches.py)
-    use_area(0); fs = types.SimpleNamespace(here=here, emit=emit, site=fs_site, put=fs_put, state=FS_STATE_OFF, render_scale=0)
-    FRAME_STEP[BUILD_ID](fs); RENDER_SCALE = fs.render_scale
+    use_area(0); fs = types.SimpleNamespace(here=here, emit=emit, site=fs_site, put=fs_put, state=FS_STATE_OFF, render_scale=0,
+                                           counter=lambda reg, off: emit_registered_gate('cntpct', reg, off),
+                                           build_id=MOD.build_id.hex(), oot_patches=0)
+    FRAME_STEP[BUILD_ID](fs); RENDER_SCALE = fs.render_scale; OOT_PATCHES = fs.oot_patches
 
 # ---- Spin waits (every module) ----
 # A guest loop that polls memory until another thread changes it fills only its own core on the Switch, where any higher-priority thread pinned there preempts it, so the
@@ -1816,6 +1824,7 @@ with open(P('fixups.tsv'), 'w', encoding='utf-8', newline='\n') as f:
     for k in KEY_INDEX: f.write(f'# KEY_{k}_IDX\t{KEY_INDEX[k]}\n')
     if TARGET == 'android': f.write('# TARGET_ANDROID\t1\n')   # the slot base of Targets above: an Apple host refuses this module, an Android host every other
     if FS_STATE_OFF: f.write(f'# FPS_STATE_OFF\t{FS_STATE_OFF:#x}\n')   # frame step state page (FRAME_STEP): the loader writes the target fps there
+    if OOT_PATCHES: f.write('# OOT_PATCHES\t1\n')
     if UE_CALL is not None: f.write(f'# UE_MALLOC_VT\t{UE_VT:#x}\n# UE_MALLOC_SLOT\t{UE_SLOT:#x}\n')   # Unreal's FMallocBinned3 (ue_malloc.py): its vtable and the slot of its name getter, which names the slot layout
     if FPS_TARGET_PTR is not None: f.write(f'# FPS_TARGET_PTR\t{FPS_TARGET_PTR:#x}\n# FPS_TARGET_FIELD\t{FPS_TARGET_FIELD:#x}\n')   # a target frame rate the game steps by (fps_target.py)
     for n, o in UE_CVARS.items(): f.write(f'# UE_CVAR:{n}\t{o:#x}\n')   # Unreal console variables (ue_cvar.py): the TAutoConsoleVariable registered under each name
