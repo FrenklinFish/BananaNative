@@ -983,10 +983,16 @@ public final class MainActivity extends Activity {
                 // Why Prepare cannot start from it (another build than this app's, an incomplete dump), plainly; a pack made elsewhere can still be picked
                 String why = k.found != null && k.found.error != null ? k.found.error
                         : "No pack found for this " + what + ", and it is not a dump Prepare can start from.";
-                Ui.explain(this, "No pack for this " + what, why + "\n\nIf you have a pack folder made for exactly this " + what + " (with pack.tsv), you can pick it.",
-                                k.found != null ? k.found.detail : "")
-                        .setPositiveButton("OK", null)
-                        .setNeutralButton("Pick a pack folder", (d, w) -> pickFolder(PICK_PACK, "Pick the pack folder (android-pack, with pack.tsv)")).show();
+                boolean flat = !Nup.isNup(k.game) && DumpLayout.flatTarget(k.game) != null;   // a flat one-version folder whose version is known: Fix folder sorts it
+                AlertDialog.Builder b = Ui.explain(this, flat ? "Fix this folder?" : "No pack for this " + what,
+                        why + (flat ? "" : "\n\nIf you have a pack folder made for exactly this " + what + " (with pack.tsv), you can pick it."), k.found != null ? k.found.detail : "");
+                if (flat) b.setPositiveButton("Fix folder", (d, w) -> {
+                            String err = DumpLayout.fixFlat(k.game);
+                            if (err != null) { error(err); return; }
+                            gamePicked(k.game);   // the sorted dump: Add game again, so Prepare starts
+                        }).setNegativeButton("Cancel", null);
+                else b.setPositiveButton("OK", null).setNeutralButton("Pick a pack folder", (d, w) -> pickFolder(PICK_PACK, "Pick the pack folder (android-pack, with pack.tsv)"));
+                b.show();
             });
             return;
         }

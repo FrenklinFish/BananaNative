@@ -285,29 +285,55 @@ final class DumpLayout {
      * cannot place it. The version is told by its main's build ID against the profile's build rows: "move it into updates/<version>/" names the exact folder
      */
     static String flatFolder(File dump) {
-        String fn = dump.getName(), what = "one version of a game", sub = "updates/<version number>";
+        String fn = dump.getName(), what = "one version of a game", sub = flatTarget(dump);
+        String[] w = new String[1];
+        flatTarget(dump, w);
+        if (w[0] != null) what = w[0];
+        return fn + " holds " + what + " as one flat folder (exefs/ and romfs/ at its top), which has no version number Prepare can place. Fix folder moves its exefs and "
+                + "romfs into " + fn + "/" + (sub == null ? "updates/<version number>" : sub) + "/ for you (or move them yourself, or convert the dump to a .nup), then Prepare starts.";
+    }
+
+    /** Where a flat folder's exefs and romfs belong ("updates/<v>" or "base"), from main's build ID against the profile's build rows; null when it cannot be told */
+    static String flatTarget(File dump) { return flatTarget(dump, new String[1]); }
+
+    private static String flatTarget(File dump, String[] what) {
         try {
-            String id = Pack.programId(new File(dump, "exefs/main.npdm"));
-            Profile prof = Profile.of(id);
+            if (!new File(dump, "exefs/main.npdm").isFile() || !new File(dump, "romfs").isDirectory()) return null;
+            Profile prof = Profile.of(Pack.programId(new File(dump, "exefs/main.npdm")));
+            if (prof == null) return null;
             String build;
-            try (java.io.InputStream in = new java.io.FileInputStream(new File(dump, "exefs/main"))) { build = BuildCheck.nsoBuildId(in.readNBytes(0x60), fn + "/exefs/main"); }
-            if (prof != null) {
-                what = prof.name;
-                for (Map.Entry<Long, Map<String, String>> row : prof.buildMap().entrySet()) {
-                    String want = row.getValue().get("main");
-                    if (want != null && build.toLowerCase(Locale.ROOT).startsWith(want.toLowerCase(Locale.ROOT))) {
-                        long v = row.getKey();
-                        what = prof.name + " (" + Profile.versionName(v) + ")";
-                        sub = v == 0 ? "base" : "updates/" + v;
-                        break;
-                    }
+            try (java.io.InputStream in = new java.io.FileInputStream(new File(dump, "exefs/main"))) { build = BuildCheck.nsoBuildId(in.readNBytes(0x60), dump.getName() + "/exefs/main"); }
+            what[0] = prof.name;
+            for (Map.Entry<Long, Map<String, String>> row : prof.buildMap().entrySet()) {
+                String want = row.getValue().get("main");
+                if (want != null && build.toLowerCase(Locale.ROOT).startsWith(want.toLowerCase(Locale.ROOT))) {
+                    long v = row.getKey();
+                    what[0] = prof.name + " (" + Profile.versionName(v) + ")";
+                    return v == 0 ? "base" : "updates/" + v;
                 }
             }
         } catch (IOException | RuntimeException e) {
-            // an unreadable main.npdm or main: the general advice below
+            // unreadable: not told
         }
-        return fn + " holds " + what + " as one flat folder (exefs/ and romfs/ at its top), which has no version number Prepare can place. Move its exefs and romfs "
-                + "folders into " + fn + "/" + sub + "/ (or convert the dump to a .nup), then pick " + fn + " again.";
+        return null;
+    }
+
+    /**
+     * Fix folder: moves a flat folder's exefs/ and romfs/ into &lt;dump&gt;/&lt;flatTarget&gt;/ (renames on the same storage: nothing is copied or deleted). Any other
+     * file stays. A move that fails puts back what was moved. null when done, else why not
+     */
+    static String fixFlat(File dump) {
+        String sub = flatTarget(dump);
+        if (sub == null) return "The game's version could not be told from " + dump.getName() + "/exefs/main, so the app cannot tell where its files belong.";
+        File to = new File(dump, sub), ex = new File(dump, "exefs"), ro = new File(dump, "romfs");
+        if (new File(to, "exefs").exists() || new File(to, "romfs").exists()) return dump.getName() + "/" + sub + " already has an exefs or romfs folder: move the files yourself.";
+        if (!to.isDirectory() && !to.mkdirs()) return "The app cannot write in " + dump.getName() + " (check that All files access is on, or move the folders yourself).";
+        if (!ex.renameTo(new File(to, "exefs"))) return "The app could not move " + dump.getName() + "/exefs (check that All files access is on, or move the folders yourself).";
+        if (!ro.renameTo(new File(to, "romfs"))) {
+            new File(to, "exefs").renameTo(ex);   // back as it was
+            return "The app could not move " + dump.getName() + "/romfs (check that All files access is on, or move the folders yourself).";
+        }
+        return null;
     }
 
     /** The program ID of a version's main.npdm (its own, else the base's) */
