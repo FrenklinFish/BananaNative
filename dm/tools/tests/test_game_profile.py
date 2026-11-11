@@ -1,6 +1,7 @@
 # dm/games/game.py's profile-key validation, on a synthetic profile: pso_gpu (the GPU architectures the app's offline pipeline archive is made for, beside pso_mtl4) takes, none and no others,
 # and a profile without the key generates its header unchanged; romfs_check (a RomFS file line that tells a version's data apart) takes <path> <line> <expected | main>;
-# scene_arg (a 3D scene choice passed as game arguments) takes <name> <scale | -> <arguments> <label>
+# scene_arg (a 3D scene choice passed as game arguments) takes <name> <scale | -> <arguments> <label>;
+# the low-RAM keys (low_ram_place_part_mb, low_ram_img_cache_max_mb: Android, devices of 12 GB or less) take MiB in their ranges and generate 0 when unset
 from pathlib import Path
 import os
 import subprocess
@@ -70,6 +71,34 @@ class SceneArg(unittest.TestCase):
                           ('scene_arg\tx\t5\t-a={s}\tX\n', 'goes into the arguments'),
                           ('scene_arg\tx\t-\t-a={s}\tX\n', 'needs a scale'),
                           ('scene_arg\tx\t0.5\t-a={s}\tX\nscene_arg\tx\t0.6\t-a={s}\tY\n', 'the name is taken')):
+            rc, out = header(rows)
+            self.assertNotEqual(rc, 0, rows)
+            self.assertIn(msg, out, rows)
+
+
+class LowRam(unittest.TestCase):
+    def macros(self, rows):
+        with tempfile.TemporaryDirectory() as d:
+            Path(d, ID).mkdir()
+            (Path(d, ID) / 'game.tsv').write_text(TSV + rows)
+            r = subprocess.run([sys.executable, str(GAME), 'header', ID, str(Path(d, ID) / 'game.h')], env={**os.environ, 'DM_GAMES_DIR': d}, capture_output=True, text=True)
+            self.assertEqual(r.returncode, 0, r.stderr)
+            h = (Path(d, ID) / 'game.h').read_text()
+        return [ln for ln in h.splitlines() if 'LOW_RAM' in ln]
+
+    def test_unset_is_zero(self):
+        self.assertEqual(self.macros(''), ['#define DM_GAME_LOW_RAM_PLACE_PART_MB 0', '#define DM_GAME_LOW_RAM_IMG_CACHE_MAX_MB 0'])
+
+    def test_valid(self):
+        self.assertEqual(self.macros('low_ram_place_part_mb\t256\nlow_ram_img_cache_max_mb\t1024\n'),
+                         ['#define DM_GAME_LOW_RAM_PLACE_PART_MB 256', '#define DM_GAME_LOW_RAM_IMG_CACHE_MAX_MB 1024'])
+        for rows in ('low_ram_place_part_mb\t16\n', 'low_ram_place_part_mb\t0\n', 'low_ram_img_cache_max_mb\t512\n', 'low_ram_img_cache_max_mb\t65536\n'):
+            self.assertEqual(header(rows), (0, ''), rows)
+
+    def test_rejected(self):
+        for rows, msg in (('low_ram_place_part_mb\t8\n', 'low_ram_place_part_mb must be'), ('low_ram_place_part_mb\t0x100\n', 'low_ram_place_part_mb must be'),
+                          ('low_ram_place_part_mb\t-1\n', 'low_ram_place_part_mb must be'), ('low_ram_img_cache_max_mb\t256\n', 'low_ram_img_cache_max_mb must be'),
+                          ('low_ram_img_cache_max_mb\t1 GB\n', 'low_ram_img_cache_max_mb must be'), ('low_ram_img_cache_max_mb\t70000\n', 'low_ram_img_cache_max_mb must be')):
             rc, out = header(rows)
             self.assertNotEqual(rc, 0, rows)
             self.assertIn(msg, out, rows)

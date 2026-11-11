@@ -69,6 +69,11 @@ mem_alias	0x400000000
 mem_stack	0x10000000
 app_pool	0x240000000
 sys_resource	0x4000000
+# Android, devices of 12 GB or less only (MemTotal up to 12 GiB, the AYN Thor's 11 GiB): memory pools of 256 MiB or more placed by parts, and the texture cache at most
+# 1024 MiB on top of the limit it measures. On the Thor (Adreno 740, Turnip) the placed memory went from 887 to 553 MiB, and the cache held at 1024 MiB with 6 prunes at 30 fps
+# (with DM_VK_PLACE_PART_MB=256 and DM_VK_IMG_LIMIT_MB=1024, the same values). DM_VK_LOW_RAM=0 turns both off, =1 applies them on any device
+low_ram_place_part_mb	256
+low_ram_img_cache_max_mb	1024
 
 # ---- Shader split (shader_split.py) ----
 shader_groups	/Shaders/=shader /Effect/=effect /Layout/=layout
