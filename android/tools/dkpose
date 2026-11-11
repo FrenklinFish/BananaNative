@@ -1,0 +1,36 @@
+#!/bin/sh
+# Position bookmarks for Donkey Kong Bananza (main build e25c90c1) while it runs with DM_DEVTOOLS=1 (docs/env_switches.tsv DM_POSE_GET, DM_POSE_SET):
+#   dkpose save <name>   asks the host where DK is (DM_POSE_GET) and keeps it as <name>
+#   dkpose load <name>   puts DK there again (DM_POSE_SET), in the same stage
+#   dkpose list          the saved bookmarks
+# Bookmarks are one line each in NX_POSES (default ~/.local/share/nxnative/poses)/<name>.pose. NX_SERIAL and NX_PKG as for nxctl.sh.
+set -eu
+CTL="$(dirname "$0")/nxctl.sh"
+DIR=${NX_POSES:-$HOME/.local/share/nxnative/poses}
+mkdir -p "$DIR"
+[ $# -ge 1 ] || { sed -n '2,6p' "$0"; exit 2; }
+case "$1" in
+list)
+    for f in "$DIR"/*.pose; do [ -e "$f" ] && echo "$(basename "$f" .pose): $(cat "$f")"; done; exit 0;;
+save|load)
+    [ $# -ge 2 ] || { echo "dkpose $1 <name>" >&2; exit 2; };;
+*)
+    sed -n '2,6p' "$0"; exit 2;;
+esac
+name=$2
+if [ "$1" = save ]; then
+    "$CTL" env "DM_POSE_GET=$(date +%s)" >/dev/null
+    sleep 1
+    line=$(NX_WAIT=1 "$CTL" log 200 | tr -d '\r' | grep 'pose: DK at ' | tail -1 || true)
+    [ -n "$line" ] || { echo "no position in the log (is DM_DEVTOOLS=1 set, and DK in a stage?)" >&2; NX_WAIT=1 "$CTL" log 200 | grep 'pose:' | tail -2 >&2; exit 1; }
+    v=$(printf '%s\n' "$line" | sed 's/.*pose: DK at \([^ ]*\).*/\1/')
+    printf '%s\n' "$v" > "$DIR/$name.pose"
+    echo "saved $name: $v"
+else
+    [ -f "$DIR/$name.pose" ] || { echo "no bookmark $name in $DIR" >&2; exit 1; }
+    v=$(cat "$DIR/$name.pose")
+    "$CTL" env DM_POSE_SET= >/dev/null   # cleared first, so the same position can be set again
+    "$CTL" env "DM_POSE_SET=$v" >/dev/null
+    sleep 2
+    NX_WAIT=1 "$CTL" log 200 | tr -d '\r' | grep 'pose:' | tail -1
+fi
