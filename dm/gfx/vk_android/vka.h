@@ -320,6 +320,7 @@ void vka_tex_own(vka_img *im, VkCommandBuffer cb);
 void vka_tex_soft_copy(vka_img *im, int dst_level, VkCommandBuffer cb);
 void vka_tex_soft_stats(char *b, size_t n);          // soft textures now: how many, the storage bytes their finest levels take, and how many went whole
 void vka_tex_big_stats(char *b, size_t n);           // the largest images the GPU has not written, with what sampled them and what lies over their storage (DM_VK_BIGIMG_MB)
+void vka_tex_kind_log(void);                          // log lines: the live images by content and by why the cache keeps them, and the largest (the ctl stats)
 int vka_rp_is_open(void);                            // a render pass is open in the replay's command buffer (vka_draw.c)
 void vka_tex_writeback(VkCommandBuffer cb);   // mtl_sub_commit, after the last pass
 // Texture pool reads (vka_tex.c, DM_VK_POOL_FB): the texture IDs shaders read through the pool, reported by the GPU, so their images are made and kept while read

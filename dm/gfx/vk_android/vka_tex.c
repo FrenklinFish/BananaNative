@@ -1460,6 +1460,64 @@ static void soft_note(vka_img *im, const tex_t *t) {   // a new soft image (call
     if (!(g_soft_made & (g_soft_made - 1)) || !(g_soft_made % 1024)) { char b[300]; soft_line(b, sizeof b); VLOG("%s", b); }   // (1, 2, 4, ... and every 1024th; the ctl stats print it too)
 }
 void vka_tex_soft_stats(char *b, size_t n) { pthread_mutex_lock(&g_tmu); soft_line(b, n); pthread_mutex_unlock(&g_tmu); }
+
+// ---------- Where the image memory goes (diagnostic, the ctl stats) ----------
+// The live images by content and by why the cache keeps them (vktl_evictable's reasons), and the largest ones: for a game whose images in use overrun memory (Mario Kart World,
+// 3.9 GB on a 12 GB device) this says which lever helps - smaller texture assets (soft textures, compressed or resized), render targets (resolution), or images kept by a rule
+enum { IK_GPU, IK_ZERO_SHARED, IK_BC, IK_RAW, IK_SPARSE, IK_CLEARED, IK_N };
+static const char *const ik_name[IK_N] = {"GPU-written", "zero-shared, not yet written", "from storage, block-compressed", "from storage, uncompressed", "sparse", "cleared, never written"};
+enum { IR_HELD, IR_NEW, IR_FENCE, IR_RECENT, IR_GPU_GRACE, IR_EVICTABLE, IR_N };
+static const char *const ir_name[IR_N] = {"held", "never used", "GPU not done", "used in the last 2 frames", "GPU-written, used in the last 120 frames", "evictable"};
+static int img_kind(const vka_img *im) {
+    if (im->gpu_owned) return IK_GPU;
+    if (im->m.z) return IK_ZERO_SHARED;
+    if (im->mode == ST_SPARSE || im->rs) return IK_SPARSE;
+    if (im->mode == ST_TRACK || im->mode == ST_FILL) return im->f.bw > 1 ? IK_BC : IK_RAW;
+    return IK_CLEARED;
+}
+static int img_keep_reason(const vka_img *im, uint64_t cur, uint64_t done) {
+    if (im->holds) return IR_HELD;
+    if (!im->last_frame || cur <= im->last_frame) return IR_NEW;
+    if (im->last_fence && done < im->last_fence) return IR_FENCE;
+    uint64_t age = cur - im->last_frame;
+    if (age < VKTL_KEEP_FRAMES) return IR_RECENT;
+    if (im->gpu_owned && age < VKTL_GPU_FRAMES) return IR_GPU_GRACE;
+    return IR_EVICTABLE;
+}
+void vka_tex_kind_log(void) {
+    pthread_mutex_lock(&g_tmu);
+    uint64_t cur = vka_frame(), done = vka_done(), kb[IK_N] = {0}, rb[IR_N] = {0}, kr[IK_N][IR_N] = {{0}}, soft_b = 0, bc_big = 0;
+    int kn[IK_N] = {0}, rn[IR_N] = {0}, soft_n = 0;
+    enum { TOP = 16 }; vka_img *top[TOP]; int nt = 0;
+    for (int i = 0; i < g_nlive; i++) {
+        vka_img *im = g_live[i]; int k = img_kind(im), r = img_keep_reason(im, cur, done);
+        kb[k] += im->bytes; kn[k]++; rb[r] += im->bytes; rn[r]++; kr[k][r] += im->bytes;
+        if (im->soft) { soft_n++; soft_b += im->bytes; } else if (k == IK_BC && im->bytes >= 4 * 1048576ull) bc_big += im->bytes;
+        int j = nt < TOP ? nt++ : TOP; if (j == TOP) { if (im->bytes <= top[TOP - 1]->bytes) continue; j = TOP - 1; }
+        while (j > 0 && top[j - 1]->bytes < im->bytes) { top[j] = top[j - 1]; j--; }
+        top[j] = im;
+    }
+    char b[1600]; size_t l = (size_t)snprintf(b, sizeof b, "ctl: images by content, frame %llu:", (unsigned long long)cur);
+    for (int k = 0; k < IK_N && l < sizeof b; k++) {
+        if (!kn[k]) continue;
+        l += (size_t)snprintf(b + l, sizeof b - l, " %s %.0f MiB (%d;", ik_name[k], kb[k] / 1048576.0, kn[k]);
+        for (int r = 0; r < IR_N && l < sizeof b; r++) if (kr[k][r]) l += (size_t)snprintf(b + l, sizeof b - l, " %s %.0f", ir_name[r], kr[k][r] / 1048576.0);
+        if (l < sizeof b) l += (size_t)snprintf(b + l, sizeof b - l, ");");
+    }
+    VLOG("%s", b);
+    l = (size_t)snprintf(b, sizeof b, "ctl: images by why they stay:");
+    for (int r = 0; r < IR_N && l < sizeof b; r++) l += (size_t)snprintf(b + l, sizeof b - l, " %s %.0f MiB (%d);", ir_name[r], rb[r] / 1048576.0, rn[r]);
+    if (l < sizeof b) snprintf(b + l, sizeof b - l, " soft textures %.0f MiB (%d); block-compressed from storage, 4 MiB or more and not soft, %.0f MiB", soft_b / 1048576.0, soft_n, bc_big / 1048576.0);
+    VLOG("%s", b);
+    for (int i = 0; i < nt; i++) {
+        vka_img *im = top[i];
+        VLOG("ctl: image %d: serial %llu %ux%ux%u layers %u levels %u (from %u) format %#x vk %d samples %u, %.1f MiB, %s, %s (last used %lld frames ago), %d holds, sampled by %u draws%s%s",
+             i + 1, (unsigned long long)im->serial, im->w, im->h, im->depth, im->layers, im->levels, im->base, im->d.format, (int)im->f.vk, im->samples, im->bytes / 1048576.0,
+             ik_name[img_kind(im)], ir_name[img_keep_reason(im, cur, done)], im->last_frame ? (long long)(cur - im->last_frame) : -1LL, im->holds, im->nsamp,
+             im->soft ? ", soft" : "", im->is_video ? ", video" : "");
+    }
+    pthread_mutex_unlock(&g_tmu);
+}
 // The image of a soft texture made again from level 0 and uploaded whole from its storage, swapped in place (every serial and view that shares it follows; the texture IDs
 // that name it are written again); the old image goes after the submission being recorded, or once its holders let it go. Caller holds nvn_pool_use and g_tmu; 1 = whole
 static int soft_harden(vka_img *im, VkCommandBuffer cb, const char *why) {
