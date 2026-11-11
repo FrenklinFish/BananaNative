@@ -102,6 +102,7 @@ typedef struct {
     // The driver (VkPhysicalDeviceDriverProperties.driverID: VK_DRIVER_ID_QUALCOMM_PROPRIETARY, VK_DRIVER_ID_MESA_TURNIP, ...). A per-driver default keys on this and on
     // feature queries, never on the driver's name; each such default keeps its DM_VK_* switch (android/README.md "Custom GPU drivers")
     int driver_id;
+    int qcom_old;                                   // Qualcomm's own driver before 512.800 (512.676 on the Adreno 740): per-driver defaults key on it (vka_dev.c DM_VK_VIN_DYN, vka_pso.c DM_VK_PREWARM)
     VkDeviceSize ub_align, sb_align, ub_range, sb_range;
     VkDeviceSize placed_align, max_alloc;
     uint32_t guest_type, local_type, upload_type;   // guest RAM (DEVICE_LOCAL|HOST_VISIBLE|HOST_COHERENT|HOST_CACHED, or the nearest), images, upload arenas
@@ -152,6 +153,7 @@ void vka_rp_exec(const uint8_t *handle, uint64_t fence);   // fence: the submiss
 uint64_t vka_rp_sub_commit(uint64_t reserved);
 void vka_rp_queue_activate(uint64_t serial);
 void vka_rp_queue_forget(uint64_t serial);
+void vka_rp_prog_forget(const prog_t *p);   // a finalized program leaves every queue's bindings (replay thread)
 void vka_rp_set_queue_origin(int on);
 int vka_worker_on(void);                              // DM_VK_WORKER (default 1): submissions are replayed on the replay worker thread
 uint64_t vka_present_reserve(void);
@@ -358,7 +360,7 @@ void vka_gp_commit(VkCommandBuffer cb, uint64_t fence);
 void vka_gp_sub_frame(uint64_t f);
 void vka_img_barrier(VkCommandBuffer cb, VkImage img, VkImageAspectFlags aspect, VkImageLayout from, VkImageLayout to);
 // The control line "screenshot" (vka_ctl.c): the present copies the window texture's crop into its command buffer, then hands the texels to the PNG writer once that submission is done
-void vka_ctl_shot_record(VkCommandBuffer cb, vka_img *im, int cx, int cy, int cw, int ch);
+void vka_ctl_shot_record(VkCommandBuffer cb, vka_img *im, VkFormat fmt, int cx, int cy, int cw, int ch);
 void vka_ctl_shot_done(VkFence fence);
 int vka_swap_rb(void);
 
@@ -425,7 +427,7 @@ VkShaderModule vka_shader_module(vka_shader *s, int variant);
 void vka_shader_pfb_hook(void);                // vka_dev.c, once the device's functions are loaded: modules made from then on report their pool reads (vka_tex_pfb_flags)
 VkShaderModule vka_shader_pfb_pick(VkShaderModule m, int a2c, int alpha_func);   // a pixel module given early tests, or its twin without them for a pipeline that needs late ones
 uint32_t vka_shader_sg_pin(int stage);              // DMSH_VK_STAGE_*: the subgroup size its subgroup shaders' pipelines require (vka_shader.c sg_plan), 0 = none
-VkShaderModule vka_shader_cs_module(vka_shader *s);  // a compute shader's module: its DMSH_VK_MOD_SHUFFLE_LDS one where the device takes it (vka_shader.c shuffle_plan), else the base
+VkShaderModule vka_shader_cs_module(vka_shader *s);  // a compute shader's module: its DMSH_VK_MOD_SHUFFLE_LDS one where the device takes it (vka_shader.c shuffle_plan) and the shader does not run as one-invocation subgroups, else the base
 VkShaderModule vka_shader_spec_module(vka_shader *s, int gl);   // a task / mesh module with its specialization constants folded (GL depth = gl), VK_NULL_HANDLE = not needed
 VkShaderModule vka_shader_img_module(vka_shader *s, uint64_t umask, uint64_t smask);   // a compute module with the float storage images at bindings umask / smask as uint / int (vka_spv_img_retype); VK_NULL_HANDLE = cannot
 VkShaderModule vka_shader_inst_module(vka_shader *s, uint32_t binding, uint32_t loc);   // an instanced variant of the base module (vka_spv_instance), made each call

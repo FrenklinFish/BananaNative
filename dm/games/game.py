@@ -218,6 +218,13 @@ def header(g):
             sys.exit(f'{g.id}: mesh_prepass_cut takes <prepass mesh shader key> <colour pass mesh shader key>, two different keys of 16 lowercase hex digits: {r}')
         mpc.append(f'{{0x{r[0]}ull, 0x{r[1]}ull}}')
     if len(mpc) > 64: sys.exit(f'{g.id}: mesh_prepass_cut: at most 64 pairs')
+    # Shaders whose subgroup operations run as subgroups of one invocation on Qualcomm's own driver even where the device has them (vka_shader.c single_lane, one_lane_forced;
+    # a workaround, Android): one key per row
+    sol = []
+    for r in g.values('subgroup_one_lane'):
+        if len(r) != 1 or not re.fullmatch(r'[0-9a-f]{16}', r[0]): sys.exit(f'{g.id}: subgroup_one_lane takes one shader key of 16 lowercase hex digits: {r}')
+        sol.append(f'0x{r[0]}ull')
+    if len(sol) > 16: sys.exit(f'{g.id}: subgroup_one_lane: at most 16 keys')
     api = g.get('device_api', '55.15')   # the NVN API major.minor version nvnDeviceGetInteger reports (hle_nvn.c)
     if not re.fullmatch(r'\d+\.\d+', api): sys.exit(f'{g.id}: device_api must be major.minor: {api}')
     src = f'dm/games/{g.id}' if g.dir.parent == HERE else str(g.dir)
@@ -267,6 +274,7 @@ def header(g):
          f'#define DM_GAME_VCONV_RANGE {int(vcr == "on")}',
          f'#define DM_GAME_ROMFS_SUBST {q(rsub)}',
          f'#define DM_GAME_WINDOW_FN {{{", ".join(wfn) or "{\"\", 0, 0, 0, 0}"}}}', f'#define DM_GAME_NWINDOW_FN {len(wfn)}',
+         '#define DM_GAME_SUBGROUP_ONE_LANE {' + (', '.join(sol) or '0') + '}', f'#define DM_GAME_NSUBGROUP_ONE_LANE {len(sol)}',
          '#define DM_GAME_MESH_PREPASS_CUT {' + (', '.join(mpc) or '{0, 0}') + '}', f'#define DM_GAME_NMESH_PREPASS_CUT {len(mpc)}',
 
          '#define DM_GAME_FPS_STEPS {' + (', '.join(fst) or '{"", 0, 0, 0, 0, {0}}') + '}', f'#define DM_GAME_NFPS_STEPS {len(fst)}',

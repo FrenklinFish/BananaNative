@@ -130,6 +130,21 @@ void vka_rp_queue_forget(uint64_t serial) {
     for (int i = 0; i < g_nqs; i++) if (g_qs[i].serial == serial) { g_qs[i] = g_qs[--g_nqs]; break; }
     if (S.serial == serial) memset(&S, 0, sizeof S);
 }
+// A finalized program leaves the bindings of every queue (upstream nxnative 1440a736, there for Metal): NVN reads a program only when it is bound, so a game may finalize one that a
+// queue still has bound and reuse its memory. Fire Emblem Fortune's Weave does this when its title screen hands over to the opening demo; a binding left in place made the next draw
+// read the program's stages from the reused memory. In submission order (the replay worker's job queue), so lists submitted before the finalize still draw with it
+static int prog_unbind(vka_dstate *d, const prog_t *p) {
+    int n = 0;
+    if (d->cprog == p) d->cprog = NULL, n++;
+    for (int st = 0; st < VKA_NSTAGE; st++) if (d->bst[st] == p) d->bst[st] = NULL, n++;
+    if (n) d->bind_gen++;
+    return n;
+}
+void vka_rp_prog_forget(const prog_t *p) {
+    int active = prog_unbind(&S.d, p) > 0, inactive = 0;
+    for (int i = 0; i < g_nqs; i++) if (g_qs[i].serial != S.serial && prog_unbind(&g_qs[i].d, p)) inactive++;
+    if (active || inactive) { static unsigned n; if (!n++ || !(n & (n - 1))) VLOG("finalized program %p dropped from queue bindings (active queue %d, inactive queues %d; %u times so far)", (const void *)p, active, inactive, n); }
+}
 
 static void post(pop o) {
     if (g_npost == g_postcap) { g_postcap = g_postcap ? g_postcap * 2 : 64; g_post = realloc(g_post, (size_t)g_postcap * sizeof *g_post); }

@@ -961,7 +961,12 @@ NVN(nvnProgramInitialize, NVNboolean, NVNprogram *p, NVNdevice *d) {
     (void)d; memset(p, 0, sizeof(prog_t)); ((prog_t *)p)->magic = MAGIC('P', 'R', 'O', 'G'); return 1;
 }
 static void pk_drop(const void *p);
-NVN(nvnProgramFinalize, void, NVNprogram *p) { mtl_prog_release((prog_t *)p); ((prog_t *)p)->magic = 0; pk_drop(p); }
+// A backend without per-queue bindings has nothing to drop at a program's finalize (the Vulkan replay's is vka_worker.c; upstream nxnative's Metal one, nvn_mtl.m, is not ported here)
+__attribute__((weak)) void mtl_prog_forget(const prog_t *p) { (void)p; }
+NVN(nvnProgramFinalize, void, NVNprogram *p) {
+    pthread_mutex_lock(&g_sub_mu); mtl_prog_forget((const prog_t *)p); pthread_mutex_unlock(&g_sub_mu);
+    mtl_prog_release((prog_t *)p); ((prog_t *)p)->magic = 0; pk_drop(p);
+}
 // a program's per-stage keys (side table: guest NVNprogram address → host object; bit i of ok = stage i computed)
 typedef struct { uint8_t key[6][8]; uint8_t ok; } prog_keys_t;
 static pthread_mutex_t g_pk_mu = PTHREAD_MUTEX_INITIALIZER; static plat_ptrmap_t *g_pk;   // a dedicated table (keys not shared with other side tables)
