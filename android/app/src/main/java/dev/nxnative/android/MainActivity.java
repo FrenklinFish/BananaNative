@@ -987,6 +987,12 @@ public final class MainActivity extends Activity {
                 AlertDialog.Builder b = Ui.explain(this, flat ? "Fix this folder?" : "No pack for this " + what,
                         why + (flat ? "" : "\n\nIf you have a pack folder made for exactly this " + what + " (with pack.tsv), you can pick it."), k.found != null ? k.found.detail : "");
                 if (flat) b.setPositiveButton("Fix folder", (d, w) -> {
+                            if (!Environment.isExternalStorageManager() && !CopyPlan.inApp(AppStorage.root(this), k.game.getPath())) {   // moving needs write access to the dump
+                                new AlertDialog.Builder(this).setTitle("Allow file access")
+                                        .setMessage("To fix this folder, the app needs All files access so it can move the game's files. Allow it, then come back and pick the folder again.")
+                                        .setPositiveButton("Open settings", (d2, w2) -> openAccessSettings()).setNegativeButton("Cancel", null).show();
+                                return;
+                            }
                             String err = DumpLayout.fixFlat(k.game);
                             if (err != null) { error(err); return; }
                             gamePicked(k.game);   // the sorted dump: Add game again, so Prepare starts
