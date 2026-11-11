@@ -20,6 +20,14 @@ static void run(sim *m, int n, double w, int kmin, int kmax, int fixed) {
 
 int main(void) {
     char b[160];
+    {   // Hold 60 fps (hle_nvn.c fstep_hold off: kmax = kmin = 1): 22 ms frames stay at hold 1 (about 45 fps on screen, not 30), the late time paid back one extra step a frame
+        sim m = {0}; run(&m, 120, 0.5, 1, 1, 0); run(&m, 600, 1.32, 1, 1, 0);
+        snprintf(b, sizeof b, "hold 60: 22 ms frames keep hold 1, game time %.0f against real time %.2f (debt %.2f)", m.game, m.real, m.s.debt);
+        check(m.s.k == 1 && m.s.ups == 0 && m.s.paid > 0 && m.real - m.game - m.s.debt > -1.01 && m.real - m.game - m.s.debt < 1.01, b);
+        sim n = {0}; run(&n, 120, 0.5, 1, 1, 0); run(&n, 600, 2.5, 1, 1, 0);   // 42 ms frames: one extra step a frame is not enough, the game falls behind (24 fps, about 0.8 of speed)
+        snprintf(b, sizeof b, "hold 60: 42 ms frames, steps of 2 at most: game time %.0f of real time %.0f", n.game, n.real);
+        check(n.s.k == 1 && n.game < n.real && n.game > 0.75 * n.real, b);
+    }
     {   sim m = {0}; run(&m, 600, 0.5, 1, 3, 0);
         check(m.s.k == 1 && m.s.ups == 0 && m.s.paid == 0 && m.game == m.real, "steady 60: hold 1, step 1, game time = real time");
     }

@@ -206,7 +206,7 @@ static int rt_same(const p_set_rt *a, int ha, const p_set_rt *b, int hb) {
 // CPU in a vkCmdBeginRendering + vkCmdEndRendering pair at the least and ~40 us in Donkey Kong Bananza's level (a quarter of the encoder thread, with ~110 passes a frame);
 // a render pass with an imageless framebuffer takes ~1.5 us (a Vulkan micro-benchmark on the same device). Render passes and framebuffers are made once per shape and kept (by targets' formats,
 // loads and clears; by each attachment's image flags, usage, size and view formats); every attachment stays in GENERAL as before. Pipelines are made against a render
-// pass of the same formats (vka_rp_compat: Vulkan's compatibility ignores loads and clears), without graphics pipeline libraries. Restart only
+// pass of the same formats (vka_rp_compat: Vulkan's compatibility ignores loads and clears); graphics pipeline libraries take the same render pass (vka_pso.c gpl_link). Restart only
 int vka_classic_rp(void) {   // decided once, after the device is made (V.imageless): pipelines and passes must agree for the whole run
     static int on = -1;
     if (on < 0 && V.dev) { const char *e = getenv("DM_VK_CLASSIC_RP"); int want = e && atoi(e) != 0; on = want && V.imageless;

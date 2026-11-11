@@ -249,6 +249,15 @@ static void steps_check(int which) {
     nxhost_fps_limit_set(45); assert(dm_fps_limit_step() == 30); dm_fps_lock_tick(); assert(*mode == 2 && writes == 10);
     dm_fps_target_set(20, "test"); dm_fps_lock_tick(); assert(*mode == STEPS_HOLD && *count == 3);   // the lower of the cap and the limit
     nxhost_fps_limit_set(0); dm_fps_target_set(0, "test"); dm_fps_lock_tick(); assert(*mode == 0 && dm_fps_limit_step() == 0);
+    // Hold 60 fps: one step a frame where the game's own mode is 0 (it would drop to 2 steps after a long frame); the game's own 30 fps form (2) stays; off gives 0 back
+    int w = writes;
+    nxhost_fps_hold60_set(1); dm_fps_lock_tick(); assert(*mode == 1 && writes == w + 1);
+    dm_fps_lock_tick(); assert(writes == w + 1);
+    dm_fps_target_set(30, "test"); dm_fps_lock_tick(); assert(*mode == 2);   // a cap of 30 still wins
+    dm_fps_target_set(60, "test"); dm_fps_lock_tick(); assert(*mode == 1);   // back to 60: held again (the game's own was 0)
+    *mode = 2; dm_fps_lock_tick(); assert(*mode == 2);   // the game picks its own 30 fps form (three or four players): left as it is
+    *mode = 0; dm_fps_lock_tick(); assert(*mode == 1);   // and back to its 0: held again
+    nxhost_fps_hold60_set(0); dm_fps_lock_tick(); assert(*mode == 0);   // off: the game's own 0
     munmap(base, len);
 }
 

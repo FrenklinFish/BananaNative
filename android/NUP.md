@@ -76,7 +76,7 @@ works (`/proc/self/fd/<n>` reopened by path is not reliable on every provider). 
 
 - `dm/tools/nup.py`: reader. Checks a `.nup` per SPEC §6.1 (TOC SHA-256 before any TOC value is used, bounds, no overlapping
   extents but shared ones, sorted acyclic directories; unknown codec, kind, flags refused), lists packages, resolves selectors,
-  and gives walk / list / stat / read and seekable streams. zstd: in memory up to 64 MiB, streamed above that, a temp file in
+  and gives walk / list / stat / read and seekable streams. zstd: in memory up to 64 MiB (a read near the start decodes only that far), streamed above that, a temp file in
   `$DM_TEMP` only when a caller needs a descriptor for mmap. CLI: `packages`, `ls`, `cat`, `verify`.
 - `dm/tools/romfs.py` (`Path`, `open`, `os`, `mmap` for paths inside images) is the access layer: a path with `.nup:` goes to
   a NUP view, so `shader_split.py`, `romfs_image.py` and `pack_dump.py` (scan, pack_version, pack_dlc) take `.nup` paths with

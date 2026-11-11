@@ -141,6 +141,8 @@ final class Native {
     static native void fpsLimitSet(int fps);
     /** Full game speed at low frame rates while the game runs (games whose profile has fps_decouple sead: Prefs.paced; hle_fpslock.c nxhost_fps_decouple_set) */
     static native void decoupleSet(boolean on);
+    /** Hold 60 fps while the game runs (games whose profile has fps_steps: Prefs.steps; hle_fpslock.c nxhost_fps_hold60_set) */
+    static native void hold60Set(boolean on);
     /** Game resolution while the game runs, for a game with graphics_scale rows (Profile.resolutionLive): the graphics scale (0-2, -1 following the operation mode) and the operation mode
      *  (0 handheld, 1 console, -1 the profile's own); the host posts the console's change notifications and the game queries them again (hle_oe.c nxhost_graphics_mode_set). False when this host has no such call */
     static native boolean graphicsModeSet(int scale, int opmode);

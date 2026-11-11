@@ -41,6 +41,18 @@ public final class PrepareTextJvmTest {
         long[] miss = PrepareText.missingShaders("[RED] 120 of the 8161 shaders to build are not in the package /x/pkg (a game version the profile's shader_map.tsv was not made from): "
                 + "the library is written without them (DMSH_VK_REQUIRE_ALL=0). abc: not in the package");
         check(miss != null && miss[0] == 120 && miss[1] == 8161, "missing shaders counted");
+        String keep = PrepareText.keepText(12000, 42800);
+        check(keep.equals(String.format("Keeping the shaders already translated: %,d of %,d", 12000, 42800)), "a delta's kept shaders counted: " + keep);
+        check(PrepareText.keepText(0, 0).equals("Keeping the shaders already translated"), "no count before the first line: " + PrepareText.keepText(0, 0));
+        check(PrepareText.withNote("Finding the shaders", "reading the game's program", "").equals("Finding the shaders: reading the game's program"), "a stage line on the card");
+        check(PrepareText.withNote("Finishing the pack", "", "").equals("Finishing the pack"), "no stage: the step alone");
+        check(PrepareText.withNote("Finding the shaders", "reading 1,442 files", "203 of 1,442 files").equals("Finding the shaders: reading 1,442 files · 203 of 1,442 files"), "stage and count");
+        check(PrepareText.countText(true, 203, 1442, null).equals(String.format("%,d of %,d files", 203, 1442)), "a file count alone: " + PrepareText.countText(true, 203, 1442, null));
+        check(PrepareText.countText(true, 1, 5, "40%").equals("1 of 5 files (40 % of a large file)"), "inside a large file: " + PrepareText.countText(true, 1, 5, "40%"));
+        check(PrepareText.countText(false, 0, 0, null).isEmpty(), "no count yet");
+        check(PrepareText.quietText(59).isEmpty(), "under a minute: nothing");
+        check(PrepareText.quietText(180).equals(" · still working, last update 3 min ago"), "quiet for 3 min: " + PrepareText.quietText(180));
+        check(PrepareText.quietText(3900).equals(String.format(" · still working, last update %d h %02d min ago", 1, 5)), "quiet for over an hour: " + PrepareText.quietText(3900));
         check(PrepareText.missingShaders("[RED] 3 of the 8157 shaders to build are not in the package /x/pkg: it is not a split") == null, "the stop is not a count");
         String mt = PrepareText.missingShadersText(120, 8161, "update 655360");
         plain(mt, "missing shaders");

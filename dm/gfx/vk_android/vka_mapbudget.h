@@ -31,13 +31,14 @@ static inline long vkmb_shed(long count, long max, int budget_pct, int target_pc
     return count > t ? count - t : 0;
 }
 // The segments to compact: the most pieces first (a segment of p pieces becomes one: p - 1 maps fewer), until shed is covered or maxpick are taken; segments under
-// VKMB_MIN_PIECES are left. Their indexes go to idx; the count picked is returned and *covered says how many maps they shed
-static inline int vkmb_pick(const int *pieces, int n, long shed, int *idx, int maxpick, long *covered) {
+// VKMB_MIN_PIECES are left, and so are those skip marks (non-zero; skip may be NULL): an exported alias (vka_fd_alias.h) has no placed map to make again. Their
+// indexes go to idx; the count picked is returned and *covered says how many maps they shed
+static inline int vkmb_pick(const int *pieces, const int *skip, int n, long shed, int *idx, int maxpick, long *covered) {
     int k = 0; long got = 0;
     while (k < maxpick && got < shed) {
         int best = -1;
         for (int i = 0; i < n; i++) {
-            if (pieces[i] < VKMB_MIN_PIECES) continue;
+            if (pieces[i] < VKMB_MIN_PIECES || (skip && skip[i])) continue;
             int taken = 0; for (int j = 0; j < k; j++) if (idx[j] == i) { taken = 1; break; }
             if (!taken && (best < 0 || pieces[i] > pieces[best])) best = i;
         }

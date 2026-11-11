@@ -430,6 +430,13 @@ final class SidePanel extends FrameLayout {
             full.setOnCheckedChangeListener((b, on) -> { Prefs.decouple(act, game(), on); Native.decoupleSet(on); });
             box.addView(full);
         }
+        if (Prefs.steps(game())) {   // Hold 60 fps: one step a frame at the cap of 60 (Game settings has the same), live in the host
+            android.widget.CheckBox hold = new android.widget.CheckBox(act);
+            hold.setText("Hold 60 fps: never drop to 30, no frame holds");
+            hold.setChecked(Prefs.hold60(act, game()));
+            hold.setOnCheckedChangeListener((b, on) -> { Prefs.hold60(act, game(), on); Native.hold60Set(on); });
+            box.addView(hold);
+        }
         fpsNow = note("");
         if (Prefs.dlssGame(game()) || GameUpscaler.shown(act, game())) {   // right under the frame rate cap: the Upscaler (the game's own upscaler and the window's scaling to the screen), for games whose network it replaces; for a game on the DLSS stand-in (no network to replace), the stand-in's modes with Motion clarity / sharpness
             GameUpscaler.rows(act, game(), box);

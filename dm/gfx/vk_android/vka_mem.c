@@ -1063,6 +1063,10 @@ static int contiguous_segs_due(void) {
     pthread_rwlock_unlock(&g_rw);
     return due;
 }
+// The time vka_mem_join_due waited for the queue (the upload batch's flush and vka_queue_idle; cumulative ns, the replay thread's): the pace cost line puts it apart
+// from the joins' scan and work (vka_exec_begin_parts times the whole call)
+static uint64_t g_join_idle_ns;
+void vka_mem_join_stats(uint64_t *idle_ns) { *idle_ns = g_join_idle_ns; }
 // At the start of a submission (vka_rp_sub_begin, the replay thread; nothing recorded is held back there): the joins the asks queued (Joining parts). The queue is
 // waited idle once for all of them. A pool being placed (lazy 2) keeps its joins for the next submission; one finalized or placed whole since drops them
 void vka_mem_join_due(void) {
@@ -1084,7 +1088,8 @@ void vka_mem_join_due(void) {
     }
     uint64_t t0 = mono_ns();
     vka_up_flush();   // an open upload batch to the queue: it may name a part's buffer
-    if (!vka_queue_idle()) return;   // (a GPU hang, or not idle in the hang time: tried again at the next submission)
+    int idle = vka_queue_idle(); g_join_idle_ns += mono_ns() - t0;
+    if (!idle) return;   // (a GPU hang, or not idle in the hang time: tried again at the next submission)
     uint64_t t1 = mono_ns();
     for (;;) {
         pthread_mutex_lock(&g_pmu);
@@ -1179,7 +1184,7 @@ uint64_t vka_mem_placed_bytes(uint64_t *peak) { pthread_rwlock_rdlock(&g_rw); ui
 // Open: between the unmap and the placed map (microseconds) a system call that reads or writes the range (not through the host's pre-write hook) fails with EFAULT
 // instead of waiting, as during a give-back (unplace)
 typedef struct { long total, guest, placed, out_kgsl; } mscan;
-static uint64_t *g_ms_lo, *g_ms_hi; static int *g_ms_pc, g_ms_cap;   // the segments as the scan saw them, their pieces (the maps thread's own)
+static uint64_t *g_ms_lo, *g_ms_hi; static int *g_ms_pc, *g_ms_fa, g_ms_cap;   // the segments as the scan saw them, their pieces, exported alias or not (the maps thread's own)
 static vkmb_hist g_ms_hist;   // the maps outside the guest block by (name, permissions, size), when DM_VK_MAPS_HIST is on (the maps thread's own)
 static int maps_scan(mscan *o, int nseg, uintptr_t glo, uintptr_t ghi, vkmb_hist *hist) {
     memset(o, 0, sizeof *o); if (nseg) memset(g_ms_pc, 0, (size_t)nseg * sizeof *g_ms_pc);
@@ -1207,6 +1212,9 @@ static int maps_scan(mscan *o, int nseg, uintptr_t glo, uintptr_t ghi, vkmb_hist
 // One segment's CPU map made again in one piece (see above). Caller holds g_pl. 1 = done, 0 = the segment is no longer there as the scan saw it
 static int compact(uintptr_t lo, uintptr_t hi) {
     int k = sg_find(lo); if (k < 0 || g_sg[k].lo != lo || g_sg[k].hi != hi) return 0;   // given back (or placed again) since the scan
+    // An exported alias (vka_fd_alias.h) is the host's own mmap of the memory's fd, and the driver's map of it lives elsewhere: unmap_placed would take that map
+    // down and a placed map is not what the alias is (on a driver without placed maps it lands elsewhere and the host stops). The maps thread never picks one
+    if (g_sg[k].fd_alias) return 0;
     VkDeviceMemory mem = g_sg[k].mem; size_t n = hi - lo;
     nvn_dirty_hold((const void *)lo, n);   // (as place: no protection of the tracker's in the range until the swap ends)
     prun pr[MAXRUN]; int npr = prot_runs(lo, hi, pr, MAXRUN), exact = prot_known(pr, &npr, lo, hi);
@@ -1257,8 +1265,8 @@ static void maps_tick(int *line_due) {
     uint8_t *gb; size_t gs; void svc_guest_range(uint8_t **base, size_t *size); svc_guest_range(&gb, &gs);
     pthread_rwlock_rdlock(&g_rw);
     int nseg = g_nsg;
-    if (nseg > g_ms_cap) { int c = nseg + nseg / 2 + 64; g_ms_lo = realloc(g_ms_lo, (size_t)c * 8); g_ms_hi = realloc(g_ms_hi, (size_t)c * 8); g_ms_pc = realloc(g_ms_pc, (size_t)c * sizeof *g_ms_pc); g_ms_cap = c; }
-    for (int i = 0; i < nseg; i++) { g_ms_lo[i] = g_sg[i].lo; g_ms_hi[i] = g_sg[i].hi; }
+    if (nseg > g_ms_cap) { int c = nseg + nseg / 2 + 64; g_ms_lo = realloc(g_ms_lo, (size_t)c * 8); g_ms_hi = realloc(g_ms_hi, (size_t)c * 8); g_ms_pc = realloc(g_ms_pc, (size_t)c * sizeof *g_ms_pc); g_ms_fa = realloc(g_ms_fa, (size_t)c * sizeof *g_ms_fa); g_ms_cap = c; }
+    for (int i = 0; i < nseg; i++) { g_ms_lo[i] = g_sg[i].lo; g_ms_hi[i] = g_sg[i].hi; g_ms_fa[i] = g_sg[i].fd_alias; }
     pthread_rwlock_unlock(&g_rw);
     int hist_pct = VKA_ENV("DM_VK_MAPS_HIST", 40);
     mscan m; uint64_t t0 = mono_ns();
@@ -1272,7 +1280,7 @@ static void maps_tick(int *line_due) {
     int npieced = 0; long inseg = 0; for (int i = 0; i < nseg; i++) if (g_ms_pc[i] > 1) { npieced++; inseg += g_ms_pc[i] - 1; }
     if (shed > 0 && VKA_ENV("DM_VK_MAPS_COMPACT", 1) && mono_ns() - last_compact_ns >= 20000000000ull) {
         int maxn = VKA_ENV("DM_VK_MAPS_COMPACT_N", 8); if (maxn < 1) maxn = 1; if (maxn > 256) maxn = 256;
-        int idx[256]; long covered = 0, shed_done = 0; int k = vkmb_pick(g_ms_pc, nseg, shed, idx, maxn, &covered), done = 0;
+        int idx[256]; long covered = 0, shed_done = 0; int k = vkmb_pick(g_ms_pc, g_ms_fa, nseg, shed, idx, maxn, &covered), done = 0;
         uint64_t c0 = mono_ns(), bytes = 0;
         for (int j = 0; j < k; j++) {
             pthread_mutex_lock(&g_pl);

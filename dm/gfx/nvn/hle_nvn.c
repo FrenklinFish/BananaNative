@@ -2236,8 +2236,12 @@ static int fstep_cpu_slowed(uint64_t presents) {
 // Whether late frames may raise the hold above the cap's vsyncs (profile fps_hold, DM_FPS_HOLD=on / off). Off for a game whose updates do not wait for the presents and step
 // by the cap whatever the hold (Age of Calamity): holding frames there only paces the screen, and an iPhone lowers the GPU clock to the longer hold, so frames got slower and
 // the hold never came back (battle GPU 10 → 41 ms at the same draws, 20 fps at thermal state 0); off, each frame is shown as soon as it is ready
+__attribute__((weak)) int dm_fps_hold60(void);   // hle_fpslock.c (weak: the gfx tests link no host): the Android launcher's Hold 60 fps (DM_FPS_HOLD60, live from the in-game panel)
 static int fstep_hold(void) {
-    static int h = -1;
+    static int h = -1, h60 = -1;
+    int o = dm_fps_hold60 ? dm_fps_hold60() : 0;
+    if (o != h60) { if (h60 >= 0 || o) LOG("[nvn] frame step: hold 60 fps %s: frames %s", o ? "on" : "off", o ? "are shown as soon as they are ready, late time paid back one extra step a frame" : "may be held longer than the cap's vsyncs again"); h60 = o; }
+    if (o) return 0;
     if (h < 0) {
         const char *e = getenv("DM_FPS_HOLD"); h = e ? strcmp(e, "off") != 0 : DM_GAME_FPS_HOLD;
         if (!h) LOG("[nvn] frame step: frames are not held longer than the cap's vsyncs (%s)", e ? "DM_FPS_HOLD" : "game profile fps_hold");
