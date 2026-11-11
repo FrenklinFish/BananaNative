@@ -1563,104 +1563,6 @@ NVN(nvnCommandBufferCopyTextureToTexture, void, NVNcommandBuffer *c, const NVNte
     const NVNtexture *d, const NVNtextureView *dv, const NVNcopyRegion *dr, int flags) {
     rec_copy_t2t(c, s, sv, sr, d, dv, dr, flags, (uint64_t)__builtin_return_address(0));
 }
-#ifdef __ANDROID__
-// NVN2's DLSS builder ABI follows nxnative's MetalFX host. The diagnostic
-// writes the scene colour into the game's output using the normal replay copy.
-typedef struct { int w, h, method; } dlss_blit_net_t;
-// The game's parameter object holds no more than the driver's own (nxnative's dlss_params_t is 128 bytes): this one is 128
-typedef struct {
-    const NVNtexture *src, *dst;
-    const NVNtextureView *src_view, *dst_view;
-    NVNcopyRegion src_rect, dst_rect;
-    const NVNtexture *depth, *motion;
-    float jitter[2], mv[2];
-    uint32_t reset;
-} dlss_blit_params_t;
-_Static_assert(sizeof(dlss_blit_params_t) <= 128, "the game's DLSS parameter object");
-
-NVN_NOPROTO(nvnDlssNetworkBuilderSetDefaults, void, dlss_blit_net_t *b) { *b = (dlss_blit_net_t){0}; }
-NVN_NOPROTO(nvnDlssNetworkBuilderSetDevice, void, dlss_blit_net_t *b, NVNdevice *d) { (void)b; (void)d; }
-NVN_NOPROTO(nvnDlssNetworkBuilderSetOutputResolution, void, dlss_blit_net_t *b, int w, int h) { b->w = w; b->h = h; }
-NVN_NOPROTO(nvnDlssNetworkBuilderSetMethod, void, dlss_blit_net_t *b, int m) { b->method = m; }
-NVN_NOPROTO(nvnDlssNetworkBuilderSetPreset, void, dlss_blit_net_t *b, int p) { (void)b; (void)p; }
-NVN_NOPROTO(nvnDlssNetworkBuilderSetFlags, void, dlss_blit_net_t *b, uint32_t f) { (void)b; (void)f; }
-NVN_NOPROTO(nvnDlssNetworkBuilderSetMaxEvaluationEntries, void, dlss_blit_net_t *b, int n) { (void)b; (void)n; }
-NVN_NOPROTO(nvnDlssNetworkBuilderSetTextureIDs, void, dlss_blit_net_t *b, const void *pool, const int *ids, int n) { (void)b; (void)pool; (void)ids; (void)n; }
-NVN_NOPROTO(nvnDlssNetworkBuilderSetStorage, void, dlss_blit_net_t *b, void *mem, size_t n) { (void)b; (void)mem; (void)n; }
-NVN_NOPROTO(nvnDlssNetworkBuilderGetStorageSize, size_t, const dlss_blit_net_t *b) { (void)b; return 0x1000; }
-NVN_NOPROTO(nvnDlssNetworkBuilderGetOptimalSettings, NVNboolean, const dlss_blit_net_t *b, int *ow, int *oh, int *maxw, int *maxh, int *minw, int *minh, float *sharp) {
-    if (b->w <= 0 || b->h <= 0) return 0;
-    int factor = b->method == 1 ? 3 : b->method == 2 ? 1 : 2;
-    int w = (b->w - 1) / factor + 1, h = (b->h - 1) / factor + 1;
-    // DM_VK_DLSS_INPUT_X / _Y: the scene's size as a percentage of the output, per axis, in place of the method's factor. With the native 4:3 pack the
-    // 16:9 frame is stretched 4:3 on the panel, so its width carries a third more texels per panel pixel than its height: 37.5 x 50 matches them
-    const char *px = getenv("DM_VK_DLSS_INPUT_X"), *py = getenv("DM_VK_DLSS_INPUT_Y");
-    if (px && atof(px) > 0) w = (int)(b->w * atof(px) / 100.0 + 0.5) & ~1;
-    if (py && atof(py) > 0) h = (int)(b->h * atof(py) / 100.0 + 0.5) & ~1;
-    if (ow) *ow = w;
-    if (oh) *oh = h;
-    if (maxw) *maxw = w;
-    if (maxh) *maxh = h;
-    if (minw) *minw = w;
-    if (minh) *minh = h;
-    if (sharp) *sharp = 0;
-    return 1;
-}
-NVN_NOPROTO(nvnDlssNetworkInitialize, NVNboolean, dlss_blit_net_t *n, const dlss_blit_net_t *b) {
-    const char *enabled = getenv("DM_VK_DLSS_BLIT");
-    if (!enabled || strcmp(enabled, "1") || b->w <= 0 || b->h <= 0) { *n = (dlss_blit_net_t){0}; return 0; }
-    *n = *b;
-    void *ra = __builtin_return_address(0);
-    module_t *m = module_of(ra);
-    LOG("[nvn] DLSS network %dx%d: Vulkan scene upscale (from %s+%#llx)", b->w, b->h,
-        m ? m->name : "?", m ? (unsigned long long)((uintptr_t)ra - (uintptr_t)m->base) : 0ULL);
-    return 1;
-}
-NVN_NOPROTO(nvnDlssNetworkFinalize, void, dlss_blit_net_t *n) { *n = (dlss_blit_net_t){0}; }
-NVN_NOPROTO(nvnDlssParametersSetDefaults, void, dlss_blit_params_t *p) { *p = (dlss_blit_params_t){0}; p->mv[0] = p->mv[1] = 1; }
-NVN_NOPROTO(nvnDlssParametersSetInputColor, void, dlss_blit_params_t *p, const NVNtexture *t, const NVNtextureView *v) { p->src = t; p->src_view = v; }
-NVN_NOPROTO(nvnDlssParametersSetOutputColor, void, dlss_blit_params_t *p, const NVNtexture *t, const NVNtextureView *v) { p->dst = t; p->dst_view = v; }
-NVN_NOPROTO(nvnDlssParametersSetInputSubrectangleSize, void, dlss_blit_params_t *p, int w, int h) { p->src_rect.width = w; p->src_rect.height = h; }
-NVN_NOPROTO(nvnDlssParametersSetInputColorSubrectangleBase, void, dlss_blit_params_t *p, int x, int y) { p->src_rect.xoffset = x; p->src_rect.yoffset = y; }
-NVN_NOPROTO(nvnDlssParametersSetOutputSubrectangleBase, void, dlss_blit_params_t *p, int x, int y) { p->dst_rect.xoffset = x; p->dst_rect.yoffset = y; }
-NVN_NOPROTO(nvnDlssParametersSetDepth, void, dlss_blit_params_t *p, const NVNtexture *t, const NVNtextureView *v) { p->depth = t; (void)v; }
-NVN_NOPROTO(nvnDlssParametersSetMotionVectors, void, dlss_blit_params_t *p, const NVNtexture *t, const NVNtextureView *v) { p->motion = t; (void)v; }
-NVN_NOPROTO(nvnDlssParametersSetDepthSubrectangleBase, void, dlss_blit_params_t *p, int x, int y) { (void)p; (void)x; (void)y; }
-NVN_NOPROTO(nvnDlssParametersSetMotionVectorSubrectangleBase, void, dlss_blit_params_t *p, int x, int y) { (void)p; (void)x; (void)y; }
-NVN_NOPROTO(nvnDlssParametersSetMotionVectorScale, void, dlss_blit_params_t *p, float x, float y) { p->mv[0] = x; p->mv[1] = y; }
-NVN_NOPROTO(nvnDlssParametersSetJitterOffset, void, dlss_blit_params_t *p, float x, float y) { p->jitter[0] = x; p->jitter[1] = y; }
-NVN_NOPROTO(nvnDlssParametersSetHistoryReset, void, dlss_blit_params_t *p, uint32_t on) { p->reset = on & 0xff; }   // an NVNboolean: only its low 8 bits are the guest's
-NVN_NOPROTO(nvnDlssParametersSetEvaluationIndex, void, dlss_blit_params_t *p, int i) { (void)p; (void)i; }
-
-static int dlss_blit_rect_fits(const NVNtexture *tex, const NVNcopyRegion *r) {
-    return r->xoffset >= 0 && r->yoffset >= 0 && r->width > 0 && r->height > 0 &&
-        r->width <= h_nvnTextureGetWidth(tex) - r->xoffset &&
-        r->height <= h_nvnTextureGetHeight(tex) - r->yoffset;
-}
-
-NVN_NOPROTO(nvnCommandBufferEvaluateDlss, void, NVNcommandBuffer *c, const dlss_blit_net_t *n, const dlss_blit_params_t *p) {
-    static _Atomic int warned, logged;
-    if (n->w <= 0 || n->h <= 0) return;
-    NVNcopyRegion src = p->src_rect, dst = p->dst_rect;
-    dst.width = n->w;
-    dst.height = n->h;
-    src.depth = dst.depth = 1;
-    if (!p->src || !p->dst || p->src == p->dst || p->src_view || p->dst_view ||
-        !dlss_blit_rect_fits(p->src, &src) || !dlss_blit_rect_fits(p->dst, &dst)) {
-        if (!atomic_exchange(&warned, 1)) LOG("[RED] Vulkan DLSS diagnostic needs distinct textures and valid base-level rectangles");
-        return;
-    }
-    // The copy record the replay scales with (linear, FSR 1), followed by the temporal upscaler's inputs (vka_fsr3.c): depth, motion vectors, jitter, their scale, the reset
-    uint64_t ra = (uint64_t)__builtin_return_address(0);
-    p_dlss_t2t *o = REC_SNAP(c, OP_COPY_T2T, p_dlss_t2t, 4);
-    o->c.src = tex_snap(o, SNAP_OFF(p_dlss_t2t), 0, p->src, ra); o->c.dst = tex_snap(o, SNAP_OFF(p_dlss_t2t), 1, p->dst, ra);
-    o->c.has_sv = o->c.has_dv = 0; o->c.sr = src; o->c.dr = dst; o->c.flags = DM_COPY_DLSS | NVN_COPY_FLAGS_LINEAR_FILTER_BIT;
-    o->depth = tex_snap(o, SNAP_OFF(p_dlss_t2t), 2, p->depth, ra); o->motion = tex_snap(o, SNAP_OFF(p_dlss_t2t), 3, p->motion, ra);
-    memcpy(o->jitter, p->jitter, sizeof o->jitter); memcpy(o->mv, p->mv, sizeof o->mv); o->reset = p->reset != 0;
-    if (!atomic_exchange(&logged, 1)) LOG("[nvn] Vulkan DLSS evaluation recorded: %dx%d -> %dx%d, depth %s, motion vectors %s, jitter %.3f %.3f, motion scale %.2f %.2f",
-                                          src.width, src.height, dst.width, dst.height, p->depth ? "yes" : "no", p->motion ? "yes" : "no", p->jitter[0], p->jitter[1], p->mv[0], p->mv[1]);
-}
-#endif
 // A textured rectangle into the bound colour targets, replayed as draw_tex (nvn_mtl.m). The handle's IDs are moved to the pools this command buffer bound, as bind_handles does:
 // Streets of Rage 4 draws its movie frames into its scene target this way, from a second texture pool. Only the handle's lower 32 bits reach the GPU (bind_handles)
 NVN(nvnCommandBufferDrawTexture, void, NVNcommandBuffer *c, NVNtextureHandle h, const NVNdrawTextureRegion *d, const NVNdrawTextureRegion *s) {
@@ -3084,6 +2986,80 @@ HLE_FORCE("_Z35nvnTextureInitializeFromNativeImageP10NVNtextureP14NVNnativeImage
     h_nvnTextureBuilderSetTarget(&tb, NVN_TEXTURE_TARGET_2D); h_nvnTextureBuilderSetFormat(&tb, i->format); h_nvnTextureBuilderSetSize2D(&tb, (int)w, (int)h); h_nvnTextureBuilderSetLevels(&tb, 1);
     h_nvnTextureBuilderSetFlags(&tb, NVN_TEXTURE_FLAGS_LINEAR); h_nvnTextureBuilderSetStride(&tb, stride); h_nvnTextureBuilderSetStorage(&tb, &i->pool, 0);
     return h_nvnTextureInitialize(t, &tb);
+}
+
+// NVN2's Z-cull compression hint for 32-bit float depth: the host's depth buffers keep their own compression, so there is nothing to set (Fire Emblem Fortune's Weave)
+NVN_NOPROTO(nvnCommandBufferSetZCullZF32CompressionEnable, void, NVNcommandBuffer *c, uint32_t on) { (void)c; (void)on; }
+
+// ---------- NVN2's DLSS ----------
+// A Switch 2 game calls DLSS through NVN itself (Fire Emblem Fortune's Weave's gfxa::TaskDLSS: main+0x1913b48 makes the network, main+0xb70f00 evaluates it): a neural network on NVIDIA's GPU, with
+// no counterpart here. The replay draws a stand-in from the same things (colour, depth, motion vectors at the input's size, the jitter, a history reset): on Vulkan, vka_exec.c dlss_eval; upstream's Mac host, MetalFX
+// The builder and the parameters are packed in place: the game's builder is 0x108 bytes of its stack frame, and the parameters hold no more than the driver's own, which keeps the same fields for
+// its getters. The network's texture IDs and storage are the driver's own needs, which the scaler does not have, so they are taken and dropped
+typedef struct { int32_t w, h, method, preset; uint32_t flags; } dlss_builder_t;
+typedef dlss_builder_t dlss_net_t;   // the network keeps what it was built with: the game gives it 0x800 bytes
+typedef struct { const NVNtexture *tex[DLSS_TEXTURES]; int32_t iw, ih, base[DLSS_TEXTURES][2]; float mv[2], jitter[2], pre_exposure; uint32_t reset; } dlss_params_t;
+static inline int dlss_ceil_div(int v, int d) { return (v + d - 1) / d; }
+// The output is this many times the input, by the builder's method (read from the game's choice at main+0x1913c24: output / input of 2 and under is 0, 3 is 1, 1 is 2)
+static int dlss_factor(int method) { return method == 1 ? 3 : method == 2 ? 1 : 2; }
+NVN_NOPROTO(nvnDlssNetworkBuilderSetDefaults, void, dlss_builder_t *b) { memset(b, 0, sizeof *b); }
+NVN_NOPROTO(nvnDlssNetworkBuilderSetDevice, void, dlss_builder_t *b, NVNdevice *d) { (void)b; (void)d; }
+NVN_NOPROTO(nvnDlssNetworkBuilderSetOutputResolution, void, dlss_builder_t *b, int w, int h) { b->w = w; b->h = h; }
+NVN_NOPROTO(nvnDlssNetworkBuilderSetMethod, void, dlss_builder_t *b, int m) { b->method = m; }
+NVN_NOPROTO(nvnDlssNetworkBuilderSetPreset, void, dlss_builder_t *b, int p) { b->preset = p; }
+NVN_NOPROTO(nvnDlssNetworkBuilderSetFlags, void, dlss_builder_t *b, uint32_t f) { b->flags = f; }
+NVN_NOPROTO(nvnDlssNetworkBuilderSetMaxEvaluationEntries, void, dlss_builder_t *b, int n) { (void)b; (void)n; }
+NVN_NOPROTO(nvnDlssNetworkBuilderSetTextureIDs, void, dlss_builder_t *b, const void *pool, const int *ids, int n) { (void)b; (void)pool; (void)ids; (void)n; }
+NVN_NOPROTO(nvnDlssNetworkBuilderSetStorage, void, dlss_builder_t *b, void *mem, size_t n) { (void)b; (void)mem; (void)n; }
+NVN_NOPROTO(nvnDlssNetworkBuilderGetStorageSize, size_t, const dlss_builder_t *b) { (void)b; return 0x1000; }   // the stand-in keeps its memory on the host's side; a page, for a game that allocates what it is told
+// The argument order is NGX's NGX_DLSS_GET_OPTIMAL_SETTINGS: optimal, largest and smallest input, sharpness (the game stores them so at main+0x1913cfc). One input size per method: no dynamic range
+NVN_NOPROTO(nvnDlssNetworkBuilderGetOptimalSettings, NVNboolean, const dlss_builder_t *b, int *ow, int *oh, int *maxw, int *maxh, int *minw, int *minh, float *sharp) {
+    int f = dlss_factor(b->method), w = dlss_ceil_div(b->w, f), h = dlss_ceil_div(b->h, f);
+    if (ow) *ow = w;
+    if (oh) *oh = h;
+    if (maxw) *maxw = w;
+    if (maxh) *maxh = h;
+    if (minw) *minw = w;
+    if (minh) *minh = h;
+    if (sharp) *sharp = 0;
+    return 1;
+}
+NVN_NOPROTO(nvnDlssNetworkInitialize, NVNboolean, dlss_net_t *n, const dlss_builder_t *b) {
+    *n = *b;
+    LOG("[nvn] DLSS network %dx%d, method %d (input 1/%d), preset %d, flags %#x: the Vulkan stand-in draws it (vka_exec.c dlss_eval)", b->w, b->h, b->method, dlss_factor(b->method), b->preset, b->flags);
+    return 1;
+}
+NVN_NOPROTO(nvnDlssNetworkFinalize, void, dlss_net_t *n) { (void)n; }
+NVN_NOPROTO(nvnDlssParametersSetDefaults, void, dlss_params_t *p) { memset(p, 0, sizeof *p); p->pre_exposure = 1; p->mv[0] = p->mv[1] = 1; }
+static void dlss_set_tex(dlss_params_t *p, int k, const NVNtexture *t, const NVNtextureView *v) {
+    p->tex[k] = t;
+    if (v) ONCE_LOG("[RED] DLSS parameter %d given a texture view: the whole texture is used", k);
+}
+NVN_NOPROTO(nvnDlssParametersSetInputColor, void, dlss_params_t *p, const NVNtexture *t, const NVNtextureView *v) { dlss_set_tex(p, DLSS_COLOR, t, v); }
+NVN_NOPROTO(nvnDlssParametersSetDepth, void, dlss_params_t *p, const NVNtexture *t, const NVNtextureView *v) { dlss_set_tex(p, DLSS_DEPTH, t, v); }
+NVN_NOPROTO(nvnDlssParametersSetMotionVectors, void, dlss_params_t *p, const NVNtexture *t, const NVNtextureView *v) { dlss_set_tex(p, DLSS_MOTION, t, v); }
+NVN_NOPROTO(nvnDlssParametersSetOutputColor, void, dlss_params_t *p, const NVNtexture *t, const NVNtextureView *v) { dlss_set_tex(p, DLSS_OUTPUT, t, v); }
+NVN_NOPROTO(nvnDlssParametersSetBiasCurrentColorMask, void, dlss_params_t *p, const NVNtexture *t, const NVNtextureView *v) { dlss_set_tex(p, DLSS_BIAS, t, v); }
+NVN_NOPROTO(nvnDlssParametersSetExposureTexture, void, dlss_params_t *p, const NVNtexture *t, const NVNtextureView *v) { dlss_set_tex(p, DLSS_EXPOSURE, t, v); }
+NVN_NOPROTO(nvnDlssParametersSetInputSubrectangleSize, void, dlss_params_t *p, int w, int h) { p->iw = w; p->ih = h; }
+NVN_NOPROTO(nvnDlssParametersSetInputColorSubrectangleBase, void, dlss_params_t *p, int x, int y) { p->base[DLSS_COLOR][0] = x; p->base[DLSS_COLOR][1] = y; }
+NVN_NOPROTO(nvnDlssParametersSetDepthSubrectangleBase, void, dlss_params_t *p, int x, int y) { p->base[DLSS_DEPTH][0] = x; p->base[DLSS_DEPTH][1] = y; }
+NVN_NOPROTO(nvnDlssParametersSetMotionVectorSubrectangleBase, void, dlss_params_t *p, int x, int y) { p->base[DLSS_MOTION][0] = x; p->base[DLSS_MOTION][1] = y; }
+NVN_NOPROTO(nvnDlssParametersSetOutputSubrectangleBase, void, dlss_params_t *p, int x, int y) { p->base[DLSS_OUTPUT][0] = x; p->base[DLSS_OUTPUT][1] = y; }
+NVN_NOPROTO(nvnDlssParametersSetBiasCurrentColorSubrectangleBase, void, dlss_params_t *p, int x, int y) { p->base[DLSS_BIAS][0] = x; p->base[DLSS_BIAS][1] = y; }
+NVN_NOPROTO(nvnDlssParametersSetMotionVectorScale, void, dlss_params_t *p, float x, float y) { p->mv[0] = x; p->mv[1] = y; }
+NVN_NOPROTO(nvnDlssParametersSetJitterOffset, void, dlss_params_t *p, float x, float y) { p->jitter[0] = x; p->jitter[1] = y; }
+NVN_NOPROTO(nvnDlssParametersSetPreExposure, void, dlss_params_t *p, float e) { p->pre_exposure = e; }
+NVN_NOPROTO(nvnDlssParametersSetHistoryReset, void, dlss_params_t *p, uint32_t on) { p->reset = on & 0xff; }   // an NVNboolean: only its low 8 bits are the guest's
+NVN_NOPROTO(nvnDlssParametersSetEvaluationIndex, void, dlss_params_t *p, int i) { (void)p; (void)i; }   // which of the network's frames in flight: the replay runs them in order
+NVN_NOPROTO(nvnCommandBufferEvaluateDlss, void, NVNcommandBuffer *c, const dlss_net_t *n, const dlss_params_t *p) {
+    p_dlss *o = REC_SNAP(c, OP_DLSS, p_dlss, DLSS_TEXTURES);
+    for (int k = 0; k < DLSS_TEXTURES; k++) {
+        o->tex[k] = tex_snap(o, SNAP_OFF(p_dlss), k, p->tex[k], (uint64_t)__builtin_return_address(0));
+        memcpy(o->base[k], p->base[k], sizeof o->base[k]);
+    }
+    o->net = (uint64_t)(uintptr_t)n; o->iw = p->iw; o->ih = p->ih; o->ow = n->w; o->oh = n->h; o->flags = n->flags;
+    memcpy(o->mv, p->mv, sizeof o->mv); memcpy(o->jitter, p->jitter, sizeof o->jitter); o->pre_exposure = p->pre_exposure; o->reset = p->reset != 0;
 }
 
 // NVN2 push constants: (command buffer, a word seen 0, byte offset, size, data). The bytes form a constant block of the graphics stages or of compute, which their shaders read

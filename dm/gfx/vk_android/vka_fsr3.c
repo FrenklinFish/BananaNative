@@ -4,7 +4,7 @@
 // The passes, internal images and constants follow AMD's ffx_fsr3upscaler.cpp (FidelityFX SDK 1.1.4, FSR 3.1.4); the shaders (fsr3/*.h, dm/third_party/fidelityfx-fsr3, MIT) are
 // the SDK's GLSL passes compiled for reversed depth, HDR colour, render-size motion vectors, no half precision, the SPD passes with and without wave operations.
 // Here each pass is a compute pipeline with push descriptors (set 0: its bindings in the SDK's order, then the point and linear samplers at 1000 and 1001), recorded into the
-// replay's command buffer where the game's DLSS evaluation is. Every image stays in GENERAL. DM_VK_DLSS_FSR3=0 turns it off (the caller then uses FSR 1 or the linear copy)
+// replay's command buffer where the game's DLSS evaluation is. Every image stays in GENERAL. DM_VK_DLSS=4 picks it (the Upscaler row's FSR 3.1) (the caller then uses FSR 1 or the linear copy)
 #if defined(__ANDROID__)
 #include "vka.h"
 #include <float.h>
@@ -156,7 +156,7 @@ static int f3_ready(void) {
     if (!r) r = vk.vkMapMemory(V.dev, F.ubo_mem, 0, VK_WHOLE_SIZE, 0, (void **)&F.ubo_map);
     if (r) { VRED("FSR 3.1: setup %d; the scene is scaled without it", r); return 0; }
     F.state = 1;
-    VLOG("FSR 3.1 upscaler ready (DLSS replacement; pyramids %s; DM_VK_DLSS_FSR3=0 off, DM_VK_FSR3_SHARP sharpness 0-1)", quads ? "with quad shuffles" : "wave-free");
+    VLOG("FSR 3.1 upscaler ready (DLSS replacement; pyramids %s; DM_VK_DLSS=4, DM_VK_FSR3_SHARP sharpness 0-1)", quads ? "with quad shuffles" : "wave-free");
     return 1;
 }
 

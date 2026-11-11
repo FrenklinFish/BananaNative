@@ -7,19 +7,6 @@
 static struct { uint32_t magic; } g_display = {0x50534944}, g_layer = {0x5259414c};
 static struct { uint32_t magic; void *layer; } g_native = {0x4e49574e, 0};
 
-#ifdef __ANDROID__
-// NVN2 chooses its scene and upscaler sizes from this display buffer mode.
-HLE_FORCE("_ZN2nn2vi31QueryDisplayBufferMaxResolutionEPNS0_19BufferMaxResolutionEPKNS0_7DisplayE",
-          "display buffer mode for the Android host", Result, h_vi_BufMaxRes, uint32_t *out, const void *disp) {
-    (void)disp;
-    const char *setting = getenv("DM_VI_MAX_RES");
-    uint32_t mode = setting && atoi(setting) == 1080 ? 1 : 0;
-    static atomic_int once;
-    if (!atomic_exchange(&once, 1)) LOG("vi::QueryDisplayBufferMaxResolution: %s", mode ? "1920x1080" : "1280x720");
-    if (out) *out = mode;
-    return RES_OK;
-}
-#endif
 
 HLE_FORCE("_ZN2nn2vi10InitializeEv", "display service init; the host has no vi service", void, h_vi_Init, void) {}
 HLE_FORCE("_ZN2nn2vi18OpenDefaultDisplayEPPNS0_7DisplayE", "open default display; the host returns a static object", Result, h_vi_OpenDisp, void **out) {
@@ -99,6 +86,16 @@ HLE_FORCE("_ZN2nn2vi21QueryDisplayHdrStatusEPbPNS0_15HdrOutputFormatEPtPKNS0_7Di
     (void)disp; if (on) *on = 0; if (fmt) *fmt = 0; if (peak) *peak = 0; return RES_OK; }
 HLE_FORCE("_ZN2nn2vi25QueryDisplayHdrPaperWhiteEPtPKNS0_7DisplayE", "display HDR paper white: 203 nits (BT.2408); HDR is off", Result, h_vi_PaperWhite, uint16_t *nits, const void *disp) {
     (void)disp; if (nits) *nits = 203; return RES_OK; }
+// The largest buffer the display takes: BufferMaxResolution 0 is 1280x720, 1 1920x1080, 2 2560x1440, 3 3840x2160 (Fire Emblem Fortune's Weave's tables, main+0x1abc2c0 and +0x1abc050). The SDK's version
+// reads the service the host does not serve and left 0, so the game chose 720p output, its DLSS input 640x360, even docked. A Switch 2 drives a 4K TV docked and has a 1080p screen
+HLE_FORCE("_ZN2nn2vi31QueryDisplayBufferMaxResolutionEPNS0_19BufferMaxResolutionEPKNS0_7DisplayE", "the display's largest buffer: 4K in console mode, the 1080p screen in handheld mode", Result, h_vi_MaxRes, uint32_t *res, const void *disp) {
+    (void)disp;
+    // DM_VI_MAX_RES=720 / 1080 / 1440 / 2160 (the launcher's Display mode, game.tsv display_modes) picks the mode instead: Fire Emblem Fortune's Weave's 720 is a 640x360 scene
+    // upscaled to 1280x720, about 8 ms less GPU time in Dagsion on an Adreno 740
+    const char *e = getenv("DM_VI_MAX_RES"); int v = e ? atoi(e) : 0;
+    uint32_t m = v == 720 ? 0 : v == 1080 ? 1 : v == 1440 ? 2 : v == 2160 ? 3 : dm_opmode() == 1 ? 3 : 1;
+    static atomic_int once; if (!atomic_exchange(&once, 1)) LOG("vi::QueryDisplayBufferMaxResolution: mode %u%s", m, v ? " (DM_VI_MAX_RES)" : "");
+    if (res) *res = m; return RES_OK; }
 HLE_FORCE("_ZN2nn2vi24QueryDisplayVrrSupportedEPbPKNS0_7DisplayE", "display VRR: not supported (fixed refresh rate)", Result, h_vi_VrrSupported, uint8_t *on, const void *disp) {
     (void)disp; if (on) *on = 0; return RES_OK; }
 HLE_FORCE("_ZN2nn2vi23SetDisplayVrrCapabilityEPNS0_7DisplayEb", "display VRR capability: the host has no VRR", Result, h_vi_SetVrr, void *disp, unsigned on) {
