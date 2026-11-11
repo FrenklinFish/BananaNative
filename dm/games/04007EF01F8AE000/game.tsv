@@ -44,6 +44,13 @@ display_modes	1080 720
 # 43: native 4:3 (cameras and UI laid out for 4:3, shown at 4:3): main only
 variant	43	main	4:3
 
+# ---- Android: drivers and movies ----
+# The light grid compute shader lost the device at its first dispatch on Qualcomm's own driver (512.800.77, Adreno 830): its subgroup operations run as one
+# invocation there (a workaround, dm/games/README.md subgroup_one_lane). Turnip runs it as built
+subgroup_one_lane	35d12d6f98fa05e2
+# The 2560x1440 AV1 movies (50-70 Mbit/s) decode on dav1d frame-parallel, not the phone's hardware decoder (it dropped 521 of 1200 frames on an Adreno 740)
+av1_decoder	dav1d
+
 # ---- Files ----
 modules	main subsdk2 sdk
 romfs_marker	Fs.bin.zst

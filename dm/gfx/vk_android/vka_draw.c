@@ -29,6 +29,8 @@ static VkCommandBuffer g_cb; static unsigned g_slot; static int g_prof, g_dyn_fi
 static int g_prof_all, g_prof_every;   // DM_VK_PROF: every draw timed; the pace line's sample (DM_VK_PACE_PROF): one draw in g_prof_every
 static int g_vin_skip = 1;             // DM_VK_VIN_SKIP (vin_build_kept)
 static int g_inst_on;   // DM_VK_INSTANCE (the instanced runs below)
+static int g_vattr_clear = 1;   // DM_VK_VATTR_CLEAR: a BindVertexAttribState replaces the whole attribute state, as the Metal backend does (S.nattr = b->n);
+                                // 0 = the old merge, where the attributes past its count keep the earlier binds' formats and offsets
 uint64_t vka_n_rp;   // render passes the draws opened (vka_exec.c replay statistics)
 static uint64_t g_draws, g_skipped, g_dispatches;
 static uint32_t g_claim_words;   // the draw's claim words (an upper bound of its primitives): 0 = its geometry shader takes no claim
@@ -159,15 +161,14 @@ int vka_state_op(vka_dstate *d, uint32_t op, const void *a) {
         case 5: memcpy(&d->ds, b->bytes, sizeof d->ds); break;
         }
         break; }
-    case OP_BIND_VATTR: {
-        const p_bind_vattr *b = a;
-        if (b->first < 0 || b->first > 16 || b->n < 0 || b->n > 16 - b->first) break;
-        d->s_vfmt = vka_stamp();
-        memcpy(&d->attr[b->first], b->st, sizeof d->attr[0] * (size_t)b->n);
-        // A full BindVertexAttribState replaces the active layout, including when it binds fewer attributes.
-        if (b->first == 0 || b->first + b->n > d->nattr) d->nattr = b->first + b->n;
-        break;
-    }
+    case OP_BIND_VATTR: { const p_bind_vattr *b = a; d->s_vfmt = vka_stamp();
+        // The bind replaces the attribute state, as the Metal backend does (S.nattr = b->n): shader inputs past its count read the zero buffer (vin_build).
+        // Merging kept the attributes past the count from earlier binds, so such an input read another mesh's format and offset from this mesh's stream.
+        if (b->first >= 0 && b->first + b->n <= 16) {
+            if (g_vattr_clear) { memset(d->attr, 0, sizeof d->attr); d->nattr = 0; }
+            memcpy(&d->attr[b->first], b->st, 4 * (size_t)b->n); if (b->first + b->n > d->nattr) d->nattr = b->first + b->n;
+        }
+        break; }
     case OP_BIND_VSTREAM: { const p_bind_vstream *b = a; d->s_vfmt = vka_stamp(); if (b->first >= 0 && b->first + b->n <= 16) { memcpy(&d->stream[b->first], b->st, 8 * (size_t)b->n); if (b->first + b->n > d->nstream) d->nstream = b->first + b->n; } break; }
     case OP_BIND_VBUF: case OP_BIND_VBUF1: { p_bind_vbuf tmp; const p_bind_vbuf *b = vbuf_rec(op, a, &tmp); d->s_vbuf = vka_stamp(); if (b->first >= 0 && b->first + b->n <= 16) memcpy(&d->vbuf[b->first], b->r, sizeof *b->r * (size_t)b->n); break; }
     case OP_BIND_UBO: case OP_BIND_UBO_SMALL: { p_bind_buf tmp; const p_bind_buf *b = bind_buf_rec(op, a, &tmp); if (b->stage >= 0 && b->stage < VKA_NSTAGE && b->index >= 0 && b->index < 16) { d->ubo_dirty[b->stage] |= 1u << b->index; d->b.ubo[b->stage][b->index] = (vka_range){b->addr, b->size}; } break; }
@@ -227,6 +228,7 @@ void vka_draw_sub_begin(VkCommandBuffer cb, unsigned slot) {
     g_prof_all = VKA_ENV("DM_VK_PROF", 0) != 0; g_prof = g_prof_all; g_prof_every = VKA_ENV("DM_VK_PACE_LOG", 5000) > 0 ? VKA_ENV("DM_VK_PACE_PROF", 16) : 0; g_dyn_filter = VKA_ENV("DM_VK_DYN_FILTER", 1); g_pass_keep = VKA_ENV("DM_VK_PASS_KEEP", 1); g_vb_filter = VKA_ENV("DM_VK_VB_FILTER", 1); g_inst_on = VKA_ENV("DM_VK_INSTANCE", 0);   // live: from this submission
     g_vin_skip = VKA_ENV("DM_VK_VIN_SKIP", 1);
     g_db_on = VKA_ENV("DM_VK_DEPTH_BOUNDS", 1); g_sb_snap = VKA_ENV("DM_VK_SB_SNAP", 0); g_rd_pending = VKA_ENV("DM_VK_RD_PENDING", 1); g_ub_pad = VKA_ENV("DM_VK_UB_PAD", 0); g_inst_oob = VKA_ENV("DM_VK_INST_OOB", 0); g_vtx_pad = VKA_ENV("DM_VK_VTX_PAD", 0); if (g_ub_pad > 65536) g_ub_pad = 65536;
+    g_vattr_clear = VKA_ENV("DM_VK_VATTR_CLEAR", 1);
     for (int i = 0; i < g_ndp[g_slot]; i++) vk.vkResetDescriptorPool(V.dev, g_dp[g_slot][i], 0);   // the slot's last submission is done (mtl_sub_begin waited for it)
     g_cur_dp[g_slot] = 0;
     vka_pso_save(0);
@@ -1388,6 +1390,7 @@ static int stage_writes(const vka_dstate *d, int st, const vka_shader *sh, const
 static struct { int n[VKA_NSTAGE], pool[VKA_NSTAGE]; char why[VKA_NSTAGE][200]; vka_res r[VKA_NSTAGE][512]; } g_wk;
 static void walk_all(const vka_dstate *d, vka_shader *const sh[VKA_NSTAGE]) {
     uint64_t t0_ = g_prof ? cntvct() : 0;
+    vka_texu_elem = VKA_ENV("DM_VK_TEXU_ELEM", 1);   // see vka_bind.h (live, A/B)
     for (int st = 0; st < VKA_NSTAGE; st++) {
         vka_shader *s = sh[st]; g_wk.n[st] = 0; g_wk.pool[st] = 0; if (!s) continue;
         g_wk.n[st] = vka_walk(&d->b, st, s->e, s->b, s->lib->h->ssbo_align, V.sb_align, rd_cb, NULL, g_wk.r[st], 512, &g_wk.pool[st], g_wk.why[st], sizeof g_wk.why[st]);

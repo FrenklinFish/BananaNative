@@ -262,7 +262,9 @@ static inline uint8x8_t rgba_channel(int32x4_t low, int32x4_t high) {
 }
 
 // I420 → RGBA (native texture mode): by the colour space and range the picture declares (VP9 colour config; when undeclared BT.709 from 720 lines up, else BT.601), 16-bit fixed point; a smaller picture is padded with black, a larger one cropped
+static int g_rgba_neon = -1;   // DM_MOVIE_RGBA_NEON=0: the scalar loop only (A/B)
 void md_rgba(const vpx_image_t *im, uint8_t *dst, int w, int h) {
+    if (g_rgba_neon < 0) { const char *e = getenv("DM_MOVIE_RGBA_NEON"); g_rgba_neon = !(e && *e == '0'); }
     int full = im->range == VPX_CR_FULL_RANGE, b709 = im->cs == VPX_CS_BT_709 || (im->cs == VPX_CS_UNKNOWN && h >= 720);
     double ky = full ? 1.0 : 255.0 / 219.0, kc = full ? 1.0 : 255.0 / 224.0;
     double rv = b709 ? 1.5748 : 1.402, gu = b709 ? 0.1873 : 0.3441, gv = b709 ? 0.4681 : 0.7141, bu = b709 ? 1.8556 : 1.772;
@@ -275,7 +277,7 @@ void md_rgba(const vpx_image_t *im, uint8_t *dst, int w, int h) {
         const uint8_t *py = im->planes[0] + (size_t)y * im->stride[0], *pu = im->planes[1] + (size_t)(y >> 1) * im->stride[1], *pv = im->planes[2] + (size_t)(y >> 1) * im->stride[2];
         uint32_t *o32 = (uint32_t *)(dst + (size_t)y * w * 4);
         int x = 0;
-        for (; x + 16 <= cw; x += 16) {
+        if (g_rgba_neon) for (; x + 16 <= cw; x += 16) {
             uint8x8_t u = vld1_u8(pu + (x >> 1)), v = vld1_u8(pv + (x >> 1));
             uint8x8x2_t uu = vzip_u8(u, u), vv = vzip_u8(v, v);
             for (int half = 0; half < 2; half++) {

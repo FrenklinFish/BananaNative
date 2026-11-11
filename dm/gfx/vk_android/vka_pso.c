@@ -1075,10 +1075,12 @@ static void *pw_main(void *a) {
 }
 // DM_VK_PREWARM threads (default 4, at most 4; 2 before 2026-11-08). With the pipeline cache warm a key costs a few milliseconds (297 in 0.1 s on 2 threads); with it
 // cold each is a compile of 60-100 ms, some vertex and mesh ones 2-9 s on Qualcomm's compiler, and Ocarina of Time's title scene alone needs about 130, so the list is
-// done before the game's first 3D frame only on more threads. They run at nice 10, under the game's threads, during logos and menus that leave most cores idle
+// done before the game's first 3D frame only on more threads. They run at nice 10, under the game's threads, during logos and menus that leave most cores idle.
+// Default off on Qualcomm's driver before 512.800 (V.qcom_old): 512.676 appears to keep about 6 MB of memory outside the process per pipeline (MemAvailable against the pipeline count), and the list's ~650 pipelines
+// took MemAvailable from 3.3 GB to 1.1-1.6 GB in Fire Emblem Fortune's Weave's opening (321 made without it); the low-memory killer then ended the game in the class showcase. DM_VK_PREWARM=<n> wins
 static void pw_start(void) {
-    int nt = VKA_ENV("DM_VK_PREWARM", 4);
-    if (nt <= 0 || !g_pw_load_n) { if (g_pw_load_n) VLOG("prewarm: off (DM_VK_PREWARM=0): %u keys not made ahead", g_pw_load_n); return; }
+    int nt = VKA_ENV("DM_VK_PREWARM", V.qcom_old ? 0 : 4);
+    if (nt <= 0 || !g_pw_load_n) { if (g_pw_load_n) VLOG("prewarm: off (%s): %u keys not made ahead", getenv("DM_VK_PREWARM") ? "DM_VK_PREWARM=0" : "default on Qualcomm's driver before 512.800; DM_VK_PREWARM=4 on", g_pw_load_n); return; }
     if (nt > 4) nt = 4;
     heavy_load();   // the shaders earlier runs found long on this driver (build_end)
     g_pw_t0 = now_ns(); g_pw_threads = 0;
