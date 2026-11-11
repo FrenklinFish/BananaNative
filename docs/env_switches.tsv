@@ -404,10 +404,10 @@ DM_VK_DISPATCH_SKIP	diagnostic	`=<from>[,<to>]` (Android, live) dispatches from.
 DM_VK_DISPATCH_SKIP_KEY	diagnostic	`=<hex key>[,…]` (Android, read at each dispatch) the dispatches of those compute shaders are recorded without their `vkCmdDispatch`, as `DM_VK_DISPATCH_SKIP` does by index; with the replay's `--dump-gpu` it shows what a shader writes
 DM_VK_DISP_OBJ	diagnostic	`=<hex key>[,…]` or `1` (every compute shader) (Android, restart) takes each dispatch of those shaders as one object's, known by the guest addresses of the storage buffers it binds (and, a second reading, of its storage and uniform buffers), and logs every `DM_VK_DISP_OBJ_EVERY` frames per shader how many objects ran, appeared and stopped, their ages, and how many changed or zeroed the first 8 words of their first storage buffer (`dispatch objects of …`), with the game's nvnSyncWait answers and nvnQueueFinish calls in the same frames (`dispatch objects: SyncWait`), to tell objects the game keeps from objects it adds (dm/games/0400A3A01EE4C000/README.md)
 DM_VK_DISP_OBJ_EVERY	diagnostic	`=<frames>` (Android, live) with `DM_VK_DISP_OBJ`, the frames between its lines (default 600)
-DM_VK_DLSS	switch	(Android, live) what draws NVN2's DLSS in place of the network (`vka_dlss.c`): `3` Snapdragon GSR2 3-pass (default), `2` FSR 1 with the jitter taken out, `1` the bilinear blit, `0` off
+DM_VK_DLSS	switch	(Android, live) what draws NVN2's DLSS in place of the network (`vka_dlss.c`): `3` Snapdragon GSR2 3-pass (default), `2` FSR 1 with the jitter taken out, `1` the bilinear blit, `0` off; the launcher's Upscaler row sets it for `dlss_standin` games
 DM_VK_DLSS_JX	diagnostic	(Android, live) the sign of the DLSS jitter's x for the stand-in upscalers (default `1`; `-1` for A/B)
 DM_VK_DLSS_JY	diagnostic	(Android, live) the sign of the DLSS jitter's y for the stand-in upscalers (default `1`; `-1` for A/B)
-DM_VK_DLSS_SHARP	player	`=<0..100>` (Android, live, default 15) the DLSS stand-in's RCAS sharpening
+DM_VK_DLSS_SHARP	player	`=<0..100>` (Android, live, default 15) the DLSS stand-in's RCAS sharpening; the launcher's Temporal sharpness (0..30) for `dlss_standin` games
 DM_VK_DLSS_UNJITTER	diagnostic	(Android, live) FSR 1 stand-in: how much of the frame's jitter EASU's sampling position is moved by (default `1`; `0` off, `-1` for A/B)
 DM_VK_DONE_LAST	diagnostic	`1` (Android, live, off) the completion thread waits for the last fence handed to the queue instead of the next one, as before (it held earlier fences back until all queued work had run); for A/B runs
 DM_VK_DRAW	diagnostic	`0` / `1` (Android, live) turns draws and dispatches off or on (their records are skipped; events, counters and fences still signal); default on with placed guest memory, off without it
@@ -453,7 +453,7 @@ DM_VK_GPU_FLOOR_LOG	diagnostic	`1` / `2` (Android, live, off) `1` logs each chan
 DM_VK_GPU_FLOOR_PERIOD	switch	`=<ms>` (Android, live, default 0 = the game's shortest period: the shortest present period it asked for, at most 16.7 ms) the period every GPU clock floor aims at (`DM_VK_GPU_FLOOR_AUTO=1`, the ADPF floor); `33.3` the cap before 2026-11-05
 DM_VK_GSR2_BOXMOTW	diagnostic	`=<w>` (Android, live) overrides the GSR2 tune's motion -> history box shrink (dev A/B on top of the row)
 DM_VK_GSR2_BSMOV	diagnostic	`=<0..1>` (Android, live) overrides the GSR2 tune's history box shrink along the motion ramp
-DM_VK_GSR2_CLARITY	player	`=<0..4>` (Android, live, default 2) the GSR2 stand-in's Motion clarity step: `0` Steadiest .. `2` Balanced (tune m2) .. `4` Clearest (less ghosting, more flicker)
+DM_VK_GSR2_CLARITY	player	`=<0..4>` (Android, live, default 2) the GSR2 stand-in's Motion clarity step: `0` Steadiest .. `2` Balanced (tune m2) .. `4` Clearest (less ghosting, more flicker); the launcher's slider for `dlss_standin` games
 DM_VK_GSR2_HMIN	diagnostic	`=<h>` (Android, live, default 0.1) GSR2's history weight floor
 DM_VK_GSR2_KFOV	diagnostic	`=<k>` (Android, live, default 1) GSR2's depth-clip field-of-view factor
 DM_VK_GSR2_MINLERP	diagnostic	`=<m>` (Android, live, default 0.3) GSR2's minimum lerp contribution

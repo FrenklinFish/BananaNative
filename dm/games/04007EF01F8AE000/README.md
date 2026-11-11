@@ -81,7 +81,7 @@ Keyboard in a window: J K U I are A B X Y, WASD the left stick, Shift + arrows t
 
 ## Android
 
-- **Playable** (`readiness.tsv`): on the OnePlus Pad 3 the game was played from the intro through many battles to the hub area Dagsion with no significant issue, on Turnip Gen8 V39 and on the stock driver. On the AYN Thor (Adreno 740) pick Turnip (below). The profile is the Mac's, with `fps_target 30` (the game's own gameplay rate, menus included; the in-game panel's cap picks 60) and no `fps_max`, plus two Android keys: `subgroup_one_lane 35d12d6f98fa05e2` and `av1_decoder dav1d` ([`dm/games/README.md`](../README.md)).
+- **Playable** (`readiness.tsv`): on the OnePlus Pad 3 the game was played from the intro through many battles to the hub area Dagsion with no significant issue, on Turnip Gen8 V39 and on the stock driver. On the AYN Thor (Adreno 740) pick Turnip (below). The profile is the Mac's, with `fps_target 30` (the game's own gameplay rate, menus included; the in-game panel's cap picks 60) and no `fps_max`, plus three Android keys: `dlss_standin 1`, `subgroup_one_lane 35d12d6f98fa05e2` and `av1_decoder dav1d` ([`dm/games/README.md`](../README.md)).
 - The display's largest buffer answers the 1080p screen in handheld mode (`hle_vi.c`), so the game picks its 1080p output. Docked it renders 1024x576 and DLSS takes it to 2048x1152; handheld (`DM_OPMODE=0`) 960x540 to 1920x1080. The game takes its render size from its own resolution tables, not from DLSS's optimal settings: an answer of 1366x768 left it at 1024x576.
 
 ### Tested devices
@@ -107,7 +107,15 @@ NVN2's DLSS is recorded as `OP_DLSS` (`hle_nvn.c`, "NVN2's DLSS"). Vulkan has no
 - **FSR 1** (`DM_VK_DLSS=2`): EASU and RCAS on the tonemapped input. The game jitters every frame (Halton(2,3), ±0.5 input pixels), which a spatial upscaler shows as crawling edges, so EASU's sampling moves with the frame's jitter (`DM_VK_DLSS_UNJITTER`, default 1); this cuts still-edge crawl by 15-30 %, not to zero. 1.30 ms on the Pad 3. RCAS strength `DM_VK_DLSS_SHARP` (0..100, default 15).
 - **Bilinear** (`DM_VK_DLSS=1`): a blit. 0.08 ms.
 
-All three are read live, at every evaluation; the tune's other fields have diagnostic levers (`DM_VK_GSR2_CLARITY`, `DM_VK_GSR2_TUNE`, `_VREJ`, `_VLO`, `_VK`, `_SFCAP`, `_MVNEAR`, `_BOXMOTW`, `_BSMOV`; `docs/env_switches.tsv`). The stand-in's output then reaches the screen through the present's own scaling, the launcher's Upscaler setting.
+With `dlss_standin 1` the launcher's Upscaler row (a game's ⋯ Manage › Game settings, and live in the in-game panel's Performance tab) offers the stand-in's modes in place of the generic choices, with its sliders beside it (`DlssTune.java`, `GameUpscaler.java`, `GameSettings.java`):
+
+| Row | Choices | Default | Lever |
+|---|---|---|---|
+| Upscaler | GSR 2 (smooth images) / FSR 1 (sharp, fast) / Bilinear (fastest, softest) | GSR 2 | `DM_VK_DLSS` 3 / 2 / 1 |
+| Motion clarity (GSR 2 only) | Steadiest / Steady / Balanced / Clear / Clearest (may flicker in combat): steps c0..c4, more history on the left (steadier, more ghosting), less ghosting on the right | Balanced (c2 = tune m2) | `DM_VK_GSR2_CLARITY` 0..4; `DM_VK_GSR2_TUNE` forces a row (0 = m1) |
+| Temporal sharpness (GSR 2) / FSR sharpness (FSR 1) | Off, 5, 10 … 30 | 15 | `DM_VK_DLSS_SHARP` (the host takes 0..100) |
+
+The stand-in's output then reaches the screen through the present's own scaling, which follows the main screen's (or an earlier per-game) Upscaler choice: SGSR 1 (the default) and FSR 1 give FSR 1 (`DM_VK_FSR=1`), Bilinear and Native bilinear, Nearest neighbor nearest (`DM_VK_PRESENT_NEAREST=1`); no `DM_VK_NDSR` line is sent for the game. Every one is read live (the stand-in's at every evaluation, the screen's at every present), so the panel changes the picture at once. The tune's other fields have diagnostic levers (`DM_VK_GSR2_VREJ`, `_VLO`, `_VK`, `_SFCAP`, `_MVNEAR`, `_BOXMOTW`, `_BSMOV`; `docs/env_switches.tsv`).
 
 ### AV1 movies on dav1d
 
