@@ -98,6 +98,8 @@ SWITCH_BINDING = [
      'why': f'what the GPU does; off by default only because other games drew everything before: {DEFAULT_SOON}'}),
     ('gpu_timestamps', '', {'what': 'timestamp reports per segment', 'now': 'game', 'goal': 'host', 'purpose': 'rendering', 'why': f'what hardware records: {DEFAULT_SOON}'}),
     ('draw_barriers', '', {'what': 'draw passes ordered by the game\'s own barriers', 'now': 'game', 'goal': 'host', 'purpose': 'frame rate', 'why': f'what NVN specifies: {DEFAULT_SOON}'}),
+    ('android_window', '1920x1080', {'what': "the Android launcher's default Game resolution, the launcher's own default written out", 'now': 'game', 'goal': 'game', 'purpose': 'rendering',
+     'why': "the same default as without the key (Phone 1080p), named in the profile so that one line changes the game's default output (Fire Emblem Fortune's Weave: handheld; original would give docked)"}),
     ('android_window', '', {'what': "the Android launcher's default Game resolution", 'now': 'game', 'goal': 'host', 'purpose': 'frame rate',
      'why': "a workaround while the game's upscaler is too slow on Adreno with Turnip at 1080p: the faster upscaler makes it unneeded"}),
     ('mem_map_limit', '', {'what': 'MapPhysicalMemory limited to the application pool', 'now': 'game', 'goal': 'host', 'purpose': 'memory',

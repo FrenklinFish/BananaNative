@@ -86,6 +86,48 @@ final class Profile {
         return size(c) == null ? name : name + " \u00b7 draws " + c + " here";
     }
 
+    static final String[] MODE_NAMES = {"Docked", "Handheld"};
+
+    /**
+     * The two-choice form of Game resolution: a game whose graphics_scale rows are one console row and one handheld row, both sizes (the game's docked and handheld
+     * outputs, nothing between them), gets the choices Docked and Handheld instead of the phone sizes (Game settings, the in-game panel). {the console row's size,
+     * the handheld row's size}: the values the two choices store. Null for any other game
+     */
+    String[] modes() {
+        if (!resolution.startsWith("scale:")) return null;
+        String[] rs = resolution.substring(6).split(",");
+        if (rs.length != 2) return null;
+        String[] m = new String[2];
+        for (String r : rs) {
+            int eq = r.indexOf('='), sl = r.indexOf('/');
+            if (eq <= 0 || sl < eq || size(r.substring(0, eq)) == null) return null;
+            String mode = r.substring(sl + 1);
+            int k = mode.equals("console") ? 0 : mode.equals("handheld") ? 1 : -1;
+            if (k < 0 || m[k] != null) return null;
+            m[k] = r.substring(0, eq);
+        }
+        return m;
+    }
+
+    /** A two-choice form's label (k: 0 docked, 1 handheld): "Docked (1152p)" for a console row of 2048x1152, "Handheld (1080p)" for a handheld row of 1920x1080; null without the form */
+    String modeLabel(int k) {
+        String[] m = modes();
+        return m == null ? null : MODE_NAMES[k] + " (" + size(m[k])[1] + "p)";
+    }
+
+    /**
+     * Which of the two choices a Game resolution value takes (the row resolutionEnv takes): 0 docked, 1 handheld; -1 without the form. Original takes no row and starts the
+     * game as its profile's op_mode says; it shows as Docked (an older choice, or Settings' default), and picking Docked stores the console row's size
+     */
+    int modeOf(String choice) {
+        String[] m = modes();
+        if (m == null) return -1;
+        String r = scalePick(choice);
+        if (r == null) return choice.equals("original") ? 0 : -1;
+        String c = r.substring(0, r.indexOf('='));
+        return c.equals(m[0]) ? 0 : c.equals(m[1]) ? 1 : -1;
+    }
+
     /** The graphics_scale row a choice takes ("WxH=scale/mode"): its own, else the largest that fits in it, else the smallest; null without rows */
     private String scalePick(String choice) {
         if (!resolution.startsWith("scale:")) return null;

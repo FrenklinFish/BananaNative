@@ -511,7 +511,7 @@ final class SidePanel extends FrameLayout {
      * Resolution: this game's Game resolution (the same choices and the same setting as Game settings › Game resolution), only for a game whose profile has a lever
      * (Profile.hasResolution). A game with graphics_scale rows changes now: the host takes the choice's graphics scale and operation mode and posts the console's change
      * notifications, which the game answers by querying them again and resizing its scenes (Native.graphicsModeSet, hle_oe.c nxhost_graphics_mode_set). A window_fn or res_levels
-     * game takes it at the next start.
+     * game takes it at the next start. A game with one docked and one handheld row gets those two as radio buttons instead (Profile.modes).
      */
     private void resolutionRow() {
         Profile p = Profile.of(game());
@@ -519,6 +519,22 @@ final class SidePanel extends FrameLayout {
         head("Resolution");
         boolean now = p.resolutionLive() && act instanceof GameActivity;
         String cur = Prefs.gameWindow(act, game());
+        String[] modes = p.modes();
+        if (modes != null) {   // a game with one docked and one handheld row (Profile.modes): those two radio buttons only, drawn as the Frame rate cap's
+            RadioGroup g = new RadioGroup(act);
+            for (int k = 0; k < 2; k++) { RadioButton b = new RadioButton(act); b.setId(ID_RES + 1 + k); b.setText(p.modeLabel(k)); g.addView(b); }
+            if (p.modeOf(cur) >= 0) g.check(ID_RES + 1 + p.modeOf(cur));   // Original shows as Docked (Profile.modeOf)
+            g.setOnCheckedChangeListener((gr, id) -> {
+                Prefs.gameWindow(act, game(), modes[id - ID_RES - 1]);   // the game's own setting: the next start takes it too
+                if (now) {
+                    int[] m = p.resolutionLive(Prefs.gameWindow(act, game()));
+                    if (m != null && !Native.graphicsModeSet(m[0], m[1])) Native.note("Game resolution: this host cannot change it live; it applies at the next start");
+                }
+                restyle(id);
+            });
+            box.addView(g);
+            return;
+        }
         Button r = row(ID_RES, "Game resolution", (Prefs.ownWindow(act, game()) ? "" : "Default · ") + Prefs.windowName(cur, false));
         r.setOnClickListener(v -> {
             String[] labels = new String[Prefs.WINDOWS.length + 1];
