@@ -422,6 +422,7 @@ final class SidePanel extends FrameLayout {
             });
         }
         box.addView(caps);
+        if (Prefs.limited(game()) && Prefs.presentOnly(game())) note(Prefs.PRESENT_ONLY_NOTE);   // fps_limit_present: the limit paces the presents only
         if (Prefs.paced(game())) {   // Full game speed at low frame rates: sead's controller at the measured rate (Game settings has the same), live in the host
             android.widget.CheckBox full = new android.widget.CheckBox(act);
             full.setText("Full game speed at low frame rates");

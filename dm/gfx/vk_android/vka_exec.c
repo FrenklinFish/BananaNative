@@ -9,6 +9,7 @@
 #include "../nvn/nvn_timestamp.h"
 #include "vka_present_rot.h"
 #include "vka_qsched.h"
+#include "vka_skipwarn.h"
 #include <math.h>
 #include <stdlib.h>
 #include <string.h>
@@ -90,9 +91,29 @@ static _Atomic uint64_t g_fstart[64], g_fstart_f[64];   // when the replay began
 static uint64_t g_job_frame; static int g_job_frame_set;   // the frame of the submission the worker replays (vka_exec_sub_frame)
 void vka_exec_sub_frame(uint64_t f) { g_job_frame = f; g_job_frame_set = 1; }
 uint64_t vka_frame_start_ns(uint64_t f) { unsigned k = f % 64; return atomic_load(&g_fstart_f[k]) == f ? atomic_load(&g_fstart[k]) : 0; }   // now_ns; 0 = not known (vka_perf.c)
+// The skipped-work warning (vka_skipwarn.h, DM_VK_SKIP_WARN): once per run, when the replay skipped over the threshold's share of the draws and dispatches in two windows of
+// VKS_WINDOW frames in a row for causes of the device (refused pipelines and shaders, a missing feature), the [RED] line below and nxhost_skip_status (the launcher's notice)
+static vkskip g_skipw; static _Atomic int g_skipw_pct;
+extern void vka_draw_skips(uint64_t dev[VKS_N], uint64_t *work, uint64_t *other);
+static void skipwarn_frame(uint64_t f) {
+    static int th = -1; if (th < 0) th = VKA_ENV("DM_VK_SKIP_WARN", VKS_DEFAULT_PCT);
+    if (th <= 0 || g_skipw.fired) return;
+    uint64_t dev[VKS_N], work, other; vka_draw_skips(dev, &work, &other);
+    if (!vkskip_step(&g_skipw, f, work, dev, other, th)) return;
+    int mesh = !strncmp(g_skipw.causes, vks_name[VKS_MESH], strlen(vks_name[VKS_MESH]));   // (the largest cause: this device has no mesh shading, which no driver choice here changes)
+    VRED("%d %% of draws skipped over the last %d frames (causes: %s): %s", g_skipw.pct, VKS_WINDOW, g_skipw.causes,
+         mesh ? "this GPU has no mesh shading, so some models are missing" : "the GPU driver may not suit this game");
+    atomic_store_explicit(&g_skipw_pct, g_skipw.pct, memory_order_release);
+}
+// The launcher's notice (Native.skipStatus): "<percent> <causes>" once the warning fired, "" before; the buffer ends with a NUL
+__attribute__((visibility("default"))) void nxhost_skip_status(char *buf, size_t n) {
+    int p = atomic_load_explicit(&g_skipw_pct, memory_order_acquire);
+    if (n) { if (p > 0) snprintf(buf, n, "%d %s", p, g_skipw.causes); else buf[0] = 0; }
+}
 void mtl_set_frame(uint64_t f) {
     g_frame = f; vka_ctl_frame(f);
     { if (atomic_load_explicit(&vka_synclog_n, memory_order_relaxed) > 0) VLOG("sync frame %llu begins at %.2f ms", (unsigned long long)f, (now_ns() % 1000000000000ull) / 1e6); }
+    skipwarn_frame(f);
     static uint64_t f0, d0, rp0, b0, ub0, s0, r0, o0, pc0, ch0;
     int on = VKA_ENV("DM_VK_STATS", 1) != 0;
     if (on && f - f0 >= 300) {

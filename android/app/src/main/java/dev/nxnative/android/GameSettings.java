@@ -36,7 +36,10 @@ final class GameSettings {
             fixed.view.setClickable(false);
             fixed.view.setAlpha(0.6f);
             Ui.add(box, fixed.view, 0);
-        } else Ui.add(box, new Ui.Setting(a, "⏱️", "Frame rate cap", v -> cap(a, g, again)).value(capLabel(a, id)).chevron(a).view, 0);
+        } else {
+            Ui.add(box, new Ui.Setting(a, "⏱️", "Frame rate cap", v -> cap(a, g, again)).value(capLabel(a, id)).chevron(a).view, 0);
+            if (Prefs.limited(id) && Prefs.presentOnly(id)) box.addView(Ui.small(a, Prefs.PRESENT_ONLY_NOTE));   // fps_limit_present: the limit paces the presents only
+        }
         if (Prefs.paced(id)) {   // the game's speed follows its measured frame rate (fps_decouple sead); off: as on the console. The in-game panel changes it live
             Ui.Setting full = new Ui.Setting(a, "🏃", "Full game speed at low frame rates", null).toggle(a, Prefs.decouple(a, id), (b, on) -> Prefs.decouple(a, id, on));
             full.value("The game keeps its normal speed when its frame rate drops or is limited. Off: it slows down with the frame rate, as on the console");

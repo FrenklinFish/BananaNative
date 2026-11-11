@@ -2202,14 +2202,14 @@ static VkImageView g_null_view;
 // depth tests (each one that reads the pool then runs its tests after shading). Needs fragmentStoresAndAtomics and update-after-bind storage buffers beyond set 0's
 // (a vertex-pipeline module also vertexPipelineStoresAndAtomics, else it reports nothing). Idea and bitmap layout after Anka Native's texture-use feedback (MIT, copyright 2026
 // seedds and 2026 EddizEge), which needs a library built with it; here no library change
-enum { PFB_BYTES = 1 << 17, PFB_RING = 8, PFB_WANT = 1, PFB_NULL = 2 };
+enum { PFB_BYTES = 1 << 17, PFB_RING = 8, PFB_WANT = 1, PFB_NULL = 2, PFB_MADE = 4 };
 static _Atomic int g_pfb = -1;   // -1 not decided; 0 off; 1 on (the bitmap and the ring made)
 static vka_span g_pfb_map, g_pfb_ring;
 static VkDescriptorSetLayout g_pfb_dsl; static VkDescriptorPool g_pfb_dpool; static VkDescriptorSet g_pfb_set;   // the bitmap's set (made in bindless_init)
 static struct { uint64_t fence; uint32_t n; int busy; } g_pfb_r[PFB_RING];   // (under g_tmu)
 static _Atomic int g_pfb_any;   // the submission being recorded has a draw or dispatch that reads the pool
 static uint8_t *g_pfb_st;   // (under g_tmu) per texture ID: PFB_WANT, PFB_NULL (its slot was last written with the null view)
-static uint64_t g_pfb_nrb, g_pfb_skip, g_pfb_hits, g_pfb_wants, g_pfb_made, g_pfb_made_b, g_pfb_logged;   // (under g_tmu)
+static uint64_t g_pfb_nrb, g_pfb_skip, g_pfb_hits, g_pfb_wants, g_pfb_made, g_pfb_made_b, g_pfb_again, g_pfb_logged;   // (under g_tmu)
 static int pfb_avail(void) {
     int v = atomic_load(&g_pfb);
     if (v >= 0) return v;
@@ -2303,8 +2303,8 @@ static void pfb_consume_locked(void) {
     }
     if (g_pfb_nrb >= g_pfb_logged + 1800 || (g_pfb_nrb && !g_pfb_logged)) {
         g_pfb_logged = g_pfb_nrb;
-        VLOG("texture pool reads: %llu readbacks (%llu put off, every slot waiting), %llu IDs read in them, %llu slots made for a read (%llu images made, %.1f MiB)",
-             (unsigned long long)g_pfb_nrb, (unsigned long long)g_pfb_skip, (unsigned long long)g_pfb_hits, (unsigned long long)g_pfb_wants, (unsigned long long)g_pfb_made, g_pfb_made_b / 1048576.0);
+        VLOG("texture pool reads: %llu readbacks (%llu put off, every slot waiting), %llu IDs read in them, %llu slots made for a read (%llu images made, %.1f MiB, %llu of them for an ID made before: evicted and read again)",
+             (unsigned long long)g_pfb_nrb, (unsigned long long)g_pfb_skip, (unsigned long long)g_pfb_hits, (unsigned long long)g_pfb_wants, (unsigned long long)g_pfb_made, g_pfb_made_b / 1048576.0, (unsigned long long)g_pfb_again);
     }
 }
 
@@ -2561,7 +2561,7 @@ static void write_tex(int id, VkCommandBuffer cb, VkWriteDescriptorSet *w, VkDes
     pthread_mutex_lock(&g_tmu);
     if (g_pfb_st && !e->img) {   // (whether the slot holds the null view: a pool read of it asks for its image, pfb_hit)
         if (view == g_null_view) g_pfb_st[id] |= PFB_NULL; else g_pfb_st[id] &= (uint8_t)~PFB_NULL;
-        if (want && im) { g_pfb_made++; g_pfb_made_b += im->bytes; }
+        if (want && im) { g_pfb_made++; g_pfb_made_b += im->bytes; if (g_pfb_st[id] & PFB_MADE) g_pfb_again++; g_pfb_st[id] |= PFB_MADE; }   // (again: an ID whose image a read made before, evicted since)
     }
     im_unhold_locked(im);
     if (im && e->img) { pthread_mutex_unlock(&g_tmu); vka_img_written(im); pthread_mutex_lock(&g_tmu); }   // an image registration: shaders write it (vka_tex_id_view)
