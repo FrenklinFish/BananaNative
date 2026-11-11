@@ -555,6 +555,7 @@ static gate_t g_gate[NGATE]; static uint64_t g_gate_in, g_gate_out, g_gate_val;
 static VkSemaphore g_gate_sem; static int g_gate_up;   // (g_gate_up: -1 no semaphore)
 static const volatile uint32_t *g_gban[NGBAN]; static int g_ngban;
 static pthread_mutex_t g_gmu = PTHREAD_MUTEX_INITIALIZER; static pthread_cond_t g_gcv = PTHREAD_COND_INITIALIZER;
+static pthread_cond_t g_gidle = PTHREAD_COND_INITIALIZER; static _Atomic int g_gate_pend;   // signaled at each opening; gates added and not yet opened (vka_gate_drain)
 static _Atomic uint64_t g_gate_nw, g_gate_nc, g_gate_nt, g_gate_ns;
 static int gate_pred(uint32_t cur, uint32_t mode, uint32_t target) { return mode == 0 ? cur == target : (uint32_t)(cur - target) < 0x80000000u; }
 VkSemaphore vka_gate_sem(void) { return g_gate_up > 0 ? g_gate_sem : VK_NULL_HANDLE; }
@@ -575,6 +576,7 @@ static void gate_open_locked(int why) {   // the oldest gate opens (why: 0 its w
     if (why == 0) g_gate_nw++; else if (why == 1) g_gate_nc++; else g_gate_nt++;
     if (why == 2) gate_ban_locked(x->w);   // (a CPU wait opens it for that frame only)
     g_gate_out++;
+    atomic_fetch_sub(&g_gate_pend, 1); pthread_cond_broadcast(&g_gidle);   // (after the signal: the driver has taken what the gate held back)
 }
 static void gate_poll_locked(void) {
     while (g_gate_out < g_gate_in) {
@@ -633,6 +635,7 @@ uint64_t vka_gate_add(volatile uint32_t *w, uint32_t mode, uint32_t value, uint6
             else { *ev = e; vka_after(fence, gate_ev_free, (void *)(uintptr_t)e); }   // (the gated submission's fence: past its wait)
         }
         g_gate[g_gate_in++ % NGATE] = (gate_t){w, mode, value, g, fence, now_ns(), park_ns, vka_fence_queued(), 0, 0, e};
+        atomic_fetch_add(&g_gate_pend, 1);
         pthread_cond_broadcast(&g_gcv);
     }
 out:
@@ -648,6 +651,25 @@ void vka_gate_cpu_wait(uint64_t fence) {   // (the gate thread looks: gate_poll_
     pthread_mutex_lock(&g_gmu); pthread_cond_broadcast(&g_gcv); pthread_mutex_unlock(&g_gmu);
 }
 void vka_gate_stats(uint64_t *n_word, uint64_t *n_cpu, uint64_t *n_time, uint64_t *wait_ns) { *n_word = g_gate_nw; *n_cpu = g_gate_nc; *n_time = g_gate_nt; *wait_ns = g_gate_ns; }
+// A present while a gate is pending, on a driver that emulates timeline semaphores (Turnip on KGSL): its queue holds back a submission that waits for a value the host has
+// not signaled yet, and every submission after it (Mesa vk_queue.c, VK_QUEUE_SUBMIT_MODE_DEFERRED), so the present's copy too when the replay has already handed over the
+// next frame's gated work. vkQueuePresentKHR then takes the copy's fence before the copy reached the kernel and gets none (tu_knl_kgsl.cc kgsl_syncobj_export: a sync
+// object not yet submitted exports -1, "done"), and Android shows the swapchain image before the frame is in it: an earlier frame, or a half-copied one (tearing and frames
+// out of order on Turnip since the gates came; a screenshot does not show it). vka_gate_pending: gates added and not yet opened. vka_gate_drain: waits until none is
+// pending, at most timeout_ns (a gate opens a millisecond or two after the frame before it ends: the game's CPU signals its event then); returns those still pending
+int vka_gate_pending(void) { return g_gate_up > 0 ? atomic_load(&g_gate_pend) : 0; }
+int vka_gate_drain(uint64_t timeout_ns) {
+    if (g_gate_up <= 0) return 0;
+    uint64_t t0 = now_ns();
+    pthread_mutex_lock(&g_gmu);
+    while (g_gate_out < g_gate_in && now_ns() - t0 < timeout_ns) {   // (the gate thread looks every millisecond, nvnEventSignal at once)
+        struct timespec dl; clock_gettime(CLOCK_REALTIME, &dl); dl.tv_nsec += 500000; if (dl.tv_nsec >= 1000000000) { dl.tv_sec++; dl.tv_nsec -= 1000000000; }
+        pthread_cond_timedwait(&g_gidle, &g_gmu, &dl);
+    }
+    int left = (int)(g_gate_in - g_gate_out);
+    pthread_mutex_unlock(&g_gmu);
+    return left;
+}
 
 // ---------- GPU hangs ----------
 // A fence that makes no progress for DM_VK_HANG_S seconds (default 6) is a hang: the GPU, or the driver's queue, will not get there. Then nothing more is submitted (mtl_sub_begin
