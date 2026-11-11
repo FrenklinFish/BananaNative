@@ -441,7 +441,7 @@ DM_VK_FSR3_MY	diagnostic	see DM_VK_FSR3_JX
 DM_VK_FSR3_OUT_H	player	see DM_VK_FSR3_OUT_W
 DM_VK_FSR3_OUT_W	player	`=<pixels>` (Android, unset) FSR 3.1 upscales to this width (with DM_VK_FSR3_OUT_H) and a linear blit takes that to the game's output: cheaper (Fire Emblem: 1280x960 saves 1.1 ms) but softer, since the present resizes the frame again (on a 1280x960 panel about half as sharp as FSR to the full output)
 DM_VK_FSR3_RESET	diagnostic	`1` (Android, live) FSR 3.1 drops its history every frame (no accumulation)
-DM_VK_FSR3_SHARP	player	`=<0-1>` (Android, live, 0.8) FSR 3.1's sharpening (RCAS): 1 the most, 0 off
+DM_VK_FSR3_SHARP	player	`=<0-1>` (Android, live, 0.5) FSR 3.1's sharpening (RCAS): 1 the most, 0 off; the launcher's Sharpness slider sets it (its step / 30). 0.5 by default: still characters' outlines shimmer less than at 0.8 (Fortune's Weave), with most of the detail
 DM_VK_FSR3_WAVE	diagnostic	`=0|1` (Android, at the first FSR 3.1 evaluation; default 1 on Turnip, 0 on other drivers) FSR 3.1's luma and shading pyramids reduce with quad shuffles (1, where compute reports them) or with the wave-free shader build (0); other drivers default to wave-free, since the quad-shuffle build was only tested on Turnip
 DM_VK_FSR_SHARP	player	`=<stops>` (Android, live, 0.25) `DM_VK_FSR`'s RCAS sharpening in stops: 0 is the strongest, each stop halves it (AMD's scale, `FsrRcasCon`)
 DM_VK_GATE_EVENT	switch	`0` (Android, restart, on) a gate (a GPU wait for an event the CPU sets, `DM_VK_EVENT_GATE`) has no host event: the gated work waits only for the gate semaphore, so the CPU's writes before its signal, made after that work went to the queue, are not made visible to the GPU (`vka_dev.c` "Gates"); for A/B runs

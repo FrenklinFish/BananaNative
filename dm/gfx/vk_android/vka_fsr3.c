@@ -339,7 +339,7 @@ int vka_dlss_fsr3(VkCommandBuffer cb, vka_img *src, vka_img *dst, vka_img *depth
     uint32_t sgx = (rw - 1) / 64 + 1, sgy = (rh - 1) / 64 + 1, mx = rw > rh ? rw : rh, mips = 0;
     while ((2u << mips) <= mx) mips++;   // floor(log2(max))
     f3_spd spd = {mips > 12 ? 12 : mips, sgx * sgy, {0, 0}, {rw, rh}};
-    float sharp = VKA_ENVF("DM_VK_FSR3_SHARP", 0.8), stops = 2.f - 2.f * (sharp < 0 ? 0 : sharp > 1 ? 1 : sharp), sx = exp2f(-stops);
+    float sharp = VKA_ENVF("DM_VK_FSR3_SHARP", 0.5), stops = 2.f - 2.f * (sharp < 0 ? 0 : sharp > 1 ? 1 : sharp), sx = exp2f(-stops);
     int sharpen = sharp > 0;
     uint32_t rcas[4] = {fbits(sx), (uint32_t)f16(sx) | (uint32_t)f16(sx) << 16, 0, 0};
     uint32_t off = (F.ring++ % F3_RING) * F3_FRAME;
