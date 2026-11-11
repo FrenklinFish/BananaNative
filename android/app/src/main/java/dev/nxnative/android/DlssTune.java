@@ -15,6 +15,7 @@ import java.util.List;
  *   0 GSR 2 (smooth images); unset or unknown     3
  *   1 FSR 1 (sharp, fast)                         2
  *   2 Bilinear (fastest, softest)                 1
+ *   3 FSR 3.1 (sharp, steady)                     4      (vka_fsr3.c; its own sharpness, DM_VK_FSR3_SHARP)
  *
  *   stored ndsr_choice2 (GameUpscaler.MODES,      the present's scaling of the window to the screen
  *   the game's own, else the main screen's)       DM_VK_FSR   DM_VK_PRESENT_NEAREST
@@ -42,11 +43,11 @@ final class DlssTune {
     static String[] sharpNames() { String[] n = new String[SHARPS.length]; for (int i = 0; i < n.length; i++) n[i] = sharpName(i); return n; }
     static int clamp(int v, int n, int dflt) { return v >= 0 && v < n ? v : dflt; }
 
-    /** The Upscaler row: the stand-in's modes in the order shown, and each one's DM_VK_DLSS (3 GSR2 3-pass, 2 FSR 1 with the jitter taken out, 1 bilinear) */
-    static final String[] MODE_NAMES = {"GSR 2 (smooth images)", "FSR 1 (sharp, fast)", "Bilinear (fastest, softest)"};
-    static final int[] MODE_DLSS = {3, 2, 1};
+    /** The Upscaler row: the stand-in's modes in the order shown, and each one's DM_VK_DLSS (3 GSR2 3-pass, 2 FSR 1 with the jitter taken out, 1 bilinear, 4 FSR 3.1) */
+    static final String[] MODE_NAMES = {"GSR 2 (smooth images)", "FSR 1 (sharp, fast)", "Bilinear (fastest, softest)", "FSR 3.1 (sharp, steady)"};
+    static final int[] MODE_DLSS = {3, 2, 1, 4};
     static final int MODE_DEFAULT = 0, MODE_GSR2 = 0, MODE_FSR1 = 1;
-    /** Which sliders the mode shows: GSR 2 both, FSR 1 the sharpness alone (its RCAS), bilinear none */
+    /** Which sliders the mode shows: GSR 2 both, FSR 1 the sharpness alone (its RCAS), bilinear and FSR 3.1 none */
     static boolean showsClarity(int mode) { return clamp(mode, MODE_NAMES.length, MODE_DEFAULT) == MODE_GSR2; }
     static boolean showsSharp(int mode) { int m = clamp(mode, MODE_NAMES.length, MODE_DEFAULT); return m == MODE_GSR2 || m == MODE_FSR1; }
     static String sharpTitle(int mode) { return clamp(mode, MODE_NAMES.length, MODE_DEFAULT) == MODE_FSR1 ? "FSR sharpness" : "Temporal sharpness"; }

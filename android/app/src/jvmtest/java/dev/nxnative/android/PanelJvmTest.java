@@ -28,8 +28,9 @@ public final class PanelJvmTest {
         check(DlssTune.lines(2, DlssTune.SHARP_DEFAULT).equals(java.util.List.of("DM_VK_GSR2_CLARITY=2", "DM_VK_DLSS_SHARP=15")), "default lines");
         check(DlssTune.lines(4, 0).equals(java.util.List.of("DM_VK_GSR2_CLARITY=4", "DM_VK_DLSS_SHARP=0")) && DlssTune.lines(9, -1).equals(DlssTune.lines(2, 3)), "lines, out of range");
         // Its Upscaler row (dlss_mode): GSR 2 the default, then FSR 1, bilinear -> DM_VK_DLSS 3 / 2 / 1; unset or unknown -> 3; the sliders shown by mode
-        check(DlssTune.MODE_NAMES.length == 3 && DlssTune.MODE_DEFAULT == 0 && DlssTune.MODE_DLSS[0] == 3 && DlssTune.MODE_DLSS[1] == 2 && DlssTune.MODE_DLSS[2] == 1, "upscaler modes");
-        for (int m : new int[] {-1, 3, 7}) check(DlssTune.lines(m, 2, 3, 4, 0.25f).get(0).equals("DM_VK_DLSS=3"), "dlss_mode unknown " + m + ": GSR 2");
+        check(DlssTune.MODE_NAMES.length == 4 && DlssTune.MODE_DEFAULT == 0 && DlssTune.MODE_DLSS[0] == 3 && DlssTune.MODE_DLSS[1] == 2 && DlssTune.MODE_DLSS[2] == 1 && DlssTune.MODE_DLSS[3] == 4, "upscaler modes");
+        check(DlssTune.lines(3, 2, 3, 4, 0.25f).get(0).equals("DM_VK_DLSS=4") && !DlssTune.showsClarity(3) && !DlssTune.showsSharp(3), "dlss_mode FSR 3.1: no sliders");
+        for (int m : new int[] {-1, 4, 7}) check(DlssTune.lines(m, 2, 3, 4, 0.25f).get(0).equals("DM_VK_DLSS=3"), "dlss_mode unknown " + m + ": GSR 2");
         check(DlssTune.lines(1, 2, 3, 4, 0.25f).get(0).equals("DM_VK_DLSS=2") && DlssTune.lines(2, 2, 3, 4, 0.25f).get(0).equals("DM_VK_DLSS=1"), "dlss_mode FSR 1, bilinear");
         check(DlssTune.showsClarity(0) && !DlssTune.showsClarity(1) && !DlssTune.showsClarity(2) && DlssTune.showsClarity(7), "clarity only with GSR 2 (out of range reads as GSR 2)");
         check(DlssTune.showsSharp(0) && DlssTune.showsSharp(1) && !DlssTune.showsSharp(2), "sharpness with GSR 2 and FSR 1");
