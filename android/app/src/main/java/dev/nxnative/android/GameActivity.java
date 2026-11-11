@@ -378,6 +378,8 @@ public final class GameActivity extends Activity implements SurfaceHolder.Callba
         if (!padMap.isEmpty()) env.add("DM_PAD_MAP=" + padMap);
         if (Prefs.stretch(this, id)) env.add("DM_VK_STRETCH=1");   // Game settings › Display › Stretch to screen (or the in-game panel's Picture rows)
         String aspect = Prefs.aspect(this, id), variant = aspect == null || Profile.of(id) == null ? null : Profile.of(id).aspectVariant(aspect);
+        String mode = Prefs.displayMode(this, id);   // Game settings > Display mode (game.tsv display_modes)
+        if (mode != null) env.add("DM_VI_MAX_RES=" + mode);
         if (variant != null) {   // Game settings › Aspect ratio: the pack's native-aspect modules (<pack>/<variant>/, loader.c) and the picture shown at that aspect
             env.add("DM_PATCH_VARIANT=" + variant);
             env.add("DM_VK_PICTURE_ASPECT=" + aspect);

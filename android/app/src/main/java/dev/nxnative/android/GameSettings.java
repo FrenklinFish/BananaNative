@@ -42,6 +42,8 @@ final class GameSettings {
             full.value("The game keeps its normal speed when its frame rate drops or is limited. Off: it slows down with the frame rate, as on the console");
             Ui.add(box, full.view, 0);
         }
+        if (prof != null && prof.displayModes.trim().split(" +").length > 1)   // a profile with display_modes (game.tsv): the game's own render size
+            Ui.add(box, new Ui.Setting(a, "🖥️", "Display mode", v -> displayMode(a, g, again)).value(displayModeLabel(a, id)).chevron(a).view, 0);
         if (!aspects(prof).isEmpty())   // a profile with a native aspect mod (game.tsv variant rows labelled w:h)
             Ui.add(box, new Ui.Setting(a, "🔳", "Aspect ratio", v -> aspect(a, g, again)).value(aspectLabel(a, id)).chevron(a).view, 0);
         Ui.add(box, new Ui.Setting(a, "📐", "Display", v -> display(a, g, again)).value(Prefs.DISPLAY_NAMES[Prefs.stretch(a, id) ? 1 : 0]).chevron(a).view, 0);
@@ -177,6 +179,28 @@ final class GameSettings {
     private static void display(MainActivity a, Game g, Runnable done) {
         new AlertDialog.Builder(a).setTitle("Display · " + g.name).setSingleChoiceItems(Prefs.DISPLAY_NAMES, Prefs.stretch(a, g.titleId) ? 1 : 0, (x, w) -> {
             Prefs.stretch(a, g.titleId, w == 1);
+            x.dismiss();
+            done.run();
+        }).setNegativeButton("Cancel", null).show();
+    }
+
+    static String modeName(String m) { return m + "p" + (m.equals("1080") ? " (sharper)" : m.equals("720") ? " (faster, softer)" : ""); }
+
+    static String displayModeLabel(android.content.Context a, String id) {
+        Profile p = Profile.of(id); String m = Prefs.displayMode(a, id);
+        String def = p == null ? "" : p.displayModes.trim().split(" +")[0];
+        return m == null ? "Default · " + modeName(def) : modeName(m);
+    }
+
+    /** Display mode: the display buffer mode the game is told (DM_VI_MAX_RES): it picks its scene and output size from it, so a lower mode renders fewer pixels */
+    private static void displayMode(MainActivity a, Game g, Runnable done) {
+        String[] ms = Profile.of(g.titleId).displayModes.trim().split(" +");
+        String[] labels = new String[ms.length];
+        for (int k = 0; k < ms.length; k++) labels[k] = modeName(ms[k]) + (k == 0 ? " · default" : "");
+        String cur = Prefs.displayMode(a, g.titleId);
+        int checked = cur == null ? 0 : Math.max(0, java.util.Arrays.asList(ms).indexOf(cur));
+        new AlertDialog.Builder(a).setTitle("Display mode · " + g.name).setSingleChoiceItems(labels, checked, (x, w) -> {
+            Prefs.displayMode(a, g.titleId, w == 0 ? null : ms[w]);
             x.dismiss();
             done.run();
         }).setNegativeButton("Cancel", null).show();

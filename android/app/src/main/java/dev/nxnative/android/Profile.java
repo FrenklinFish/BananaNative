@@ -24,6 +24,7 @@ final class Profile {
     String window = "";   // game.tsv android_window (build.gradle windowOf): the default Game resolution when the player chose none (Prefs.gameWindow), "" for the main screen's
     int fpsLimit;   // game.tsv fps_limit (build.gradle fpsLimitOf): the host's frame limit by default, frames a second (0 = none); the launcher offers a frame limit for it (Prefs.limited)
     boolean drs;   // game.tsv has drs_ctl rows (build.gradle drsOf): the host can steer the game's dynamic resolution (Prefs.drsGame)
+    String displayModes = "";   // game.tsv display_modes (build.gradle displayModesOf): "1080 720", the display buffer modes Game settings > Display mode offers (DM_VI_MAX_RES)
     String variants = "";   // game.tsv variant rows (build.gradle variantsOf): "<name>=<label>", ',' between them; a native 4:3 mod is "43=4:3" (Game settings › Aspect ratio)
 
     /** The variant whose label is w:h (a native aspect mod: "43" for "4:3"), or null when the profile has none */
@@ -148,6 +149,7 @@ final class Profile {
             p.drs = c.length > 14 && c[14].equals("1");
             try { p.fpsLimit = c.length > 15 && !c[15].isEmpty() ? Math.max(0, Integer.parseInt(c[15])) : 0; } catch (NumberFormatException e) { p.fpsLimit = 0; }
             p.variants = c.length > 16 ? c[16] : "";
+            p.displayModes = c.length > 17 ? c[17] : "";
             out.add(p);
         }
         return Collections.unmodifiableList(out);

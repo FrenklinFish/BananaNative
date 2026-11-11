@@ -36,6 +36,10 @@ depth_mode	zero
 # the 1920x1080 frame is shown on smaller panels with readable small text
 host_env	DM_VK_DLSS_BLIT=1 DM_VI_MAX_RES=1080 DM_VK_VIEW_LEARN=0 DM_VK_PRESENT_FILTER=2
 
+# ---- Display modes (Game settings > Display mode, DM_VI_MAX_RES; the first is host_env's default) ----
+# 720: a 640x360 scene upscaled to 1280x720: about 8 ms less GPU time in Dagsion, a softer picture
+display_modes	1080 720
+
 # ---- Variants (patches.py VARIANT_CUTS; Game settings › Aspect ratio) ----
 # 43: native 4:3 (cameras and UI laid out for 4:3, shown at 4:3): main only
 variant	43	main	4:3
