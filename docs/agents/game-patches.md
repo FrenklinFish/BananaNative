@@ -73,9 +73,12 @@ Every patch bound tighter than it could be: the open gaps, then the blocked, kep
 | `build` → `game` | 60 fps frame step and render scale | frame rate | blocked: frame-step stubs have no function-matched form yet | judgement | 1 | [The Legend of Zelda: Tears of the Kingdom](../../dm/games/0100F2C0115B6000/README.md) | the game's own timing object |
 | `build` → `game` | 60 fps frame step and render scale (ksys::VFR) | frame rate | blocked: frame-step stubs have no function-matched form yet | judgement | 1 | [The Legend of Zelda: Breath of the Wild](../../dm/games/01007EF00011E000/README.md) | the game's own frame code; the frame-step state page is general |
 | `build` → `game` | 60 fps frame step: the KIDS frame task and frame-rate block | frame rate | blocked: frame-step stubs have no function-matched form yet | judgement | 1 | [Hyrule Warriors: Age of Calamity](../../dm/games/01002B00111A2000/README.md) | the game's own frame code; only the host's frame-step state page is shared. Fire Emblem: Three Houses and Taiko Risshiden V DX run on KTGL too, with other frame code |
+| `build` → `game` | FPS Unlock: optional elapsed-time update step | frame rate | blocked: one full build ID and update hook verified | judgement | 1 | [The Legend of Zelda: Ocarina of Time](../../dm/games/0400486024DEC000/README.md) | the game update derives a fractional step from its integer frame rate |
 | `build` → `game` | frame step floor 2 → 1 vsync, and its frame step | frame rate | blocked: frame-step stubs have no function-matched form yet | judgement | 1 | [Paper Mario: The Thousand-Year Door](../../dm/games/0100ECD018EBE000/README.md) | the game's own clock floor and step |
 | `build` → `game` | frame step: the frame-rate controller's interval and fps from the host | frame rate | blocked: frame-step stubs have no function-matched form yet | judgement | 1 | [The Legend of Zelda: Ocarina of Time](../../dm/games/0400486024DEC000/README.md) | the game's own 30 fps mode (interval 2), chosen by the host's step so presentation and game time agree |
+| `build` → `game` | Max Resolution: optional full-scale dynamic resolution path | rendering | blocked: one full build ID and branch verified | judgement | 1 | [The Legend of Zelda: Ocarina of Time](../../dm/games/0400486024DEC000/README.md) | the title has its own dynamic resolution controller and full-scale branch |
 | `build` → `game` | movie player: the plain player instead of the NDVE-enhanced one | frame rate | blocked: one build on hand; the faster tensor path is translator work (docs/reference/shaders.md, Ampere HMMA through simdgroup_matrix, Open) | judgement | 1 | [The Legend of Zelda: Ocarina of Time](../../dm/games/0400486024DEC000/README.md) | a workaround: the tensor network costs 47.5 ms of GPU a movie frame; a function fingerprint could carry it over updates, and once the translator keeps LDSM / MOVM / HMMA chains in matrices the cut can go |
+| `build` → `game` | Texture Pool x2: optional larger initial graphics allocation | memory | blocked: one full build ID and allocator call verified | judgement | 1 | [The Legend of Zelda: Ocarina of Time](../../dm/games/0400486024DEC000/README.md) | the allocator is in the game and full-scale rendering can exhaust the original pool |
 
 ## Summary
 
@@ -106,7 +109,7 @@ Every patch bound tighter than it could be: the open gaps, then the blocked, kep
 | [Taiko Risshiden V DX](#taiko-risshiden-v-dx) | 1 | 0 | 0 | 2 | 0 | `game` |
 | [The Legend of Zelda: Breath of the Wild](#the-legend-of-zelda-breath-of-the-wild) | 7 | 0 | 5 | 0 | 0 | `build` → `game` ×2 |
 | [The Legend of Zelda: Link's Awakening](#the-legend-of-zelda-links-awakening) | 1 | 0 | 0 | 0 | 0 | `build` → `game` |
-| [The Legend of Zelda: Ocarina of Time](#the-legend-of-zelda-ocarina-of-time) | 1 | 0 | 1 | 0 | 0 | `build` → `game` ×2 |
+| [The Legend of Zelda: Ocarina of Time](#the-legend-of-zelda-ocarina-of-time) | 1 | 0 | 4 | 0 | 0 | `build` → `game` ×5 |
 | [The Legend of Zelda: Tears of the Kingdom](#the-legend-of-zelda-tears-of-the-kingdom) | 0 | 0 | 9 | 0 | 0 | `build` → `game` |
 | [Xenoblade Chronicles 3](#xenoblade-chronicles-3) | 6 | 0 | 0 | 0 | 0 | `build` → `game` |
 
@@ -559,11 +562,17 @@ Every patch bound tighter than it could be: the open gaps, then the blocked, kep
 
 [The Legend of Zelda: Ocarina of Time](../../dm/games/0400486024DEC000/README.md), `0400486024DEC000`, [patches.py](../../dm/games/0400486024DEC000/patches.py).
 
+- **`build` → `game`**, rendering, blocked: one full build ID and branch verified, judgement: Max Resolution: optional full-scale dynamic resolution path. The title has its own dynamic resolution controller and full-scale branch
+- **`build` → `game`**, memory, blocked: one full build ID and allocator call verified, judgement: Texture Pool x2: optional larger initial graphics allocation. The allocator is in the game and full-scale rendering can exhaust the original pool
+- **`build` → `game`**, frame rate, blocked: one full build ID and update hook verified, judgement: FPS Unlock: optional elapsed-time update step. The game update derives a fractional step from its integer frame rate
 - **`build` → `game`**, frame rate, blocked: frame-step stubs have no function-matched form yet, judgement: frame step: the frame-rate controller's interval and fps from the host. The game's own 30 fps mode (interval 2), chosen by the host's step so presentation and game time agree
 - **`build` → `game`**, frame rate, blocked: one build on hand; the faster tensor path is translator work (docs/reference/shaders.md, Ampere HMMA through simdgroup_matrix, Open), judgement: movie player: the plain player instead of the NDVE-enhanced one. A workaround: the tensor network costs 47.5 ms of GPU a movie frame; a function fingerprint could carry it over updates, and once the translator keeps LDSM / MOVM / HMMA chains in matrices the cut can go
 
 - **v131072 `main`** `e0f3ccfa…` ([patches.py:9](../../dm/games/0400486024DEC000/patches.py#L9))
   - cut `+0x3b5f524`: movie player: cbz w8 → b main+0x3b5f548 (the plain player, without the NDVE tensor network)
+  - frame step `+0x6e6cc4`: FPS Unlock: optional fractional update step from the host guest clock
+  - frame step `+0x805bd0`: Max Resolution: optional full-scale branch of the dynamic resolution controller
+  - frame step `+0xc2a36c`: Texture Pool x2: optional doubling of the initial graphics allocation
   - frame step `+0x3b4f074`: frame step: the frame-rate controller's interval and fps follow the host's vsyncs (state page target fps; 0 = the game's own choice)
 
 ### The Legend of Zelda: Tears of the Kingdom

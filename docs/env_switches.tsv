@@ -251,6 +251,9 @@ DM_OODLE_HOST	path	The Mac host binary that `shader_split.py` runs in its Oodle 
 DM_OODLE_JOB	path	`=<job file>`: the host runs the game's own Oodle decoder on every record of the job file right before `nnMain`, writes `<job file>.out` and exits (Unreal shader archives)
 DM_OODLE_MODULES	path	The rewritten modules the Mac host's Oodle tool mode loads when `shader_split.py` decodes Trinity packs; set by the NSP script
 DM_OODLE_SERVE	switch	`=1`: the host answers decode requests on stdin / stdout with the game's own Oodle (or LZ5) decoder from the guest main thread before the SDK starts, until stdin ends
+DM_OOT_FPS_UNLOCK	player	`1` (Ocarina of Time v131072, restart and rewritten main required): use elapsed guest time for the game's fractional update step, with a 100 ms cap per update; presentation still follows the frame-rate settings
+DM_OOT_MAX_RESOLUTION	player	`1` (Ocarina of Time v131072, restart and rewritten main required): force the current mode's full 3D resolution and enable Texture Pool x2
+DM_OOT_TEXTURE_POOL_X2	player	`1` (Ocarina of Time v131072, restart and rewritten main required): double the initial graphics allocation, independently of dynamic resolution
 DM_OPMODE	player	The operation mode the game sees: `0` handheld, `1` console (default: the profile's `op_mode`, console unless set); read once at startup
 DM_OVERLAY	switch	`0` / `1` (Android) hides or shows the game overlay (build tag, frame rate, throttle dot) for a run, over the launcher's setting; read by the launcher from `env.txt`; the Vulkan replayer does not take it from a capture
 DM_PACKER_COMMIT	path	`=<commit>` the packer commit `pack_android.py` writes as `pack.tsv`'s `packer` when the repository has no git (the phone: the app's `PackService` passes the commit it was built from); `shader_split.py`'s resume digest covers it. Default: `git rev-parse` of the repository, else `unknown`
