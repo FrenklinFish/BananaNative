@@ -214,7 +214,7 @@ static void rot_copy(VkCommandBuffer cb, unsigned k, uint32_t idx, vka_img *im, 
         VkRect2D sc = {{0, 0}, g_ext};
         // DM_VK_PRESENT_FILTER=1 (live): Lanczos-2 resample (vka_rot_lz_frag) in place of one bilinear sample; sharper small text when the picture is scaled down
         // DM_VK_PRESENT_FILTER=2: the same plus a mild clamped sharpening (vka_rot_lzs_frag)
-        int fm = linear && !VKA_ENV("DM_VK_PRESENT_NEAREST", 0) ? (int)VKA_ENV("DM_VK_PRESENT_FILTER", 0) : 0;
+        int fm = linear && !VKA_ENV("DM_VK_PRESENT_NEAREST", 0) && (dw < cw || dh < ch) ? (int)VKA_ENV("DM_VK_PRESENT_FILTER", 0) : 0;   // only when the picture is scaled down: at 1:1 (a 1080p panel) bilinear is exact and Lanczos costs GPU time for nothing
         VkPipeline pp = fm == 2 && g_rot.lzs ? g_rot.lzs : fm >= 1 && g_rot.lz ? g_rot.lz : g_rot.pipe;
         int lz = pp == g_rot.lzs ? 2 : pp == g_rot.lz ? 1 : 0;
         { static int told = -1; if (told != lz) { told = lz; VLOG("present: rotated copy %s (%dx%d -> %dx%d)", lz == 2 ? "Lanczos-2 + sharpen" : lz ? "Lanczos-2" : "bilinear", cw, ch, dw, dh); } }

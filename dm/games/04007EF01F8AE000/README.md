@@ -30,6 +30,9 @@ Point the Android test app's `DM_SAVE` at a writable test directory with the sav
 
 ### Frame time
 
+On 16:9 phones that dip below 30 in Dagsion (an Adreno 740 at 1080p: 32-34 ms of GPU time), `DM_VI_MAX_RES=720` (Game settings > Extra environment) gives the game its 720p display mode: a 640x360 scene upscaled to 1280x720, 24-25 ms there, a steady 30 FPS and a slightly softer picture.
+
+
 GPU-bound in Dagsion on a mid-range Snapdragon: about 21 ms of vertex-heavy draws, 7.4 ms of compute and 3.3 ms of FSR 3.1. `patches.py` `CUTS` turns on the game's own "no depth pre-pass" mode (main+0xb9cb0c) for every player: about 2 ms of depth-only passes fewer, rendering the same. No measurable gain from `DM_VK_INSTANCE`, `DM_VK_CLASSIC_RP` or the FSR pyramids' quad version. `DM_VK_FSR3_OUT_W/H` (FSR output at that size, then a linear blit to the game's output) saves about 1 ms at 1280x960 but resizes twice and looks softer.
 
 ### Stretched geometry in Dagsion
