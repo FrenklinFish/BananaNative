@@ -752,7 +752,10 @@ static int present_one(const pq_item *it) {
     int ew = (int)(rot_quarter(g_pre) ? g_ext.height : g_ext.width), eh = (int)(rot_quarter(g_pre) ? g_ext.width : g_ext.height);   // the display, as the user sees it
     // Fit (keep aspect) or stretch to the whole display (DM_VK_STRETCH), at DM_VK_PICTURE_SIZE % of that, placed by nxhost_picture_place; all live (the in-game panel
     // sends the switches through DM_CTL and gives the launcher's touch mapping the same rectangle, PictureFit.rect)
-    int fr[4]; vka_fit_rect(ew, eh, cw, ch, stretch_wanted(), picture_size(), g_place_x, g_place_y, fr);
+    // DM_VK_PICTURE_ASPECT=<w>:<h> (live; the launcher's Aspect ratio 4:3 sets 4:3): the picture's shape on screen when it is fitted, in place of the crop's own (a native 4:3
+    // mod lays its 4:3 picture out in the game's 16:9 frame: shown at 4:3 it fills a 4:3 screen and gets side bars on a 16:9 one). Stretch still fills the screen
+    int fw = cw; { const char *pa = getenv("DM_VK_PICTURE_ASPECT"); int aw = 0, ah = 0; if (pa && sscanf(pa, "%d:%d", &aw, &ah) == 2 && aw > 0 && ah > 0) fw = (int)((long)ch * aw / ah); }
+    int fr[4]; vka_fit_rect(ew, eh, fw, ch, stretch_wanted(), picture_size(), g_place_x, g_place_y, fr);
     int dx = fr[0], dy = fr[1], dw = fr[2], dh = fr[3];
     static VkFormat s_last_fmt; static VkFormatProperties s_last_fp;
     VkFormatProperties fp = {0};

@@ -452,6 +452,11 @@ public final class GameActivity extends Activity implements SurfaceHolder.Callba
         String padMap = Prefs.padMap(this, id);   // Button mapping (Game settings, Settings): wins over the label swap's A/B for the buttons it names
         if (!padMap.isEmpty()) env.add("DM_PAD_MAP=" + padMap);
         if (Prefs.stretch(this, id)) env.add("DM_VK_STRETCH=1");   // Game settings › Display › Stretch to screen (or the in-game panel's Picture rows)
+        String aspect = Prefs.aspect(this, id), variant = aspect == null || Profile.of(id) == null ? null : Profile.of(id).aspectVariant(aspect);
+        if (variant != null) {   // Game settings › Aspect ratio: the pack's native-aspect modules (<pack>/<variant>/, loader.c) and the picture shown at that aspect
+            env.add("DM_PATCH_VARIANT=" + variant);
+            env.add("DM_VK_PICTURE_ASPECT=" + aspect);
+        }
         int picSize = Prefs.pictureSize(this, id);   // the in-game panel's Picture size; 100 (the default) is not passed
         if (picSize < PictureFit.SIZE_MAX) env.add("DM_VK_PICTURE_SIZE=" + picSize);
         String lang = GameLanguage.env(Prefs.gameLang(this, id), GameSettings.phoneTag());   // Game settings › Game language: the phone's by default (a DM_LANG line of the user's wins)
@@ -635,15 +640,21 @@ public final class GameActivity extends Activity implements SurfaceHolder.Callba
             boolean stretch = false;
             String testCrash = null;
             int picSize = PictureFit.SIZE_MAX;
+            float picAspect = 16f / 9f;
             String ctl = null;
             for (String kv : env) {   // the last line wins, as for the host
                 if (kv.startsWith("DM_OVERLAY=")) overlayEnv = !kv.substring(11).trim().equals("0");
                 if (kv.startsWith("DM_VK_STRETCH=")) stretch = envOn(kv.substring(14));
                 if (kv.startsWith("DM_VK_PICTURE_SIZE=")) picSize = PictureFit.size((int) envNum(kv.substring(19)));
+                if (kv.startsWith("DM_VK_PICTURE_ASPECT=")) {   // w:h, as the present reads it
+                    String[] wh = kv.substring(21).trim().split(":");
+                    try { if (wh.length == 2 && Integer.parseInt(wh[0]) > 0 && Integer.parseInt(wh[1]) > 0) picAspect = Integer.parseInt(wh[0]) / (float) Integer.parseInt(wh[1]); } catch (NumberFormatException e) { /* the present ignores it too */ }
+                }
                 if (kv.startsWith("DM_CTL=")) ctl = kv.substring(7).trim();
                 if (kv.startsWith("DM_TEST_CRASH=")) testCrash = kv.substring(14).trim();
             }
             runCtl = ctl == null || ctl.isEmpty() ? null : ctl;
+            controls.setAspect(picAspect);
             controls.setPicture(runStretch = stretch, runPictureSize = picSize);
             String[] args = {"nxhost", packDir.getPath()};
             int r = Native.start(args, env.toArray(new String[0]), log.getPath(), files.getPath());

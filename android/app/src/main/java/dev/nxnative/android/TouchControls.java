@@ -69,6 +69,8 @@ final class TouchControls extends View {
     private int pictureSize = PictureFit.SIZE_MAX;   // the picture's share of its fitted or stretched size (DM_VK_PICTURE_SIZE), %
     /** Stretch to screen and the picture size (GameActivity: from the game's environment at start, and the in-game panel's Picture rows while it runs, which send the
      *  host the same values): touches map to the rectangle the present draws (PictureFit.rect) */
+    private float aspect = 16f / 9f;   // the picture's shape when fitted (DM_VK_PICTURE_ASPECT: 4:3 with Game settings › Aspect ratio 4:3)
+    void setAspect(float a) { if (a > 0 && a != aspect) { aspect = a; layout(getWidth(), getHeight()); invalidate(); } }
     void setPicture(boolean on, int sizePct) {
         int sz = PictureFit.size(sizePct);
         if (stretch == on && pictureSize == sz) return;
@@ -185,7 +187,7 @@ final class TouchControls extends View {
         float dp = TypedValue.applyDimension(TypedValue.COMPLEX_UNIT_DIP, 1, getResources().getDisplayMetrics()), u = unit();
         String key = Math.round(w / u / 40) + "x" + Math.round(h / u / 40);
         if (!key.equals(prof)) { prof = key; load(); }   // a new screen shape (a fold, an unfold): its own layout
-        float[] p = PictureFit.rect(w, h, placeX, placeY, stretch, pictureSize);
+        float[] p = PictureFit.rect(w, h, placeX, placeY, stretch, pictureSize, aspect);
         picX = p[0]; picY = p[1]; picW = p[2]; picH = p[3];
         if (input) { Native.picturePlace(placeX, placeY); Native.touchLayout(w, h, picX, picY, picW, picH); }
         // On a short screen (under 340 units high) everything shrinks with it

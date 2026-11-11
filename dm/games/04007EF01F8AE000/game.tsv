@@ -38,6 +38,10 @@ dlss_standin	1
 # dropped 521 of 1200 frames of NR14_00 (22-23 fps), dav1d frame-parallel plays it and the opening at 30 fps with no drops (dm/games/README.md av1_decoder)
 av1_decoder	dav1d
 
+# ---- Variants (patches.py VARIANT_CUTS; Game settings > Aspect ratio) ----
+# 43: native 4:3 (cameras and UI laid out for 4:3, shown at 4:3): main only
+variant	43	main	4:3
+
 # ---- Files ----
 modules	main subsdk2 sdk
 romfs_marker	Fs.bin.zst

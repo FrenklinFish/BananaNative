@@ -140,3 +140,23 @@ The 82 movies are AV1 at 2560x1440. Android's default sends AV1 to the phone's h
 - The light grid's compute shader `35d12d6f98fa05e2` lost the device at its first dispatch, at the title, on the Pad 3's stock driver; on Qualcomm's driver its subgroup operations run as one invocation (`subgroup_one_lane`, `DM_VK_ONE_LANE`); Turnip runs it as built.
 - Qualcomm's own driver before 512.800 (the Thor's 512.676): no per-draw vertex input (`VK_EXT_vertex_input_dynamic_state`), which drew skinned characters as long spikes; the vertex input goes into the pipeline instead (`vka_dev.c`, `DM_VK_VIN_DYN`). And no pipeline prewarm by default: each pipeline there appears to hold about 6 MB of driver memory outside the process (MemAvailable against the pipeline count, with the prewarm list's about 650 pipelines in the class showcase against about 320 without it), so it is off there (`DM_VK_PREWARM`). The static vertex input adds pipelines of its own.
 - On that driver per-draw vertex input also draws rigid pieces drawn with a skinning shader (bone inputs fed by the zero buffer) as flat blue shapes, and map pieces with an attribute past its stream's stride as black shards. Keeping it for every other draw fixes the picture but saves only about a tenth of the pipelines (about 510 instead of 550 by the dungeon load). So the vertex input stays in the pipeline for every draw on that driver (`DM_VK_VIN_DYN` unset), and the stock driver stays not recommended for play.
+
+## Native 4:3 (Game settings › Aspect ratio)
+
+`patches.py` `VARIANT_CUTS['43']` and the `game.tsv` row `variant 43 main 4:3` make a native 4:3 version (see [Native aspect variants](../README.md#native-aspect-variants)). Prepare rewrites `main` a second time into `<pack>/43/`; choosing 4:3 loads it (`DM_PATCH_VARIANT=43`) and shows the picture at 4:3 (`DM_VK_PICTURE_ASPECT=4:3`): it fills a 4:3 screen and gets side bars on a 16:9 one. 16:9 stays the default.
+
+The game keeps its 1920x1080 window and scene; its cameras take a 4:3 aspect and its UI is laid out for a 1920x1440 screen squeezed into the frame. The words started as a `.pchtxt` for Eden-family emulators and were extended here:
+
+| Group in `patches.py` | What it does |
+|---|---|
+| `_V11` | Camera aspect 4:3; UI projection squeezed; panes at the top and bottom moved to the 4:3 edges (the edge rule); minimap pinned; full-screen overlays stretched (the overlay rule); sliding menu containers anchored |
+| `_SCISSOR43` | Clip rectangles (the minimap) squeezed like the rest of the UI |
+| `_UI_V12` | Base Menu cursor (the `L_List` container is not scaled), dialog text in its box (`A_Contents` children not moved), tall half-screen dimmers (the shop's `Fade01`) cover the full height |
+| `_UI_V13` | The Armorer's Buy/Sell and help panels keep their 4:3 heights while their empty parent panes slide |
+| `_UI_V14` | Combat: the smoky bands behind the names (`Player_Fade` / `Target_Fade`) move with them |
+| `_UI_V15` | The EXP panel no longer pops into place (its 422x4 sliding parent anchored); the army flag and smoke stay level with the names and battle report while `N_Player_Bg` / `N_Target_Bg` sit at y -80 (forecast, Blaze Arts) |
+| `_UI_V16` | Level-up window: the unit's name stays in the panel header (`N_Status` children not moved) |
+| `_UI_V17` | Unit details (X on a unit): the stat windows stay below the header (`L_UnitIn*` children not moved inside the stretched `L_UnitInfo`) |
+| `_UI_V18` | Obelisks: the darkening `Fade` (1920x856) covers the whole 4:3 screen (overlay stretch); the Flame Lord art `UnitPub` is no longer stretched 4/3 tall |
+
+Checked screens: map HUD and minimap, command menu, forecast, combat and Blaze Arts, EXP and level-up, unit details, items, quick settings, obelisks, Base Menu, shops, dialogue. Not yet checked: dungeon battles, the end-of-chapter battle report. Cave torches miss some of their light pools at a distance in both aspects (likely the game's own light culling; open).

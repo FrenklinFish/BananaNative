@@ -107,7 +107,8 @@ def fpsLimitOf = { String game -> tsvRows(game, 'fps_limit').with { rs -> rs.isE
 def dlssOf = { String game -> tsvRows(game, 'dlss_standin').isEmpty() ? '' : '1' }
 // Whether the profile's frame limit only paces the presents (game.tsv fps_limit_present 1): the launcher says so beside the cap (Prefs.presentOnly)
 def presentOnlyOf = { String game -> tsvRows(game, 'fps_limit_present').isEmpty() ? '' : '1' }
-def nxProfiles = nxGames.collect { g -> [g, nameOf(g).replaceAll(/[\t\n\\"]/, ' '), shaderTotalOf(g), shaderInputsOf(g), buildsOf(g), reqsOf(g), statusOf(g), deltaOf(g), stampOf(g), resolutionOf(g), romfsChecksOf(g), gpuTsOf(g), windowOf(g), decoupleOf(g), drsOf(g), fpsLimitOf(g), dlssOf(g), presentOnlyOf(g)].join('\\t') }.join('\\n')
+def variantsOf = { String game -> tsvRows(game, 'variant').findAll { it.size() > 1 && it[1].trim() }.collect { it[1].trim() + '=' + (it.size() > 3 && it[3].trim() ? it[3].trim() : it[1].trim()) }.join(',') }   // game.tsv variant rows: "43=4:3,..." (Game settings > Aspect ratio)
+def nxProfiles = nxGames.collect { g -> [g, nameOf(g).replaceAll(/[\t\n\\"]/, ' '), shaderTotalOf(g), shaderInputsOf(g), buildsOf(g), reqsOf(g), statusOf(g), deltaOf(g), stampOf(g), resolutionOf(g), romfsChecksOf(g), gpuTsOf(g), windowOf(g), decoupleOf(g), drsOf(g), fpsLimitOf(g), dlssOf(g), presentOnlyOf(g), variantsOf(g)].join('\\t') }.join('\\n')
 def lockOf = { String key -> def f = new File(repo, 'dm/gfx/tools/dmsh_chain.lock'); f.isFile() ? (f.readLines().find { it.startsWith(key + '\t') }?.split('\t')?.getAt(1) ?: 'unknown') : 'unknown' }
 
 android {

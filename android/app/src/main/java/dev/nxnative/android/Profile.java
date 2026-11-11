@@ -25,6 +25,13 @@ final class Profile {
     boolean presentOnly;   // game.tsv fps_limit_present 1 (build.gradle presentOnlyOf): the frame limit only paces the presents, the game's own logic is not known to follow it (Prefs.presentOnly)
     int fpsLimit;   // game.tsv fps_limit (build.gradle fpsLimitOf): the host's frame limit by default, frames a second (0 = none); the launcher offers a frame limit for it (Prefs.limited)
     boolean drs;   // game.tsv has drs_ctl rows (build.gradle drsOf): the host can steer the game's dynamic resolution (Prefs.drsGame)
+    String variants = "";   // game.tsv variant rows (build.gradle variantsOf): "<name>=<label>", ',' between them; a native 4:3 mod is "43=4:3" (Game settings › Aspect ratio)
+
+    /** The variant whose label is w:h (a native aspect mod: "43" for "4:3"), or null when the profile has none */
+    String aspectVariant(String label) {
+        for (String v : variants.split(",")) { int eq = v.indexOf('='); if (eq > 0 && v.substring(eq + 1).equals(label)) return v.substring(0, eq); }
+        return null;
+    }
     boolean dlss;   // game.tsv has dlss_standin rows (build.gradle dlssOf): the game's DLSS runs on the host's GSR2 stand-in, with its Upscaler modes and sliders (Prefs.dlssGame)
     boolean decoupled;   // game.tsv has fps_decouple rows (build.gradle decoupleOf): the game's speed follows its measured frame rate, so it gets a frame limit (Prefs.paced)
     String romfsChecks = "";   // game.tsv romfs_check rows (build.gradle romfsChecksOf): "<path>|<line>|<expected or main>", ';' between them (RomfsCheck)
@@ -144,6 +151,7 @@ final class Profile {
             try { p.fpsLimit = c.length > 15 && !c[15].isEmpty() ? Math.max(0, Integer.parseInt(c[15])) : 0; } catch (NumberFormatException e) { p.fpsLimit = 0; }
             p.dlss = c.length > 16 && c[16].equals("1");
             p.presentOnly = c.length > 17 && c[17].equals("1");
+            p.variants = c.length > 18 ? c[18] : "";
             out.add(p);
         }
         return Collections.unmodifiableList(out);

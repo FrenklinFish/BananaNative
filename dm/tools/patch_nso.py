@@ -109,6 +109,9 @@ else:
 #     empty CUTS list). They are fixes of Nintendo's code that hold for any game on a platform with a small address space; a build without a reviewed implementation of one keeps
 #     the original code, logged but not red (games without virtual address memory never reach it)
 #   CAPABILITIES = {build ID: (name,...)}: verified main-build features exposed by fixups metadata to the launcher
+#   VARIANT_CUTS = {variant: {build ID: [cuts as in CUTS]}}: an optional variant of the game (a native 4:3 mod: variant '43'), added to the build's CUTS only when
+#     DM_PATCH_VARIANT names it. pack_android.py rewrites each module of a game.tsv `variant` row a second time with it into <pack>/<variant>/; the host loads
+#     those modules from there with DM_PATCH_VARIANT=<variant> (loader.c), the launcher's Game settings › Aspect ratio
 #   BINDING = [{what, now, goal, purpose, why[, blocked or kept][, checked]}]: not read here; each patch's binding now and the loosest it could have (dm/tools/docs_patches.py "Binding", docs/agents/game-patches.md)
 PATCH_FILES = [os.path.join(os.path.dirname(os.path.abspath(__file__)), 'sdk_patches.py')] + sorted(glob.glob(os.path.join(os.path.dirname(os.path.abspath(__file__)), '../games/*/patches.py')))
 # Profiles outside the repository (DM_GAMES_DIR, folders separated by os.pathsep, which is ':' as in dm/games/game.py: the NSP script's provisional profile of a game being brought up) may have a
@@ -118,7 +121,7 @@ patch_paths = {}
 for path in PATCH_FILES: patch_paths.setdefault(os.path.realpath(path), path)   # repeated roots and symlinks name the same file, not competing build claims
 PATCH_FILES = list(patch_paths.values())
 def load_patches():
-    tables, where = {'CUTS': {}, 'OBS': {}, 'FRAME_STEP': {}, 'MATCH_CUTS': {}, 'SDK_MATCH_CUTS': {}, 'CAPABILITIES': {}}, {}
+    tables, where = {'CUTS': {}, 'OBS': {}, 'FRAME_STEP': {}, 'MATCH_CUTS': {}, 'SDK_MATCH_CUTS': {}, 'CAPABILITIES': {}, 'VARIANT_CUTS': {}}, {}
     for n, path in enumerate(PATCH_FILES):
         spec = importlib.util.spec_from_file_location(f'patches_{n}', path); m = importlib.util.module_from_spec(spec); spec.loader.exec_module(m)
         for kind, table in tables.items():
@@ -133,6 +136,12 @@ def load_patches():
                 if profile_dir and os.path.realpath(os.path.dirname(path)) != os.path.realpath(profile_dir): continue
                 if getattr(m, kind, {}): table[profile] = m.MATCH_CUTS   # repository rules win for derived profiles; otherwise use the first external root
                 continue
+            if kind == 'VARIANT_CUTS':   # {variant: {build ID: cuts}}
+                for var, builds in getattr(m, kind, {}).items():
+                    for bid, v in builds.items():
+                        assert (var, bid) not in table, f'{kind} {var} of build {bid} in both {where[kind, var, bid]} and {path}'
+                        table[var, bid], where[kind, var, bid] = v, path
+                continue
             for bid, v in getattr(m, kind, {}).items():
                 assert bid not in table, f'{kind} of build {bid} in both {where[kind, bid]} and {path}'
                 table[bid], where[kind, bid] = v, path
@@ -140,6 +149,14 @@ def load_patches():
 PATCHES, PATCH_WHERE = load_patches()
 BUILD_ID = MOD.build_id[:0x10].hex()
 cuts = list(PATCHES['CUTS'].get(BUILD_ID, []))
+VARIANT = os.environ.get('DM_PATCH_VARIANT', '')
+if VARIANT:   # a game variant's cuts on top of the build's own (VARIANT_CUTS); a build without that variant is rewritten as it is
+    vc = PATCHES['VARIANT_CUTS'].get((VARIANT, BUILD_ID))
+    if vc is None: print(f'{NAME}: no {VARIANT} variant cuts for build {BUILD_ID}: rewritten without them')
+    else:
+        have = {c[0] for c in cuts}
+        assert not have & {c[0] for c in vc}, f"variant {VARIANT} cuts overlap the build's own CUTS at {sorted(have & {c[0] for c in vc})}"
+        cuts += vc; print(f'{NAME}: variant {VARIANT}: {len(vc)} cuts added')
 if BUILD_ID not in PATCHES['CUTS']:
     from nso_match import resolve
     profile = os.path.basename(os.environ.get('DM_GAME', '').rstrip('/'))

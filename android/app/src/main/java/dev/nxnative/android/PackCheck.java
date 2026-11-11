@@ -8,6 +8,7 @@ import java.io.InputStream;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.util.HashMap;
+import java.util.List;
 import java.util.Map;
 import java.util.zip.ZipEntry;
 import java.util.zip.ZipInputStream;
@@ -81,6 +82,12 @@ final class PackCheck {
         for (String m : mods) {
             File k = new File(p.dir, m + ".android.key");
             id.append('|').append(k.length()).append(':').append(k.lastModified()).append(':').append(mod(game, gv, m).stamp());
+            Profile prof = Profile.of(p.titleId);
+            if (prof != null) for (String v : prof.variants.split(",")) {   // a variant's key (<pack>/<variant>/<module>.android.key) made since
+                int eq = v.indexOf('='); if (eq <= 0) continue;
+                File vk = new File(new File(p.dir, v.substring(0, eq)), m + ".android.key");
+                id.append('|').append(vk.length()).append(':').append(vk.lastModified());
+            }
         }
         File gt = new File(p.dir, "game.tsv");   // the pack's copy: an earlier key may have been made with it (RewriteKey)
         id.append('|').append(gt.length()).append(':').append(gt.lastModified());
@@ -107,12 +114,39 @@ final class PackCheck {
             if (!nso.exists()) return null;
             try {
                 String have = new String(Files.readAllBytes(kf.toPath()), StandardCharsets.UTF_8).trim();
-                if (!RewriteKey.keys(t, BuildConfig.NX_REWRITER.split(" "), gd, m, nso::hash, packGt).contains(have)) return false;   // this rewriter's key, an equivalent one's, an earlier formula's (RewriteKey)
+                List<String> ok = RewriteKey.keys(t, BuildConfig.NX_REWRITER.split(" "), gd, m, nso::hash, packGt);
+                if (!ok.contains(have)) return false;   // this rewriter's key, an equivalent one's, an earlier formula's (RewriteKey)
+                // The profile's variants of this module (game.tsv variant rows: a native 4:3 mod), rewritten into <pack>/<variant>/ and keyed "<module key> variant=<name>"
+                // (pack_android.py rewrite_variants): a pack from before the variant, or with a stale one, is out of date too (Prepare again adds it)
+                Profile prof = Profile.of(p.titleId);
+                if (prof != null) for (String v : prof.variants.split(",")) {
+                    int eq = v.indexOf('='); if (eq <= 0) continue;
+                    String name = v.substring(0, eq);
+                    if (!variantModules(t.get(gd + "game.tsv"), name).contains(m)) continue;
+                    File vk = new File(new File(p.dir, name), m + ".android.key");
+                    if (!vk.isFile()) return false;
+                    String vh = new String(Files.readAllBytes(vk.toPath()), StandardCharsets.UTF_8).trim(), suffix = " variant=" + name;
+                    if (!vh.endsWith(suffix) || !ok.contains(vh.substring(0, vh.length() - suffix.length()))) return false;
+                }
             } catch (IOException e) {
                 return null;
             }
         }
         return true;
+    }
+
+    /** The modules game.tsv's variant row of that name rewrites (pack_android.py variants: its second cell, main when empty) */
+    static List<String> variantModules(byte[] gameTsv, String name) {
+        List<String> out = new java.util.ArrayList<>();
+        if (gameTsv == null) return out;
+        for (String row : new String(gameTsv, StandardCharsets.UTF_8).split("\n")) {
+            String[] c = row.split("\t", -1);
+            if (c.length > 1 && c[0].trim().equals("variant") && c[1].trim().equals(name)) {
+                String mods = c.length > 2 && !c[2].trim().isEmpty() ? c[2].trim() : "main";
+                for (String m : mods.replace(',', ' ').split(" +")) if (!m.isEmpty()) out.add(m);
+            }
+        }
+        return out;
     }
 
     /** dm/tools/*.py, dm/tools/rewriter_equiv/* and dm/games/&lt;id&gt;/{patches.py,game.tsv} from assets/pack/tools.zip; null without it (-PnxPackEngine=fake) */

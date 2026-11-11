@@ -45,6 +45,8 @@ final class GameSettings {
             full.value("The game keeps its normal speed when its frame rate drops or is limited. Off: it slows down with the frame rate, as on the console");
             Ui.add(box, full.view, 0);
         }
+        if (!aspects(prof).isEmpty())   // a profile with a native aspect mod (game.tsv variant rows labelled w:h)
+            Ui.add(box, new Ui.Setting(a, "🔳", "Aspect ratio", v -> aspect(a, g, again)).value(aspectLabel(a, id)).chevron(a).view, 0);
         Ui.add(box, new Ui.Setting(a, "📐", "Display", v -> display(a, g, again)).value(Prefs.DISPLAY_NAMES[Prefs.stretch(a, id) ? 1 : 0]).chevron(a).view, 0);
         if (Prefs.dlssGame(id)) {   // a game on the DLSS stand-in (game.tsv dlss_standin): its Upscaler is the stand-in (GSR2's sliders under GSR 2, the sharpness under FSR 1)
             int dm = GameUpscaler.dlssMode(a, id);
@@ -309,5 +311,34 @@ final class GameSettings {
 
     private static void drs(MainActivity a, Game g, Runnable done) {   // the render size's range (Prefs.DRS), from the next start; the in-game panel changes it live
         DrsSlider.dialog(a, " · " + g.name, Prefs.drs(a, g.titleId), Prefs.DRS_NAMES[Prefs.drs(a)], Prefs.ownDrs(a, g.titleId), v -> Prefs.drs(a, g.titleId, v), done);
+    }
+
+    /** The profile's aspect variants' labels ("4:3"): its variant rows labelled w:h */
+    static List<String> aspects(Profile p) {
+        List<String> out = new ArrayList<>();
+        if (p == null) return out;
+        for (String v : p.variants.split(",")) { int eq = v.indexOf('='); if (eq > 0 && v.substring(eq + 1).matches("[0-9]+:[0-9]+")) out.add(v.substring(eq + 1)); }
+        return out;
+    }
+
+    static String aspectLabel(android.content.Context a, String id) {
+        String l = Prefs.aspect(a, id);
+        return l == null || !aspects(Profile.of(id)).contains(l) ? "16:9 (as shipped)" : l + " (native)";
+    }
+
+    /** Aspect ratio: as shipped, or a native aspect mod (the pack holds both, so it takes effect at the next start without Prepare); 4:3 shows the picture at 4:3, filling a
+     *  4:3 screen and with side bars on a wider one (Display › Stretch still fills the screen) */
+    private static void aspect(MainActivity a, Game g, Runnable done) {
+        List<String> as = aspects(Profile.of(g.titleId));
+        String[] labels = new String[as.size() + 1];
+        labels[0] = "16:9 (as shipped)";
+        for (int k = 0; k < as.size(); k++) labels[k + 1] = as.get(k) + " (native: cameras and menus laid out for " + as.get(k) + ")";
+        String cur = Prefs.aspect(a, g.titleId);
+        int checked = cur == null ? 0 : Math.max(0, as.indexOf(cur) + 1);
+        new AlertDialog.Builder(a).setTitle("Aspect ratio · " + g.name).setSingleChoiceItems(labels, checked, (x, w) -> {
+            Prefs.aspect(a, g.titleId, w == 0 ? null : as.get(w - 1));
+            x.dismiss();
+            done.run();
+        }).setNegativeButton("Cancel", null).show();
     }
 }
