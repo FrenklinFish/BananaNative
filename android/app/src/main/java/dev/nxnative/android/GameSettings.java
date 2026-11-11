@@ -31,6 +31,12 @@ final class GameSettings {
         Profile prof = Profile.of(id);
         if (prof != null && prof.hasResolution())   // only where it does something: a profile with window_fn or graphics_scale rows
             Ui.add(box, new Ui.Setting(a, "🖼️", "Game resolution", v -> resolution(a, g, again)).value(windowLabel(a, id)).chevron(a).view, 8);
+        if (prof != null && prof.vegetationDetail) {
+            Ui.Setting vegetation = new Ui.Setting(a, "🌿", "Full vegetation", null)
+                    .toggle(a, Prefs.fullVegetation(a, id), (button, on) -> Prefs.fullVegetation(a, id, on));
+            vegetation.value("Turn off to hide some grass and foliage and reduce GPU work. Applies at the next start.");
+            Ui.add(box, vegetation.view, 0);
+        }
         if (!Prefs.limited(id) && Prefs.ownRate(a, id)) {   // the host found no limiter it can hold for this game: choices would do nothing (the host's frame limiter holds a limited game)
             Ui.Setting fixed = new Ui.Setting(a, "⏱️", "Frame rate cap", null).value("This game picks its own frame rate");
             fixed.view.setClickable(false);

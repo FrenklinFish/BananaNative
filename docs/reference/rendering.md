@@ -1526,3 +1526,11 @@ Digimon Story Cyber Sleuth: Complete Edition (Media.Vision's MVGL engine, SDK 6.
 - **Cause:** the replay skips a draw or dispatch it cannot run: a pipeline the driver refused (`vka_gfx_pipeline`, `cs_obtain` returned no pipeline), a shader module refused, a mesh draw without `VK_EXT_mesh_shader`, no null descriptors, 8-bit indices or a workgroup count the device lacks. Each is logged a few times and counted, but nothing told the player.
 - **Fix:** general, every game and driver (`dm/gfx/vk_android/vka_skipwarn.h`, `vka_draw.c` `g_skip_dev`, `vka_exec.c` `skipwarn_frame`): counters only. The skips whose cause is the device (not render conditions, empty draws or profile cuts, which stay out of the share) are counted by cause. In two windows of 300 frames in a row, from frame 900 on, with at least 200 draws and dispatches attempted in each, a share over `DM_VK_SKIP_WARN` percent (default 5, 0 = off) logs one `[RED] vk: <n> % of draws skipped over the last 300 frames (causes: ...): the GPU driver may not suit this game` line and sets `nxhost_skip_status`. The launcher polls it (`Native.skipStatus`, `SkipNotice`) and shows one small dismissible notice per run in the game, naming the driver in use and Settings > GPU driver. Tests: `dm/host/tests/t_android_skipwarn.c`, `dm/tools/tests/test_android_skipnotice.py`.
 - **Found on:** no game yet (written for driver differences such as the system driver against a Turnip build); not run on a phone.
+
+
+### Dense vegetation in the Kokiri Forest
+
+- **Symptom:** rendering the full vegetation in the forest takes several milliseconds of GPU time on the Odin 3.
+- **Cause:** separate mesh draws write depth and colour for grass and tree foliage. Some other vegetation shaders write guest storage and must still run.
+- **Fix:** the game's Full vegetation setting defaults to on. Off omits seven reviewed depth and colour pairs. A draw with transform feedback, writable bindings or an unresolved binding still runs. The compute producers and their synchronization still run. The setting takes effect at the next game start.
+- **Found on:** [Ocarina of Time](../../dm/games/0400486024DEC000/README.md#vegetation-detail-on-android).

@@ -1990,6 +1990,29 @@ void vka_draw(vka_dstate *d, const p_set_rt *rt, int has_rt, const p_scissor *sc
     draw_body(d, rt, has_rt, sc, has_sc, dw, di);
     g_pt_tot += cntvct() - t0; g_pt_n++; g_prof = g_prof_all;
 }
+// Lower vegetation detail removes only the profile's reviewed mesh draws.
+static int vegetation_cut(const vka_dstate *d, vka_shader *const *sh) {
+    if (!DM_GAME_NMESH_VEGETATION_CUT || VKA_ENV("DM_VK_VEGETATION", 1) || d->tf_on) return 0;
+    static const uint64_t keys[] = DM_GAME_MESH_VEGETATION_CUT;
+    unsigned i = 0;
+    while (i < DM_GAME_NMESH_VEGETATION_CUT && keys[i] != sh[7]->key) i++;
+    if (i == DM_GAME_NMESH_VEGETATION_CUT) return 0;
+    for (int stage = 0; stage < VKA_NSTAGE; stage++) {
+        const vka_shader *shader = sh[stage];
+        if (!shader) continue;
+        for (unsigned j = 0; j < shader->e->bind_count; j++) {
+            const dmsh_vk_bind *binding = &shader->b[j];
+            if ((binding->flags & (DMSH_VK_BF_RW | DMSH_VK_BF_ATOMIC | DMSH_VK_BF_NOSLOT)) ||
+                binding->kind == DMSH_VK_KIND_GMEM_LOG || binding->kind == DMSH_VK_KIND_UNKNOWN)
+                return 0;
+        }
+    }
+    static uint64_t omitted;
+    if (++omitted == 1 || omitted % 4096 == 0)
+        VLOG("lower vegetation detail: %llu mesh draws omitted", (unsigned long long)omitted);
+    return 1;
+}
+
 // Profile mesh_prepass_cut (<prepass mesh shader key> <colour pass mesh shader key> pairs). A WORKAROUND, cause open (docs/reference/rendering.md "Depth-only mesh prepass
 // drawn as spikes on Qualcomm's driver"): on Qualcomm's driver the depth-only prepass mesh draws of Ocarina of Time's foliage draw some primitives from vertex slots never
 // written (white spikes converging on the screen centre), while the colour pass's own mesh modules draw the same instances right; believed to be the driver's compiler on
@@ -2066,6 +2089,7 @@ static void draw_body(vka_dstate *d, const p_set_rt *rt, int has_rt, const p_sci
         if (!resolve(mp, 6, &sh[6], &bad) || !resolve(mp, 7, &sh[7], &bad) || !resolve(d->bst[1], 1, &sh[1], &bad)) SKIP("mesh draw skipped: no shader library");
         if (bad) { g_skipped++; g_skip_dev[VKS_SHADER]++; return; }   // a refused or missing shader (logged when it was made)
         if (!sh[7]) SKIP("mesh draw with no mesh shader bound: skipped");
+        if (vegetation_cut(d, sh)) return;
         // Diagnostics: DM_VK_MESH_LOG=1 logs each (task, mesh, pixel) shader triple once with its first draw's workgroups; DM_VK_MESH_SKIP=<mesh key>,... skips the mesh
         // draws of those mesh shaders (a wrong mesh draw found by taking draws away in a replay)
         if (VKA_ENV("DM_VK_MESH_LOG", 0)) { static uint64_t seen[256][2]; static int ns; uint64_t a = sh[7]->key, b = sh[1] ? sh[1]->key : 0; int k = 0;
