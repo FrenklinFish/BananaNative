@@ -28,14 +28,21 @@ int main(void) {
     // Which segments: most pieces first, small ones left, the count covered
     int pc[] = {3, 400, 15, 1200, 16, 90, 1};
     int idx[8]; long cov = 0;
-    int k = vkmb_pick(pc, 7, 1500, idx, 8, &cov);
+    int k = vkmb_pick(pc, NULL, 7, 1500, idx, 8, &cov);
     CHECK(k == 2 && idx[0] == 3 && idx[1] == 1 && cov == 1199 + 399, "the two largest cover 1,500 (k %d, cov %ld)", k, cov);
-    k = vkmb_pick(pc, 7, 100000, idx, 8, &cov);
+    k = vkmb_pick(pc, NULL, 7, 100000, idx, 8, &cov);
     CHECK(k == 4 && idx[2] == 5 && idx[3] == 4 && cov == 1199 + 399 + 89 + 15, "all worth it, none under %d pieces (k %d, cov %ld)", VKMB_MIN_PIECES, k, cov);
-    k = vkmb_pick(pc, 7, 100000, idx, 1, &cov);
+    k = vkmb_pick(pc, NULL, 7, 100000, idx, 1, &cov);
     CHECK(k == 1 && idx[0] == 3, "at most maxpick a round");
-    k = vkmb_pick(pc, 7, 0, idx, 8, &cov);
+    k = vkmb_pick(pc, NULL, 7, 0, idx, 8, &cov);
     CHECK(k == 0 && cov == 0, "nothing to shed: none taken");
+    // An exported alias (vka_fd_alias.h) has no placed map to make again: never picked, however many pieces; the placed ones still are, most pieces first
+    int fa[] = {0, 0, 0, 1, 0, 0, 0};
+    k = vkmb_pick(pc, fa, 7, 100000, idx, 8, &cov);
+    CHECK(k == 3 && idx[0] == 1 && idx[1] == 5 && idx[2] == 4 && cov == 399 + 89 + 15, "exported alias skipped (k %d, cov %ld)", k, cov);
+    int fa1[] = {1};
+    k = vkmb_pick(pc + 3, fa1, 1, 100000, idx, 8, &cov);
+    CHECK(k == 0 && cov == 0, "a lone exported alias: none taken");
     // Lines of /proc/self/maps
     struct { const char *ln; int ok; uint64_t a; int kgsl; } L[] = {
         {"40fe420000-40fe442000 rw-s 2bd5f000 00:0e 1066                           /dev/kgsl-3d0", 1, 0x40fe420000ull, 1},

@@ -549,20 +549,36 @@ static void fps_limit_wait(void) {
 // 2: the mode that picks 2, the game's own 30 fps form. 3: STEPS_HOLD and the count 3 (the game's mode adjustments for 30 fps, made where the mode is 2, then take their 60 fps
 // values; README of the game). The mode the game had is given back when the cap goes up again; one it sets meanwhile (a scene's setup) is the one given back, and the host's
 // goes in again over it while the cap holds. One frame may run the game's own pick at a change: the gate is the game's own procFrame, which reads the mode before the count
+// Hold 60 fps (DM_FPS_HOLD60=1 at start, the Android launcher's Game settings; its in-game panel live: nxhost_fps_hold60_set): with no cap below 60, where the game's own
+// mode is 0 (2 steps on a frame its work overran: a drop to 30 fps at the first long frame, Mario Kart World's free roam), the host writes mode 1, one step every frame. A long
+// frame then plays slower (one 1/60 s step for a longer frame) instead of halving the frame rate. The game's own other modes stay (2: its 30 fps form for three or four players)
+static _Atomic int g_hold60 = -1;
+__attribute__((visibility("default"))) void nxhost_fps_hold60_set(int on) { atomic_store(&g_hold60, on != 0); LOG("main: hold 60 fps %s (the launcher's in-game panel)", on ? "on" : "off"); }
+static int hold60_on(void) {
+    int v = atomic_load(&g_hold60);
+    if (v >= 0) return v;
+    const char *e = getenv("DM_FPS_HOLD60"); int was = -1; v = e && atoi(e) > 0;
+    if (atomic_compare_exchange_strong(&g_hold60, &was, v) && v) LOG("main: hold 60 fps on (DM_FPS_HOLD60=1): one framework step a frame where the game's own mode would drop to 30 fps");
+    return atomic_load(&g_hold60);
+}
+// The host's frame step (hle_nvn.c fstep_hold, a game with FRAME_STEP stubs: Ocarina of Time) takes Hold 60 fps as fps_hold off: frames are not held longer than the cap's
+// vsyncs, each shown as soon as it is ready, and a late frame's time is paid back one extra step a frame (game time = real time down to 30 fps) instead of the hold going to 2
+int dm_fps_hold60(void) { return PLAT_ANDROID && hold60_on(); }
 static struct { int32_t game, mine; uint8_t ours; int nlog; } g_st[NROWS];   // ours: the mode in is the host's (mine); game: the game's own, given back
 static int steps_cap(int target) { int c = limit_step(target), l = limit_step(limit_raw()); return l && (!c || l < c) ? l : c; }
 static void steps_tick(const lock_t *L, int r, int target, const char *src) {
     uint64_t obj = row_obj(L); int32_t cur, cnt;
     if (!obj || !rd(obj + L->scale, &cur, sizeof cur) || !rd(obj + L->field, &cnt, sizeof cnt)) return;   // not made yet
-    int c = steps_cap(target), n = c ? 60 / c : 1, want = n <= 1 ? -1 : n == 2 ? 2 : STEPS_HOLD;
+    int c = steps_cap(target), n = c ? 60 / c : 1, want = n == 2 ? 2 : STEPS_HOLD;
     int32_t *mode = (int32_t *)(uintptr_t)(obj + L->scale), *count = (int32_t *)(uintptr_t)(obj + L->field);
     if (g_st[r].ours && cur != g_st[r].mine) g_st[r].ours = 0;   // the game set its own since (a scene's setup): that is the one to give back
     if (!g_st[r].ours) g_st[r].game = cur;
+    if (n <= 1) want = hold60_on() && g_st[r].game == 0 ? 1 : -1;   // 60 or no cap: the game's own mode, or one step a frame where its own is 0 (Hold 60 fps)
     if (want >= 0) {
         if (want == STEPS_HOLD && cnt != n) { dm_guest_write_prepare(count, sizeof *count); __atomic_store_n(count, n, __ATOMIC_RELAXED); }   // the count before the mode that keeps it
         if (cur != want) {
             dm_guest_write_prepare(mode, sizeof *mode); __atomic_store_n(mode, want, __ATOMIC_RELAXED); g_st[r].ours = 1; g_st[r].mine = want;
-            if (g_st[r].nlog < 16) { g_st[r].nlog++; LOG("main: %s %d a frame at %d fps: its mode %d → %d (%s%s)", L->what, n, c, cur, want, src, c != limit_step(target) ? "; held by the frame limit" : ""); }
+            if (g_st[r].nlog < 16) { g_st[r].nlog++; LOG("main: %s %d a frame at %d fps: its mode %d → %d (%s%s%s)", L->what, n, c ? c : 60, cur, want, src, want == 1 ? ", hold 60 fps" : "", c != limit_step(target) ? "; held by the frame limit" : ""); }
         }
     } else if (g_st[r].ours) {
         dm_guest_write_prepare(mode, sizeof *mode); __atomic_store_n(mode, g_st[r].game, __ATOMIC_RELAXED); g_st[r].ours = 0;

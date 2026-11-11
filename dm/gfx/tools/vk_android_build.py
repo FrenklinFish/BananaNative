@@ -739,9 +739,12 @@ def write_library(results):
     path = os.path.join(out, VK['LIB_FILE']); tmp = path + '.tmp'
     with open(tmp, 'wb') as f:
         f.write(data); pos = 0
+        stage(f'writing the shader library: 0 of {blen >> 20:,} MB')
         for off, b in pieces:
             b = stored_bytes(b)
             f.write(b'\0' * (off - pos)); f.write(b); pos = off + len(b)
+            stage(f'writing the shader library: {pos >> 20:,} of {blen >> 20:,} MB', 0.5)
+        stage('saving the shader library to storage')
         assert pos == blen and f.tell() == blob_off + blen
         f.flush(); os.fsync(f.fileno())   # whole on storage before it takes the library's name (write_result)
     os.replace(tmp, path)
@@ -800,10 +803,11 @@ def result_head(path):
     return result_file(path)[0]
 
 
-def write_result(key, st, err, r, ps_in):
+def write_result(key, st, err, r, ps_in, sync=True):
     """One shader's result, as fin() gives it, to <RES>/<key>.r: written to a temporary name, flushed to storage, then renamed, so a killed build or a phone that stops
     leaves a whole file or none (without the fsync a rename on the phone's shared storage can outlive the data: a file cut short under its full name, #82). A result reused
-    from an older library (delta) has 'reused': that library's version in its head and its reflection"""
+    from an older library (delta) has 'reused': that library's version in its head and its reflection. sync False: neither flushed nor renamed; → the temporary file's
+    path, which the caller makes whole on storage and renames (sync_results: the delta's kept shaders, one storage flush for all of them)"""
     refl, modules = r if r else (None, [])
     h = {'vk': TOOLS, 'inputs': INPUTS, 'raw': RAW, 'val': VAL_ID, 'key': key, 'stage': STAGE_OF[key], 'st': st, 'err': err, 'ps_inputs': sorted(ps_in) if ps_in is not None else None,
          'refl': refl, 'modules': [[variant, size, len(stored), codec] for variant, size, stored, codec, _ in modules]}
@@ -813,8 +817,22 @@ def write_result(key, st, err, r, ps_in):
     with open(tmp, 'wb') as f:
         f.write(RESULT_MAGIC + struct.pack('<I', len(j)) + j)
         for m in modules: f.write(m[2])
+        if not sync: return tmp
         f.flush(); os.fsync(f.fileno())
     os.replace(tmp, result_path(key))
+
+
+def sync_results(done):
+    """[(temporary file, key)] of write_result(sync=False) made whole on storage, then renamed to their result files: what write_result does for each, with one os.sync
+    for all of them in place of an fsync each. A delta update of Ocarina of Time keeps 42,800 shaders: an fsync each on the phone's shared storage (FUSE) took many
+    minutes before the first progress line, and Prepare's card stood at "Translating shaders: 0 of 42,848" (docs/reference/packing.md, A delta update writes its kept
+    shaders with an fsync each). Without os.sync (Windows): an fsync each, as before"""
+    if not done: return
+    if hasattr(os, 'sync'): os.sync()
+    else:
+        for tmp, _ in done:
+            with open(tmp, 'r+b') as f: os.fsync(f.fileno())
+    for tmp, k in done: os.replace(tmp, result_path(k))
 
 
 def read_result(key):
@@ -838,6 +856,19 @@ def read_result(key):
 
 _plock = threading.Lock()
 PROGRESS = os.environ.get('DMSH_VK_PROGRESS'); DONE = [0]; TOTAL = [len(keys)]   # TOTAL: the shaders this version translates (all, less those a delta reuses)
+
+
+_stage_at = [0.0]
+
+
+def stage(text, every=0.0):
+    """'stage: <text>': what the step does between or inside its counted phases, which Prepare's card shows (PackService, Job.stepNote). every: at most once in that
+    many seconds (a count inside a long phase); 0: always (a new phase)"""
+    with _plock:
+        now = time.monotonic()
+        if every and now - _stage_at[0] < every: return
+        _stage_at[0] = now
+        print(f'stage: {text}', flush=True)
 
 
 def progress(stage, add=0):
@@ -1032,11 +1063,24 @@ def older_libraries():
     return sorted(libs, key=lambda L: -os.stat(L.path).st_mtime)
 
 
-if not want:   # a build of a key list may run beside a full one: it leaves the other's unfinished files alone
-    for _n in os.listdir(RES):   # what a killed build left: unfinished result files
-        if _n.endswith('.tmp'):
-            try: os.unlink(os.path.join(RES, _n))
-            except OSError: pass
+def _tmp_owner_gone(name):
+    """Whether a result's temporary file (<key>.r.<pid>.tmp, write_result) is no running build's: its process is this one (the phone runs one build at a time in its
+    own process, so it is a stopped run's) or has ended"""
+    try: pid = int(name.rsplit('.', 2)[-2])
+    except (ValueError, IndexError): return True
+    if pid == os.getpid(): return True
+    if os.name == 'nt': return False   # os.kill there ends the process (TerminateProcess) whatever the signal: no way to ask, so the file stays
+    try: os.kill(pid, 0)
+    except (ProcessLookupError, OverflowError): return True   # no such process (a number no pid can be)
+    except (OSError, ValueError): return False
+    return False
+
+
+for _n in os.listdir(RES):   # what a killed or stopped build left: unfinished result files (a stop while a delta keeps shaders leaves one per kept shader).
+    # A build of a key list may run beside a full one: then only the files of no running build go
+    if _n.endswith('.tmp') and (not want or _tmp_owner_gone(_n)):
+        try: os.unlink(os.path.join(RES, _n))
+        except OSError: pass
 heads, _cut = {}, []
 for k in keys:
     h, c = result_file(result_path(k))
@@ -1052,22 +1096,31 @@ if MANIFEST and want and len(_in_m) < len(MANIFEST['hashes']):
     print(f'delta: the manifest has {len(MANIFEST["hashes"]) - len(_in_m)} shaders this key list does not build', flush=True)
 if MANIFEST:
     _cand = delta.reuse_candidates(MANIFEST, keys, heads)
+    if _cand: stage('looking for shaders the older library already has')
     _libs = older_libraries() if _cand else []
     def _reuse(k):
         L, ent, errs = delta.find_entry(MANIFEST, k, _libs, zstd)
-        if L is None: return k, None, '; '.join(errs) or None
+        if L is None: return k, None, '; '.join(errs) or None, None
         _, e, b, c1, mods = ent
         refl = {'stage': STAGE_OF[k], 'reused': L.version, 'lib': {'entry': delta.zeroed(e).hex(), 'binds': b.hex(), 'c1': c1.hex()}}
-        write_result(k, 'ok', '', (refl, [(v, size, bytes(st), codec, None) for v, size, st, codec in mods]), None)
-        return k, L.version, None
-    _from = collections.Counter()
-    with cf.ThreadPoolExecutor(NJ) as ex:
-        for k, v, err in ex.map(_reuse, [k for k in _cand if any(k in L.index for L in _libs)]):
-            if err: print(f'[RED] delta: {k}: the older library\'s entry cannot be read ({err}): translated', flush=True)
-            if v:
-                _from[v] += 1; REUSED.add(k)
-                heads[k] = {'reused': v, 'ps_inputs': None}
-    for L in _libs: L.close()
+        return k, L.version, None, write_result(k, 'ok', '', (refl, [(v, size, bytes(st), codec, None) for v, size, st, codec in mods]), None, sync=False)
+    _from, _kc, _tmps = collections.Counter(), [k for k in _cand if any(k in L.index for L in _libs)], []
+    # 'progress <n> <of> keep' at most twice a second: the kept shaders are no part of the translation's total, and without these lines the phone's card stood at
+    # its first count for as long as the older library's entries took to be written out
+    _shown, _n = time.monotonic(), 0
+    try:
+        with cf.ThreadPoolExecutor(NJ) as ex:
+            for k, v, err, tmp in ex.map(_reuse, _kc):
+                _n += 1
+                if time.monotonic() - _shown >= 0.5 or _n == len(_kc): print(f'progress {_n} {len(_kc)} keep', flush=True); _shown = time.monotonic()
+                if err: print(f'[RED] delta: {k}: the older library\'s entry cannot be read ({err}): translated', flush=True)
+                if v:
+                    _from[v] += 1; REUSED.add(k); _tmps.append((tmp, k))
+                    heads[k] = {'reused': v, 'ps_inputs': None}
+        if _tmps: stage(f'saving the {len(_tmps):,} kept shaders to storage')
+        sync_results(_tmps)
+    finally:
+        for L in _libs: L.close()
     if not _libs and not REUSED: print('delta: no older library of this game: a full build', flush=True)
     else: print(f'delta: {len(REUSED)} of {len(keys)} shaders kept (' + (', '.join(f'from v-{v}: {n}' for v, n in _from.most_common()) or 'by an earlier run of this build')
                 + f'); {len(keys) - len(REUSED)} to translate, {sum(1 for k in keys if k not in heads)} of them left', flush=True)
@@ -1211,6 +1264,7 @@ def translate_keys(ks, count=True):
     """Translate the shaders ks (pixel shaders first, then the vertex shaders their inputs pad) and write their result files"""
     for _phase in ([k for k in ks if STAGE_OF[k] != 'vs'], [k for k in ks if STAGE_OF[k] == 'vs']):
         if _phase and STAGE_OF[_phase[0]] == 'vs':   # the pixel shaders' inputs, from their results (this run's and earlier runs')
+            stage('reading what the pixel shaders take from the vertex shaders')
             _need = set().union(*[PAIRS.get(k, ()) for k in _phase])
             for k in keys:
                 if STAGE_OF[k] != 'vs' and k not in PS_INPUTS:
@@ -1238,9 +1292,11 @@ def read_all():
     _missing = [k for k in ORDER if not os.path.exists(result_path(k))]
     if _missing: sys.exit(f'[RED] {len(_missing)} shaders have no result (the translator wrote neither a module nor a reason for them, from {_missing[0]}): run again')
     rs, cut = [], []
-    for k in ORDER:
+    stage(f'reading the translated shaders: 0 of {len(ORDER):,}')
+    for n, k in enumerate(ORDER, 1):
         try: rs.append(read_result(k))
         except ResultCut: cut.append(k)
+        stage(f'reading the translated shaders: {n:,} of {len(ORDER):,}', 0.5)
     return rs, cut
 
 
@@ -1276,6 +1332,7 @@ if os.environ.get('DMSH_VK_LOOSE') == '1':
     for key, st, _, r in results:
         if st == 'ok':
             for variant, _, _, _, data in r[1]: open(os.path.join(out, 'spv', key + (f'_{variant}' if variant else '') + '.spv'), 'wb').write(data)
+stage('writing the shader library\'s index')
 index = {k: r[0] for k, st, _, r in results if st == 'ok'}   # a shader kept from an older library has its stage and that library's version here, not its whole reflection
 for v in index.values():
     for b in v.get('bindings', ()): b['kind_num'] = KIND_NUM[b['kind']]
@@ -1285,6 +1342,7 @@ json.dump([{'key': k, 'st': st, 'err': e} for k, st, e, _ in results], open(os.p
 # version, each entry checked against it: a mismatch or a shader the manifest has and the library lacks is a [RED] line naming the key (the library is kept: it is what this
 # machine's tools made). A full build with a manifest checks the same, so a phone's full build is compared with the Mac's too
 progress('check')
+stage(f'checking the shader library ({len(results):,} shaders)')
 _lib, _hashes = delta.library_hashes(lib, zstd, NJ); _lib.close()
 _status = {k: st for k, st, _, _ in results}
 open(os.path.join(out, delta.MANIFEST + '.tmp'), 'w').write(delta.format_manifest(VKV, GAME.id, INPUTS, {k: _hashes.get(k, '-') for k in keys}))

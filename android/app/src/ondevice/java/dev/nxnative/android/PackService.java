@@ -65,6 +65,8 @@ public final class PackService extends Service {
     /** Starts of one step the process may not live through before the job fails (Job.start) */
     private static final int MAX_STARTS = 2;
     private static final Pattern PROGRESS = Pattern.compile("^progress:? (\\d+)(?: |/)(\\d+)(?: (\\S+))?");
+    /** A tool's "stage: <what it is doing now>" line (Job.stepNote) */
+    private static final Pattern STAGE = Pattern.compile("^stage: (.+)$");
 
     private final List<Messenger> clients = new CopyOnWriteArrayList<>();
     private final Messenger messenger = new Messenger(new Handler(Looper.getMainLooper(), this::handle));
@@ -767,9 +769,12 @@ public final class PackService extends Service {
             while ((nl = partial.indexOf("\n")) >= 0) {
                 String line = partial.substring(0, nl).trim();
                 partial.delete(0, nl + 1);
-                Matcher m = PROGRESS.matcher(line);
+                Matcher m = PROGRESS.matcher(line), st = STAGE.matcher(line);
                 if (m.find()) {
                     j.stepProgress(step, Long.parseLong(m.group(1)), Long.parseLong(m.group(2)), m.group(3));
+                    changed = true;
+                } else if (st.find()) {
+                    j.stepNote(step, st.group(1).trim());
                     changed = true;
                 } else if (stop.line(line)) {
                     long[] miss = PrepareText.missingShaders(line);   // Try anyway: shaders this game version lacks, said once the game is ready (Ondevice.addGame)
@@ -875,7 +880,7 @@ public final class PackService extends Service {
             long d = j.stepDone(i), t = j.stepTotal(i);
             if (t > 1) b.setProgress((int) Math.min(t, Integer.MAX_VALUE), (int) Math.min(d, t), false);
             else b.setProgress(100, pct, false);
-            b.setContentText(j.stepText()).setSubText("Step " + (i + 1) + " of " + Job.STEPS.length + " · " + pct + " %").setOngoing(true).addAction(pauseAction);
+            b.setContentText(j.stepText() + j.quietText()).setSubText("Step " + (i + 1) + " of " + Job.STEPS.length + " · " + pct + " %").setOngoing(true).addAction(pauseAction);
         } else {
             String why = state.equals("failed") ? j.error() : Job.reasonText(j.reason());
             b.setContentText(j.stepText() + " · " + pct + " %").setStyle(new Notification.BigTextStyle().bigText(j.stepText() + " · " + pct + " %\n" + why)).setOngoing(false);

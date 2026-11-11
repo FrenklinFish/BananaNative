@@ -98,6 +98,11 @@ STAGE_NAME = {'vs': 'vertex', 'hs': 'hull', 'ds': 'domain', 'gs': 'geometry', 'p
 
 def red(msg): sys.exit('[RED] ' + msg)
 
+
+def stage(text):
+    """'stage: <text>': the phase the split is in, which Prepare's card shows after "Finding the shaders" (PackService, Job.stepNote); its progress lines then count it"""
+    print(f'stage: {text}', flush=True)
+
 def field(d, fmt, at, where):
     """struct.unpack_from(fmt, d, at) of a field a header or table points at: red() naming where and the offset when it is not inside d (a damaged or cut file)"""
     if not 0 <= at <= len(d) - struct.calcsize(fmt): red(f'{where}: {struct.calcsize(fmt):#x} bytes at {at:#x} lie outside the {len(d):#x} bytes there are')
@@ -900,8 +905,11 @@ def zip_jobs(files, parts=64):
     """Every member of every zip archive in ranges of about equal length (Portal: the whole game in game.zip, 41,416 members, 4.6 GB inflated, Deflate or stored; its GLSLC outputs are the
     221 nxcontent/nvsb/*.nvsb files, but no name is relied on). → ([(path, rel, (ZIP, members)), …], the zip paths). An archive zipfile cannot read is scanned as one file, as before"""
     import zipfile
-    zs = []
-    for p, r in files:
+    zs, shown = [], time.monotonic()
+    for i, (p, r) in enumerate(files):
+        # the full scan gives every RomFS file (186,583 in Ocarina of Time): a 'progress' line at most twice a second, so the phone's card counts them instead of
+        # standing still (the scan's own lines start again from 0 after it)
+        if len(files) >= 1000 and time.monotonic() - shown >= 0.5: print(f'progress: {i}/{len(files)}', flush=True); shown = time.monotonic()
         with open(p, 'rb') as f: h = f.read(4)
         if h != ZIP: continue
         try:
@@ -3108,8 +3116,11 @@ def main():
     files, results, common, dumps = [], [], None, []
     for i, (romfs, mainnso) in enumerate(zip(romfs_v, main_v)):
         tag = os.path.basename(os.path.dirname(os.path.abspath(romfs))) if i else ''
+        stage('listing the game\'s files')
         files += sorted(((os.path.join(dp, f), (tag + '/' if tag else '') + posix_rel(os.path.join(dp, f), romfs)) for dp, _, fs in os.walk(romfs) for f in fs), key=lambda t: t[1])   # by the '/' path: the same order on every system
+        stage('reading the game\'s program')
         img = nso_image(mainnso)
+        stage('looking for shaders in the game\'s program')
         if not i:
             import unityfs
             try: common = unityfs.common_strings(img)
@@ -3159,8 +3170,10 @@ def main():
             if failed and os.path.isfile(failed) and open(failed).read().strip() == dg: why = 'an earlier run on these inputs found the targeted scan\'s tables differ from the profile\'s'
             else:
                 print(f'targeted split: {len(want):,} of {len(files):,} RomFS files hold the shaders of the profile\'s shader_map.tsv (main build {", ".join(build_id(m) for m in main_v)}); only these are scanned', flush=True)
+                stage(f'reading the {len(want):,} files that hold shaders')
                 try:
                     out = split_tables(list(results), big, todo, dumps, J, common, zdicts, ScanCache(os.path.join(rd, 'targeted'), dg) if rd else None, targeted=True)
+                    stage('comparing the shaders found with the app\'s list')
                     why = profile_differs(out, pairsout, psopairsout)
                 except Fallback as e: why = str(e)
                 if why:
@@ -3171,9 +3184,12 @@ def main():
         if out is None: print(f'targeted split: not taken, {why}: every file is scanned', flush=True)
     if out is None:
         print(f'split: looking for archives among {len(files):,} RomFS files', flush=True)   # each file is opened (zip_jobs): a minute or more on a large RomFS, before the first progress line
+        stage(f'looking for archives among {len(files):,} files')
         big, todo = scan_jobs(files)
+        stage(f'reading every file of the game ({len(files):,})')
         cd = (os.path.join(rd, 'full') if targeted else rd) if rd else None
         out = split_tables(list(results), big, todo, dumps, J, common, zdicts, ScanCache(cd, scan_digest(inputs, big + todo + mains)) if cd else None)
+    stage('writing the shaders found')
     write_outputs(out, pkg, mapout, factsout, pairsout, psopairsout)
 
 class Fallback(Exception): pass   # the targeted scan cannot give the full scan's outputs (split_tables)
@@ -3285,6 +3301,7 @@ def split_tables(results, big, files, dumps, J, common, zdicts, cache, targeted=
     with pool(J, common, {}, zdicts) as ex:
         n = len(big) + len(files)
         results += pooled(ex, big, n, cache=cache) + pooled(ex, files, n, len(big), chunk=16, cache=cache)
+    stage('sorting the shaders found')
     trees, defer = {}, []
     for rel, uniq, pr, extra in results:
         if extra == 'defer': defer.append(rel)

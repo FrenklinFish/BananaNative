@@ -64,7 +64,9 @@ void nxhost_env_changed(void);
 #pragma weak nxhost_fps_limit_set
 void nxhost_fps_limit_set(int fps);   // hle_fpslock.c: the frame limiter, live from the in-game panel
 #pragma weak nxhost_fps_decouple_set
-void nxhost_fps_decouple_set(int on);   // hle_fpslock.c: sead's controller at the measured rate, live from the in-game panel
+void nxhost_fps_decouple_set(int on);
+#pragma weak nxhost_fps_hold60_set
+void nxhost_fps_hold60_set(int on);   // hle_fpslock.c: a steps framework held at one step a frame at the cap of 60, live from the in-game panel   // hle_fpslock.c: sead's controller at the measured rate, live from the in-game panel
 #pragma weak nxhost_text_input_callback
 
 // ---- Log: the host's stdout and stderr go straight into the log file (nothing is lost when the process dies), and a thread copies new lines to logcat ----
@@ -494,6 +496,8 @@ JNIEXPORT jint JNICALL Java_dev_nxnative_android_Native_pinThreads(JNIEnv *env, 
 JNIEXPORT void JNICALL Java_dev_nxnative_android_Native_fpsLimitSet(JNIEnv *env, jclass cls, jint fps) { (void)env; (void)cls; if (nxhost_fps_limit_set) nxhost_fps_limit_set(fps); }
 // Full game speed at low frame rates, live from the in-game panel (Native.decoupleSet)
 JNIEXPORT void JNICALL Java_dev_nxnative_android_Native_decoupleSet(JNIEnv *env, jclass cls, jboolean on) { (void)env; (void)cls; if (nxhost_fps_decouple_set) nxhost_fps_decouple_set(on ? 1 : 0); }
+// Hold 60 fps, live from the in-game panel (Native.hold60Set)
+JNIEXPORT void JNICALL Java_dev_nxnative_android_Native_hold60Set(JNIEnv *env, jclass cls, jboolean on) { (void)env; (void)cls; if (nxhost_fps_hold60_set) nxhost_fps_hold60_set(on ? 1 : 0); }
 // Game resolution of a game that sizes its scenes by the graphics scale, live from the in-game panel (Native.graphicsModeSet): the host changes the scale and operation mode
 // and posts the console's notifications (300, 30 / 31), which the game answers by querying them again
 #pragma weak nxhost_graphics_mode_set

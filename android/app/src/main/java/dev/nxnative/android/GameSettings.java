@@ -45,6 +45,11 @@ final class GameSettings {
             full.value("The game keeps its normal speed when its frame rate drops or is limited. Off: it slows down with the frame rate, as on the console");
             Ui.add(box, full.view, 0);
         }
+        if (Prefs.steps(id)) {   // a framework of whole steps a frame (fps_steps): Hold 60 fps keeps one step at the cap of 60. The in-game panel changes it live
+            Ui.Setting hold = new Ui.Setting(a, "🎯", "Hold 60 fps", null).toggle(a, Prefs.hold60(a, id), (b, on) -> Prefs.hold60(a, id, on));
+            hold.value(Prefs.HOLD60_TEXT);
+            Ui.add(box, hold.view, 0);
+        }
         Ui.add(box, new Ui.Setting(a, "📐", "Display", v -> display(a, g, again)).value(Prefs.DISPLAY_NAMES[Prefs.stretch(a, id) ? 1 : 0]).chevron(a).view, 0);
         if (Prefs.dlssGame(id)) {   // a game on the DLSS stand-in (game.tsv dlss_standin): its Upscaler is the stand-in (GSR2's sliders under GSR 2, the sharpness under FSR 1)
             int dm = GameUpscaler.dlssMode(a, id);

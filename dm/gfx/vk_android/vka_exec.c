@@ -428,12 +428,16 @@ void vka_exec_hang_report(uint64_t fence) {
     vka_qtrace_dump();   // the scheduler's and the submissions' last events (vka_worker.c, DM_VK_QS_TRACE)
 }
 
-// Where a submission's recording time goes besides its draws, for the pace line (vka_exec_phases, cumulative ns): mtl_sub_begin (the slot's fence, the command buffer's reset
-// and begin, the texture re-uploads and descriptor table updates of vka_tex_prepare: the "prepare" part, timed apart) and the commit (the pass end, the encoder's drain, the
-// command buffer's end, the submit)
-static uint64_t g_t_begin, g_t_prep, g_t_commit;
+// Where a submission's recording time goes besides its draws, for the pace line (vka_exec_phases, cumulative ns): mtl_sub_begin (the slot's fence, the segment joins,
+// the command buffer's reset and begin, the texture re-uploads and descriptor table updates of vka_tex_prepare: the "prepare" part, timed apart) and the commit (the pass
+// end, the encoder's drain, the command buffer's end, the submit). The start's own parts are timed apart too (vka_exec_begin_parts): the wait for the command buffer
+// slot's fence, which is the replay thread blocked on the GPU (the slot's last submission, NSLOT commits back, not finished), not CPU work; and vka_mem_join_due (its
+// queue-idle wait, vka_mem_join_stats, and the join scan and work). A player's Ocarina of Time log had "submission start" 171 ms of a 208 ms recording a frame with the
+// replay thread on a core 34 ms: read as one number it looked like the joins' scan or the texture pool's work, and was the slot waits
+static uint64_t g_t_begin, g_t_prep, g_t_commit, g_t_slot, g_t_join;
 static _Atomic int g_rec_tid;   // the thread that records submissions (the replay worker, or the submitting thread inline): the pace line's thread statistics
 void vka_exec_phases(uint64_t *begin, uint64_t *prep, uint64_t *commit) { *begin = g_t_begin; *prep = g_t_prep; *commit = g_t_commit; }
+void vka_exec_begin_parts(uint64_t *slot, uint64_t *join) { *slot = g_t_slot; *join = g_t_join; }
 // the commit's parts (cumulative ns): waiting for the encoder thread to make every call, the upload batches' flush and throttle, vkQueueSubmit (vka_submit)
 static uint64_t g_t_cm_enc, g_t_cm_up, g_t_cm_sub;
 void vka_exec_commit_parts(uint64_t *enc, uint64_t *up, uint64_t *sub) { *enc = g_t_cm_enc; *up = g_t_cm_up; *sub = g_t_cm_sub; }
@@ -471,7 +475,7 @@ void vka_rp_sub_begin(void) {
     if (!vka_init()) return;
     vka_gpu_floor();
     if (vka_hung()) { VRED_ONCE("GPU hang: submissions from now on run their effects without the GPU"); return; }   // no command buffer: mtl_sub_commit takes the CPU path
-    vka_mem_join_due();   // parts of a pool placed by parts that a range given to the GPU lies across, joined into one (vka_mem.c "Joining parts"): before anything is recorded
+    { uint64_t tj0 = now_ns(); vka_mem_join_due(); g_t_join += now_ns() - tj0; }   // parts of a pool placed by parts that a range given to the GPU lies across, joined into one (vka_mem.c "Joining parts"): before anything is recorded
     g_sub_draws0 = g_stat_draws; g_sub_ops0 = g_stat_ops; g_sub_skip0 = g_stat_skipped; g_sub_t0 = now_ns(); g_n_sub++; g_rc_rec = 1;
     if (!g_pool) {
         VkCommandPoolCreateInfo pi = {VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO, .flags = VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT, .queueFamilyIndex = V.qf};
@@ -484,11 +488,13 @@ void vka_rp_sub_begin(void) {
     // A slot whose last commit went without a timeline signal (handed over while a lower fence was parked at a GPU wait, vka_qsched.h) waits for its own fence: its
     // timeline value comes only with a later commit, which this thread makes (waiting for it would wait forever), and is reached only once all work up to that later
     // commit is done (waiting for that tied the recording to the GPU: on the Honor Ocarina of Time's submission start took 20 ms a frame instead of 1.5, 2026-11-09)
+    uint64_t ts0 = now_ns();
     if (g_slot[k].vf_on) {
         if (vk.vkWaitForFences(V.dev, 1, &g_slot[k].vf, VK_TRUE, vka_hang_ns())) VRED_ONCE("a command buffer slot's fence was not reached in the hang time: reused anyway");
         vk.vkResetFences(V.dev, 1, &g_slot[k].vf); g_slot[k].vf_on = 0;
         if (g_slot_ts[k]) gpu_slot_done(k);   // its GPU times are there (its timeline fence may come later)
     } else if (g_slot[k].fence) vka_wait_done(g_slot[k].fence, UINT64_MAX);
+    g_t_slot += now_ns() - ts0;
     uint64_t done = vka_done();
     for (unsigned i = 0; i < NSLOT; i++) if (g_slot_ts[i] && g_slot[i].fence <= done) gpu_slot_done(i);
     g_cb = g_slot[k].cb;
