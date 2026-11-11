@@ -23,6 +23,18 @@ The profile's `graphics_scale` rows give the Android launcher's Game resolution:
 
 Live from the in-game panel (2026-11-10, by disassembly; phone check open): the game turns on the graphics scale change notification (`main+0x3bc0170`), and the notification handler above takes message 300 to `oe::GetCurrentGraphicsScale` (`main+0x3bc038c`; stored at +0x2c, bit 0x100 of its change mask, bit 1 for message 30), so the panel's Resolution row changes the size while the game runs ([Graphics scale changes while the game runs](../../../docs/reference/services.md#graphics-scale-changes-while-the-game-runs-message-300)). Original and 1440p ↔ the others also change the operation mode.
 
+### Optional Lichii add-ons
+
+The game profile implements three optional [Lichii add-ons](https://github.com/zortos293/Lichii/blob/nx2/src/core/file_sys/patch_manager.cpp) for v131072 main, full build ID `E0F3CCFAF50065AE4EA01EB5AEB13B1A45DA3348`. Rewrite the pack's code once. The rewritten main reports `OOT_PATCHES` in `main.fixups.tsv`. Set these in the title's environment before launching.
+
+| Switch | Effect |
+| --- | --- |
+| `DM_OOT_MAX_RESOLUTION=1` | Selects the full-scale path of the game's dynamic resolution controller. The current operation mode and graphics scale still determine the maximum size. Also enables Texture Pool x2. |
+| `DM_OOT_TEXTURE_POOL_X2=1` | Doubles the initial graphics allocation in main. Lichii credits RsMan-Dev and reports a null allocation in the guard house with full scale and the original pool. |
+| `DM_OOT_FPS_UNLOCK=1` | Computes the fractional update step from the interval between calls to the game's update hook. The guest clock gate supplies Switch 2 ticks. Each update is capped at 100 ms and the first sample uses the original step. Lichii credits Dark's earlier [Dynamic FPS routine](https://github.com/zortos293/Lichii/blob/nx2/docs/nx2/ocarina-dynamic-fps.md). |
+
+All switches default to off. The FPS option affects the accumulator at main + `0x6e6cc4`. The separate controller at main + `0x3b4f074` still chooses whole-vsync presentation intervals with the host. The FPS option neither changes the frame cap nor removes GPU work. The native implementation uses the rewriter's patch area and state page.
+
 ## Mac dry run
 
 Use the rewritten `patched_v0` and the original extracted `base/romfs`. Build the host with `make -C dm/host GAME=0400486024DEC000` and use the [Mac shader build](../../../docs/development.md#build-by-hand-mac). From the repository, set `DUMP` to the folder containing `base` and `WORK` to the build and run workspace beside it.
