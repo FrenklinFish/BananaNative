@@ -1418,6 +1418,13 @@ void vka_tex_own(vka_img *im, VkCommandBuffer cb) {
 }
 
 // ---------- Soft textures (vka_soft.h; profile tex_soft) ----------
+// How many of the finest levels a soft texture leaves out: DM_VK_TEX_SOFT_LEVELS (live, 1 by default, 1 to 3), leaving at least two levels. Each level out quarters what
+// is left: 1 keeps a quarter of the texture, 2 a sixteenth. For a game whose textures in use alone overrun memory (Mario Kart World on a 12 GB device: 3.9 GB of images in use)
+static uint32_t soft_levels(uint32_t levels) {
+    uint32_t n = (uint32_t)VKA_ENV("DM_VK_TEX_SOFT_LEVELS", 1); if (n < 1) n = 1; if (n > 3) n = 3;
+    return levels > 2 && n > levels - 2 ? levels - 2 : n;
+}
+static uint32_t d_levels_of(const tex_t *t) { return t->d.levels ? (uint32_t)t->d.levels : 1; }
 // A large block-compressed texture from the game's files (vksoft_candidate, with content from its storage: ST_TRACK / ST_FILL) is an image from texture level 1 (img_create's
 // base, the mechanism a sparse texture's left-out levels use): uploads deswizzle texture level image level + base (upload_, upload_mt), views, render targets and copies map
 // texture levels through vka_img_lv / vksoft_view, and a view of level 0 starts at level 1 while a copy of level 0 is skipped. What the game sees differently: softer texels
@@ -1445,11 +1452,11 @@ static void soft_line(char *b, size_t n) {   // caller holds g_tmu
              (unsigned long long)g_soft_n, g_soft_bytes / 1048576.0, (unsigned long long)g_soft_made, (unsigned long long)g_soft_whole);
 }
 static void soft_note(vka_img *im, const tex_t *t) {   // a new soft image (caller holds g_tmu)
-    if (im->base != 1) return;   // (img_create_ starts it at 0 when it could not)
-    im->soft = 1; im->soft_saved = vksoft_saved(nvn_tex_level_offset(&t->d, 1), im->layers);
+    if (!im->base) return;   // (img_create_ starts it at 0 when it could not; DM_VK_TEX_SOFT_LEVELS may start it at 2 or 3)
+    im->soft = 1; im->soft_saved = vksoft_saved(nvn_tex_level_offset(&t->d, im->base ? im->base : 1), im->layers);
     g_soft_n++; g_soft_bytes += im->soft_saved; g_soft_made++;
-    if (g_soft_made <= 4) VLOG("soft texture serial %llu %ux%u layers %u levels %u format %#x: an image of its levels 1-%u (%.1f MiB of storage left out)", (unsigned long long)t->serial,
-                               t->d.width, t->d.height, im->layers, t->d.levels, t->d.levels - 1, im->soft_saved / 1048576.0);
+    if (g_soft_made <= 4) VLOG("soft texture serial %llu %ux%u layers %u levels %u format %#x: an image of its levels %u-%u (%.1f MiB of storage left out)", (unsigned long long)t->serial,
+                               t->d.width, t->d.height, im->layers, t->d.levels, t->d.format, im->base, t->d.levels - 1, im->soft_saved / 1048576.0);
     if (!(g_soft_made & (g_soft_made - 1)) || !(g_soft_made % 1024)) { char b[300]; soft_line(b, sizeof b); VLOG("%s", b); }   // (1, 2, 4, ... and every 1024th; the ctl stats print it too)
 }
 void vka_tex_soft_stats(char *b, size_t n) { pthread_mutex_lock(&g_tmu); soft_line(b, n); pthread_mutex_unlock(&g_tmu); }
@@ -1690,7 +1697,7 @@ vka_img *vka_tex_get(const tex_t *t, VkCommandBuffer cb) {
             mode = first_mode(t, &f, cpuw_take(t->serial, 0));
             soft = !base && soft_want(t, &f, mode);
             g_zwant = mode == ST_ZERO && !(t->d.flags & NVN_TEXTURE_FLAGS_IMAGE) && (t->L.size <= 32ull * 1024 * 1024);
-            im = img_create(t, &f, soft ? 1 : base);
+            im = img_create(t, &f, soft ? soft_levels(d_levels_of(t)) : base);
             g_zwant = 0;
             if (im && soft) soft_note(im, t);   // (a soft texture: from level 1, "Soft textures" above)
         }
