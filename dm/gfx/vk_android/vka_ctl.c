@@ -6,7 +6,7 @@
 //                     (the switch reads as unset). Switches that need a restart are named in the log line (g_restart)
 //   "capture <n>"     the next n frames, one log line each: draws, skipped draws, render passes, full barriers, clears / copies, submissions, recording ms, GPU ms
 //   "screenshot [p]"  the next presented game frame (the window texture, before the present's scaling) as a PNG, by default ctl-shot-<frame>.png beside the control file
-//   "stats"           one log line now: the last 60 frames' averages, the frame rate, placed memory, pipelines, the switches set live
+//   "stats"           log lines now: the last 60 frames' averages, the frame rate, placed memory, pipelines, the switches set live, and the images by content and by why they stay
 // Every answer is a log line starting "[vk] ctl:" (android/tools/nxctl.sh waits for them)
 #if defined(__ANDROID__)
 #include "vka.h"
@@ -148,6 +148,7 @@ static void stats_line(uint64_t f) {
     { char im[600]; vka_imem_stats(im, sizeof im); VLOG("ctl: %s", im); }
     { char bs[1000]; vka_tex_big_stats(bs, sizeof bs); if (bs[0]) VLOG("ctl: %s", bs); }
     { char ss[300]; vka_tex_soft_stats(ss, sizeof ss); VLOG("ctl: %s", ss); }
+    vka_tex_kind_log();
 }
 void vka_ctl_frame(uint64_t f) {   // mtl_set_frame: frame f begins
     snap(&g_rec[f % NREC], f);
