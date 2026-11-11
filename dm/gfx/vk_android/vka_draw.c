@@ -1764,6 +1764,16 @@ void vka_draw_pace(char *b, size_t n, double *draw_us) {
 }
 static void draw_body(vka_dstate *d, const p_set_rt *rt, int has_rt, const p_scissor *sc, int has_sc, const p_draw *dw, const p_draw_idx *di);
 // A draw, timed when it is DM_VK_PROF's (every draw) or the pace line's sample (one in DM_VK_PACE_PROF, default 16: ten counter reads in a timed draw, none in the others)
+// DM_VK_SKIP_FS=<pixel shader key>[,...] (live, up to 8): every draw of those pixel shaders is dropped. The launcher's Game settings › Speedhack: Turn off hidden layers
+// sets it to the profile's skip_layers keys, layers later drawing covers; set by hand it measures a shader's GPU cost (the picture is then wrong)
+static int skip_fs(uint64_t fs) {
+    static uint32_t gen = ~0u; static uint64_t keys[8]; static int nk;
+    uint32_t g = atomic_load_explicit(&vka_env_gen, memory_order_relaxed);
+    if (g != gen) { gen = g; nk = 0; const char *e = getenv("DM_VK_SKIP_FS"); while (e && *e && nk < 8) { char *end; uint64_t k = strtoull(e, &end, 16); if (end == e) break; keys[nk++] = k; e = *end ? end + 1 : end; } }
+    for (int i = 0; i < nk; i++) if (keys[i] == fs) return 1;
+    return 0;
+}
+
 void vka_draw(vka_dstate *d, const p_set_rt *rt, int has_rt, const p_scissor *sc, int has_sc, const p_draw *dw, const p_draw_idx *di) {
     static int tick;
     if (!g_prof_all && (g_prof_every <= 0 || ++tick < g_prof_every)) { draw_body(d, rt, has_rt, sc, has_sc, dw, di); return; }
@@ -1895,6 +1905,7 @@ static void draw_body(vka_dstate *d, const p_set_rt *rt, int has_rt, const p_sci
         else VRED_ONCE("geometry shader %016llx writes memory in an %s draw: drawn without the claim, its writes repeated by the device's runs of each primitive", (unsigned long long)sh[2]->key, ind ? "indirect" : "instanced");
     }
     if (expand && ind) SKIP("an indirect draw of quads or a line loop is not on Vulkan yet: skipped");
+    if (!mesh && sh[1] && skip_fs(sh[1]->key)) { g_skipped++; return; }
 
     PT(1);
     // The last draw's shaders' layout (layouts live as long as the device): the layout table's lock and hash a draw

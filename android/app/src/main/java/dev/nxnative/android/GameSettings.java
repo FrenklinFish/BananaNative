@@ -76,6 +76,11 @@ final class GameSettings {
         Ui.Setting crp = new Ui.Setting(a, "🧱", "Classic render passes", null).toggle(a, Prefs.classicPasses(a, id), (b, on) -> Prefs.classicPasses(a, id, on));
         crp.value("Render passes instead of dynamic rendering (less CPU a pass on Qualcomm's driver)");
         Ui.add(box, crp.view, 0);
+        if (Prefs.skipLayersGame(id)) {   // a game whose profile names layers the picture covers anyway (game.tsv skip_layers)
+            Ui.Setting hid = new Ui.Setting(a, "🚀", "Speedhack: Turn off hidden layers (experimental)", null).toggle(a, Prefs.skipLayers(a, id), (b, on) -> Prefs.skipLayers(a, id, on));
+            hid.value("Skips layers that later drawing covers (much faster where they are drawn). Turn it off if something looks missing");
+            Ui.add(box, hid.view, 0);
+        }
         Ui.Setting pso = new Ui.Setting(a, "🧵", "Background pipelines", null).toggle(a, Prefs.psoAsync(a, id), (b, on) -> Prefs.psoAsync(a, id, on));
         pso.value("New pipelines are made in the background: a short pop-in instead of a stutter the first time something is drawn");
         Ui.add(box, pso.view, 0);
