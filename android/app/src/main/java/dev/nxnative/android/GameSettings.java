@@ -98,6 +98,8 @@ final class GameSettings {
 
     static String windowLabel(MainActivity a, String id) {
         String w = Prefs.gameWindow(a, id);
+        Profile p = Profile.of(id);
+        if (p != null && p.modeOf(w) >= 0) return p.modeLabel(p.modeOf(w));   // the two-choice form (Profile.modes): Docked or Handheld
         String l = Prefs.windowName(w, false);
         return Prefs.ownWindow(a, id) ? l : "Default · " + l;
     }
@@ -172,6 +174,17 @@ final class GameSettings {
     }
 
     private static void resolution(MainActivity a, Game g, Runnable done) {
+        Profile mp = Profile.of(g.titleId);
+        String[] modes = mp != null ? mp.modes() : null;
+        if (modes != null) {   // a game with one docked and one handheld row (Profile.modes): those two choices only, as Display shows its two
+            new AlertDialog.Builder(a).setTitle("Game resolution · " + g.name).setSingleChoiceItems(new String[] {mp.modeLabel(0), mp.modeLabel(1)},
+                    mp.modeOf(Prefs.gameWindow(a, g.titleId)), (x, w) -> {
+                Prefs.gameWindow(a, g.titleId, modes[w]);
+                x.dismiss();
+                done.run();
+            }).setNegativeButton("Cancel", null).show();
+            return;
+        }
         String[] labels = new String[Prefs.WINDOWS.length + 1];
         labels[0] = "Default (" + Prefs.windowName(Prefs.defaultWindow(a, g.titleId), false) + ")";
         { Profile lp = Profile.of(g.titleId); for (int li = 0; li < Prefs.WINDOWS.length; li++) labels[li + 1] = lp != null ? lp.windowLabel(Prefs.WINDOWS[li], Prefs.WINDOW_NAMES[li]) : Prefs.WINDOW_NAMES[li]; }   // a choice the game draws at another size says so (Profile.windowLabel)

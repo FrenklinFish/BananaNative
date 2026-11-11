@@ -656,6 +656,7 @@ Profile keys (`game.tsv`) whose value changes what the host does, set away from 
 
 | Key and value | Games | Binding | Why |
 |---|---|---|---|
+| `android_window 1920x1080` | [Fire Emblem Fortune's Weave](../../dm/games/04007EF01F8AE000/README.md) | `game`, at goal | the same default as without the key (Phone 1080p), named in the profile so that one line changes the game's default output (Fire Emblem Fortune's Weave: handheld; original would give docked) |
 | `av1_decoder dav1d` | [Fire Emblem Fortune's Weave](../../dm/games/04007EF01F8AE000/README.md) | `game` → `host`, gap | the default decoder drops frames of this game's movies on the phone; frame-parallel dav1d for every game once it is checked on the other games' movies |
 | `draw_barriers game` | [The Legend of Zelda: Ocarina of Time](../../dm/games/0400486024DEC000/README.md) | `game` → `host`, gap | what NVN specifies: a default for every game after `regress.py check` on the games |
 | `drs_ctl e25c90c1c136638885659fd55bf8a03b 0x38e100 0x38de2c 0x38dcbc 0x38dbc8` | [Donkey Kong Bananza](../../dm/games/040074A01BF12000/README.md) | `build` → `engine`, gap | four places in sead / agl's MaintainGpuPercentage controller, at fixed offsets per main build (each checked for its instruction); a fingerprint of the controller could find them in other games on that engine |
@@ -664,6 +665,7 @@ Profile keys (`game.tsv`) whose value changes what the host does, set away from 
 | `fps_steps d00e4f399e411d0613aa8d26b1c02fef 0x37c8410 0x8 0x210 0x214` | [Mario Kart World](../../dm/games/0400C3F00006E000/README.md) | `build` → `engine`, gap | the framework at a fixed global per main build; a fingerprint of its frame function (the step pick from the mode, then the update loop over the count and the present interval set to it) could find it in the game's updates |
 | `fps_target 30` | [Fire Emblem Fortune's Weave](../../dm/games/04007EF01F8AE000/README.md) | `game`, at goal | a choice per game |
 | `game_env DOTNET_GCRegionRange=60000000` | [Absolum](../../dm/games/0100A83022A22000/README.md) | `game`, at goal | measured for the game's regions |
+| `graphics_scale 2048x1152 1 console` | [Fire Emblem Fortune's Weave](../../dm/games/04007EF01F8AE000/README.md) | `game`, at goal | the game sizes its 3D scenes by the graphics scale, not by its window; which crop each scale gives was measured on the game |
 | `graphics_scale original 1 console` | [The Legend of Zelda: Ocarina of Time](../../dm/games/0400486024DEC000/README.md) | `game`, at goal | the game sizes its 3D scenes by the graphics scale, not by its window; which crop each scale gives was measured on the game |
 | `present_snap on` | [The Legend of Zelda: Breath of the Wild](../../dm/games/01007EF00011E000/README.md) | `game` → `host`, gap | a setting the game was tested with: a default for every game after `regress.py check` on the games |
 | `pso_mtl4 on` | [The Legend of Zelda: Breath of the Wild](../../dm/games/01007EF00011E000/README.md) | `game` → `host`, gap | a setting the game was tested with on an iPhone: a default for every game after `regress.py check` on the games |
