@@ -102,12 +102,14 @@ def report(n, since=0, as_json=False):
     o.append(f"== issue #{n}: {iss['title']}")
     o.append(f"   {iss['state']}, by {iss['user']['login']} {iss['created_at']}, labels: {', '.join(l['name'] for l in iss.get('labels') or []) or 'none'}; "
              f"{FORGEJO}/{REPO}/issues/{n}; files in {d}")
+    who = {'issue': (iss['user']['login'], iss.get('html_url') or f'{FORGEJO}/{REPO}/issues/{n}')}   # where a log came from -> (poster, link)
     body = split_body(iss.get('body'), 'issue', d, logs)
     assets(iss.get('assets'), 'issue', d, logs, others)
     if not since: o += ['-- text', body]
     for c in comments(n):
         if c['id'] <= since: continue
         where = f"c{c['id']}"
+        who[where] = (c['user']['login'], c.get('html_url') or f'{FORGEJO}/{REPO}/issues/{n}#issuecomment-{c["id"]}')
         text = split_body(c.get('body'), where, d, logs)
         assets(c.get('assets'), where, d, logs, others)
         o += [f"-- comment {c['id']} by {c['user']['login']} {c['created_at']}", text]
@@ -126,7 +128,8 @@ def report(n, since=0, as_json=False):
             o.append(f'-- {p.name} ({src}): cannot read: {e}'); continue
         txt = log_digest.render(dg)
         (p.parent / (p.name + '.digest')).write_text(txt, encoding='utf-8')
-        digests.append({'file': str(p), 'source': src, 'digest': dg})
+        poster, link = who.get(p.name.split('-', 1)[0], (None, None))
+        digests.append({'file': str(p), 'source': src, 'poster': poster, 'link': link, 'digest': dg})
         o.append(f'-- log {p.name} ({src})')
         o.append(txt.rstrip('\n'))
     if as_json: return json.dumps({'issue': n, 'title': iss['title'], 'dir': str(d), 'text': body, 'logs': digests}, indent=1, ensure_ascii=False) + '\n'

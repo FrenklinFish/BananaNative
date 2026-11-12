@@ -36,13 +36,81 @@ def fence(text):
     return '`' * max(3, max(runs, default=0) + 1)
 
 
+GAME_RX = re.compile(r'^(.*?)\s*\b([0-9A-Fa-f]{16})\b')
+VK_DRIVER_ID = {8: 'Qualcomm', 18: 'Turnip'}   # VkDriverId: QUALCOMM_PROPRIETARY, MESA_TURNIP
+
+
+def vendor(h):
+    """Qualcomm or Turnip (or None): by the driver ID the run reported, else by the driver's description"""
+    if h.get('driver_id') in VK_DRIVER_ID: return VK_DRIVER_ID[h['driver_id']]
+    d, g = (h.get('driver') or '').lower(), (h.get('gpu') or '').lower()
+    if 'qualcomm' in d: return 'Qualcomm'
+    return 'Turnip' if 'turnip' in d or ('mesa' in d and 'adreno' in g) else None
+
+
+def driver_label(h):
+    """'Qualcomm system driver', 'Qualcomm driver v863.1 (custom)', 'Turnip v39 (custom)'"""
+    v, k = vendor(h), h.get('driver_kind') or ''
+    m = re.match(r'custom \((?:DM_VK_DRIVER )?(.*)\)$', k)
+    if k == 'system': return f'{v} system driver' if v else 'system driver'
+    if m: return (f'{v} ' if v and v.lower() not in m.group(1).lower() else '') + ('' if v == 'Turnip' else 'driver ') + f'{m.group(1)} (custom)'
+    return f'{v} driver' if v else None
+
+
+def device_label(dev):
+    """'Xiaomi 23049PCD8G, Android 17 (SDK 37), arm64-v8a' -> 'Xiaomi 23049PCD8G (Android 17)'"""
+    if not dev: return None
+    bits = [b.strip() for b in dev.split(',')]
+    android = next((re.sub(r'\s*\(SDK \d+\)', '', b) for b in bits[1:] if b.startswith('Android')), None)
+    return bits[0] + (f' ({android})' if android else '')
+
+
+def game_label(h):
+    m = GAME_RX.match(h.get('game') or '')
+    if not m: return h.get('game')
+    return f'{m.group(1)} (`{m.group(2).upper()}`)' if m.group(1) else f'`{m.group(2).upper()}`'
+
+
+def fits(ref_text, h):
+    """A reference written for one driver (its heading names Turnip or Qualcomm) is kept only for a run on that driver"""
+    v, t = vendor(h), ref_text.lower()
+    return ('turnip' not in t or v == 'Turnip') and ('qualcomm' not in t or v == 'Qualcomm')
+
+
+def references(d):
+    """(heading, doc) of the notes that may explain the run: symptom-index matches first, then the verdict's rule, those for the other driver left out"""
+    h, out = d.get('header') or {}, []
+    for x in d.get('symptoms') or []:
+        out.append((x['heading'], x['doc']))
+    v = d['verdict']
+    if v.get('doc'):
+        anchor = v['doc'].split('#', 1)[-1].replace('-', ' ')
+        out.append((anchor[:1].upper() + anchor[1:], v['doc']))
+    seen, keep = set(), []
+    for head, doc in out:
+        if doc in seen or not fits(head + ' ' + doc, h): continue
+        seen.add(doc); keep.append((head, doc))
+    return keep
+
+
+def where_label(log):
+    name = log['source'].split(': ', 1)[1] if ': ' in log['source'] else 'pasted log'
+    return f"[{name}]({log['link']})" if log.get('link') else name
+
+
 def summary_line(log):
-    v = log['digest']['verdict']
-    s = f"**{log['source'][:1].upper() + log['source'][1:]}**: {v['label']}" + (f": {v['sentence']}" if v.get('sentence') else '')
-    if v.get('rule'):
-        cause = v.get('cause') or v['rule']
-        s += f"\n  Likely cause: {cause}" + (f" ([reference]({doc_url(v['doc'])}))" if v.get('doc') else '')
-    return s
+    d = log['digest']; h, v, s, p = d.get('header') or {}, d['verdict'], d.get('stage') or {}, d.get('perf') or {}
+    who = [f"**{log['poster']}**" if log.get('poster') else None, where_label(log),
+           f"Banana Native {h['app_version'].split(' ')[0]}" if h.get('app_version') else None,
+           ', '.join(x for x in (device_label(h.get('device')), (h.get('gpu') or '').split(',')[0].replace(' (TM)', '')) if x) or None,
+           driver_label(h), game_label(h)]
+    line = ' · '.join(x for x in who if x)
+    when = 'in game' if s.get('number') == 8 else f"before the game started (stage {s['number']}, {s['name']})" if s else None
+    fps = p.get('fps_game', {}).get('median')
+    ctx = ', '.join(x for x in (when, f'about {fps:.0f} fps before it' if fps and v['kind'] not in ('normal_exit', 'stopped') else None) if x)
+    what = v.get('cause') or v.get('sentence') or ''
+    line += f"\n  **{v['label'][:1].upper() + v['label'][1:]}**" + (f' ({ctx})' if ctx else '') + (f': {what}' if what else '')
+    return line
 
 
 def body(n, data):
@@ -52,7 +120,14 @@ def body(n, data):
     parts = [I.BOT_MARK, '### Automatic log analysis', '',
              f'Made by a script from the {"log" if len(logs) == 1 else f"{len(logs)} logs"} in this issue; it is updated when a new log comes in. '
              'A maintainer reads the issue too.', '']
+    kinds = {(lg['digest']['verdict']['kind'], lg['digest']['verdict'].get('rule')) for lg in logs}
+    if len(logs) > 1 and len(kinds) == 1:
+        parts += [f"{'Both' if len(logs) == 2 else f'All {len(logs)}'} logs end the same way: **{logs[0]['digest']['verdict']['label']}**.", '']
     parts += [f'- {summary_line(lg)}' for lg in logs]
+    tips = list(dict.fromkeys(lg['digest']['verdict']['meaning'] for lg in logs if lg['digest']['verdict'].get('meaning')))
+    if tips: parts += ['', '**What you can try**', ''] + [f'- {t}' for t in tips]
+    refs = list(dict.fromkeys(r for lg in logs for r in references(lg['digest'])))
+    if refs: parts += ['', '**Notes that may match** (for maintainers)', ''] + [f'- [{head}]({doc_url(doc)})' for head, doc in refs]
     digests = []
     for lg in logs:
         txt = I.log_digest.render(lg['digest']).rstrip('\n')
