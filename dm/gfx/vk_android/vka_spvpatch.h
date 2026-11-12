@@ -29,6 +29,8 @@ uint32_t *vka_spv_instance(const uint32_t *w, size_t nw, uint32_t binding, uint3
 // emitted (or null when the vertex shader has none): the passthrough copies a shader translated alone lacks (vka_spvpatch.c). A malloc'd copy (*out_nw words; *copied /
 // *nulled the locations added); NULL with err empty when the pixel shader reads nothing more, NULL with the reason in err when it cannot be made
 uint32_t *vka_spv_gs_link(const uint32_t *gw, size_t gn, const uint32_t *vw, size_t vn, const uint32_t *fw, size_t fn, uint32_t *copied, uint32_t *nulled, size_t *out_nw, char *err, size_t errn);
+// A geometry shader that may emit nothing for a primitive made to emit one degenerate primitive instead (Adreno's binning pass; vka_spvpatch.c). NULL with err empty: nothing to do
+uint32_t *vka_spv_gs_fill(const uint32_t *w, size_t nw, size_t *out_nw, char *err, size_t errn);
 // A pixel shader's colour outputs: the components each location's stores can write (bit c of comp[loc]), for the colour write mask: 0, or -1 when the module is not read
 int vka_spv_fout_comps(const uint32_t *w, size_t nw, uint8_t comp[8]);
 // Texture-use feedback for the texture pool (vka_spvpatch.c vka_spv_pool_fb): before each read of the pool (a one-index access chain into the sampled-image array at set
@@ -40,3 +42,7 @@ int vka_spv_fout_comps(const uint32_t *w, size_t nw, uint8_t comp[8]);
 // NULL with the reason in err when it cannot take the code (the module is then used as it is: its pool reads report nothing)
 enum { VKA_PFB_VTX_STORES = 1, VKA_PFB_EARLY = 2 };
 uint32_t *vka_spv_pool_fb(const uint32_t *w, size_t nw, uint32_t set, uint32_t tex_binding, uint32_t fb_set, uint32_t fb_binding, unsigned flags, uint32_t alpha_spec, size_t *out_nw, int *sites, int *early, char *err, size_t errn);
+// A pixel shader's user inputs moved to other locations, or made constant, for another earlier stage than its own (vka_spvpatch.c vka_spv_input_remap): the input at location
+// L < 16 moves to nibble L of map, or with nibble 0xf becomes a Private (0, 0, 0, 1). A malloc'd copy (*out_nw words; *moved / *consts the original locations of each kind);
+// NULL with err empty when nothing changes, NULL with the reason in err when it cannot be made
+uint32_t *vka_spv_input_remap(const uint32_t *w, size_t nw, uint64_t map, size_t *out_nw, uint32_t *moved, uint32_t *consts, char *err, size_t errn);

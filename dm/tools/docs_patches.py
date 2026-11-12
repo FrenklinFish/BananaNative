@@ -19,7 +19,7 @@ HOST_EXT = ('.c', '.m', '.mm', '.h', '.swift')
 # What a build-keyed host table does (the table's name in the source; a row of another table is listed under its own name)
 TABLES = {'k_locks': 'engine frame limit set to fps_target', 'k_ue': "Unreal's allocator on a host malloc zone", 'k_nier_dr': 'frame interval and dynamic-resolution floor'}
 # Profile keys that are not behaviour switches: per-game data or controls, not something the host does differently
-NOT_SWITCHES = {'pad_layout', 'depth_mode', 'mem_used', 'sys_resource', 'fastboot_env', 'romfs_substitute'}   # fastboot_env: a test-run preset (DM_FASTBOOT), not a change to how the game runs
+NOT_SWITCHES = {'pad_layout', 'depth_mode', 'mem_used', 'sys_resource', 'fastboot_env', 'devtools', 'romfs_substitute'}   # fastboot_env: a test-run preset (DM_FASTBOOT), not a change to how the game runs
 
 # ---- Binding: what a patch's correctness is anchored to, from the loosest (GitHub issue #635). A patch is at its goal when its binding is the loosest it could have; the gap between the two
 # is the work list. A patch file's BINDING is a list of {'what', 'now', 'goal', 'purpose', 'why'} with an optional 'blocked' (why the gap cannot close yet) or 'kept' (why it stays
@@ -98,6 +98,8 @@ SWITCH_BINDING = [
      'why': f'what the GPU does; off by default only because other games drew everything before: {DEFAULT_SOON}'}),
     ('gpu_timestamps', '', {'what': 'timestamp reports per segment', 'now': 'game', 'goal': 'host', 'purpose': 'rendering', 'why': f'what hardware records: {DEFAULT_SOON}'}),
     ('draw_barriers', '', {'what': 'draw passes ordered by the game\'s own barriers', 'now': 'game', 'goal': 'host', 'purpose': 'frame rate', 'why': f'what NVN specifies: {DEFAULT_SOON}'}),
+    ('android_window', '1920x1080', {'what': "the Android launcher's default Game resolution, the launcher's own default written out", 'now': 'game', 'goal': 'game', 'purpose': 'rendering',
+     'why': "the same default as without the key (Phone 1080p), named in the profile so that one line changes the game's default output (Fire Emblem Fortune's Weave: handheld; original would give docked)"}),
     ('android_window', '', {'what': "the Android launcher's default Game resolution", 'now': 'game', 'goal': 'host', 'purpose': 'frame rate',
      'why': "a workaround while the game's upscaler is too slow on Adreno with Turnip at 1080p: the faster upscaler makes it unneeded"}),
     ('mem_map_limit', '', {'what': 'MapPhysicalMemory limited to the application pool', 'now': 'game', 'goal': 'host', 'purpose': 'memory',
@@ -185,7 +187,8 @@ def build_rows(gs):   # {build ID: [(game, display version, module)]}
 def frame_step_sites(fn):   # (offset, reason) of each site a FRAME_STEP function writes, and whether it marks a render-scale stub
     pos, puts = [0x8000000], []
     def emit(w): pos[0] += 4
-    ctx = types.SimpleNamespace(here=lambda: pos[0], emit=emit, site=lambda off, orig: None, put=lambda off, words, why: puts.append((off, why)), state=0x9000000, render_scale=0)
+    ctx = types.SimpleNamespace(here=lambda: pos[0], emit=emit, site=lambda off, orig: None, put=lambda off, words, why: puts.append((off, why)),
+                                state=0x9000000, render_scale=0, build_id=None, counter=lambda reg, off: None)
     fn(ctx)
     return sorted(puts), ctx.render_scale
 

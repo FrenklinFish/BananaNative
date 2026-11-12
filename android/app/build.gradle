@@ -111,9 +111,28 @@ def presentOnlyOf = { String game -> tsvRows(game, 'fps_limit_present').isEmpty(
 // Hold 60 fps (Prefs.steps, Prefs.hold60: DM_FPS_HOLD60), one step a frame, where the game's own mode drops to two steps (30 fps) after a frame its work overran
 // or a host frame step (fps_target with the rewriter's FRAME_STEP stubs in the profile's patches.py: Ocarina of Time), which Hold 60 fps keeps at one vsync, late time paid back
 def stepsOf = { String game -> def pp = new File(repo, "dm/games/$game/patches.py"); def ft = tsvRows(game, 'fps_target'); (!tsvRows(game, 'fps_steps').isEmpty() || (!ft.isEmpty() && ft[0].size() > 1 && ft[0][1].trim() != '0' && pp.isFile() && pp.text.contains('FRAME_STEP'))) ? '1' : '' }
+// Profile-declared opt-in settings (game.tsv option rows: "<env>|<label>|<description>|<restart or live>", ';' between them: Profile.options)
+def optionsOf = { String game ->
+    tsvRows(game, 'option').collect { c ->
+        def env = c.size() > 1 ? c[1].trim() : ''
+        def label = c.size() > 2 ? c[2].trim() : ''
+        def desc = c.size() > 3 ? c[3].trim() : ''
+        def mode = 'restart'
+        def implies = ''
+        def needs = ''
+        if (c.size() > 4) {
+            c.drop(4).collectMany { it.trim().split(/\s+/) as List }.each { tok ->
+                if (tok == 'restart' || tok == 'live') mode = tok
+                else if (tok.startsWith('implies=')) implies = tok.substring('implies='.length()).trim()
+                else if (tok.startsWith('needs=')) needs = tok.substring('needs='.length()).trim()
+            }
+        }
+        [env, label, desc, mode, implies, needs].collect { it.replaceAll(/[\t\n\\"]/, ' ').replaceAll(/[;|]/, ',').trim() }.join('|')
+    }.join(';')
+}
 // The pixel shaders the game's Speedhack setting drops (game.tsv skip_layers: shader keys, comma separated), or empty. The launcher then offers the toggle (Prefs.skipLayersGame)
 def skipLayersOf = { String game -> tsvRows(game, 'skip_layers').with { rs -> rs.isEmpty() || rs[0].size() < 2 ? '' : rs[0][1].trim().replaceAll(/[^0-9a-fA-F,]/, '') } }
-def nxProfiles = nxGames.collect { g -> [g, nameOf(g).replaceAll(/[\t\n\\"]/, ' '), shaderTotalOf(g), shaderInputsOf(g), buildsOf(g), reqsOf(g), statusOf(g), deltaOf(g), stampOf(g), resolutionOf(g), romfsChecksOf(g), gpuTsOf(g), windowOf(g), decoupleOf(g), drsOf(g), fpsLimitOf(g), dlssOf(g), presentOnlyOf(g), stepsOf(g), skipLayersOf(g)].join('\\t') }.join('\\n')
+def nxProfiles = nxGames.collect { g -> [g, nameOf(g).replaceAll(/[\t\n\\"]/, ' '), shaderTotalOf(g), shaderInputsOf(g), buildsOf(g), reqsOf(g), statusOf(g), deltaOf(g), stampOf(g), resolutionOf(g), romfsChecksOf(g), gpuTsOf(g), windowOf(g), decoupleOf(g), drsOf(g), fpsLimitOf(g), dlssOf(g), presentOnlyOf(g), stepsOf(g), tsvRows(g, 'mesh_vegetation_cut').isEmpty() ? '' : '1', optionsOf(g), skipLayersOf(g)].join('\\t') }.join('\\n')
 def lockOf = { String key -> def f = new File(repo, 'dm/gfx/tools/dmsh_chain.lock'); f.isFile() ? (f.readLines().find { it.startsWith(key + '\t') }?.split('\t')?.getAt(1) ?: 'unknown') : 'unknown' }
 
 android {

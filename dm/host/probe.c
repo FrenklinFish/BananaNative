@@ -1,5 +1,6 @@
 // Probes DM_PROBE: when the debugger needs a system authorization prompt on the Mac, use this to print registers and a backtrace at a guest address.
 #include "dm.h"
+#include <math.h>
 #include <signal.h>
 #include <dlfcn.h>
 #include <sys/mman.h>
@@ -406,21 +407,163 @@ static void watch_start(void) {   // DM_PROBE_WATCH at start, or later through t
 #if !PLAT_IOS
 // ---------- Dev tools, changed while the game runs (DM_DEVTOOLS=1 at start; off by default, nothing below runs without it) ----------
 // A thread looks at the live control's generation (vka_ctl.c: an "env KEY=VALUE" line in DM_CTL, android/tools/nxctl.sh env) five times a second and, when it moved,
-// reads DM_PROBE_LIVE and DM_PROBE_WATCH again
+// reads DM_PROBE_LIVE, DM_PROBE_WATCH, DM_TELEPORT, DM_POSE_SET and DM_POSE_GET again
 extern _Atomic uint32_t vka_env_gen __attribute__((weak));
 static int devtools_on(void) { static int on = -1; if (on < 0) { const char *e = getenv("DM_DEVTOOLS"); on = e && atoi(e) > 0; } return on; }
 static module_t *main_mod(void) { for (int i = 0; i < g_nmod; i++) if (!strcmp(g_mod[i].name, "main")) return &g_mod[i]; return NULL; }
-// DM_PROBE_LIVE=<hex offset>[,...] (into main): each new offset gets a printing probe while the game runs, no restart (at most 6 printed hits each unless
+// The game's dev tools row (game.tsv devtools, DM_GAME_DEVTOOLS): the main build they were found on and the code offsets into it, so a profile without the
+// row, or another build of the game, gets a red line instead of writes at the wrong place. Donkey Kong Bananza's: main=<build ID> actor=<DK actor's class>
+// pose=<his pose's class> pose_writer=<the probe in the per-frame pose writer> transform=<the transform hand-off>
+typedef struct { int ok; char build[40]; uint64_t actor, pose, pose_writer, transform; } devrow_t;
+static const devrow_t *devrow(const char *what) {
+    static devrow_t r; static int parsed;
+    if (!parsed) {
+        parsed = 1; char s[512]; strlcpy(s, DM_GAME_DEVTOOLS, sizeof s);
+        for (char *t = strtok(s, " "); t; t = strtok(NULL, " ")) {
+            char *v = strchr(t, '='); if (!v) continue; *v++ = 0;
+            if (!strcmp(t, "main")) strlcpy(r.build, v, sizeof r.build);
+            else if (!strcmp(t, "actor")) r.actor = strtoull(v, 0, 16); else if (!strcmp(t, "pose")) r.pose = strtoull(v, 0, 16);
+            else if (!strcmp(t, "pose_writer")) r.pose_writer = strtoull(v, 0, 16); else if (!strcmp(t, "transform")) r.transform = strtoull(v, 0, 16);
+        }
+        r.ok = r.build[0] && r.actor && r.pose && r.pose_writer && r.transform;
+    }
+    module_t *m = main_mod();
+    if (!r.ok) { LOG("[RED] %s: the game profile has no devtools row (game.tsv)", what); return NULL; }
+    if (!m || strcmp(m->build_id, r.build)) { LOG("[RED] %s: the game profile's devtools row is for main build %.8s, this one is %.8s", what, r.build, m ? m->build_id : "?"); return NULL; }
+    return &r;
+}
+// Teleport into a stage the way a door does (Donkey Kong Bananza; the main build in its devtools row). A door calls main+0x14fd3a0(holder, stage, arrival GUID): main+0x14fd3f0
+// fills the stage-change request (stage name string at +0x18, scenario +0x20, arrival GUID string at +0x28, type +0x30 = 1, +0x34 = 2) and sets its flag byte +0; the
+// scene ends and the sequence (main+0x668684) builds the stage named there. The request is a heap object whose two strings point at buffers inside it (+0x158 and
+// +0x288): found by that shape in the game's read-write memory on the first DM_TELEPORT (a second or two), kept while it still has it. DM_TELEPORT=<stage>,<arrival GUID> writes it and sets the flag; DM_TELEPORT=? logs the last request (go through
+// a door, then ask: that pair is a target). Limits: from the overworld only (a sublevel requested from inside another one asks for a second stage heap and crashes the
+// load), and leaving a teleported stage reloads it instead of returning to the overworld
+static uint64_t g_tp;   // the request, once found
+static int tp_shape(uint64_t r) { uint64_t a = 0, b = 0; return !plat_mem_read(r + 0x18, &a, 8) && !plat_mem_read(r + 0x28, &b, 8) && a == r + 0x158 && b == r + 0x288; }
+static uint64_t tp_find(void) {
+    if (g_tp && tp_shape(g_tp)) return g_tp;
+    g_tp = 0;
+    FILE *f = fopen("/proc/self/maps", "r"); if (!f) return 0;
+    char line[512]; unsigned long long lo, hi; char perm[8];
+    while (!g_tp && fgets(line, sizeof line, f)) {
+        if (sscanf(line, "%llx-%llx %7s", &lo, &hi, perm) != 3 || perm[0] != 'r' || perm[1] != 'w' || lo < 0x4000000000ull || hi > 0x8000000000ull) continue;
+        for (uint64_t q = lo; q + 0x300 <= hi; q += 8)   // guest memory is mapped at its own addresses
+            if (*(volatile uint64_t *)(uintptr_t)(q + 0x18) == q + 0x158 && *(volatile uint64_t *)(uintptr_t)(q + 0x28) == q + 0x288) { g_tp = q; break; }
+    }
+    fclose(f);
+    return g_tp;
+}
+static int tp_str(uint64_t obj, char *out, size_t n, uint64_t *buf) {   // a request string: a pointer to its own buffer right after it, capacity 0x100
+    uint64_t p = 0; uint32_t cap = 0;
+    if (plat_mem_read(obj, &p, 8) || plat_mem_read(obj + 8, &cap, 4) || p != obj + 12 || cap != 0x100) return -1;
+    if (out) { if (plat_mem_read(p, out, n - 1)) return -1; out[n - 1] = 0; }
+    if (buf) *buf = p;
+    return 0;
+}
+static void teleport_live(void) {
+    const char *e = getenv("DM_TELEPORT"); static char last[160];
+    if (!e || !strcmp(e, last)) return;
+    strlcpy(last, e, sizeof last);
+    if (!devrow("teleport")) return;
+    uint64_t so = 0, go = 0, sb = 0, gb = 0, req = tp_find(); char st[64], gu[64];
+    if (!req || plat_mem_read(req + 0x18, &so, 8) || plat_mem_read(req + 0x28, &go, 8) || tp_str(so, st, sizeof st, &sb) || tp_str(go, gu, sizeof gu, &gb)) {
+        LOG("[RED] teleport: the stage-change request was not found in the game's memory"); g_tp = 0; return; }
+    if (!strcmp(e, "?")) { LOG("teleport: the last request was %s,%s", st, gu); return; }
+    char stage[128], guid[64]; const char *c = strchr(e, ',');
+    if (!c || c - e >= (long)sizeof stage || strlen(c + 1) >= sizeof guid) { LOG("[RED] teleport: DM_TELEPORT=<stage>,<arrival GUID> (or ? for the last door's)"); return; }
+    memcpy(stage, e, (size_t)(c - e)); stage[c - e] = 0; strlcpy(guid, c + 1, sizeof guid);
+    char *sp = (char *)(uintptr_t)sb, *gp = (char *)(uintptr_t)gb;
+    memset(sp, 0, 128); memcpy(sp, stage, strlen(stage)); memset(gp, 0, 64); memcpy(gp, guid, strlen(guid));
+    *(int32_t *)(uintptr_t)(req + 0x20) = 1; *(int32_t *)(uintptr_t)(req + 0x30) = 1; *(int32_t *)(uintptr_t)(req + 0x34) = 2;
+    __atomic_thread_fence(__ATOMIC_SEQ_CST);
+    *(volatile uint8_t *)(uintptr_t)req = 1;
+    LOG("teleport: to %s (arrival %s), was %s (request at %#llx)", stage, guid, st, (unsigned long long)req);
+}
+// DM_POSE_SET=<x>,<y>,<z>[,<qx>,<qy>,<qz>,<qw>] (Donkey Kong Bananza; offsets from its devtools row, found on main build e25c90c1): puts DK at that body position (and facing) the way the game's own
+// transform change does. DK's actor is the one heap object whose class is the row's actor= (main+0x238d1a8 on e25c90c1) and whose pose's class is pose=; its physics body wrapper B = [[[actor+0x88]+0x18]+0x50] (matrix at +0xd8,
+// rows of 4 floats, translation in each row's last float), its physics handle [B+0x90], its pose [actor+0x60] (facing quaternion at +0x20). The solver keeps the
+// position to itself while the body is awake (flag bit 15: main+0x1282c syncs it into B every frame), so the matrices cannot simply be written: a one-time probe
+// in DK's per-frame pose writer (pose_writer=, just after its entry: x1 = the pose's position; it runs whether the body sleeps or not) calls transform=(handle, new 3x4 matrix, B),
+// the hand-off main+0x34d2c8 makes for a pending transform (change flag bit 6), on the game's thread
+static uint64_t g_pose_b, g_pose_h, g_pose_at; static float g_pose_m[12] __attribute__((aligned(16))); static uint64_t g_pose_fn;
+static void pose_cb(ucontext_t *uc) {   // at the row's pose_writer (x1 = the pose's position), every frame whether the body is awake or not
+    if (!g_pose_b || PLAT_UC_X(uc, 1) != g_pose_at) return;
+    ((void (*)(uint64_t, const float *, uint64_t))(uintptr_t)g_pose_fn)(g_pose_h, g_pose_m, g_pose_b);
+    LOG("pose: DK's body set to %.2f %.2f %.2f", g_pose_m[3], g_pose_m[7], g_pose_m[11]);
+    g_pose_b = 0;
+    for (int i = 0; i < g_nprobe; i++) if (g_probe[i].at == PLAT_UC_PC(uc)) g_probe[i].once = 1;   // taken out after this hit
+}
+static uint64_t dk_actor(uint64_t mb, const devrow_t *d) {
+    uint64_t vt = mb + d->actor, pvt = mb + d->pose, found = 0;
+    FILE *f = fopen("/proc/self/maps", "r"); if (!f) return 0;
+    char line[512]; unsigned long long lo, hi; char perm[8];
+    while (!found && fgets(line, sizeof line, f)) {
+        if (sscanf(line, "%llx-%llx %7s", &lo, &hi, perm) != 3 || perm[0] != 'r' || perm[1] != 'w' || lo < 0x4000000000ull || hi > 0x8000000000ull) continue;
+        for (uint64_t q = lo; q + 0x70 <= hi; q += 8)
+            if (*(volatile uint64_t *)(uintptr_t)q == vt) { uint64_t ps = *(volatile uint64_t *)(uintptr_t)(q + 0x60), pv = 0; if (!plat_mem_read(ps, &pv, 8) && pv == pvt) { found = q; break; } }
+    }
+    fclose(f); return found;
+}
+// DK's actor, his pose, his physics body B and its 3x4 matrix, and the pose's position (his feet); 0 with a red line when he is not found (not in a stage)
+static int pose_find(uint64_t mb, const devrow_t *d, uint64_t *actor, uint64_t *pose, uint64_t *body, float pp[3], float mt[12]) {
+    uint64_t p88 = 0, p18 = 0; *body = 0; *actor = dk_actor(mb, d);
+    if (!*actor || plat_mem_read(*actor + 0x60, pose, 8) || plat_mem_read(*pose + 8, pp, 12) || plat_mem_read(*actor + 0x88, &p88, 8) || plat_mem_read(p88 + 0x18, &p18, 8)) {
+        LOG("[RED] pose: DK's actor not found (not in a stage?)"); return 0; }
+    for (int k = 0; k < 2 && !*body; k++) {   // the body: [[[actor+0x88]+0x18]+0x50] in every run seen (+0xa0 as the second choice), checked against the pose
+        uint64_t c = 0; if (plat_mem_read(p18 + (k ? 0xa0 : 0x50), &c, 8) || plat_mem_read(c + 0xd8, mt, 48)) continue;
+        if (fabsf(mt[3] - pp[0]) < 0.5f && fabsf(mt[11] - pp[2]) < 0.5f) *body = c;
+    }
+    if (!*body) { LOG("[RED] pose: DK's physics body not found from the actor"); return 0; }
+    return 1;
+}
+// DM_POSE_GET=<any new value> (Donkey Kong Bananza; offsets from its devtools row, found on main build e25c90c1): logs where DK is, in the form DM_POSE_SET takes back ("pose: DK at <x>,<y>,<z>,<qx>,<qy>,<qz>,<qw>"),
+// plus his feet; android/tools/dkpose saves it as a bookmark
+static void pose_get_live(void) {
+    const char *e = getenv("DM_POSE_GET"); static char last[64];
+    if (!e || !*e || !strcmp(e, last)) return;
+    strlcpy(last, e, sizeof last);
+    const devrow_t *d = devrow("pose"); if (!d) return;
+    uint64_t actor, pose, b; float pp[3], mt[12], q[4];
+    if (!pose_find((uint64_t)main_mod()->base, d, &actor, &pose, &b, pp, mt) || plat_mem_read(pose + 0x20, q, 16)) return;
+    LOG("pose: DK at %.3f,%.3f,%.3f,%.4f,%.4f,%.4f,%.4f (feet %.2f %.2f %.2f)", mt[3], mt[7], mt[11], q[0], q[1], q[2], q[3], pp[0], pp[1], pp[2]);
+}
+static void pose_live(void) {
+    const char *e = getenv("DM_POSE_SET"); static char last[160];
+    if (!e || !*e) { last[0] = 0; return; }   // cleared: the same position can be set again
+    if (!strcmp(e, last)) return;
+    strlcpy(last, e, sizeof last);
+    const devrow_t *d = devrow("pose"); if (!d) return;
+    module_t *m = main_mod();
+    float v[7] = {0}; int n = sscanf(e, "%f,%f,%f,%f,%f,%f,%f", &v[0], &v[1], &v[2], &v[3], &v[4], &v[5], &v[6]);
+    if (n != 3 && n != 7) { LOG("[RED] pose: DM_POSE_SET=<x>,<y>,<z>[,<qx>,<qy>,<qz>,<qw>]"); return; }
+    uint64_t mb = (uint64_t)m->base, actor, b, h = 0, pose; float pp[3], mt[12];
+    if (!pose_find(mb, d, &actor, &pose, &b, pp, mt) || plat_mem_read(b + 0x90, &h, 8)) return;
+    mt[3] = v[0]; mt[7] = v[1]; mt[11] = v[2]; memcpy(g_pose_m, mt, sizeof mt);
+    if (n == 7) memcpy((void *)(uintptr_t)(pose + 0x20), v + 3, 16);   // the facing sticks when written (the pose's quaternion)
+    g_pose_fn = mb + d->transform; g_pose_h = h; g_pose_at = pose + 8; __atomic_thread_fence(__ATOMIC_SEQ_CST); g_pose_b = b;
+    int have = 0; for (int i = 0; i < g_nprobe; i++) if (g_probe[i].at == mb + d->pose_writer) have = 1;
+    if (!have) { if (g_nprobe >= MAX_PROBE) { LOG("[RED] pose: no probe slot left (restart the game)"); g_pose_b = 0; return; } probe_add(m, d->pose_writer, -1, pose_cb); }
+    LOG("pose: setting DK (actor %#llx, body %#llx) to %.2f %.2f %.2f at his next pose update", (unsigned long long)actor, (unsigned long long)b, v[0], v[1], v[2]);
+}
+// DM_PROBE_LIVE=<hex offset>[?xN=<hex>][,...] (into main): each new offset gets a printing probe while the game runs, no restart (at most 6 printed hits each unless
 // DM_PROBE_LIMIT says otherwise). The same rules as DM_PROBE: function entries, never a PC-relative instruction
 static void probe_live(void) {
     watch_start();
+    teleport_live();
+    pose_live();
+    pose_get_live();
     module_t *m = main_mod(); const char *e = getenv("DM_PROBE_LIVE"); if (!e || !m) return;
     if (!g_probe_limit) g_probe_limit = 6;
     char spec[512]; strlcpy(spec, e, sizeof spec);
     for (char *t = strtok(spec, ","); t; t = strtok(NULL, ",")) {
-        uint64_t off = strtoull(t, 0, 16), at = (uint64_t)m->base + off; int have = 0;
+        char *end; uint64_t off = strtoull(t, &end, 16), at = (uint64_t)m->base + off; int have = 0;
         for (int i = 0; i < g_nprobe; i++) if (g_probe[i].at == at) have = 1;
-        if (!have && off && g_nprobe < MAX_PROBE) { probe_add(m, off, -1, NULL); LOG("probe: main+%#llx added while running", (unsigned long long)off); }
+        if (!have && off && g_nprobe < MAX_PROBE) {
+            probe_add(m, off, -1, NULL);
+            // ?xN=<hex>: only hits where that register holds the value print (as DM_PROBE's filter), e.g. one actor's calls of a shared setter
+            if (end[0] == '?' && end[1] == 'x') { char *e2; int r = (int)strtol(end + 2, &e2, 10) & 31; if (*e2 == '=') { g_probe[g_nprobe - 1].freg = r; g_probe[g_nprobe - 1].foff = -1; g_probe[g_nprobe - 1].fval = strtoull(e2 + 1, 0, 16); } }
+            LOG("probe: main+%#llx added while running%s", (unsigned long long)off, g_probe[g_nprobe - 1].freg >= 0 ? " (with a register filter)" : "");
+        }
     }
 }
 static void *devtools_run(void *arg) {
@@ -432,7 +575,7 @@ static void devtools_start(void) {
     if (!devtools_on()) return;
     if (!&vka_env_gen) { LOG("[RED] dev tools: this host has no live control (vka_env_gen): DM_DEVTOOLS does nothing"); return; }
     pthread_t t; pthread_create(&t, NULL, devtools_run, NULL); pthread_detach(t);
-    LOG("dev tools on (DM_DEVTOOLS): DM_PROBE_LIVE and DM_PROBE_WATCH are read again at each live control change");
+    LOG("dev tools on (DM_DEVTOOLS): DM_PROBE_LIVE, DM_PROBE_WATCH, DM_TELEPORT, DM_POSE_SET and DM_POSE_GET are read again at each live control change");
 }
 #endif
 

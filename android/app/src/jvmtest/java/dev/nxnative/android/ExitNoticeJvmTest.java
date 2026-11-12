@@ -25,6 +25,7 @@ public final class ExitNoticeJvmTest {
                     a[5].equals("1"), file(a[6]))); break;
             case "pending": System.out.println("pending " + ExitNotice.pending(ExitNotice.parse(file(a[1])))); break;
             case "message": System.out.println("message " + esc(a.length > 3 ? ExitNotice.message(a[1], a[2], a[3]) : ExitNotice.message(a[1], a[2]))); break;
+            case "meaning": System.out.println("meaning " + esc(a.length > 2 && !a[2].equals("-") ? ExitNotice.meaningMessage(a[1], a[2]) : ExitNotice.meaningMessage(a[1]))); break;
             case "block": System.out.println("block " + esc(ExitNotice.crashBlock(a[1], file(a[2]), Integer.parseInt(a[3])))); break;
             case "line": System.out.println("line " + ExitNotice.exceptionLine(a[1], a[2].equals("-") ? null : a[2])); break;
             default: throw new IllegalArgumentException(a[0]);

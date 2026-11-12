@@ -1,0 +1,72 @@
+#!/bin/sh
+# One scripted test run on the phone: starts a game with extra switches, waits until it is in the level, optionally puts the player at a bookmark,
+# then plays live control lines one step at a time and checks each step for a GPU hang or a crash, or takes a screenshot of the game frame.
+#   nxrun -t <title id> [options] <game folder or .nup>
+#     -e KEY=VALUE   a switch for this run (repeatable); the game's env-<title id>.txt gets it, plus DM_FASTBOOT=1, and is put back once the game has read it
+#     -a '<line>'    a control line sent once the game is in the level, before the steps (repeatable; e.g. 'Plus~1.5' holds + to skip a title card)
+#     -p <name>      a dkpose bookmark loaded before the steps (a game with a devtools row in its profile: Donkey Kong Bananza; needs -e DM_DEVTOOLS=1)
+#     -s '<lines>'   the steps: control lines separated by spaces, e.g. 'RLeft~0.35 RLeft~0.35 RDown~0.35'
+#     -d <seconds>   time per step (default 1.2)
+#     -o <folder>    a screenshot of the game frame after each step, <folder>/step-<n>.png
+# Prints OK, HANG (a GPU fence not reached), CRASH (the game gone) with the step, or NOSTART (no level within 150 s: a dialog may be waiting on the phone).
+# The game is in the level at the log's [mark] line (DM_FASTBOOT's DM_MARK_DRAWS). NX_SERIAL and NX_PKG as for nxctl.sh.
+set -eu
+T=$(dirname "$0")
+PKG=${NX_PKG:-dev.nxnative.android}
+FILES=/sdcard/Android/data/$PKG/files
+A="adb${NX_SERIAL:+ -s $NX_SERIAL}"
+id=; envs=; acts=; pose=; steps=; dt=1.2; shots=
+while getopts t:e:a:p:s:d:o: o; do
+    case $o in
+    t) id=$OPTARG;; e) envs="$envs$OPTARG
+";; a) acts="$acts$OPTARG
+";; p) pose=$OPTARG;; s) steps=$OPTARG;; d) dt=$OPTARG;; o) shots=$OPTARG;;
+    *) sed -n '2,12p' "$0"; exit 2;;
+    esac
+done
+shift $((OPTIND - 1))
+[ -n "$id" ] && [ $# -eq 1 ] || { sed -n '2,12p' "$0"; exit 2; }
+game=$1
+E=$FILES/env-$id.txt
+newest_log() { $A shell "ls -t $FILES/logs/$id*.log 2>/dev/null | head -1" | tr -d '\r'; }
+ctl() { $A shell "echo '$1' >> $FILES/ctl.txt" >/dev/null; }
+
+# The switches: the game's env file kept aside and put back after the start
+$A shell "am force-stop $PKG; f=$E; if [ -f \$f ]; then cp \$f \$f.nxrun; else rm -f \$f.nxrun; fi" >/dev/null
+printf '%sDM_FASTBOOT=1\n' "$envs" | $A shell "cat >> $E"
+before=$(newest_log)
+$A shell "am start -n $PKG/dev.nxnative.android.MainActivity --es game '$game' --ez run true" >/dev/null
+restore() { $A shell "f=$E; if [ -f \$f.nxrun ]; then mv \$f.nxrun \$f; else rm -f \$f; fi" >/dev/null; }
+
+# The readiness check's "Ready, with limits" notice (a warning only, shown again for each new driver) is answered with Continue, wherever the button is
+continue_notice() {
+    b=$($A shell "uiautomator dump /data/local/tmp/nxrun-ui.xml >/dev/null 2>&1 && cat /data/local/tmp/nxrun-ui.xml" | tr -d '\r' | tr '>' '\n' |
+        grep -q 'Ready, with limits' && $A shell "cat /data/local/tmp/nxrun-ui.xml" | tr -d '\r' | tr '>' '\n' | grep -i 'text="continue"' | sed -n 's/.*bounds="\[\([0-9]*\),\([0-9]*\)\]\[\([0-9]*\),\([0-9]*\)\]".*/\1 \2 \3 \4/p' | head -1) || true
+    [ -n "$b" ] || return 0
+    set -- $b; $A shell "input tap $((($1 + $3) / 2)) $((($2 + $4) / 2))" >/dev/null; echo "answered the readiness notice with Continue" >&2
+}
+
+# In the level: a new log with the [mark] line
+log=; i=0
+while [ $i -lt 75 ]; do
+    sleep 2; i=$((i + 1))
+    [ $i -eq 5 ] || [ $i -eq 10 ] && continue_notice
+    l=$(newest_log)
+    [ -n "$l" ] && [ "$l" != "$before" ] && log=$l
+    [ -n "$log" ] && $A shell "grep -q '\[mark\]' '$log'" && break
+done
+sleep 3; restore
+if [ -z "$log" ] || ! $A shell "grep -q '\[mark\]' '$log'"; then echo "NOSTART (no level within 150 s; a dialog may be waiting on the phone)"; exit 3; fi
+printf '%s' "$acts" | while IFS= read -r a; do [ -n "$a" ] && { ctl "$a"; sleep 2; }; done
+[ -n "$pose" ] && "$T/dkpose" load "$pose"
+[ -n "$shots" ] && mkdir -p "$shots"
+
+# The steps
+state() { $A shell "grep -c 'fence .* not reached' '$log'; pidof $PKG:game >/dev/null || echo GONE" | tr -d '\r' | tr '\n' ' '; }
+n=0; result=OK
+for s in $steps; do
+    n=$((n + 1)); ctl "$s"; sleep "$dt"
+    [ -n "$shots" ] && { "$T/nxctl.sh" screenshot "$shots/step-$n.png" >/dev/null 2>&1 || echo "step $n: no screenshot" >&2; }
+    case "$(state)" in [1-9]*) result="HANG after step $n"; break;; *GONE*) result="CRASH after step $n"; break;; esac
+done
+echo "$result (log $log)"
