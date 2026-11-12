@@ -39,10 +39,10 @@ final class LogDigest {
     // ---------------------------------------------------------------- tables
 
     static final class Row {
-        final String id, kind, regex, cause, doc;
+        final String id, kind, regex, cause, meaning, doc;
         final Pattern rx;
-        Row(String id, String kind, String regex, String cause, String doc) {
-            this.id = id; this.kind = kind; this.regex = regex; this.cause = cause; this.doc = doc; this.rx = Pattern.compile(regex, FLAGS);
+        Row(String id, String kind, String regex, String cause, String meaning, String doc) {
+            this.id = id; this.kind = kind; this.regex = regex; this.cause = cause; this.meaning = meaning; this.doc = doc; this.rx = Pattern.compile(regex, FLAGS);
         }
     }
 
@@ -64,13 +64,13 @@ final class LogDigest {
             }
             String[] v = new String[cols.length];
             for (int i = 0; i < v.length; i++) v[i] = i < f.length ? f[i] : "";
-            // rules: id kind regex cause doc; noise: id regex note
-            rows.add(cols.length == 5 ? new Row(v[0], v[1], v[2], v[3], v[4]) : new Row(v[0], "", v[1], v[2], ""));
+            // rules: id kind regex cause meaning doc; noise: id regex note
+            rows.add(cols.length == 6 ? new Row(v[0], v[1], v[2], v[3], v[4], v[5]) : new Row(v[0], "", v[1], v[2], "", ""));
         }
         return rows;
     }
 
-    static List<Row> rules(String text) { return table(text, "id", "kind", "regex", "cause", "doc"); }
+    static List<Row> rules(String text) { return table(text, "id", "kind", "regex", "cause", "meaning", "doc"); }
     static List<Row> noise(String text) { return table(text, "id", "regex", "note"); }
 
     /** The index of the first row whose regex is found in the line, or -1 */
@@ -175,9 +175,9 @@ final class LogDigest {
     }
     static final class Java { int line; String thread; final List<String> trace = new ArrayList<>(); }
 
-    /** The verdict (the tool's Digest.verdict): kind, label, sentence (or null), the likely cause's rule id, cause, doc (or null) and line (0 for none) */
+    /** The verdict (the tool's Digest.verdict): kind, label, sentence (or null), the likely cause's rule id, cause, meaning, doc (or null) and line (0 for none) */
     static final class Verdict {
-        String kind, label, sentence, rule, cause, doc;
+        String kind, label, sentence, rule, cause, meaning, doc;
         int line;
         /** The rule's doc as a web link, or null */
         String docUrl() { return doc == null || doc.isEmpty() ? null : DOCS_BASE + doc; }
@@ -332,7 +332,7 @@ final class LogDigest {
         else set(v, "cut_short", "log cut short", ExitNotice.UNKNOWN_TEXT + " The log ends without an exit line (stopped from outside, or the log was cut).");
         if (rule >= 0) {
             Row r = rules.get(rule);
-            v.rule = r.id; v.cause = r.cause; v.doc = r.doc; v.line = hits.get(rule).first;
+            v.rule = r.id; v.cause = r.cause; v.meaning = r.meaning; v.doc = r.doc; v.line = hits.get(rule).first;
         }
         int last = -1;
         for (int i = 0; i < stage.length; i++) if (stage[i]) last = i + 1;

@@ -82,7 +82,7 @@ def read_tsv(path, cols):
     return rows
 
 
-def load_rules(path=RULES_TSV): return read_tsv(path, ('id', 'kind', 'regex', 'cause', 'doc'))
+def load_rules(path=RULES_TSV): return read_tsv(path, ('id', 'kind', 'regex', 'cause', 'meaning', 'doc'))
 def load_noise(path=NOISE_TSV): return read_tsv(path, ('id', 'regex', 'note'))
 
 
@@ -646,7 +646,7 @@ class Digest:
     # -- results
     def _rule(self, i):
         r = self.rules[i]; h = self.rule_hits[i]
-        return {'id': r['id'], 'kind': r['kind'], 'cause': r['cause'], 'doc': r['doc'], 'count': h[0], 'first_line': h[1], 'last_line': h[2],
+        return {'id': r['id'], 'kind': r['kind'], 'cause': r['cause'], 'meaning': r['meaning'], 'doc': r['doc'], 'count': h[0], 'first_line': h[1], 'last_line': h[2],
                 'source': h[4], 'example': redact(h[3])}
 
     def first_rule(self, kinds):
@@ -692,7 +692,7 @@ class Digest:
         kind, label, sentence, rule = v
         last = max(self.stage) if self.stage else None
         out = {'kind': kind, 'label': label, 'sentence': sentence, 'rule': rule['id'] if rule else None, 'cause': rule['cause'] if rule else None,
-               'doc': rule['doc'] if rule else None, 'line': rule['first_line'] if rule and rule['first_line'] else None}
+               'meaning': rule['meaning'] if rule else None, 'doc': rule['doc'] if rule else None, 'line': rule['first_line'] if rule and rule['first_line'] else None}
         if kind == 'cut_short' and last is not None and last < 8: out['sentence'] += f' It stopped before stage {last + 1}.'
         return out
 

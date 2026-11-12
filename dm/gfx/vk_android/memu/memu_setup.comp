@@ -1,0 +1,26 @@
+// SPDX-FileCopyrightText: Copyright 2026 Banana Native
+// SPDX-License-Identifier: GPL-3.0-or-later
+// The mesh emulation's setup pass (vka_memu.c): one invocation per record of the batch. A task draw gets its task payloads and counts in the arena and its task
+// dispatch (the distribution pass places its mesh output); a draw without a task gets its mesh output placed at once. Not game code
+#version 450
+#extension GL_GOOGLE_include_directive : require
+#include "memu_common.glsl"
+layout(local_size_x = 64) in;
+void main() {
+    uint j = gl_GlobalInvocationID.x;
+    if (j >= pc.n) return;
+    uint R = (pc.first + j) * VKA_MEMU_REC_WORDS;
+    uint count = r[R + VKA_MEMU_R_COUNT];
+    if ((r[R + VKA_MEMU_R_FLAGS] & VKA_MEMU_F_TASK) != 0u) {
+        uint nt = min(count, max(min(r[R + VKA_MEMU_R_MAXG], 65535u), 1u)), wt = r[R + VKA_MEMU_R_WT];
+        uint o = nt != 0u ? alloc(nt * (wt + 1u), 1u) : 0u;
+        if (o == 0xffffffffu) { nt = 0u; o = 0u; }
+        r[R + VKA_MEMU_R_NTASK] = nt; r[R + VKA_MEMU_R_PAYLOAD] = o; r[R + VKA_MEMU_R_COUNTS] = o + nt * wt;
+        r[R + VKA_MEMU_R_TASK_X] = nt; r[R + VKA_MEMU_R_TASK_X + 1] = 1u; r[R + VKA_MEMU_R_TASK_X + 2] = 1u;
+        r[R + VKA_MEMU_R_TOTAL] = 0u; r[R + VKA_MEMU_R_MESH_X] = 0u; r[R + VKA_MEMU_R_MESH_X + 1] = 1u; r[R + VKA_MEMU_R_MESH_X + 2] = 1u;
+        r[R + VKA_MEMU_R_DRAW] = 0u; r[R + VKA_MEMU_R_DRAW + 1] = 1u; r[R + VKA_MEMU_R_DRAW + 2] = 0u; r[R + VKA_MEMU_R_DRAW + 3] = 0u; r[R + VKA_MEMU_R_DRAW + 4] = 0u;
+    } else {
+        r[R + VKA_MEMU_R_NTASK] = 0u;
+        place(R, count);
+    }
+}
