@@ -6,6 +6,10 @@ shows at 4:3 (DM_VK_PICTURE_ASPECT=4:3: it fills a 4:3 screen and gets side bars
 for Eden-family emulators (camera aspect, ui2d pane rules) and were extended here; each group below says what it fixes. The
 original bytes are kept so the rewriter refuses another executable."""
 
+# Minimap rotation: v11 pinned N_RotCenter's Z rotation (+0x44) at 180 degrees, taking the game's turning of the map with the camera for a
+# fault. The game places the quest pins (N_Quest, outside N_RotCenter) with its own angle, so they slid across the pinned map while walking and
+# turning, and the map was the wrong way round for the camera. N_RotCenter now only skips the pane rules (0x58f570) and keeps its rotation;
+# the scissor fix below keeps the turning map inside its frame. Checked in Dagsion against 16:9 through a walk and a camera turn.
 # Camera aspect and ui2d pane rules (v11). The ui2d rules: a pane at |y| >= 120 under a parent at global (0,0) moves 180 units toward
 # the nearer top or bottom edge (the "edge rule"), a centred full-screen pane (>= 1896 x 960) gets its y scaled by 4/3 (the
 # "overlay rule"), sliding 30x40 containers count as anchored; a few names are exempt (L_UnitIn*, L_Cursor*, L_Popup_*).
@@ -40,9 +44,7 @@ _V11 = [
     (0x0058e738, '00000000', '8c030014', 'v11 camera and UI'),
     (0x0058f568, '00000000', '7f010aeb', 'v11 camera and UI'),
     (0x0058f56c, '00000000', 'c16efb54', 'v11 camera and UI'),
-    (0x0058f570, '00000000', '8a66a852', 'v11 camera and UI'),
-    (0x0058f574, '00000000', '0a4400b9', 'v11 camera and UI'),
-    (0x0058f578, '00000000', 'bffbff17', 'v11 camera and UI'),
+    (0x0058f570, '00000000', 'c1fbff17', 'minimap: b 0x58e474 (N_RotCenter keeps the game rotation; v11 wrote 180 to +0x44)'),
     (0x00586344, '00000000', '890904b4', 'v11 camera and UI'),
     (0x00586348, '00000000', '101d40bd', 'v11 camera and UI'),
     (0x0058634c, '00000000', '110d40bd', 'v11 camera and UI'),

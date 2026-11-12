@@ -150,7 +150,7 @@ The game keeps its 1920x1080 window and scene; its cameras take a 4:3 aspect and
 
 | Group in `patches.py` | What it does |
 |---|---|
-| `_V11` | Camera aspect 4:3; UI projection squeezed; panes at the top and bottom moved to the 4:3 edges (the edge rule); minimap pinned; full-screen overlays stretched (the overlay rule); sliding menu containers anchored |
+| `_V11` | Camera aspect 4:3; UI projection squeezed; panes at the top and bottom moved to the 4:3 edges (the edge rule); the minimap's rotating centre left to the game; full-screen overlays stretched (the overlay rule); sliding menu containers anchored |
 | `_SCISSOR43` | Clip rectangles (the minimap) squeezed like the rest of the UI |
 | `_UI_V12` | Base Menu cursor (the `L_List` container is not scaled), dialog text in its box (`A_Contents` children not moved), tall half-screen dimmers (the shop's `Fade01`) cover the full height |
 | `_UI_V13` | The Armorer's Buy/Sell and help panels keep their 4:3 heights while their empty parent panes slide |
