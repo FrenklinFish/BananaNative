@@ -301,7 +301,7 @@ _UI_V15 = [
     (0x005c2cec, '00000000', 'ad8ceef2', 'v15: movk x13, #0x7465, lsl #48'),
     (0x005c2cf0, '00000000', '9f010aeb', 'v15: cmp x12, x10'),
     (0x005c2cf4, '00000000', '84114dfa', 'v15: ccmp x12, x13, #4, ne (N_Player or N_Target)'),
-    (0x005c2cf8, '00000000', 'e1bbe554', 'v15: b.ne 0x58e474 (other parents: leave)'),
+    (0x005c2cf8, '00000000', '611b0854', 'v21: b.ne 0x5d3064 (other parents: the footer tolerance, then leave; v15 had b.ne 0x58e474)'),
     (0x005c2cfc, '00000000', '62010014', 'v15: b 0x5c3284'),
     (0x005c3284, '00000000', '2cb940b9', 'v15: ldr w12, [x9, #0xb8] (name bytes 8..11)'),
     (0x005c3288, '00000000', '8c5d0012', 'v15: and w12, w12, #0xffffff'),
@@ -369,7 +369,7 @@ _UI_V18 = [
     (0x005cbd30, '00000000', '4a0ce0f2', 'v18: movk x10, #0x62, lsl #48'),
     (0x005cbd34, '00000000', '7f010aeb', 'v18: cmp x11, x10'),
     (0x005cbd38, '00000000', 'a0ebe154', 'v18: b.eq 0x58faac (UnitPub, the hero art: not stretched)'),
-    (0x005cbd3c, '00000000', 'da56ff17', 'v18: b 0x5a18a4 (others: overlay as before)'),
+    (0x005cbd3c, '00000000', '5a2a0014', 'v22: b 0x5d66a4 (L_SpotDetail and L_Info checks; v18 had b 0x5a18a4)'),
 ]
 
 # v20: choice boxes (Common_Choice: MenuItemList holds L_MenuItem00..03 at y 210 / 90 / -30 / -150). The edge rule moved only the
@@ -384,9 +384,51 @@ _UI_V20 = [
     (0x005d257c, '00000000', 'bb50ff17', 'v20: b 0x5a6868'),
 ]
 
+# v21: the footer key help (Common_Footer: N_Footer > A_KeyHelp at y -520, the talk window's Text Log / Hide UI / Auto-Advance) jumped
+# 180 up for a few frames whenever it opened or closed: Footer_In / Footer_Out move N_Footer by y -4, so its parent was off (0,0) and the
+# edge rule let go. A parent whose global y is within 4 of 0 now counts as at (0,0) (cave 0x5d3064, from the v15 parent checks' exit).
+_UI_V21 = [
+    (0x005d3064, '00000000', '0c02261e', 'v21: fmov w12, s16 (parent global y)'),
+    (0x005d3068, '00000000', '8c790012', 'v21: and w12, w12, #0x7fffffff (|y|)'),
+    (0x005d306c, '00000000', '0a10a852', 'v21: mov w10, #0x40800000 (4.0)'),
+    (0x005d3070, '00000000', '9f010a6b', 'v21: cmp w12, w10'),
+    (0x005d3074, '00000000', '89c8ce54', 'v21: b.ls 0x570984 (|y| <= 4: edge rule as under (0,0))'),
+    (0x005d3078, '00000000', 'ffecfe17', 'v21: b 0x58e474 (others: leave)'),
+]
+
+# v22: travel map spot info (Gmap_UI: N_SpotDetail > L_SpotDetail, 2548x1395, holding Gmap_UI_SpotDetail's Bg, N_Img and N_Info at y 540).
+# v10's overlay rule stretched L_SpotDetail 4/3 tall and v4's edge rule moved its children, so the info text, the level pills and the ore list
+# came out tall and off the top while the dark backdrop (Bg, sized by the game to N_DummyMargin's global y against a hard 540, the 16:9 top
+# edge) stopped short and the ore list spilled below it. L_SpotDe* is now left unscaled by the overlay rule (cave 0x5d66a4, after v18's UnitPub
+# check), and the backdrop sizing uses 720, the 4:3 top edge (0x168ed78). Checked on the device at Dagsion and Niraga Mine against 16:9.
+# v23: quest panels (Common_Quest, Common_QuestTalk: L_Info 1634x1096; Common_TutorialMenu: L_Info 1766x1080). The overlay rule caught them
+# as full-screen (>= 1080 tall) and stretched them 4/3, so the quest offer, the Quest List and the tutorials looked tall. A pane named exactly
+# L_Info is now left unscaled and moved 180 up, so its top meets the 4:3 top as the list beside it does (caves 0x5d7de4, 0x5d7988; the move
+# ends the rules for the pane, as v19's Fade does, or the edge rule would move it again). Checked on the Quest List and the Tutorials.
+_UI_V22 = [
+    (0x0168ed78, 'e880a852', '8886a852', 'v22: mov w8, #0x44340000 (720.0, the 4:3 top edge, for the spot info backdrop; was 540.0)'),
+    (0x005d66a4, '00000000', '8ae98bd2', 'v22: x10 = "L_SpotDe"'),
+    (0x005d66a8, '00000000', '6a0aaef2', 'v22: movk x10, #0x7053, lsl #16'),
+    (0x005d66ac, '00000000', 'ea8dcef2', 'v22: movk x10, #0x746f, lsl #32'),
+    (0x005d66b0, '00000000', '8aa8ecf2', 'v22: movk x10, #0x6544, lsl #48'),
+    (0x005d66b4, '00000000', '7f010aeb', 'v22: cmp x11, x10'),
+    (0x005d66b8, '00000000', 'a09fdc54', 'v22: b.eq 0x58faac (L_SpotDetail: not stretched)'),
+    (0x005d66bc, '00000000', 'ca050014', 'v23: b 0x5d7de4 (L_Info check)'),
+    (0x005d7de4, '00000000', '8ae98bd2', 'v23: x10 = "L_Info"'),
+    (0x005d7de8, '00000000', '2ac9adf2', 'v23: movk x10, #0x6e49, lsl #16'),
+    (0x005d7dec, '00000000', 'caeccdf2', 'v23: movk x10, #0x6f66, lsl #32'),
+    (0x005d7df0, '00000000', '7f010aeb', 'v23: cmp x11, x10'),
+    (0x005d7df4, '00000000', 'a0dcff54', 'v23: b.eq 0x5d7988'),
+    (0x005d7df8, '00000000', 'ab26ff17', 'v23: b 0x5a18a4 (others: overlay as before)'),
+    (0x005d7988, '00000000', '8a66a852', 'v23: mov w10, #0x43340000 (180.0)'),
+    (0x005d798c, '00000000', '5301271e', 'v23: fmov s19, w10'),
+    (0x005d7990, '00000000', '4228331e', 'v23: fadd s2, s2, s19 (L_Info: 180 up, not stretched)'),
+    (0x005d7994, '00000000', 'b8dafe17', 'v23: b 0x58e474 (no further rule)'),
+]
+
 _MAIN = 'db93b0125f4850601d61c3edde012f8e'
 CUTS = {_MAIN: _NO_PREPASS}
-VARIANT_CUTS = {'43': {_MAIN: _V11 + _SCISSOR43 + _UI_V12 + _UI_V13 + _UI_V14 + _UI_V15 + _UI_V16 + _UI_V17 + _UI_V18 + _UI_V20}}
+VARIANT_CUTS = {'43': {_MAIN: _V11 + _SCISSOR43 + _UI_V12 + _UI_V13 + _UI_V14 + _UI_V15 + _UI_V16 + _UI_V17 + _UI_V18 + _UI_V20 + _UI_V21 + _UI_V22}}
 
 BINDING = [
     {'what': "Fire Emblem Fortune's Weave no depth pre-pass (the game's own co_disable_depth_prepass mode)", 'now': 'build', 'goal': 'unreviewed', 'purpose': 'frame rate',
