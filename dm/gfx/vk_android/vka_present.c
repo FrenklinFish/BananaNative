@@ -824,7 +824,21 @@ static int present_one(const pq_item *it) {
     if (it->fence && !vka_hung() && VKA_ENV("DM_VK_PRESENT_PREWAIT", 1) && it->fence <= __atomic_load_n(&V.tl_queued, __ATOMIC_ACQUIRE)) {
         VkResult vka_tl_wait(VkSemaphore s, uint64_t v, uint64_t timeout_ns); vka_tl_wait(V.tl, it->fence, vka_hang_ns());   // a timeout: the submission below waits as before, and the hang handling sees it
     }
-    pthread_mutex_lock(&V.qmu);
+    // No gate pending when the copy goes to the queue (vka_dev.c vka_gate_drain): on Turnip the driver would hold the copy back behind the gated work while Android
+    // already shows the image. DM_VK_PRESENT_GATE_WAIT=<ms> (live; 30 on Turnip, 0 = off elsewhere): the longest wait, after which the present goes on as before
+    uint64_t gw_ns = (uint64_t)(VKA_ENVF("DM_VK_PRESENT_GATE_WAIT", V.driver_id == VK_DRIVER_ID_MESA_TURNIP ? 30.0 : 0.0) * 1e6), gw_t0 = now_ns(); int gw_had = 0, gw_left = 0;
+    for (;;) {
+        pthread_mutex_lock(&V.qmu);
+        gw_left = vka_hung() ? 0 : vka_gate_pending();
+        if (!gw_left || !gw_ns || now_ns() - gw_t0 >= gw_ns) break;
+        pthread_mutex_unlock(&V.qmu);   // (the replay's gated submission and its opening need no lock of ours, but its other submissions take this one)
+        gw_had = 1; vka_gate_drain(gw_ns - (now_ns() - gw_t0));
+    }
+    { static uint64_t n, nw, nl, sum, mx; uint64_t w = gw_had ? now_ns() - gw_t0 : 0;   // (under the queue lock)
+      n++; nw += gw_had; nl += gw_left > 0; sum += w; if (w > mx) mx = w;
+      if (n == 600) { if (nw || nl) VLOG("present: %llu of %llu frames waited for a gate to open (%.2f ms on average, %.1f at most), %llu went on with one still pending%s", (unsigned long long)nw, (unsigned long long)n,
+                                         nw ? sum / 1e6 / nw : 0.0, mx / 1e6, (unsigned long long)nl, gw_ns ? "" : " (DM_VK_PRESENT_GATE_WAIT=0: not waited for)");
+                      n = nw = nl = sum = mx = 0; } }
     // Never a wait for a value no earlier submission signals: the queue runs its batches in order, so the copy would wait for a submission queued behind it, and neither ever
     // runs (mtl_present takes vka_fence_queued for that; this holds it under the queue lock)
     if (wv[1] > V.tl_queued) { static _Atomic int n; if (atomic_fetch_add(&n, 1) < 4) VRED("present ticket %llu waited for fence %llu, %llu is the last handed to the queue: waits for that", (unsigned long long)it->ticket, (unsigned long long)wv[1], (unsigned long long)V.tl_queued); wv[1] = V.tl_queued; }
