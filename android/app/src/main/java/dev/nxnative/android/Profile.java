@@ -301,6 +301,146 @@ final class Profile {
         try { return new int[] {Integer.parseInt(c.substring(0, x)), Integer.parseInt(c.substring(x + 1))}; } catch (NumberFormatException e) { return null; }
     }
 
+    // ---- Resolution, Upscaling quality and Graphics quality: a game whose profile has a render_cfg row (the host writes its output and render size into the game's render
+    // configurations, hle_render.c; build.gradle resolutionOf: "render:<min output height>:<original WxH>:<render_cfg max_render WxH>:<the game's own pool MiB>:<MiB=WxH>/…:<out_h>",
+    // the last three from its rt_pool row, empty without one). Three rows in Game settings and the in-game panel instead of Game resolution ----
+
+    /** The launcher's sizes (Prefs.WINDOWS without Original, here because the JVM test has no Prefs), largest first */
+    static final String[] SIZES = {"2560x1440", "1920x1080", "1280x720", "960x540", "848x480"};
+    /** The upscaling choices, best first: the render size in percent of the output (DM_RENDER_PCT); 100 is the output itself (the upscaler only anti-aliases) */
+    static final int[] RENDER_PCTS = {100, 67, 59, 50, 33};
+    static final int RENDER_PCT_DEFAULT = 50;
+
+    /** A render setting: the output (a size of SIZES or "original"), the render scale in percent and the graphics quality (true quality, false performance) */
+    static final class Render {
+        final String out; final int pct; final boolean quality;
+        Render(String out, int pct, boolean quality) { this.out = out; this.pct = pct; this.quality = quality; }
+        @Override public boolean equals(Object o) { return o instanceof Render && ((Render) o).out.equals(out) && ((Render) o).pct == pct && ((Render) o).quality == quality; }
+        @Override public int hashCode() { return out.hashCode() * 31 + pct * 2 + (quality ? 1 : 0); }
+        @Override public String toString() { return out + "@" + pct + (quality ? "/quality" : "/performance"); }
+    }
+
+    /** Whether the profile has a render_cfg row: the three rows are shown only then */
+    boolean renderCfg() { return resolution.startsWith("render:"); }
+    private String renderField(int i) { String[] f = resolution.split(":", -1); return f.length > i ? f[i] : ""; }
+    private int renderMin() { try { return Integer.parseInt(renderField(1)); } catch (NumberFormatException e) { return 720; } }
+    private int[] renderOriginal() { int[] s = size(renderField(2)); return s != null ? s : new int[] {1920, 1080}; }
+    private int[] renderCap() { int[] s = size(renderField(3)); return s != null ? s : new int[] {1280, 720}; }
+    private String[] renderTiers() { return renderField(5).isEmpty() ? new String[0] : renderField(5).split("/"); }
+
+    /** The Resolution choices, largest first: the launcher's sizes from the row's smallest output height up, and Original (the row's original size) in its place */
+    String[] renderOutputs() {
+        int oh = renderOriginal()[1];
+        List<String> l = new ArrayList<>();
+        boolean orig = false;
+        for (String w : SIZES) {
+            int[] s = size(w);
+            if (s[1] < renderMin()) continue;
+            if (!orig && s[1] <= oh) { l.add("original"); orig = true; }
+            if (s[1] != oh) l.add(w);
+        }
+        if (!orig) l.add("original");
+        return l.toArray(new String[0]);
+    }
+    /** An output choice's size: Original is the row's original */
+    int[] renderOut(String out) { return out.equals("original") ? renderOriginal() : size(out); }
+
+    /**
+     * A Resolution choice's label: "<height>p" from heightFmt ("%dp"), Original from originalFmt with its height ("%dp (original docked)"), and heavyFmt around a size above the
+     * original ("%s (heavy)"). The formats are the app's string resources (render_res_height, render_res_original, render_heavy)
+     */
+    String renderOutLabel(String out, String heightFmt, String originalFmt, String heavyFmt) {
+        if (out.equals("original")) return String.format(Locale.ROOT, originalFmt, renderOriginal()[1]);
+        int[] s = size(out);
+        String l = String.format(Locale.ROOT, heightFmt, s[1]);
+        return s[1] > renderOriginal()[1] ? String.format(Locale.ROOT, heavyFmt, l) : l;
+    }
+    /** An Upscaling quality choice's label: names[i] for RENDER_PCTS[i] (render_upscale), heavyFmt around 100 % */
+    static String renderPctLabel(int pct, String[] names, String heavyFmt) {
+        for (int i = 0; i < RENDER_PCTS.length; i++) if (RENDER_PCTS[i] == pct) return pct == 100 ? String.format(Locale.ROOT, heavyFmt, names[i]) : names[i];
+        return pct + " %";
+    }
+
+    /**
+     * The setting stored for this game, read the way the launcher shows it (a lazy migration: nothing is rewritten until the player picks): window = Prefs.gameWindow (the old Game
+     * resolution value), pct and quality -1 when not stored. An old 2048x1152 or Original (the old Docked) gives Original with Performance upscaling (50 %) and Quality graphics;
+     * a size below the smallest offered (540p, 480p) gives the smallest (720p); a size not offered, or none, gives the profile's default (android_window, else 1080p); unset pct 50,
+     * unset quality Performance
+     */
+    Render renderSetting(String window, int pct, int quality) {
+        List<String> outs = java.util.Arrays.asList(renderOutputs());
+        String o = window == null ? "" : window;
+        int[] orig = renderOriginal(), s = size(o);
+        boolean docked = o.equals("original") || (s != null && s[0] == orig[0] && s[1] == orig[1]);
+        if (docked) o = "original";
+        else if (s != null && s[1] < renderMin()) o = outs.get(outs.size() - 1);
+        else if (!outs.contains(o)) o = outs.contains(this.window) ? this.window : "1920x1080";
+        int p = RENDER_PCT_DEFAULT;
+        for (int k : RENDER_PCTS) if (k == pct) p = pct;
+        boolean q = quality < 0 ? docked && pct < 0 : quality == 1;
+        return new Render(o, p, q);
+    }
+
+    /** The host's lines for a setting: DM_WINDOW_SIZE, DM_RENDER_PCT and DM_GFX_QUALITY (hle_render.c; the loader picks the render target pool from the first two) */
+    static List<String> renderEnv(Render r) {
+        return List.of("DM_WINDOW_SIZE=" + r.out, "DM_RENDER_PCT=" + r.pct, "DM_GFX_QUALITY=" + (r.quality ? "quality" : "performance"));
+    }
+    /** The output height the in-game panel sends (Native.renderSet): 0 for Original */
+    int renderOutH(Render r) { return r.out.equals("original") ? 0 : renderOut(r.out)[1]; }
+    /**
+     * The in-game panel's live call for a pick (Native.renderSet): the output height (0 for Original), the render scale and the graphics quality (1 Quality, 0 Performance), each
+     * -1 when the pick leaves it as it was; null when nothing changed. All three apply at once; the pool size the game started with never changes (renderRestartNote)
+     */
+    int[] renderLive(Render was, Render pick) {
+        if (pick.equals(was)) return null;
+        return new int[] {pick.out.equals(was.out) ? -1 : renderOutH(pick), pick.pct == was.pct ? -1 : pick.pct, pick.quality == was.quality ? -1 : pick.quality ? 1 : 0};
+    }
+
+    /** The render size before any cap, as the host computes it (render_cfg.h rcfg_render: even sides, 33 % exactly a third, 67 % exactly two thirds, 100 % the output) */
+    int[] renderSize(Render r) {
+        int[] o = renderOut(r.out);
+        if (r.pct == 100) return o;
+        if (r.pct == 33) return new int[] {o[0] / 3, o[1] / 3};
+        int num = r.pct == 67 ? 2 : r.pct == 50 ? 1 : r.pct, den = r.pct == 67 ? 3 : r.pct == 50 ? 2 : 100;
+        return new int[] {even(o[0], num, den), even(o[1], num, den)};
+    }
+    private static int even(int x, int num, int den) { long q = ((long) x * num + den) / (2L * den) * 2; return q < 2 ? 2 : (int) q; }
+
+    /**
+     * The render target pool (MiB) the host's loader picks for a setting the game starts with (rt_pool.h rtp_need and rtp_choose, without DM_RT_POOL_MB): the game's own while the
+     * render size fits render_cfg's cap and the output is below out_h, else the smallest larger size whose cap holds it (the largest when none does); at least the first larger
+     * size on a device of more than 12 GB (lowRam false). 0 without an rt_pool row
+     */
+    int renderPool(Render r, boolean lowRam) {
+        String[] tiers = renderTiers();
+        int base, outh;
+        try { base = Integer.parseInt(renderField(4)); } catch (NumberFormatException e) { return 0; }
+        try { outh = Integer.parseInt(renderField(6)); } catch (NumberFormatException e) { outh = 0; }
+        int[] rs = renderSize(r), cap = renderCap();
+        int need = rs[0] <= cap[0] && rs[1] <= cap[1] ? -1 : tiers.length - 1;
+        if (need >= 0) for (int i = 0; i < tiers.length; i++) { int[] c = size(tiers[i].substring(tiers[i].indexOf('=') + 1)); if (c != null && rs[0] <= c[0] && rs[1] <= c[1]) { need = i; break; } }
+        if (outh > 0 && renderOut(r.out)[1] >= outh && need < 0) need = 0;
+        if (!lowRam && need < 0 && tiers.length > 0) need = 0;
+        return need < 0 ? base : Integer.parseInt(tiers[need].substring(0, tiers[need].indexOf('=')));
+    }
+    /** The render size cap a pool gives (render_cfg's below the larger sizes: rt_pool.h rtp_cap) */
+    int[] renderPoolCap(int mb) {
+        int[] cap = renderCap();
+        for (String t : renderTiers()) { int eq = t.indexOf('='); if (eq > 0 && mb >= Integer.parseInt(t.substring(0, eq))) cap = size(t.substring(eq + 1)); }
+        return cap;
+    }
+
+    /**
+     * Whether a pick shows the one line "This change will apply on game restart." (render_restart_note): it needs another render target pool than the one that matters now.
+     * In the in-game panel (running: the setting the game started with): the pick's render size is above the started pool's cap, so the host clamps it until the next start
+     * (hle_render.c pend_set). In Game settings (running null, no game runs; before: the setting stored before the pick): the pick needs another pool size than the stored one
+     */
+    boolean renderRestartNote(Render pick, Render running, Render before, boolean lowRam) {
+        if (renderTiers().length == 0) return false;   // no rt_pool row: no pool to change
+        if (running != null) { int[] cap = renderPoolCap(renderPool(running, lowRam)), rs = renderSize(pick); return rs[0] > cap[0] || rs[1] > cap[1]; }
+        return before != null && renderPool(before, lowRam) != renderPool(pick, lowRam);
+    }
+
     /** Whether any game of this APK has Game resolution (Settings shows its default only then) */
     static boolean anyResolution() { for (Profile p : all()) if (p.hasResolution()) return true; return false; }
 

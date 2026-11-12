@@ -506,6 +506,13 @@ JNIEXPORT jboolean JNICALL Java_dev_nxnative_android_Native_graphicsModeSet(JNIE
     (void)env; (void)cls; if (!nxhost_graphics_mode_set) return JNI_FALSE;
     nxhost_graphics_mode_set(scale, opmode); return JNI_TRUE;
 }
+// Resolution and Upscaling quality of a game with a render_cfg row, live from the in-game panel (Native.renderSet): the host keeps the setting pending and posts notification 31
+#pragma weak nxhost_render_set
+void nxhost_render_set(int outh, int pct, int quality);   // hle_render.c: -1 keeps one
+JNIEXPORT jboolean JNICALL Java_dev_nxnative_android_Native_renderSet(JNIEnv *env, jclass cls, jint outh, jint pct, jint quality) {
+    (void)env; (void)cls; if (!nxhost_render_set) return JNI_FALSE;
+    nxhost_render_set(outh, pct, quality); return JNI_TRUE;
+}
 // Dynamic resolution, live from the in-game panel (Native.drsSet)
 #pragma weak nxhost_drs_set
 void nxhost_drs_set(int min_pct, int max_pct);   // probe.c: Donkey Kong Bananza's dynamic resolution range, % of the window (0 = the game's own)

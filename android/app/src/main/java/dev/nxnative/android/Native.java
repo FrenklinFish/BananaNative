@@ -146,6 +146,10 @@ final class Native {
     /** Game resolution while the game runs, for a game with graphics_scale rows (Profile.resolutionLive): the graphics scale (0-2, -1 following the operation mode) and the operation mode
      *  (0 handheld, 1 console, -1 the profile's own); the host posts the console's change notifications and the game queries them again (hle_oe.c nxhost_graphics_mode_set). False when this host has no such call */
     static native boolean graphicsModeSet(int scale, int opmode);
+    /** Resolution and Upscaling quality while the game runs, for a game with a render_cfg row (Profile.renderCfg): the output height (0 Original), the render scale in percent and the
+     *  graphics quality (1 quality, 0 performance), -1 keeping one; the host writes them at the game's next notification 31, clamped to the render target pool the game started with
+     *  (hle_render.c nxhost_render_set). False when this host has no such call */
+    static native boolean renderSet(int outh, int pct, int quality);
     /** Donkey Kong Bananza's dynamic resolution range while it runs, % of the window (probe.c nxhost_drs_set); 100, 100 = off (the native size) */
     static native void drsSet(int minPct, int maxPct);
     /** Whether the running game has dispatched a neural upscaler network that the Upscaler can replace (vka_draw.c nxhost_ndsr_status): 1 yes, 0 not yet, -1 this host cannot say */

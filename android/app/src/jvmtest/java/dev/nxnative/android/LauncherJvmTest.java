@@ -71,7 +71,7 @@ public final class LauncherJvmTest {
         System.out.println("ok " + n);
     }
 
-    static void profiles() {
+    static void profiles() throws IOException {
         List<Profile> l = Profile.parse("040074A01BF12000\tDonkey Kong Bananza\t22852\tabcdef012345\t458752 main=aa sdk=BB;0 main=cc\nbad line\n"
                 + "0400C3F00006E000\t\t0\tunknown\t");
         check(l.size() == 2, "two profiles, the bad line skipped");
@@ -135,6 +135,7 @@ public final class LauncherJvmTest {
                 && Profile.parse("0400C3F00006E000\tM\t0\tx\t\t\t\t\t\tscale:2560x1440=1/handheld,1920x1080=0/handheld").get(0).modes() == null,
                 "three rows, an original row, two handheld rows, window_fn and none: the phone sizes");
         check(!win.resolutionLive() && win.resolutionLive("1280x720") == null && !l.get(0).resolutionLive(), "window_fn / res_levels and none: not live (the next start)");
+        render(win, sc, sc4, fe, l.get(0));
         // The default frame limit (build.gradle fpsLimitOf, the 16th column): game.tsv fps_limit, 0 without the column, an empty one or a bad value
         Profile lim = Profile.parse("0400486024DEC000\tO\t0\tx\t\t\t\t\t\t\t\t\t\t\t\t30").get(0);
         check(lim.fpsLimit == 30 && !lim.decoupled && !lim.drs, "fps_limit column: " + lim.fpsLimit);
@@ -146,6 +147,112 @@ public final class LauncherJvmTest {
         check(Profile.versionName(0).equals("the base game") && Profile.versionName(458752).equals("update 458752"), "versionName");
         check(Profile.of("040074A01BF12000") != null && Profile.of("0100000000010000") == null, "Profile.of over BuildConfig.NX_PROFILES");
         check(Profile.missing("0100000000010000", "Mario").startsWith("This app version does not include Mario (0100000000010000).") && Profile.missing("040074A01BF12000", null) == null, "Profile.missing");
+    }
+
+    /** The app's string resources (res/values/strings.xml, the path in the system property nx.res): string name → text, string-array name → items joined by '\n' */
+    static Map<String, String> strings() throws IOException {
+        String x = new String(Files.readAllBytes(new File(System.getProperty("nx.res")).toPath()), StandardCharsets.UTF_8);
+        Map<String, String> m = new java.util.HashMap<>();
+        java.util.regex.Matcher s = java.util.regex.Pattern.compile("<string name=\"([^\"]+)\">([^<]*)</string>").matcher(x);
+        while (s.find()) m.put(s.group(1), s.group(2));
+        java.util.regex.Matcher a = java.util.regex.Pattern.compile("<string-array name=\"([^\"]+)\">(.*?)</string-array>", java.util.regex.Pattern.DOTALL).matcher(x);
+        while (a.find()) {
+            List<String> items = new java.util.ArrayList<>();
+            java.util.regex.Matcher i = java.util.regex.Pattern.compile("<item>([^<]*)</item>").matcher(a.group(2));
+            while (i.find()) items.add(i.group(1));
+            m.put(a.group(1), String.join("\n", items));
+        }
+        return m;
+    }
+
+    /**
+     * Resolution, Upscaling quality and Graphics quality (build.gradle resolutionOf "render:…", Profile.renderCfg): shown only for a profile with a render_cfg row; the labels from
+     * the string resources; the host's lines for each choice; the lazy migration of an older Game resolution value; the render target pool each setting needs (the host's
+     * rt_pool.h table); and when the one restart line shows
+     */
+    static void render(Profile... others) throws IOException {
+        String col = "render:720:2048x1152:1280x720:1008:1536=1920x1080/2048=2560x1440:1440";
+        Profile fe = Profile.parse("04007EF01F8AE000\tF\t0\tx\t\t\t\t\t\t" + col + "\t\tsubmission\t1920x1080").get(0);
+        check(fe.renderCfg() && !fe.hasResolution() && fe.resolutionEnv("1920x1080").isEmpty() && fe.modes() == null, "a render_cfg row: the three rows, not Game resolution");
+        for (Profile o : others) check(!o.renderCfg(), "no render_cfg row: no render rows (" + o.resolution + ")");
+        // the labels, from the string resources
+        Map<String, String> r = strings();
+        String h = r.get("render_res_height"), og = r.get("render_res_original"), hv = r.get("render_heavy");
+        String[] up = r.get("render_upscale").split("\n"), gfx = r.get("render_gfx").split("\n");
+        check("Resolution".equals(r.get("render_res_title")) && "Upscaling quality".equals(r.get("render_upscale_title")) && "Graphics quality".equals(r.get("render_gfx_title")), "row titles");
+        String[] outs = fe.renderOutputs();
+        check(java.util.Arrays.equals(outs, new String[] {"2560x1440", "original", "1920x1080", "1280x720"}), "Resolution: from 720p up, largest first: " + java.util.Arrays.toString(outs));
+        String[] ol = new String[outs.length];
+        for (int i = 0; i < outs.length; i++) ol[i] = fe.renderOutLabel(outs[i], h, og, hv);
+        check(java.util.Arrays.equals(ol, new String[] {"1440p (heavy)", "1152p (original docked)", "1080p", "720p"}), "Resolution labels: " + java.util.Arrays.toString(ol));
+        String[] pl = new String[Profile.RENDER_PCTS.length];
+        for (int i = 0; i < pl.length; i++) pl[i] = Profile.renderPctLabel(Profile.RENDER_PCTS[i], up, hv);
+        check(java.util.Arrays.equals(pl, new String[] {"Native (heavy)", "Quality", "Balanced", "Performance", "Ultra performance"}), "Upscaling labels: " + java.util.Arrays.toString(pl));
+        check(java.util.Arrays.equals(Profile.RENDER_PCTS, new int[] {100, 67, 59, 50, 33}), "Upscaling: 100, 67, 59, 50, 33 %");
+        check(java.util.Arrays.equals(gfx, new String[] {"Quality", "Performance"}), "Graphics quality labels");
+        check("This change will apply on game restart.".equals(r.get("render_restart_note")), "the restart line");
+        // the host's lines for each choice
+        for (String o : outs) for (int p : Profile.RENDER_PCTS) for (boolean q : new boolean[] {true, false})
+            check(Profile.renderEnv(new Profile.Render(o, p, q)).equals(List.of("DM_WINDOW_SIZE=" + o, "DM_RENDER_PCT=" + p, "DM_GFX_QUALITY=" + (q ? "quality" : "performance"))), "env " + o + " " + p);
+        check(fe.renderOutH(new Profile.Render("original", 50, false)) == 0 && fe.renderOutH(new Profile.Render("2560x1440", 50, false)) == 1440, "the panel's output height");
+        // the in-game panel's live call (Native.renderSet): each of the three at once, -1 for the ones the pick leaves as they were
+        Profile.Render was = new Profile.Render("1920x1080", 50, false);
+        check(fe.renderLive(was, was) == null, "live: nothing changed, no call");
+        check(java.util.Arrays.equals(fe.renderLive(was, new Profile.Render("1920x1080", 50, true)), new int[] {-1, -1, 1})
+                && java.util.Arrays.equals(fe.renderLive(new Profile.Render("1920x1080", 50, true), was), new int[] {-1, -1, 0}), "live: Graphics quality alone, both ways");
+        check(java.util.Arrays.equals(fe.renderLive(was, new Profile.Render("original", 50, false)), new int[] {0, -1, -1})
+                && java.util.Arrays.equals(fe.renderLive(was, new Profile.Render("1920x1080", 67, false)), new int[] {-1, 67, -1})
+                && java.util.Arrays.equals(fe.renderLive(was, new Profile.Render("2560x1440", 100, true)), new int[] {1440, 100, 1}), "live: Resolution, Upscaling quality, all three");
+        // the lazy migration (Prefs.render: the stored Game resolution value, then render_pct and gfx_quality, -1 when not stored)
+        Object[][] mig = {
+            {"2048x1152", -1, -1, "original", 50, true}, {"original", -1, -1, "original", 50, true}, {"1920x1080", -1, -1, "1920x1080", 50, false},
+            {null, -1, -1, "1920x1080", 50, false}, {"960x540", -1, -1, "1280x720", 50, false}, {"848x480", -1, -1, "1280x720", 50, false},
+            {"2560x1440", -1, -1, "2560x1440", 50, false}, {"1280x720", -1, -1, "1280x720", 50, false}, {"3840x2160", -1, -1, "1920x1080", 50, false},
+            {"original", 67, 0, "original", 67, false}, {"2560x1440", 100, 1, "2560x1440", 100, true}, {"1920x1080", 40, 7, "1920x1080", 50, false}};
+        for (Object[] m : mig) {
+            Profile.Render got = fe.renderSetting((String) m[0], (Integer) m[1], (Integer) m[2]);
+            check(got.equals(new Profile.Render((String) m[3], (Integer) m[4], (Boolean) m[5])), "migration of " + java.util.Arrays.toString(m) + ": " + got);
+        }
+        // the render target pool each setting needs (rt_pool.h, the host's unit test has the same table): 12 GB or less, and more (1536 at least)
+        String[] ws = {"1280x720", "1920x1080", "original", "2560x1440"};
+        int[] ps = {33, 50, 59, 67, 100};
+        int[][] small = {{1008, 1008, 1008, 1008, 1008}, {1008, 1008, 1008, 1008, 1536}, {1008, 1008, 1008, 1536, 2048}, {1536, 1536, 1536, 1536, 2048}};
+        for (int o = 0; o < 4; o++) for (int k = 0; k < 5; k++) {
+            Profile.Render s = new Profile.Render(ws[o], ps[k], k % 2 == 0);
+            check(fe.renderPool(s, true) == small[o][k] && fe.renderPool(s, false) == Math.max(1536, small[o][k]), "pool " + s + ": " + fe.renderPool(s, true));
+        }
+        check(java.util.Arrays.equals(fe.renderSize(new Profile.Render("2560x1440", 67, false)), new int[] {1706, 960})
+                && java.util.Arrays.equals(fe.renderSize(new Profile.Render("1920x1080", 59, false)), new int[] {1132, 638})
+                && java.util.Arrays.equals(fe.renderSize(new Profile.Render("original", 33, false)), new int[] {682, 384}), "render sizes as the host's");
+        check(java.util.Arrays.equals(fe.renderPoolCap(1008), new int[] {1280, 720}) && java.util.Arrays.equals(fe.renderPoolCap(1536), new int[] {1920, 1080})
+                && java.util.Arrays.equals(fe.renderPoolCap(2048), new int[] {2560, 1440}), "caps");
+        // when "This change will apply on game restart." shows. The in-game panel: the pick's render size is above the started pool's cap (the host clamps it)
+        Profile.Render s1080 = new Profile.Render("1920x1080", 50, false);
+        check(fe.renderRestartNote(new Profile.Render("2560x1440", 67, false), s1080, null, true), "panel, 12 GB: 1440p 67 % after a 1008 MiB start");
+        check(fe.renderRestartNote(new Profile.Render("1920x1080", 100, false), s1080, null, true), "panel, 12 GB: Native at 1080p after a 1008 MiB start");
+        check(!fe.renderRestartNote(new Profile.Render("2560x1440", 50, false), s1080, null, true), "panel, 12 GB: 1440p 50 % fits 1280x720 (the host does not clamp)");
+        check(!fe.renderRestartNote(new Profile.Render("1920x1080", 67, true), s1080, null, true) && !fe.renderRestartNote(s1080, s1080, null, true), "panel: within the cap, quality alone");
+        // Graphics quality alone never changes the pool, so it never shows the line (in the panel or in Game settings), on any setting and either device class
+        for (String o : outs) for (int p : Profile.RENDER_PCTS) for (boolean low : new boolean[] {true, false}) {
+            Profile.Render a = new Profile.Render(o, p, false), b = new Profile.Render(o, p, true);
+            check(fe.renderPool(a, low) == fe.renderPool(b, low) && fe.renderRestartNote(b, a, null, low) == fe.renderRestartNote(a, a, null, low)
+                    && fe.renderRestartNote(a, b, null, low) == fe.renderRestartNote(b, b, null, low) && !fe.renderRestartNote(b, null, a, low) && !fe.renderRestartNote(a, null, b, low),
+                    "quality alone, no line: " + a + (low ? " 12 GB" : " more"));
+        }
+        check(!fe.renderRestartNote(new Profile.Render("2560x1440", 67, false), s1080, null, false), "panel, more than 12 GB: 1440p 67 % fits the 1536 MiB start");
+        check(fe.renderRestartNote(new Profile.Render("2560x1440", 100, false), s1080, null, false), "panel, more than 12 GB: 1440p Native needs 2048 MiB");
+        check(!fe.renderRestartNote(new Profile.Render("1920x1080", 50, false), new Profile.Render("2560x1440", 100, false), null, true), "panel: a smaller pick after a 2048 MiB start");
+        // Game settings (no game running): the pick needs another pool size than the setting stored before it
+        check(fe.renderRestartNote(new Profile.Render("2560x1440", 50, false), null, s1080, true), "settings, 12 GB: 1080p to 1440p (1008 to 1536 MiB)");
+        check(fe.renderRestartNote(s1080, null, new Profile.Render("2560x1440", 50, false), true), "settings, 12 GB: 1440p to 1080p (1536 to 1008 MiB)");
+        check(!fe.renderRestartNote(new Profile.Render("1280x720", 100, true), null, s1080, true), "settings: the same pool");
+        check(!fe.renderRestartNote(new Profile.Render("2560x1440", 67, false), null, s1080, false), "settings, more than 12 GB: 1536 both");
+        check(fe.renderRestartNote(new Profile.Render("original", 100, false), null, s1080, false), "settings, more than 12 GB: 1152p Native needs 2048 MiB");
+        check(!fe.renderRestartNote(new Profile.Render("2560x1440", 50, false), null, null, true), "settings: nothing stored before");
+        // without an rt_pool row: no pool, never the line
+        Profile np = Profile.parse("04007EF01F8AE000\tF\t0\tx\t\t\t\t\t\trender:720:2048x1152:1280x720:::\t\tsubmission\t1920x1080").get(0);
+        check(np.renderCfg() && np.renderPool(s1080, true) == 0 && !np.renderRestartNote(new Profile.Render("2560x1440", 100, false), s1080, null, true)
+                && !np.renderRestartNote(new Profile.Render("2560x1440", 100, false), null, s1080, true), "no rt_pool row: no restart line");
     }
 
     static void backup(File t) throws Exception {
