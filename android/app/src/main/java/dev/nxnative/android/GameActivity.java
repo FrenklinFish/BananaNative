@@ -430,6 +430,8 @@ public final class GameActivity extends Activity implements SurfaceHolder.Callba
         // mode that give that size (graphics_scale rows), as its profile says (Profile.resolutionEnv); nothing for a game with neither
         Profile prof = Profile.of(id);
         if (prof != null) env.addAll(prof.resolutionEnv(Prefs.gameWindow(this, id)));
+        if (prof != null && prof.vegetationDetail && !Prefs.fullVegetation(this, id)) env.add("DM_VK_VEGETATION=0");
+        if (prof != null) env.addAll(prof.optionsEnv(optEnv -> Prefs.gameOption(this, id, optEnv)));
         Lsfg.env(this, env);   // frame generation: the user's Lossless.dll and the settings
         GameUpscaler.env(this, id, env);   // the Upscaler (Game settings, the in-game panel): the game's own upscaler and the present's scaling
         if (Prefs.drsGame(id)) { int[] drs = Prefs.DRS[Prefs.drs(this, id)]; env.add("DM_DRS=" + drs[0] + "," + drs[1]); }   // dynamic resolution range (Prefs.DRS)
@@ -441,6 +443,7 @@ public final class GameActivity extends Activity implements SurfaceHolder.Callba
         } else if (Prefs.limited(id)) {   // a profile's default frame limit (fps_limit), which the host applies itself: only the player's own choice is passed (60 fps = none: the game's own interval)
             if (Prefs.ownFpsCap(this, id)) { int pace = Prefs.paceCap(this, id); env.add("DM_FPS_LIMIT=" + Math.max(pace, 0)); }
         } else if (cap >= 0) env.add("DM_FPS_TARGET=" + cap);
+        if (Prefs.steps(id) && Prefs.hold60(this, id)) env.add("DM_FPS_HOLD60=1");   // Hold 60 fps: one step a frame at the cap of 60 (the in-game panel changes it live)
         String gpuNote = GpuDriver.env(this, id, env);   // the game's GPU driver, else the main screen's (DM_VK_DRIVER)
         String ts = Prefs.gpuTs(this, id);   // Game settings › GPU timing; unset: the profile's gpu_timestamps (a DM_NVN_GPU_TS line of env.txt or the game's own lines comes later and wins)
         if (ts != null) env.add("DM_NVN_GPU_TS=" + ts);
@@ -449,6 +452,7 @@ public final class GameActivity extends Activity implements SurfaceHolder.Callba
         if (xb == 2) env.add("DM_PAD_LABELLED=2");
         if (Prefs.instancedDraws(this, id)) env.add("DM_VK_INSTANCE=1");   // Game settings › Instanced draws
         if (Prefs.classicPasses(this, id)) env.add("DM_VK_CLASSIC_RP=1");   // Game settings › Classic render passes
+        if (Prefs.skipLayersGame(id) && Prefs.skipLayers(this, id)) env.add("DM_VK_SKIP_FS=" + Prefs.skipLayersKeys(id));   // Game settings › Speedhack: Turn off hidden layers
         env.add("DM_VK_PSO_ASYNC=" + (Prefs.psoAsync(this, id) ? 2 : 0));   // Game settings › Background pipelines (an env.txt line of the player's comes later and wins)
         if (Prefs.ramSaver(this, id)) { env.add("DM_MEM_FILEBACK=1"); env.add("DM_MEM_FILEBACK_KINDS=shader,texture"); }   // Game settings › RAM saver: texture pools in a file in TMPDIR, the cache folder (vka_mem.c "File-backed pools"); lines of env.txt or the game's own come later and win
         String padMap = Prefs.padMap(this, id);   // Button mapping (Game settings, Settings): wins over the label swap's A/B for the buttons it names

@@ -1,0 +1,76 @@
+; A task module in the form of the translator's SpirvMeshEntry.cs (written by hand, no game code): a body function, then the wrapper's barrier and
+; OpEmitMeshTasksEXT(payload[1] clamped, 1, 1, payload). Workgroup w asks for (w & 3) mesh workgroups and writes payload[2] = 3 x w + 1, payload[3..7] = lane
+               OpCapability Shader
+               OpCapability MeshShadingEXT
+               OpExtension "SPV_EXT_mesh_shader"
+               OpMemoryModel Logical GLSL450
+               OpEntryPoint TaskEXT %main "main" %wg %lid %payload
+               OpExecutionMode %main LocalSize 32 1 1
+               OpDecorate %wg BuiltIn WorkgroupId
+               OpDecorate %lid BuiltIn LocalInvocationIndex
+       %void = OpTypeVoid
+         %fn = OpTypeFunction %void
+       %uint = OpTypeInt 32 0
+        %int = OpTypeInt 32 1
+       %bool = OpTypeBool
+     %v3uint = OpTypeVector %uint 3
+     %uint_0 = OpConstant %uint 0
+     %uint_1 = OpConstant %uint 1
+     %uint_2 = OpConstant %uint 2
+     %uint_3 = OpConstant %uint 3
+     %uint_8 = OpConstant %uint 8
+   %uint_264 = OpConstant %uint 264
+ %uint_65535 = OpConstant %uint 65535
+      %int_0 = OpConstant %int 0
+     %pl_arr = OpTypeArray %uint %uint_8
+   %p_in_v3u = OpTypePointer Input %v3uint
+   %p_in_u32 = OpTypePointer Input %uint
+     %p_pl_a = OpTypePointer TaskPayloadWorkgroupEXT %pl_arr
+     %p_pl_u = OpTypePointer TaskPayloadWorkgroupEXT %uint
+         %wg = OpVariable %p_in_v3u Input
+        %lid = OpVariable %p_in_u32 Input
+    %payload = OpVariable %p_pl_a TaskPayloadWorkgroupEXT
+       %body = OpFunction %void None %fn
+         %b0 = OpLabel
+          %l = OpLoad %uint %lid
+        %wgv = OpLoad %v3uint %wg
+        %wgx = OpCompositeExtract %uint %wgv 0
+        %wgp = OpAccessChain %p_in_u32 %wg %int_0
+       %wgx2 = OpLoad %uint %wgp
+       %isl0 = OpIEqual %bool %l %uint_0
+               OpSelectionMerge %b2 None
+               OpBranchConditional %isl0 %b1 %b2
+         %b1 = OpLabel
+        %cnt = OpBitwiseAnd %uint %wgx %uint_3
+        %pp1 = OpAccessChain %p_pl_u %payload %uint_1
+               OpStore %pp1 %cnt
+         %m3 = OpIMul %uint %wgx2 %uint_3
+         %m4 = OpIAdd %uint %m3 %uint_1
+        %pp2 = OpAccessChain %p_pl_u %payload %uint_2
+               OpStore %pp2 %m4
+               OpBranch %b2
+         %b2 = OpLabel
+       %inr = OpULessThan %bool %l %uint_8
+       %ge3 = OpULessThan %bool %uint_2 %l
+       %wr = OpLogicalAnd %bool %inr %ge3
+               OpSelectionMerge %b4 None
+               OpBranchConditional %wr %b3 %b4
+         %b3 = OpLabel
+        %ppl = OpAccessChain %p_pl_u %payload %l
+               OpStore %ppl %l
+               OpBranch %b4
+         %b4 = OpLabel
+               OpReturn
+               OpFunctionEnd
+       %main = OpFunction %void None %fn
+      %entry = OpLabel
+         %l0 = OpLoad %uint %lid
+               OpControlBarrier %uint_2 %uint_2 %uint_264
+          %c = OpFunctionCall %void %body
+               OpControlBarrier %uint_2 %uint_2 %uint_264
+        %cp = OpAccessChain %p_pl_u %payload %uint_1
+         %cv = OpLoad %uint %cp
+         %lt = OpULessThan %bool %cv %uint_65535
+         %cc = OpSelect %uint %lt %cv %uint_65535
+               OpEmitMeshTasksEXT %cc %uint_1 %uint_1 %payload
+               OpFunctionEnd

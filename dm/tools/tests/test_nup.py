@@ -172,6 +172,25 @@ class Read(Fixture):
         self.assertEqual(nso.read(f).image, nso.read(plain).image)
         self.assertEqual(pack_android.rewriter_src(plain, out, 'main'), plain)   # a folder module is read where it is
 
+    def test_magic_read_decodes_a_prefix(self):   # a 4-byte read (shader_split.py zip_jobs' probe) decompresses up to the read's end, not the whole file
+        p = f'{self.nup}:update/{VER}/romfs/Shader/big.bin'
+        for peek in (nup.PEEK, 4096):
+            with mock.patch.object(nup, 'PEEK', peek), mock.patch.object(nup._Zstd, '_load', autospec=True, side_effect=nup._Zstd._load) as load:
+                if peek >= io.DEFAULT_BUFFER_SIZE:   # buffered: the reader asks for its whole buffer
+                    with romfs.open(p, 'rb') as f: self.assertEqual(f.read(4), BIG[:4])
+                with romfs.open(p, 'rb', buffering=0) as f:
+                    self.assertEqual(f.read(4), BIG[:4]); self.assertLessEqual(len(f.head), 4)
+                    f.seek(100); self.assertEqual(f.read(8), BIG[100:108])   # past the prefix kept: decoded again further, still not whole
+                self.assertEqual(load.call_count, 0)
+                with romfs.open(p, 'rb', buffering=0) as f:   # read on to the end: the whole file is loaded once and the prefix dropped
+                    self.assertEqual(f.read(4), BIG[:4]); self.assertEqual(f.read(), BIG[4:]); self.assertIsNone(f.head)
+                self.assertEqual(load.call_count, 1)
+                with romfs.open(p, 'rb', buffering=0) as f:   # chunks that run past PEEK: the same bytes as one read
+                    got = b''
+                    while b := f.read(3000): got += b
+                    self.assertEqual(got, BIG)
+        with romfs.open(f'{self.nup}:update/{VER}/romfs/a.txt', 'rb') as f: self.assertEqual(f.read(4), b'vers')   # a read that reaches the end loads the file as before
+
 
 class RawOnly(Fixture):
     raw_only = True

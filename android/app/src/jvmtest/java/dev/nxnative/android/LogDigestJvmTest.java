@@ -42,6 +42,10 @@ public final class LogDigestJvmTest {
                     System.out.println("bad " + e.getMessage().replace('\n', ' '));
                 }
                 break;
+            case "meanings":
+                for (LogDigest.Row r : LogDigest.rules(file(a[1])))
+                    System.out.println(r.id + "\t" + r.meaning);
+                break;
             case "keys": System.out.println(LogDigest.KEY_LINE.pattern()); System.out.println(LogDigest.KEY_LINE2.pattern()); break;
             case "redact":
                 for (String l : file(a[1]).split("\n", -1)) System.out.println(LogDigest.redact(l));

@@ -6,14 +6,16 @@ import json
 import os
 import shutil
 import struct
+import subprocess
 import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 REPO = Path(__file__).resolve().parents[3]
 TOOLS = REPO / 'dm/gfx/tools'
-NAMES = ('ResultCut', 'Stored', 'stored_bytes', 'result_path', 'result_file', 'result_head', 'write_result', 'read_result')
+NAMES = ('ResultCut', 'Stored', 'stored_bytes', 'result_path', 'result_file', 'result_head', 'write_result', 'read_result', 'sync_results', '_tmp_owner_gone')
 
 
 def vk_functions(res):
@@ -80,6 +82,43 @@ class Results(unittest.TestCase):
         (self.res / '0000000000000011.r').write_bytes(b'not a result')
         self.assertEqual(self.ns['result_file'](str(self.res / '0000000000000011.r')), (None, False))
         self.assertEqual(self.ns['result_file'](str(self.res / 'missing.r')), (None, False))
+
+    def test_kept_shaders_one_sync(self):   # a delta's kept shaders: written unflushed and unnamed, then one os.sync for all of them before they take their names
+        keys = [f'{i:016x}' for i in range(1, 6)]; tmps = []
+        for k in keys:
+            self.ns['STAGE_OF'][k] = 'ps'
+            t = self.ns['write_result'](k, 'ok', '', ({'stage': 'ps', 'reused': 'v0'}, [(0, 8, b'\x03\x02\x23\x07' * 2, 0, None)]), None, sync=False)
+            self.assertTrue(t.endswith('.tmp') and os.path.isfile(t)); tmps.append((t, k))
+        self.assertEqual([n for n in os.listdir(self.res) if n.endswith('.r')], [])   # no result under its name before the sync
+        order = []
+        with mock.patch.object(os, 'sync', lambda: order.append('sync'), create=True), mock.patch.object(os, 'fsync', side_effect=AssertionError('an fsync each')), \
+                mock.patch.object(os, 'replace', side_effect=lambda a, b, _r=os.replace: (order.append('replace'), _r(a, b))):
+            self.ns['sync_results'](tmps)
+        self.assertEqual(order, ['sync'] + ['replace'] * len(keys))
+        self.assertEqual(sorted(os.listdir(self.res)), [k + '.r' for k in keys])
+        for k in keys: self.assertEqual(self.ns['result_file'](str(self.res / f'{k}.r'))[0]['reused'], 'v0')
+
+    def test_kept_shaders_without_os_sync(self):   # Windows: an fsync each, still before the rename
+        self.ns['STAGE_OF']['0000000000000077'] = 'ps'
+        t = self.ns['write_result']('0000000000000077', 'ok', '', ({'stage': 'ps'}, []), None, sync=False)
+        n = []
+        real = os.fsync
+        with mock.patch.object(os, 'sync', create=True) as sy:
+            del os.sync
+            try:
+                with mock.patch.object(os, 'fsync', side_effect=lambda fd: (n.append(fd), real(fd))): self.ns['sync_results']([(t, '0000000000000077')])
+            finally: os.sync = sy
+        self.assertEqual(len(n), 1); self.assertTrue((self.res / '0000000000000077.r').is_file())
+
+    def test_stale_temporary_files(self):   # a stopped build's (this process, or one that ended) go at the start; a running build's stay
+        gone = self.ns['_tmp_owner_gone']
+        self.assertTrue(gone(f'0000000000000001.r.{os.getpid()}.tmp'))
+        self.assertTrue(gone('0000000000000001.r.notapid.tmp'))
+        if os.name != 'nt':
+            self.assertFalse(gone(f'0000000000000001.r.{os.getppid()}.tmp'))
+            child = subprocess.Popen([sys.executable, '-c', '']); child.wait()   # a pid whose process has ended
+            self.assertTrue(gone(f'0000000000000001.r.{child.pid}.tmp'))
+            self.assertTrue(gone('0000000000000001.r.99999999999.tmp'))   # no pid is that large
 
     def test_flushed_before_rename(self):   # the order that keeps a renamed file whole
         src = (TOOLS / 'vk_android_build.py').read_text()

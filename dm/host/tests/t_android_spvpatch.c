@@ -1,7 +1,8 @@
 // The Android replay's SPIR-V rewrite of vertex inputs fed integer formats (dm/gfx/vk_android/vka_spvpatch.c), on the Mac: the graphics selftest's vertex shader
 // (a component read through an access chain at location 0, whole loads at location 1) retyped as uint / int, checked by structure and, when spirv-val is on the PATH,
 // by validation. DM_VK_SPV_DIR=<folder of .spv vertex modules> also rewrites each of those (every vec4 input as uint) and validates it. DM_VK_GS_SPV=<a geometry module
-// that writes memory> puts its writes under a per-primitive claim (vka_spv_gs_claim, after the one-invocation subgroup rewrite) and validates it
+// that writes memory> puts its writes under a per-primitive claim (vka_spv_gs_claim, after the one-invocation subgroup rewrite) and validates it. A small culling
+// geometry shader gets a degenerate primitive where a run emits nothing (vka_spv_gs_fill)
 #include "../../gfx/vk_android/vka_spvpatch.h"
 #include "../../gfx/vk_android/vka_selftest_spv.h"
 #include <dirent.h>
@@ -10,6 +11,48 @@
 #include <string.h>
 #include <unistd.h>
 
+// A triangle geometry shader that emits its triangle only when the first vertex's x is above 0, else nothing (assembled with spirv-as, valid for Vulkan 1.0),
+// and the same with its emits on stream 0 (GeometryStreams), which vka_spv_gs_fill leaves alone
+static const uint32_t GS_CULL[217] = {
+    0x07230203, 0x00010000, 0x00070000, 0x00000026, 0x00000000, 0x00020011, 0x00000002, 0x0003000e, 0x00000000, 0x00000001, 0x0007000f, 0x00000003,
+    0x00000001, 0x6e69616d, 0x00000000, 0x00000002, 0x00000003, 0x00030010, 0x00000001, 0x00000016, 0x00040010, 0x00000001, 0x00000000, 0x00000001,
+    0x00030010, 0x00000001, 0x0000001d, 0x00040010, 0x00000001, 0x0000001a, 0x00000003, 0x00050048, 0x00000004, 0x00000000, 0x0000000b, 0x00000000,
+    0x00030047, 0x00000004, 0x00000002, 0x00050048, 0x00000005, 0x00000000, 0x0000000b, 0x00000000, 0x00030047, 0x00000005, 0x00000002, 0x00020013,
+    0x00000006, 0x00030021, 0x00000007, 0x00000006, 0x00030016, 0x00000008, 0x00000020, 0x00040017, 0x00000009, 0x00000008, 0x00000004, 0x00040015,
+    0x0000000a, 0x00000020, 0x00000001, 0x00040015, 0x0000000b, 0x00000020, 0x00000000, 0x0003001e, 0x00000004, 0x00000009, 0x00040020, 0x0000000c,
+    0x00000003, 0x00000004, 0x0004003b, 0x0000000c, 0x00000002, 0x00000003, 0x0003001e, 0x00000005, 0x00000009, 0x0004002b, 0x0000000b, 0x0000000d,
+    0x00000003, 0x0004002b, 0x0000000b, 0x0000000e, 0x00000000, 0x0004001c, 0x0000000f, 0x00000005, 0x0000000d, 0x00040020, 0x00000010, 0x00000001,
+    0x0000000f, 0x0004003b, 0x00000010, 0x00000003, 0x00000001, 0x0004002b, 0x0000000a, 0x00000011, 0x00000000, 0x0004002b, 0x0000000a, 0x00000012,
+    0x00000001, 0x0004002b, 0x0000000a, 0x00000013, 0x00000002, 0x00040020, 0x00000014, 0x00000001, 0x00000009, 0x00040020, 0x00000015, 0x00000003,
+    0x00000009, 0x00040020, 0x00000016, 0x00000001, 0x00000008, 0x0004002b, 0x00000008, 0x00000017, 0x00000000, 0x00020014, 0x00000018, 0x00050036,
+    0x00000006, 0x00000001, 0x00000000, 0x00000007, 0x000200f8, 0x00000019, 0x00070041, 0x00000016, 0x0000001a, 0x00000003, 0x00000011, 0x00000011,
+    0x0000000e, 0x0004003d, 0x00000008, 0x0000001b, 0x0000001a, 0x000500ba, 0x00000018, 0x0000001c, 0x0000001b, 0x00000017, 0x000300f7, 0x0000001d,
+    0x00000000, 0x000400fa, 0x0000001c, 0x0000001e, 0x0000001d, 0x000200f8, 0x0000001e, 0x00060041, 0x00000014, 0x0000001f, 0x00000003, 0x00000011,
+    0x00000011, 0x0004003d, 0x00000009, 0x00000020, 0x0000001f, 0x00050041, 0x00000015, 0x00000021, 0x00000002, 0x00000011, 0x0003003e, 0x00000021,
+    0x00000020, 0x000100da, 0x00060041, 0x00000014, 0x00000022, 0x00000003, 0x00000012, 0x00000011, 0x0004003d, 0x00000009, 0x00000023, 0x00000022,
+    0x0003003e, 0x00000021, 0x00000023, 0x000100da, 0x00060041, 0x00000014, 0x00000024, 0x00000003, 0x00000013, 0x00000011, 0x0004003d, 0x00000009,
+    0x00000025, 0x00000024, 0x0003003e, 0x00000021, 0x00000025, 0x000100da, 0x000100db, 0x000200f9, 0x0000001d, 0x000200f8, 0x0000001d, 0x000100fd,
+    0x00010038};
+static const uint32_t GS_CULL_STREAM[223] = {
+    0x07230203, 0x00010000, 0x00070000, 0x00000026, 0x00000000, 0x00020011, 0x00000002, 0x00020011, 0x00000036, 0x0003000e, 0x00000000, 0x00000001,
+    0x0007000f, 0x00000003, 0x00000001, 0x6e69616d, 0x00000000, 0x00000002, 0x00000003, 0x00030010, 0x00000001, 0x00000016, 0x00040010, 0x00000001,
+    0x00000000, 0x00000001, 0x00030010, 0x00000001, 0x0000001d, 0x00040010, 0x00000001, 0x0000001a, 0x00000003, 0x00050048, 0x00000004, 0x00000000,
+    0x0000000b, 0x00000000, 0x00030047, 0x00000004, 0x00000002, 0x00050048, 0x00000005, 0x00000000, 0x0000000b, 0x00000000, 0x00030047, 0x00000005,
+    0x00000002, 0x00020013, 0x00000006, 0x00030021, 0x00000007, 0x00000006, 0x00030016, 0x00000008, 0x00000020, 0x00040017, 0x00000009, 0x00000008,
+    0x00000004, 0x00040015, 0x0000000a, 0x00000020, 0x00000001, 0x00040015, 0x0000000b, 0x00000020, 0x00000000, 0x0003001e, 0x00000004, 0x00000009,
+    0x00040020, 0x0000000c, 0x00000003, 0x00000004, 0x0004003b, 0x0000000c, 0x00000002, 0x00000003, 0x0003001e, 0x00000005, 0x00000009, 0x0004002b,
+    0x0000000b, 0x0000000d, 0x00000003, 0x0004002b, 0x0000000b, 0x0000000e, 0x00000000, 0x0004001c, 0x0000000f, 0x00000005, 0x0000000d, 0x00040020,
+    0x00000010, 0x00000001, 0x0000000f, 0x0004003b, 0x00000010, 0x00000003, 0x00000001, 0x0004002b, 0x0000000a, 0x00000011, 0x00000000, 0x0004002b,
+    0x0000000a, 0x00000012, 0x00000001, 0x0004002b, 0x0000000a, 0x00000013, 0x00000002, 0x00040020, 0x00000014, 0x00000001, 0x00000009, 0x00040020,
+    0x00000015, 0x00000003, 0x00000009, 0x00040020, 0x00000016, 0x00000001, 0x00000008, 0x0004002b, 0x00000008, 0x00000017, 0x00000000, 0x00020014,
+    0x00000018, 0x00050036, 0x00000006, 0x00000001, 0x00000000, 0x00000007, 0x000200f8, 0x00000019, 0x00070041, 0x00000016, 0x0000001a, 0x00000003,
+    0x00000011, 0x00000011, 0x0000000e, 0x0004003d, 0x00000008, 0x0000001b, 0x0000001a, 0x000500ba, 0x00000018, 0x0000001c, 0x0000001b, 0x00000017,
+    0x000300f7, 0x0000001d, 0x00000000, 0x000400fa, 0x0000001c, 0x0000001e, 0x0000001d, 0x000200f8, 0x0000001e, 0x00060041, 0x00000014, 0x0000001f,
+    0x00000003, 0x00000011, 0x00000011, 0x0004003d, 0x00000009, 0x00000020, 0x0000001f, 0x00050041, 0x00000015, 0x00000021, 0x00000002, 0x00000011,
+    0x0003003e, 0x00000021, 0x00000020, 0x000200dc, 0x0000000e, 0x00060041, 0x00000014, 0x00000022, 0x00000003, 0x00000012, 0x00000011, 0x0004003d,
+    0x00000009, 0x00000023, 0x00000022, 0x0003003e, 0x00000021, 0x00000023, 0x000200dc, 0x0000000e, 0x00060041, 0x00000014, 0x00000024, 0x00000003,
+    0x00000013, 0x00000011, 0x0004003d, 0x00000009, 0x00000025, 0x00000024, 0x0003003e, 0x00000021, 0x00000025, 0x000200dc, 0x0000000e, 0x000200dd,
+    0x0000000e, 0x000200f9, 0x0000001d, 0x000200f8, 0x0000001d, 0x000100fd, 0x00010038};
 static int g_fail;
 #define CHECK(c, ...) do { if (!(c)) { g_fail++; printf("FAIL %s:%d: ", __FILE__, __LINE__); printf(__VA_ARGS__); printf("\n"); } } while (0)
 static int have_val(void) { return system("spirv-val --version >/dev/null 2>&1") == 0; }
@@ -117,6 +160,36 @@ static const uint32_t SPV_PFB_DISCARD[] = {
     0x00000033, 0x00050041, 0x00000035, 0x00000036, 0x0000001b, 0x00000034, 0x0004003d, 0x00000018, 0x00000037, 0x00000036, 0x000500b8, 0x00000038,
     0x00000039, 0x00000037, 0x00000031, 0x000300f7, 0x0000003b, 0x00000000, 0x000400fa, 0x00000039, 0x0000003a, 0x0000003b, 0x000200f8, 0x0000003a,
     0x000100fc, 0x000200f8, 0x0000003b, 0x0004003d, 0x00000019, 0x0000003f, 0x0000001b, 0x0003003e, 0x0000003e, 0x0000003f, 0x000100fd, 0x00010038};
+// A pixel shader's inputs for another earlier stage (vka_spv_input_remap), glslangValidator -V --target-env vulkan1.1 of:
+//   layout(location = 5) in vec4 uv; layout(location = 0) noperspective in vec4 fade; layout(location = 6) in vec4 tint; layout(location = 0) out vec4 o;
+//   if (uv.x + fade.x < 0.5) discard; o = tint * uv.y;
+static const uint32_t SPV_REMAP_FRAG[] = {
+    0x07230203, 0x00010300, 0x0008000b, 0x00000021, 0x00000000, 0x00020011, 0x00000001, 0x0006000b, 0x00000001, 0x4c534c47, 0x6474732e, 0x3035342e,
+    0x00000000, 0x0003000e, 0x00000000, 0x00000001, 0x0009000f, 0x00000004, 0x00000004, 0x6e69616d, 0x00000000, 0x00000009, 0x0000000f, 0x0000001a,
+    0x0000001b, 0x00030010, 0x00000004, 0x00000007, 0x00030003, 0x00000002, 0x000001c2, 0x00040005, 0x00000004, 0x6e69616d, 0x00000000, 0x00030005,
+    0x00000009, 0x00007675, 0x00040005, 0x0000000f, 0x65646166, 0x00000000, 0x00030005, 0x0000001a, 0x0000006f, 0x00040005, 0x0000001b, 0x746e6974,
+    0x00000000, 0x00040047, 0x00000009, 0x0000001e, 0x00000005, 0x00030047, 0x0000000f, 0x0000000d, 0x00040047, 0x0000000f, 0x0000001e, 0x00000000,
+    0x00040047, 0x0000001a, 0x0000001e, 0x00000000, 0x00040047, 0x0000001b, 0x0000001e, 0x00000006, 0x00020013, 0x00000002, 0x00030021, 0x00000003,
+    0x00000002, 0x00030016, 0x00000006, 0x00000020, 0x00040017, 0x00000007, 0x00000006, 0x00000004, 0x00040020, 0x00000008, 0x00000001, 0x00000007,
+    0x0004003b, 0x00000008, 0x00000009, 0x00000001, 0x00040015, 0x0000000a, 0x00000020, 0x00000000, 0x0004002b, 0x0000000a, 0x0000000b, 0x00000000,
+    0x00040020, 0x0000000c, 0x00000001, 0x00000006, 0x0004003b, 0x00000008, 0x0000000f, 0x00000001, 0x0004002b, 0x00000006, 0x00000013, 0x3f000000,
+    0x00020014, 0x00000014, 0x00040020, 0x00000019, 0x00000003, 0x00000007, 0x0004003b, 0x00000019, 0x0000001a, 0x00000003, 0x0004003b, 0x00000008,
+    0x0000001b, 0x00000001, 0x0004002b, 0x0000000a, 0x0000001d, 0x00000001, 0x00050036, 0x00000002, 0x00000004, 0x00000000, 0x00000003, 0x000200f8,
+    0x00000005, 0x00050041, 0x0000000c, 0x0000000d, 0x00000009, 0x0000000b, 0x0004003d, 0x00000006, 0x0000000e, 0x0000000d, 0x00050041, 0x0000000c,
+    0x00000010, 0x0000000f, 0x0000000b, 0x0004003d, 0x00000006, 0x00000011, 0x00000010, 0x00050081, 0x00000006, 0x00000012, 0x0000000e, 0x00000011,
+    0x000500b8, 0x00000014, 0x00000015, 0x00000012, 0x00000013, 0x000300f7, 0x00000017, 0x00000000, 0x000400fa, 0x00000015, 0x00000016, 0x00000017,
+    0x000200f8, 0x00000016, 0x000100fc, 0x000200f8, 0x00000017, 0x0004003d, 0x00000007, 0x0000001c, 0x0000001b, 0x00050041, 0x0000000c, 0x0000001e,
+    0x00000009, 0x0000001d, 0x0004003d, 0x00000006, 0x0000001f, 0x0000001e, 0x0005008e, 0x00000007, 0x00000020, 0x0000001c, 0x0000001f, 0x0003003e,
+    0x0000001a, 0x00000020, 0x000100fd, 0x00010038};
+// Whether a variable is decorated Location loc (*var: the first one), and a global variable's storage class (-1: none)
+static int loc_of(const uint32_t *w, size_t n, uint32_t loc, uint32_t *var) {
+    for (size_t i = 5; i < n && (w[i] >> 16); i += w[i] >> 16) if ((w[i] & 0xffff) == 71 && (w[i] >> 16) >= 4 && w[i + 2] == 30 && w[i + 3] == loc) { if (var) *var = w[i + 1]; return 1; }
+    return 0;
+}
+static int storage_of(const uint32_t *w, size_t n, uint32_t var) {
+    for (size_t i = 5; i < n && (w[i] >> 16); i += w[i] >> 16) if ((w[i] & 0xffff) == 59 && w[i + 2] == var) return (int)w[i + 3];
+    return -1;
+}
 int main(void) {
     int val = have_val();
     size_t n = sizeof SPV_TRI_VERT / 4, on = 0; char err[200] = "";
@@ -273,6 +346,21 @@ int main(void) {
         printf("t_android_spvpatch: %s texture binding %u retyped (%d texture reads in the module)\n", path, b, reads);
         free(w);
     }
+    {   // A geometry shader that may end a run without emitting (vka_spv_gs_fill): a run that emits nothing emits one degenerate triangle instead; one with streams is left alone
+        size_t gn = sizeof GS_CULL / 4;
+        uint32_t *g = vka_spv_gs_fill(GS_CULL, gn, &on, err, sizeof err);
+        CHECK(g, "culling geometry shader not filled: %s", err);
+        if (g) {
+            CHECK(count_op(g, on, 218) == count_op(GS_CULL, gn, 218) + 3, "three more OpEmitVertex: the degenerate triangle (%d)", count_op(g, on, 218));
+            CHECK(count_op(g, on, 219) == count_op(GS_CULL, gn, 219) + 1, "one more OpEndPrimitive");
+            CHECK(count_op(g, on, 59) == count_op(GS_CULL, gn, 59) + 1, "one more variable: the emitted flag");
+            CHECK(count_op(g, on, 247) == count_op(GS_CULL, gn, 247) + 1, "the filler under its own selection");
+            if (val) CHECK(validate(g, on, "culling geometry shader filled"), "valid SPIR-V");
+            free(g);
+        }
+        err[0] = 1;
+        CHECK(!vka_spv_gs_fill(GS_CULL_STREAM, sizeof GS_CULL_STREAM / 4, &on, err, sizeof err) && !err[0], "a geometry shader that emits to a stream is left alone: %s", err);
+    }
     {   // Texture pool reads (vka_spv_pool_fb): a bit set before each read of the pool, early depth tests where they give the same result
         size_t pn = sizeof SPV_PFB_FRAG / 4; int sites = 0, early = 0;
         uint32_t *x = vka_spv_pool_fb(SPV_PFB_FRAG, pn, 1, 0, 2, 0, VKA_PFB_EARLY, 1, &on, &sites, &early, err, sizeof err);
@@ -302,6 +390,45 @@ int main(void) {
         free(x);
         x = vka_spv_pool_fb(SPV_TRI_FRAG, sizeof SPV_TRI_FRAG / 4, 1, 0, 2, 0, VKA_PFB_EARLY, 1, &on, &sites, &early, err, sizeof err);
         CHECK(!x && !err[0], "pool reads: a module that reads no pool is left alone (%s)", err);
+    }
+    {   // vka_spv_input_remap: uv 5 -> 7, tint 6 -> 8, fade (location 0, read through an access chain) a constant (0, 0, 0, 1)
+        size_t rn = sizeof SPV_REMAP_FRAG / 4, ron = 0; uint32_t mv = 0, cs = 0, v_uv = 0, v_fade = 0, v_tint = 0;
+        loc_of(SPV_REMAP_FRAG, rn, 5, &v_uv); loc_of(SPV_REMAP_FRAG, rn, 6, &v_tint);
+        for (size_t i = 5; i < rn; i += SPV_REMAP_FRAG[i] >> 16)
+            if ((SPV_REMAP_FRAG[i] & 0xffff) == 71 && SPV_REMAP_FRAG[i + 2] == 30 && SPV_REMAP_FRAG[i + 3] == 0 && storage_of(SPV_REMAP_FRAG, rn, SPV_REMAP_FRAG[i + 1]) == 1) v_fade = SPV_REMAP_FRAG[i + 1];
+        CHECK(v_uv && v_tint && v_fade, "test module's inputs found");
+        uint64_t map = (~0ull & ~(0xfull << 20) & ~(0xfull << 24)) | 7ull << 20 | 8ull << 24;
+        uint32_t *r = vka_spv_input_remap(SPV_REMAP_FRAG, rn, map, &ron, &mv, &cs, err, sizeof err);
+        CHECK(r, "input remap refused: %s", err);
+        if (r) {
+            uint32_t a = 0, b = 0;
+            CHECK(loc_of(r, ron, 7, &a) && a == v_uv, "uv at location 7");
+            CHECK(loc_of(r, ron, 8, &b) && b == v_tint, "tint at location 8");
+            CHECK(!loc_of(r, ron, 5, NULL) && !loc_of(r, ron, 6, NULL), "nothing left at 5 or 6");
+            CHECK(storage_of(r, ron, v_fade) == 6, "fade a Private variable (storage class %d)", storage_of(r, ron, v_fade));
+            CHECK(mv == (1u << 5 | 1u << 6) && cs == 1u, "moved %#x, constant %#x", mv, cs);
+            if (val) CHECK(validate(r, ron, "input remap"), "input remap valid");
+            free(r);
+        }
+        r = vka_spv_input_remap(SPV_REMAP_FRAG, rn, 0x6543210ull | ~0ull << 28, &ron, &mv, &cs, err, sizeof err);
+        CHECK(!r && !err[0], "an identity map changes nothing (%s)", err);
+        free(r);
+        map = (~0ull & ~(0xfull << 20) & ~(0xfull << 24)) | 7ull << 20 | 7ull << 24;
+        r = vka_spv_input_remap(SPV_REMAP_FRAG, rn, map, &ron, &mv, &cs, err, sizeof err);
+        CHECK(!r && err[0], "two inputs at one location refused");
+        free(r);
+        // DM_VK_REMAP_SPV=<pixel module>:<map in hex>: that module rewritten and validated (the profile's mesh_prepass_cut maps on a game's prepass pixel shaders)
+        const char *rs = getenv("DM_VK_REMAP_SPV");
+        if (rs) {
+            char path[1024]; snprintf(path, sizeof path, "%s", rs); char *c = strrchr(path, ':'); uint64_t m2 = c ? strtoull(c + 1, NULL, 16) : ~0ull; if (c) *c = 0;
+            FILE *f = fopen(path, "rb"); long sz = f && !fseek(f, 0, SEEK_END) ? ftell(f) : -1;
+            uint32_t *x = sz > 20 && !fseek(f, 0, SEEK_SET) ? malloc((size_t)sz) : NULL; size_t xn = x ? fread(x, 1, (size_t)sz, f) / 4 : 0; if (f) fclose(f);
+            r = x ? vka_spv_input_remap(x, xn, m2, &ron, &mv, &cs, err, sizeof err) : NULL;
+            CHECK(r, "%s: input remap refused: %s", path, err);
+            if (r && val) CHECK(validate(r, ron, path), "%s remapped valid", path);
+            printf("t_android_spvpatch: %s remapped: moved %#x, constant %#x\n", path, mv, cs);
+            free(r); free(x);
+        }
     }
     // DM_VK_PFB_SPV_DIR=<folder of .spv modules>: each one that reads the pool rewritten (vertex-pipeline stores allowed, early tests asked for) and validated
     const char *pd = getenv("DM_VK_PFB_SPV_DIR");

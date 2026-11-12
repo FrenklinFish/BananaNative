@@ -33,6 +33,7 @@ BASE, UPDATE, ADDON = 0, 1, 2
 KINDS = {BASE: 'base', UPDATE: 'update', ADDON: 'addon', 3: 'addon_update', 4: 'system'}   # 3 and 4 are reserved: accepted in a file, never selected
 RAW, ZSTD = 0, 1
 SMALL = 64 << 20   # a zstd file up to this size is decompressed into memory at its first read; a larger one is streamed
+PEEK = 1 << 20     # a read that ends within this many bytes of a file's start, and before its end, decompresses only up to the read's end (_Zstd._prefix)
 SELECTOR = re.compile(r'(base|update/[0-9]+|addon/[0-9a-fA-F]{16})(?:/(.*))?', re.S)
 
 
@@ -354,10 +355,11 @@ class _Raw(io.RawIOBase):
 class _Zstd(io.RawIOBase):
     """A zstd file (codec 1: one frame of the whole file). Up to SMALL: decompressed into memory at the first read. Larger: streamed through the module's ZstdFile
     over the extent (a seek back starts the frame again). fileno() decompresses it into an unlinked temporary file ($DM_TEMP, else the system's) and reads from
-    there from then on"""
+    there from then on. A read that ends within PEEK of the start and before the end (a tool reading a file's magic: shader_split.py zip_jobs opens every RomFS
+    file for 4 bytes) decompresses only up to its end, not the whole file (docs/reference/packing.md, A magic read of a .nup file decompressed all of it)"""
     def __init__(self, path, start, stored, size, regions=None):
         self.path, self.start, self.stored, self.length, self.regions = path, start, stored, size, regions
-        self.pos, self.data, self.stream, self.tmp = 0, None, None, None
+        self.pos, self.data, self.stream, self.tmp, self.head = 0, None, None, None, None
         zstd()   # fails here, at open, when there is no zstd module
     def readable(self): return True
     def seekable(self): return True
@@ -372,10 +374,28 @@ class _Zstd(io.RawIOBase):
         try: self.data = zstd().decompress(comp)
         except Exception as e: raise Error(f'{self.path}: zstd extent at {self.start:#x}: {e}') from None
         if len(self.data) != self.length: raise self._bad(len(self.data))
+        self.head = None
+    def _prefix(self, n):
+        """The file's first n bytes (n below its length), decompressed from as much of the extent as they need"""
+        z = zstd(); d, out, got = z.ZstdDecompressor(), [], 0
+        try:
+            with _Raw(self.path, self.start, self.stored) as r:
+                while got < n and not d.eof:
+                    if d.needs_input:
+                        c = r.read(64 << 10)
+                        if not c: break
+                    else: c = b''
+                    b = d.decompress(c, n - got); out.append(b); got += len(b)
+        except z.ZstdError as e: raise Error(f'{self.path}: zstd extent at {self.start:#x}: {e}') from None
+        if got < n: raise self._bad(got)
+        return b''.join(out)
     def readinto(self, buffer):
         want = min(len(buffer), max(0, self.length - self.pos))
         if not want: return 0
         if self.tmp is not None: data = pread(self.tmp.fileno(), want, self.pos)
+        elif self.length <= SMALL and self.data is None and self.pos + want <= PEEK and self.pos + want < self.length:
+            if self.head is None or len(self.head) < self.pos + want: self.head = self._prefix(self.pos + want)
+            data = self.head[self.pos:self.pos + want]
         elif self.length <= SMALL:
             if self.data is None: self._load()
             data = self.data[self.pos:self.pos + want]
@@ -411,7 +431,7 @@ class _Zstd(io.RawIOBase):
             if self.tmp is not None:
                 if self.regions is not None: self.regions.pop(self.tmp.fileno(), None)
                 self.tmp.close()
-            self.data = None
+            self.data = self.head = None
         super().close()
 
 

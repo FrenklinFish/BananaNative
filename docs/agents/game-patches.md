@@ -40,7 +40,7 @@ Every patch bound tighter than it could be: the open gaps, then the blocked, kep
 | `game` → `host` | frame-parallel dav1d for AV1 movies | frame rate | gap | judgement | 1 | `av1_decoder`: [Fire Emblem Fortune's Weave](../../dm/games/04007EF01F8AE000/README.md) | the default decoder drops frames of this game's movies on the phone; frame-parallel dav1d for every game once it is checked on the other games' movies |
 | `game` → `host` | Metal encoding on its own thread on the Mac | frame rate | gap | judgement | 1 | `enc_thread`: [Need For Speed™ Hot Pursuit Remastered](../../dm/games/010029B0118E8000/README.md) | what iOS does for every game: a default for every game after `regress.py check` on the games |
 | `game` → `host` | MTL4Compiler pipelines on iOS | rendering | gap | judgement | 1 | `pso_mtl4`: [The Legend of Zelda: Breath of the Wild](../../dm/games/01007EF00011E000/README.md) | a setting the game was tested with on an iPhone: a default for every game after `regress.py check` on the games |
-| `game` → `host` | one vertex shader's visibility counter (VertexCounterLowering) | shaders | gap | judgement | — | [Program.cs:302](../../dm/gfx/tools/dmsh_xlate/Program.cs#L302) | a general lowering of subgroup ballots in vertex shaders would cover any shader that counts that way |
+| `game` → `host` | one vertex shader's visibility counter (VertexCounterLowering) | shaders | gap | judgement | — | [Program.cs:303](../../dm/gfx/tools/dmsh_xlate/Program.cs#L303) | a general lowering of subgroup ballots in vertex shaders would cover any shader that counts that way |
 | `game` → `host` | present snapshots | rendering | gap | judgement | 1 | `present_snap`: [The Legend of Zelda: Breath of the Wild](../../dm/games/01007EF00011E000/README.md) | a setting the game was tested with: a default for every game after `regress.py check` on the games |
 | `game` → `host` | the 1080p display buffer mode, view-format learning off and the Lanczos present | rendering | gap | judgement | 1 | `host_env`: [Fire Emblem Fortune's Weave](../../dm/games/04007EF01F8AE000/README.md) | the display mode and the small-text present are measured for this game on its handhelds: defaults for others once checked |
 | `build` → `engine` | sead's dynamic interval controller floor behind a fixed global (the app object's framework) | frame rate | gap | judgement | 1 | [Donkey Kong Bananza](../../dm/games/040074A01BF12000/README.md) | sead's game framework code that other Nintendo EPD games ship: the rewriter now finds the controller by its code (nso_code.py sead_find) and its gate hands the host the controller's address, which the floor could take instead of the fixed chain |
@@ -74,9 +74,12 @@ Every patch bound tighter than it could be: the open gaps, then the blocked, kep
 | `build` → `game` | 60 fps frame step and render scale | frame rate | blocked: frame-step stubs have no function-matched form yet | judgement | 1 | [The Legend of Zelda: Tears of the Kingdom](../../dm/games/0100F2C0115B6000/README.md) | the game's own timing object |
 | `build` → `game` | 60 fps frame step and render scale (ksys::VFR) | frame rate | blocked: frame-step stubs have no function-matched form yet | judgement | 1 | [The Legend of Zelda: Breath of the Wild](../../dm/games/01007EF00011E000/README.md) | the game's own frame code; the frame-step state page is general |
 | `build` → `game` | 60 fps frame step: the KIDS frame task and frame-rate block | frame rate | blocked: frame-step stubs have no function-matched form yet | judgement | 1 | [Hyrule Warriors: Age of Calamity](../../dm/games/01002B00111A2000/README.md) | the game's own frame code; only the host's frame-step state page is shared. Fire Emblem: Three Houses and Taiko Risshiden V DX run on KTGL too, with other frame code |
+| `build` → `game` | FPS Unlock: optional elapsed-time update step | frame rate | blocked: one full build ID and update hook verified | judgement | 1 | [The Legend of Zelda: Ocarina of Time](../../dm/games/0400486024DEC000/README.md) | the game update derives a fractional step from its integer frame rate |
 | `build` → `game` | frame step floor 2 → 1 vsync, and its frame step | frame rate | blocked: frame-step stubs have no function-matched form yet | judgement | 1 | [Paper Mario: The Thousand-Year Door](../../dm/games/0100ECD018EBE000/README.md) | the game's own clock floor and step |
 | `build` → `game` | frame step: the frame-rate controller's interval and fps from the host | frame rate | blocked: frame-step stubs have no function-matched form yet | judgement | 1 | [The Legend of Zelda: Ocarina of Time](../../dm/games/0400486024DEC000/README.md) | the game's own 30 fps mode (interval 2), chosen by the host's step so presentation and game time agree |
+| `build` → `game` | Max Resolution: optional full-scale dynamic resolution path | rendering | blocked: one full build ID and branch verified | judgement | 1 | [The Legend of Zelda: Ocarina of Time](../../dm/games/0400486024DEC000/README.md) | the title has its own dynamic resolution controller and full-scale branch |
 | `build` → `game` | movie player: the plain player instead of the NDVE-enhanced one | frame rate | blocked: one build on hand; the faster tensor path is translator work (docs/reference/shaders.md, Ampere HMMA through simdgroup_matrix, Open) | judgement | 1 | [The Legend of Zelda: Ocarina of Time](../../dm/games/0400486024DEC000/README.md) | a workaround: the tensor network costs 47.5 ms of GPU a movie frame; a function fingerprint could carry it over updates, and once the translator keeps LDSM / MOVM / HMMA chains in matrices the cut can go |
+| `build` → `game` | Texture Pool x2: optional larger initial graphics allocation | memory | blocked: one full build ID and allocator call verified | judgement | 1 | [The Legend of Zelda: Ocarina of Time](../../dm/games/0400486024DEC000/README.md) | the allocator is in the game and full-scale rendering can exhaust the original pool |
 | `build` → unreviewed | Fire Emblem Fortune's Weave native 4:3 variant (VARIANT_CUTS['43']: camera aspect and ui2d pane rules) | rendering | unreviewed | judgement | 1 | [Fire Emblem Fortune's Weave](../../dm/games/04007EF01F8AE000/README.md) | an opt-in variant (Game settings › Aspect ratio) of about 230 words in code caves of this main; each ui2d rule names panes of this build's layouts |
 | `build` → unreviewed | Fire Emblem Fortune's Weave no depth pre-pass (the game's own co_disable_depth_prepass mode) | frame rate | unreviewed | judgement | 1 | [Fire Emblem Fortune's Weave](../../dm/games/04007EF01F8AE000/README.md) | one load at the setter call reads the config flag; the same mode in a later update would need the call found again |
 
@@ -110,7 +113,7 @@ Every patch bound tighter than it could be: the open gaps, then the blocked, kep
 | [Taiko Risshiden V DX](#taiko-risshiden-v-dx) | 1 | 0 | 0 | 2 | 0 | `game` |
 | [The Legend of Zelda: Breath of the Wild](#the-legend-of-zelda-breath-of-the-wild) | 7 | 0 | 5 | 0 | 0 | `build` → `game` ×2 |
 | [The Legend of Zelda: Link's Awakening](#the-legend-of-zelda-links-awakening) | 1 | 0 | 0 | 0 | 0 | `build` → `game` |
-| [The Legend of Zelda: Ocarina of Time](#the-legend-of-zelda-ocarina-of-time) | 1 | 0 | 1 | 0 | 0 | `build` → `game` ×2 |
+| [The Legend of Zelda: Ocarina of Time](#the-legend-of-zelda-ocarina-of-time) | 1 | 0 | 4 | 0 | 0 | `build` → `game` ×5 |
 | [The Legend of Zelda: Tears of the Kingdom](#the-legend-of-zelda-tears-of-the-kingdom) | 0 | 0 | 9 | 0 | 0 | `build` → `game` |
 | [Xenoblade Chronicles 3](#xenoblade-chronicles-3) | 6 | 0 | 0 | 0 | 0 | `build` → `game` |
 
@@ -573,11 +576,17 @@ Every patch bound tighter than it could be: the open gaps, then the blocked, kep
 
 [The Legend of Zelda: Ocarina of Time](../../dm/games/0400486024DEC000/README.md), `0400486024DEC000`, [patches.py](../../dm/games/0400486024DEC000/patches.py).
 
+- **`build` → `game`**, rendering, blocked: one full build ID and branch verified, judgement: Max Resolution: optional full-scale dynamic resolution path. The title has its own dynamic resolution controller and full-scale branch
+- **`build` → `game`**, memory, blocked: one full build ID and allocator call verified, judgement: Texture Pool x2: optional larger initial graphics allocation. The allocator is in the game and full-scale rendering can exhaust the original pool
+- **`build` → `game`**, frame rate, blocked: one full build ID and update hook verified, judgement: FPS Unlock: optional elapsed-time update step. The game update derives a fractional step from its integer frame rate
 - **`build` → `game`**, frame rate, blocked: frame-step stubs have no function-matched form yet, judgement: frame step: the frame-rate controller's interval and fps from the host. The game's own 30 fps mode (interval 2), chosen by the host's step so presentation and game time agree
 - **`build` → `game`**, frame rate, blocked: one build on hand; the faster tensor path is translator work (docs/reference/shaders.md, Ampere HMMA through simdgroup_matrix, Open), judgement: movie player: the plain player instead of the NDVE-enhanced one. A workaround: the tensor network costs 47.5 ms of GPU a movie frame; a function fingerprint could carry it over updates, and once the translator keeps LDSM / MOVM / HMMA chains in matrices the cut can go
 
 - **v131072 `main`** `e0f3ccfa…` ([patches.py:9](../../dm/games/0400486024DEC000/patches.py#L9))
   - cut `+0x3b5f524`: movie player: cbz w8 → b main+0x3b5f548 (the plain player, without the NDVE tensor network)
+  - frame step `+0x6e6cc4`: FPS Unlock: optional fractional update step from the host guest clock
+  - frame step `+0x805bd0`: Max Resolution: optional full-scale branch of the dynamic resolution controller
+  - frame step `+0xc2a36c`: Texture Pool x2: optional doubling of the initial graphics allocation
   - frame step `+0x3b4f074`: frame step: the frame-rate controller's interval and fps follow the host's vsyncs (state page target fps; 0 = the game's own choice)
 
 ### The Legend of Zelda: Tears of the Kingdom
@@ -662,7 +671,7 @@ Applied to the `sdk` of any build without CUTS, found by function fingerprint ([
 
 ## Translator rules keyed by a shader's code
 
-- [Program.cs:302](../../dm/gfx/tools/dmsh_xlate/Program.cs#L302): Tears of the Kingdom 1.4.3 visibility counter (one vertex shader, exact code SHA-256 below) (**`game` → `host`**, gap: a general lowering of subgroup ballots in vertex shaders would cover any shader that counts that way)
+- [Program.cs:303](../../dm/gfx/tools/dmsh_xlate/Program.cs#L303): Tears of the Kingdom 1.4.3 visibility counter (one vertex shader, exact code SHA-256 below) (**`game` → `host`**, gap: a general lowering of subgroup ballots in vertex shaders would cover any shader that counts that way)
 
 ## Profile switches
 
@@ -670,6 +679,7 @@ Profile keys (`game.tsv`) whose value changes what the host does, set away from 
 
 | Key and value | Games | Binding | Why |
 |---|---|---|---|
+| `android_window 1920x1080` | [Fire Emblem Fortune's Weave](../../dm/games/04007EF01F8AE000/README.md) | `game`, at goal | the same default as without the key (Phone 1080p), named in the profile so that one line changes the game's default output (Fire Emblem Fortune's Weave: handheld; original would give docked) |
 | `av1_decoder dav1d` | [Fire Emblem Fortune's Weave](../../dm/games/04007EF01F8AE000/README.md) | `game` → `host`, gap | the default decoder drops frames of this game's movies on the phone; frame-parallel dav1d for every game once it is checked on the other games' movies |
 | `draw_barriers game` | [The Legend of Zelda: Ocarina of Time](../../dm/games/0400486024DEC000/README.md) | `game` → `host`, gap | what NVN specifies: a default for every game after `regress.py check` on the games |
 | `drs_ctl e25c90c1c136638885659fd55bf8a03b 0x38e100 0x38de2c 0x38dcbc 0x38dbc8` | [Donkey Kong Bananza](../../dm/games/040074A01BF12000/README.md) | `build` → `engine`, gap | four places in sead / agl's MaintainGpuPercentage controller, at fixed offsets per main build (each checked for its instruction); a fingerprint of the controller could find them in other games on that engine |
@@ -678,6 +688,7 @@ Profile keys (`game.tsv`) whose value changes what the host does, set away from 
 | `fps_steps d00e4f399e411d0613aa8d26b1c02fef 0x37c8410 0x8 0x210 0x214` | [Mario Kart World](../../dm/games/0400C3F00006E000/README.md) | `build` → `engine`, gap | the framework at a fixed global per main build; a fingerprint of its frame function (the step pick from the mode, then the update loop over the count and the present interval set to it) could find it in the game's updates |
 | `fps_target 30` | [Fire Emblem Fortune's Weave](../../dm/games/04007EF01F8AE000/README.md) | `game`, at goal | a choice per game |
 | `game_env DOTNET_GCRegionRange=60000000` | [Absolum](../../dm/games/0100A83022A22000/README.md) | `game`, at goal | measured for the game's regions |
+| `graphics_scale 2048x1152 1 console` | [Fire Emblem Fortune's Weave](../../dm/games/04007EF01F8AE000/README.md) | `game`, at goal | the game sizes its 3D scenes by the graphics scale, not by its window; which crop each scale gives was measured on the game |
 | `graphics_scale original 1 console` | [The Legend of Zelda: Ocarina of Time](../../dm/games/0400486024DEC000/README.md) | `game`, at goal | the game sizes its 3D scenes by the graphics scale, not by its window; which crop each scale gives was measured on the game |
 | `host_env DM_VI_MAX_RES=1080 DM_VK_VIEW_LEARN=0 DM_VK_PRESENT_FILTER=2` | [Fire Emblem Fortune's Weave](../../dm/games/04007EF01F8AE000/README.md) | `game` → `host`, gap | the display mode and the small-text present are measured for this game on its handhelds: defaults for others once checked |
 | `present_snap on` | [The Legend of Zelda: Breath of the Wild](../../dm/games/01007EF00011E000/README.md) | `game` → `host`, gap | a setting the game was tested with: a default for every game after `regress.py check` on the games |

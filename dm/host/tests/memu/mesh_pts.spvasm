@@ -1,0 +1,83 @@
+; A points mesh module in the form of the translator's SpirvMeshEntry.cs (written by hand, no game code): OutputPoints, a per-vertex block with Position and
+; PointSize, one per-primitive location (1), PrimitivePointIndicesEXT, CullPrimitiveEXT, no payload, no WorkgroupId; the program in a function of its own
+; called between barriers, as the translator's wrapper calls its body. Point t: index t, culled past 20; vertex v: position (v, 0, 0, 1), size 4; location 1 (t, 0, 0, 1)
+               OpCapability Shader
+               OpCapability MeshShadingEXT
+               OpExtension "SPV_EXT_mesh_shader"
+               OpMemoryModel Logical GLSL450
+               OpEntryPoint MeshEXT %main "main" %lid %pos %prim1 %idx %cull
+               OpExecutionMode %main LocalSize 32 1 1
+               OpExecutionMode %main OutputVertices 32
+               OpExecutionMode %main OutputPrimitivesEXT 32
+               OpExecutionMode %main OutputPoints
+               OpDecorate %lid BuiltIn LocalInvocationIndex
+               OpDecorate %pv Block
+               OpMemberDecorate %pv 0 BuiltIn Position
+               OpMemberDecorate %pv 1 BuiltIn PointSize
+               OpDecorate %prim1 Location 1
+               OpDecorate %prim1 PerPrimitiveEXT
+               OpDecorate %idx BuiltIn PrimitivePointIndicesEXT
+               OpDecorate %cull BuiltIn CullPrimitiveEXT
+               OpDecorate %cull PerPrimitiveEXT
+       %void = OpTypeVoid
+         %fn = OpTypeFunction %void
+       %uint = OpTypeInt 32 0
+      %float = OpTypeFloat 32
+       %bool = OpTypeBool
+    %v4float = OpTypeVector %float 4
+     %uint_0 = OpConstant %uint 0
+     %uint_1 = OpConstant %uint 1
+     %uint_2 = OpConstant %uint 2
+    %uint_20 = OpConstant %uint 20
+    %uint_32 = OpConstant %uint 32
+   %uint_264 = OpConstant %uint 264
+    %float_0 = OpConstant %float 0
+    %float_1 = OpConstant %float 1
+    %float_4 = OpConstant %float 4
+         %pv = OpTypeStruct %v4float %float
+     %pv_arr = OpTypeArray %pv %uint_32
+     %v4_arr = OpTypeArray %v4float %uint_32
+     %ix_arr = OpTypeArray %uint %uint_32
+      %b_arr = OpTypeArray %bool %uint_32
+   %p_in_u32 = OpTypePointer Input %uint
+   %p_out_pv = OpTypePointer Output %pv_arr
+   %p_out_v4a = OpTypePointer Output %v4_arr
+   %p_out_ix = OpTypePointer Output %ix_arr
+   %p_out_b = OpTypePointer Output %b_arr
+   %p_out_v4 = OpTypePointer Output %v4float
+    %p_out_f = OpTypePointer Output %float
+    %p_out_u = OpTypePointer Output %uint
+   %p_out_bo = OpTypePointer Output %bool
+        %lid = OpVariable %p_in_u32 Input
+        %pos = OpVariable %p_out_pv Output
+      %prim1 = OpVariable %p_out_v4a Output
+        %idx = OpVariable %p_out_ix Output
+       %cull = OpVariable %p_out_b Output
+       %body = OpFunction %void None %fn
+         %bl = OpLabel
+               OpReturn
+               OpFunctionEnd
+       %main = OpFunction %void None %fn
+      %entry = OpLabel
+               OpSetMeshOutputsEXT %uint_32 %uint_32
+          %l = OpLoad %uint %lid
+               OpControlBarrier %uint_2 %uint_2 %uint_264
+          %c = OpFunctionCall %void %body
+               OpControlBarrier %uint_2 %uint_2 %uint_264
+         %fl = OpConvertUToF %float %l
+          %v = OpCompositeConstruct %v4float %fl %float_0 %float_0 %float_1
+         %p0 = OpAccessChain %p_out_v4 %pos %l %uint_0
+               OpStore %p0 %v
+         %p1 = OpAccessChain %p_out_f %pos %l %uint_1
+               OpStore %p1 %float_4
+         %p2 = OpAccessChain %p_out_v4 %prim1 %l
+               OpStore %p2 %v
+       %used = OpULessThan %bool %l %uint_20
+         %ix = OpSelect %uint %used %l %uint_0
+         %p3 = OpAccessChain %p_out_u %idx %l
+               OpStore %p3 %ix
+         %nu = OpLogicalNot %bool %used
+         %p4 = OpAccessChain %p_out_bo %cull %l
+               OpStore %p4 %nu
+               OpReturn
+               OpFunctionEnd

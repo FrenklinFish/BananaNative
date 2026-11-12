@@ -430,6 +430,13 @@ final class SidePanel extends FrameLayout {
             full.setOnCheckedChangeListener((b, on) -> { Prefs.decouple(act, game(), on); Native.decoupleSet(on); });
             box.addView(full);
         }
+        if (Prefs.steps(game())) {   // Hold 60 fps: one step a frame at the cap of 60 (Game settings has the same), live in the host
+            android.widget.CheckBox hold = new android.widget.CheckBox(act);
+            hold.setText("Hold 60 fps: never drop to 30, no frame holds");
+            hold.setChecked(Prefs.hold60(act, game()));
+            hold.setOnCheckedChangeListener((b, on) -> { Prefs.hold60(act, game(), on); Native.hold60Set(on); });
+            box.addView(hold);
+        }
         fpsNow = note("");
         if (Prefs.dlssGame(game()) || GameUpscaler.shown(act, game())) {   // right under the frame rate cap: the Upscaler (the game's own upscaler and the window's scaling to the screen), for games whose network it replaces; for a game on the DLSS stand-in (no network to replace), the stand-in's modes with Motion clarity / sharpness
             GameUpscaler.rows(act, game(), box);
@@ -442,6 +449,18 @@ final class SidePanel extends FrameLayout {
         }
 
         lsfgNow = Lsfg.rows(act, box, "", () -> { Lsfg.push(act); refresh(); });
+
+        Profile prof = Profile.of(game());
+        if (prof != null) {
+            for (Profile.Option opt : prof.options) {
+                if (!opt.live) continue;
+                android.widget.CheckBox cb = new android.widget.CheckBox(act);
+                cb.setText(opt.label);
+                cb.setChecked(Prefs.gameOption(act, game(), opt.env));
+                cb.setOnCheckedChangeListener((b, on) -> Prefs.gameOption(act, game(), opt.env, on));
+                box.addView(cb);
+            }
+        }
     }
 
     /** Display: the picture (Fit / Stretch, size, position) and the overlay's items */
@@ -504,7 +523,7 @@ final class SidePanel extends FrameLayout {
      * Resolution: this game's Game resolution (the same choices and the same setting as Game settings › Game resolution), only for a game whose profile has a lever
      * (Profile.hasResolution). A game with graphics_scale rows changes now: the host takes the choice's graphics scale and operation mode and posts the console's change
      * notifications, which the game answers by querying them again and resizing its scenes (Native.graphicsModeSet, hle_oe.c nxhost_graphics_mode_set). A window_fn or res_levels
-     * game takes it at the next start.
+     * game takes it at the next start. A game with one docked and one handheld row gets those two as radio buttons instead (Profile.modes).
      */
     private void resolutionRow() {
         Profile p = Profile.of(game());
@@ -512,6 +531,22 @@ final class SidePanel extends FrameLayout {
         head("Resolution");
         boolean now = p.resolutionLive() && act instanceof GameActivity;
         String cur = Prefs.gameWindow(act, game());
+        String[] modes = p.modes();
+        if (modes != null) {   // a game with one docked and one handheld row (Profile.modes): those two radio buttons only, drawn as the Frame rate cap's
+            RadioGroup g = new RadioGroup(act);
+            for (int k = 0; k < 2; k++) { RadioButton b = new RadioButton(act); b.setId(ID_RES + 1 + k); b.setText(p.modeLabel(k)); g.addView(b); }
+            if (p.modeOf(cur) >= 0) g.check(ID_RES + 1 + p.modeOf(cur));   // Original shows as Docked (Profile.modeOf)
+            g.setOnCheckedChangeListener((gr, id) -> {
+                Prefs.gameWindow(act, game(), modes[id - ID_RES - 1]);   // the game's own setting: the next start takes it too
+                if (now) {
+                    int[] m = p.resolutionLive(Prefs.gameWindow(act, game()));
+                    if (m != null && !Native.graphicsModeSet(m[0], m[1])) Native.note("Game resolution: this host cannot change it live; it applies at the next start");
+                }
+                restyle(id);
+            });
+            box.addView(g);
+            return;
+        }
         Button r = row(ID_RES, "Game resolution", (Prefs.ownWindow(act, game()) ? "" : "Default · ") + Prefs.windowName(cur, false));
         r.setOnClickListener(v -> {
             String[] labels = new String[Prefs.WINDOWS.length + 1];
@@ -596,6 +631,26 @@ final class SidePanel extends FrameLayout {
         if (!(act instanceof GameActivity)) return;
         GameActivity ga = (GameActivity) act;
         head("Next start");
+        Profile prof = Profile.of(game());
+        if (prof != null && !prof.options.isEmpty()) {
+            for (Profile.Option opt : prof.options) {
+                if (opt.live) continue;
+                android.widget.CheckBox cb = new android.widget.CheckBox(act);
+                cb.setText(opt.label);
+                Profile.Option source = Profile.findImpliedBy(prof.options, opt, env -> Prefs.gameOption(act, game(), env));
+                if (source != null) {
+                    cb.setChecked(true);
+                    cb.setEnabled(false);
+                } else {
+                    cb.setChecked(Prefs.gameOption(act, game(), opt.env));
+                    cb.setOnCheckedChangeListener((b, on) -> {
+                        Prefs.gameOption(act, game(), opt.env, on);
+                        if (opt.hasImplies()) build();
+                    });
+                }
+                box.addView(cb);
+            }
+        }
         String sum = PadMapUi.label(act, game());
         Button map = row(ID_MAP, "Button mapping", sum);
         map.setContentDescription("Button mapping: " + sum + ", applies at the next start");

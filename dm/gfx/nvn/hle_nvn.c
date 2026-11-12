@@ -2284,8 +2284,12 @@ static int fstep_cpu_slowed(uint64_t presents) {
 // Whether late frames may raise the hold above the cap's vsyncs (profile fps_hold, DM_FPS_HOLD=on / off). Off for a game whose updates do not wait for the presents and step
 // by the cap whatever the hold (Age of Calamity): holding frames there only paces the screen, and an iPhone lowers the GPU clock to the longer hold, so frames got slower and
 // the hold never came back (battle GPU 10 → 41 ms at the same draws, 20 fps at thermal state 0); off, each frame is shown as soon as it is ready
+__attribute__((weak)) int dm_fps_hold60(void);   // hle_fpslock.c (weak: the gfx tests link no host): the Android launcher's Hold 60 fps (DM_FPS_HOLD60, live from the in-game panel)
 static int fstep_hold(void) {
-    static int h = -1;
+    static int h = -1, h60 = -1;
+    int o = dm_fps_hold60 ? dm_fps_hold60() : 0;
+    if (o != h60) { if (h60 >= 0 || o) LOG("[nvn] frame step: hold 60 fps %s: frames %s", o ? "on" : "off", o ? "are shown as soon as they are ready, late time paid back one extra step a frame" : "may be held longer than the cap's vsyncs again"); h60 = o; }
+    if (o) return 0;
     if (h < 0) {
         const char *e = getenv("DM_FPS_HOLD"); h = e ? strcmp(e, "off") != 0 : DM_GAME_FPS_HOLD;
         if (!h) LOG("[nvn] frame step: frames are not held longer than the cap's vsyncs (%s)", e ? "DM_FPS_HOLD" : "game profile fps_hold");
@@ -3030,6 +3034,11 @@ NVN_NOPROTO(nvnDlssNetworkInitialize, NVNboolean, dlss_net_t *n, const dlss_buil
     return 1;
 }
 NVN_NOPROTO(nvnDlssNetworkFinalize, void, dlss_net_t *n) { (void)n; }
+// Star Fox calls this once at start with 768x432, the size of its 3D targets. The replay takes the input size from each evaluation's parameters (SetInputSubrectangleSize) and the output from its texture, so the network keeps nothing of it
+NVN_NOPROTO(nvnDlssNetworkResize, NVNboolean, dlss_net_t *n, int w, int h) {
+    (void)n; static int once; if (!once++) LOG("[nvn] DLSS network resized to %dx%d (each evaluation's own sizes are used)", w, h);
+    return 1;
+}
 NVN_NOPROTO(nvnDlssParametersSetDefaults, void, dlss_params_t *p) { memset(p, 0, sizeof *p); p->pre_exposure = 1; p->mv[0] = p->mv[1] = 1; }
 static void dlss_set_tex(dlss_params_t *p, int k, const NVNtexture *t, const NVNtextureView *v) {
     p->tex[k] = t;

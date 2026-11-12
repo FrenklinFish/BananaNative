@@ -19,6 +19,10 @@ games' own shaders translated, not part of this code. The other translator files
 therefore a GPL-3.0-or-later work whatever `nxLsfg` says, and the Mac and iPhone builds stay MIT only as apps: the committed translator `dm/gfx/tools/dmsh_xlate_bin` they run to
 build shader libraries is the same GPL combined work.
 
+**Mesh draws through compute are GPL-3.0-or-later.** On a device without `VK_EXT_mesh_shader` the host draws NVN2 task and mesh programs through compute with
+[`dm/gfx/vk_android/vka_memu.c`](../dm/gfx/vk_android/vka_memu.c), `vka_memu_spv.c`, `vka_memu_draw.inc`, `vka_memu_abi.h` and the passes in `memu/`, after
+[Hokkaido](https://github.com/pavelgajdo/Hokkaido)'s compute mesh emulation (GPL-3.0-or-later; its #569 and #642), so every `libnxhost.so` is a GPL-3.0-or-later work as a whole.
+
 File-backed memory pools (the launcher's per-game **RAM saver (uses storage)**, `DM_MEM_FILEBACK`) come from [Anka Native](https://github.com/EddizEge/AnkaNative)
 v0.2.2 by EddizEge (MIT, "Copyright (c) 2026 EddizEge" with the MIT permission notice in [LICENSE](../LICENSE)): `dm/gfx/vk_android/vka_fileback.h` and its test
 `dm/host/tests/t_android_fileback.c` as they were there, the "File-backed pools" part of `dm/gfx/vk_android/vka_mem.c` with its hook in `dm/gfx/nvn/hle_nvn.c`, and the
@@ -77,7 +81,9 @@ The Vulkan replay's stand-in for NVN2's DLSS (`dm/gfx/vk_android/vka_dlss.c`) ru
 (GSR2) 3-pass shaders, adapted to compute passes in [`dm/gfx/vk_android/gsr2`](../dm/gfx/vk_android/gsr2/LICENSE) and compiled into the host (`gsr2/vka_gsr2_spv.h`):
 Copyright (c) 2023-2024, Qualcomm Innovation Center, Inc. All rights reserved, under the BSD-3-Clause license, whose full text, conditions and disclaimer are in
 [`dm/gfx/vk_android/gsr2/LICENSE`](../dm/gfx/vk_android/gsr2/LICENSE) and apply to the shaders in source and binary form. Its FSR 1 mode uses AMD's FidelityFX FSR 1
-headers (MIT, [dm/third_party/fidelityfx-fsr1](../dm/third_party/fidelityfx-fsr1/LICENSE.txt)), as the present's FSR 1 does.
+headers (MIT, [dm/third_party/fidelityfx-fsr1](../dm/third_party/fidelityfx-fsr1/LICENSE.txt)), as the present's FSR 1 does. Its FSR 3.1 mode (`vka_fsr3.c`) runs AMD FidelityFX
+Super Resolution 3.1's upscaler passes from the FidelityFX SDK 1.1.4, compiled to SPIR-V (`dm/gfx/vk_android/fsr3/*.h`): Copyright (c) Advanced Micro Devices, Inc., under the MIT
+license in [dm/third_party/fidelityfx-fsr3](../dm/third_party/fidelityfx-fsr3/LICENSE.txt).
 
 `Lossless.dll` belongs to Lossless Scaling (proprietary, sold separately). It is never in this repository or in an APK: the user supplies their own copy, which the
 launcher finds on the phone or lets the user pick, and copies into the app's private files.

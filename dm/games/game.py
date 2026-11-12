@@ -212,14 +212,48 @@ def header(g):
             ls += [('0', 0)] * (12 - len(ls))
             rlv.append('{' + q(r[0]) + f', {r[1]}, {n}, {len(r) - 3}, ' + '{' + ', '.join(f'{{{o}, {ln}}}' for o, ln in ls) + '}}')
         if g.get('graphics_scale', ''): sys.exit(f'{g.id}: graphics_scale and res_levels are two levers for one setting: keep one')
-    # Depth-only mesh prepass draws skipped and their colour pass's EQUAL relaxed to LEQUAL on Qualcomm's driver (vka_draw.c mesh_cut; a workaround, open: rendering.md
-    # "Depth-only mesh prepass drawn as spikes on Qualcomm's driver"): one row per pair, <prepass mesh shader key> <colour pass mesh shader key>, 16 hex digits each
+    # Depth-only mesh prepass draws of mesh modules Qualcomm's driver draws wrong (vka_draw.c mesh_cut; a workaround, cause open: rendering.md "Depth-only mesh prepass
+    # drawn as spikes on Qualcomm's driver"): one row per pair, <prepass mesh shader key> <colour pass mesh shader key> [<map>], 16 hex digits each. The map says where the
+    # colour mesh module writes what the prepass mesh module writes: <prepass location>:<colour location>,... (locations 0-14; "-": none of them). The prepass is then
+    # drawn with the colour mesh module and its own pixel shader, those inputs moved and the others (0, 0, 0, 1). Without a map it is skipped and EQUAL drawn as LEQUAL
     mpc = []
     for r in g.values('mesh_prepass_cut'):
-        if len(r) != 2 or not all(re.fullmatch(r'[0-9a-f]{16}', x) for x in r) or r[0] == r[1]:
-            sys.exit(f'{g.id}: mesh_prepass_cut takes <prepass mesh shader key> <colour pass mesh shader key>, two different keys of 16 lowercase hex digits: {r}')
-        mpc.append(f'{{0x{r[0]}ull, 0x{r[1]}ull}}')
+        if len(r) not in (2, 3) or not all(re.fullmatch(r'[0-9a-f]{16}', x) for x in r[:2]) or r[0] == r[1]:
+            sys.exit(f'{g.id}: mesh_prepass_cut takes <prepass mesh shader key> <colour pass mesh shader key> [<map>], two different keys of 16 lowercase hex digits: {r}')
+        m, has = (1 << 64) - 1, 0
+        if len(r) == 3:
+            has = 1
+            for it in ([] if r[2] == '-' else r[2].split(',')):
+                a = re.fullmatch(r'(\d+):(\d+)', it)
+                if not a or not all(0 <= int(x) <= 14 for x in a.groups()) or (m >> 4 * int(a[1]) & 15) != 15 or any((m >> 4 * k & 15) == int(a[2]) for k in range(15)):
+                    sys.exit(f'{g.id}: mesh_prepass_cut: a map is <prepass location>:<colour location>,... (0-14, each location once on either side) or -: {r}')
+                m = m & ~(15 << 4 * int(a[1])) | int(a[2]) << 4 * int(a[1])
+        mpc.append(f'{{0x{r[0]}ull, 0x{r[1]}ull, 0x{m:016x}ull, {has}}}')
     if len(mpc) > 64: sys.exit(f'{g.id}: mesh_prepass_cut: at most 64 pairs')
+    vegetation = []
+    for row in g.values('mesh_vegetation_cut'):
+        if len(row) != 2 or not all(re.fullmatch(r'[0-9a-f]{16}', key) for key in row) or row[0] == row[1]:
+            sys.exit(f'{g.id}: mesh_vegetation_cut takes two different mesh shader keys: {row}')
+        vegetation.extend(row)
+    if len(vegetation) > 128 or len(vegetation) != len(set(vegetation)):
+        sys.exit(f'{g.id}: mesh_vegetation_cut: at most 64 pairs, with unique keys')
+    for r in g.values('option'):
+        if len(r) < 3 or not re.fullmatch(r'[A-Za-z_][A-Za-z0-9_]*', r[0]) or not r[1].strip() or not r[2].strip():
+            sys.exit(f'{g.id}: option takes <ENV name> <label> <one-line description> [restart|live] [implies=<ENV>] [needs=<marker>]: {r}')
+        for col in r[3:]:
+            for tok in col.split():
+                if tok in ('restart', 'live'):
+                    pass
+                elif tok.startswith('implies='):
+                    imp = tok.split('=', 1)[1]
+                    if not re.fullmatch(r'[A-Za-z_][A-Za-z0-9_]*', imp):
+                        sys.exit(f'{g.id}: option implies takes an environment variable name: {tok}')
+                elif tok.startswith('needs='):
+                    mk = tok.split('=', 1)[1]
+                    if not re.fullmatch(r'[A-Za-z0-9_]+', mk):
+                        sys.exit(f'{g.id}: option needs takes a fixup marker: {tok}')
+                else:
+                    sys.exit(f'{g.id}: option unknown attribute (expected restart|live, implies=<ENV>, needs=<marker>): {tok}')
     # Shaders whose subgroup operations run as subgroups of one invocation on Qualcomm's own driver even where the device has them (vka_shader.c single_lane, one_lane_forced;
     # a workaround, Android): one key per row
     sol = []
@@ -246,7 +280,8 @@ def header(g):
          f'#define DM_GAME_SYS_RESOURCE {int(g.get("sys_resource", "0x2000000"), 0):#x}ull',   # the NPDM's system resource size (hle_svc.c GetInfo TotalSystemResourceSize; 0 = no virtual address memory)
          f'#define DM_GAME_ARGS {q(g.get("game_args", ""))}',   # game arguments when the command line gives none (main.c; Octopath Traveler 0: Unreal's -SwitchVirtualAddressSpaceSize=)
          f'#define DM_GAME_ENV {q(g.get("game_env", ""))}',   # KEY=VALUE pairs getenv answers (hle_os.c; Absolum: .NET's DOTNET_GCRegionRange)
-         f'#define DM_GAME_FASTBOOT_ENV {q(g.get("fastboot_env", ""))}',
+         f'#define DM_GAME_FASTBOOT_ENV {q(g.get("fastboot_env", ""))}',   # KEY=VALUE host switches DM_FASTBOOT=1 sets for a test run (main.c fastboot_apply; the environment and env.txt win)
+         f'#define DM_GAME_DEVTOOLS {q(g.get("devtools", ""))}',   # the dev tools' build and code offsets for this game (probe.c devrow: DM_TELEPORT, DM_POSE_SET / _GET)
          f'#define DM_GAME_HOST_ENV {q(g.get("host_env", ""))}',   # KEY=VALUE host switch defaults for this game, set at start unless the environment or env.txt sets them (main.c host_env_apply)   # KEY=VALUE host switches DM_FASTBOOT=1 sets for a test run (main.c fastboot_apply; the environment and env.txt win)
          f'#define DM_GAME_MEM_MAP_LIMIT {int(mml == "on")}',
          f'#define DM_GAME_STDALLOC_CAP {int(g.get("stdalloc_cap", "0"), 0):#x}ull',   # StandardAllocator's address space with virtual address memory (hle_svc.c); 0 = what the alias region has room for
@@ -279,7 +314,9 @@ def header(g):
          f'#define DM_GAME_ROMFS_SUBST {q(rsub)}',
          f'#define DM_GAME_WINDOW_FN {{{", ".join(wfn) or "{\"\", 0, 0, 0, 0}"}}}', f'#define DM_GAME_NWINDOW_FN {len(wfn)}',
          '#define DM_GAME_SUBGROUP_ONE_LANE {' + (', '.join(sol) or '0') + '}', f'#define DM_GAME_NSUBGROUP_ONE_LANE {len(sol)}',
-         '#define DM_GAME_MESH_PREPASS_CUT {' + (', '.join(mpc) or '{0, 0}') + '}', f'#define DM_GAME_NMESH_PREPASS_CUT {len(mpc)}',
+         '#define DM_GAME_MESH_VEGETATION_CUT {' + (', '.join(f'0x{k}ull' for k in vegetation) or '0') + '}',
+         f'#define DM_GAME_NMESH_VEGETATION_CUT {len(vegetation)}',
+         '#define DM_GAME_MESH_PREPASS_CUT {' + (', '.join(mpc) or '{0, 0, 0, 0}') + '}', f'#define DM_GAME_NMESH_PREPASS_CUT {len(mpc)}',
 
          '#define DM_GAME_FPS_STEPS {' + (', '.join(fst) or '{"", 0, 0, 0, 0, {0}}') + '}', f'#define DM_GAME_NFPS_STEPS {len(fst)}',
          f'#define DM_GAME_DRS_CTL {{{", ".join(drs) or "{\"\", 0, 0, 0, 0}"}}}', f'#define DM_GAME_NDRS_CTL {len(drs)}',

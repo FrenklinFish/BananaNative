@@ -1,11 +1,13 @@
 # The Android shader library delta manifest (dm/gfx/tools/vk_android_delta.py, android/SHADERS.md#delta-updates): the hash of every shader's library entry in
 # the version below, from a full Mac build; "-" for a shader that did not build. Hashes only. "from" rows: shaders a phone with that older library translates
-version	6257cc4482ac
+version	65883461079b
 game	0400C3F00006E000
 inputs	a2e9850bf2ce
 from	0035e16073bf	66
+from	6257cc4482ac	0
 from	bdedc945dff0	68
 from	d64f157175fd	101
+stamp	6257cc4482ac	9e2c7ba76698d09f8a7fd82474d3e70764c4c415399f11e6e6a86dfe58269ab7	403fd3dcf75a58b5e026fa04a744033db0d2e516fa055d133c7f92252d662141
 00003eca0d463706	42c48d25a04b85b8
 000274a3b9686106	2f9f4928a3b555ad
 00080c646e6d87da	dc6a46631270fa6a

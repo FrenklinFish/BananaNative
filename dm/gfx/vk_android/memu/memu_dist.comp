@@ -1,0 +1,23 @@
+// SPDX-FileCopyrightText: Copyright 2026 Hokkaido contributors (the distribution pass: pavelgajdo/Hokkaido #569 EmitMeshEmulationDistribution)
+// SPDX-FileCopyrightText: Copyright 2026 Banana Native (this port)
+// SPDX-License-Identifier: GPL-3.0-or-later
+// The mesh emulation's distribution pass (vka_memu.c): one workgroup per record of the batch; for a task draw, the tasks' mesh workgroup counts become exclusive
+// offsets (a workgroup scan, 64 tasks a step; Hokkaido summed them in one invocation), then its mesh output is placed. Not game code
+#version 450
+#extension GL_GOOGLE_include_directive : require
+#include "memu_common.glsl"
+layout(local_size_x = 64) in;
+shared uint s[64];
+void main() {
+    uint R = (pc.first + gl_WorkGroupID.x) * VKA_MEMU_REC_WORDS, l = gl_LocalInvocationID.x;
+    if ((r[R + VKA_MEMU_R_FLAGS] & VKA_MEMU_F_TASK) == 0u) return;   // (uniform in the workgroup)
+    uint nt = r[R + VKA_MEMU_R_NTASK], cb = r[R + VKA_MEMU_R_COUNTS], run = 0u;
+    for (uint b = 0u; b < nt; b += 64u) {
+        uint i = b + l, c = i < nt ? a[cb + i] : 0u;
+        s[l] = c; barrier();
+        for (uint o = 1u; o < 64u; o <<= 1) { uint v = l >= o ? s[l - o] : 0u; barrier(); s[l] += v; barrier(); }
+        if (i < nt) a[cb + i] = run + s[l] - c;
+        run += s[63]; barrier();
+    }
+    if (l == 0u) place(R, run);
+}

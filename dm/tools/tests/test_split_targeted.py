@@ -2,6 +2,8 @@
 (a member's source reduced to its RomFS file) are scanned, and the result is kept only when its tables are the profile's byte for byte; otherwise every file is scanned,
 with a line saying why. Either way the outputs are the full split's. A file that holds only shaders found earlier but pairs them anew makes the targeted pairs differ,
 so that dump takes the full scan; with DM_SPLIT_RESUME a stopped fall back resumes as the full scan. No game files needed: a synthetic RomFS and profile."""
+import contextlib
+import io
 import os
 import shutil
 import struct
@@ -10,6 +12,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 REPO = Path(__file__).resolve().parents[3]
 sys.path.insert(0, str(REPO / 'dm/gfx/tools'))
@@ -176,6 +179,17 @@ class Targeted(unittest.TestCase):
         big, todo = ss.scan_jobs(files, {'Shader/a.bnsh'})   # the missing files would raise if they were opened
         self.assertEqual((big, [f[1] for f in todo]), ([], ['Shader/a.bnsh']))
         with self.assertRaises(FileNotFoundError): ss.scan_jobs(files)
+
+    def test_the_full_zip_probe_prints_progress(self):   # the full scan's probe of every file counts them for the phone's card ('progress: <done>/<total>')
+        files = [(str(self.rom / 'Shader/a.bnsh'), f'f{i}') for i in range(1000)]
+        clock = iter(range(0, 10 ** 6))
+        out = io.StringIO()
+        with mock.patch.object(ss.time, 'monotonic', lambda: next(clock)), contextlib.redirect_stdout(out): ss.zip_jobs(files)
+        lines = out.getvalue().splitlines()
+        self.assertTrue(lines and all(ln.startswith('progress: ') and ln.endswith('/1000') for ln in lines), lines[:3])
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out): ss.zip_jobs(files[:999])   # a small RomFS: no lines
+        self.assertEqual(out.getvalue(), '')
 
     def test_no_map_takes_the_full_scan(self):
         full, _ = self.split('full', False)

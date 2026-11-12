@@ -109,6 +109,31 @@ public final class LauncherJvmTest {
                 && java.util.Arrays.equals(sc.resolutionLive("848x480"), new int[] {2, 0}) && java.util.Arrays.equals(sc.resolutionLive("original"), new int[] {-1, -1}),
                 "live graphics_scale rows: " + java.util.Arrays.toString(sc.resolutionLive("original")));
         check(java.util.Arrays.equals(sc4.resolutionLive("original"), new int[] {1, 1}) && java.util.Arrays.equals(sc4.resolutionLive("1920x1080"), new int[] {0, 0}), "live, four rows");
+        // The two-choice form (Profile.modes): one console row and one handheld row, both sizes, give Docked and Handheld; any other set of rows keeps the phone sizes
+        Profile fe = Profile.parse("04007EF01F8AE000\tF\t0\tx\t\t\t\t\t\tscale:2048x1152=1/console,1920x1080=0/handheld").get(0);
+        check(java.util.Arrays.equals(fe.modes(), new String[] {"2048x1152", "1920x1080"}) && fe.modeLabel(0).equals("Docked (1152p)") && fe.modeLabel(1).equals("Handheld (1080p)"),
+                "two rows, docked and handheld: " + java.util.Arrays.toString(fe.modes()));
+        check(fe.resolutionEnv(fe.modes()[0]).equals(List.of("DM_GRAPHICS_SCALE=1", "DM_OPMODE=1")) && fe.resolutionEnv(fe.modes()[1]).equals(List.of("DM_GRAPHICS_SCALE=0", "DM_OPMODE=0"))
+                && java.util.Arrays.equals(fe.resolutionLive(fe.modes()[0]), new int[] {1, 1}) && java.util.Arrays.equals(fe.resolutionLive(fe.modes()[1]), new int[] {0, 0}),
+                "each choice takes its own row, at start and live: " + fe.resolutionEnv(fe.modes()[0]));
+        check(fe.modeOf("2048x1152") == 0 && fe.modeOf("2560x1440") == 0 && fe.modeOf("1920x1080") == 1 && fe.modeOf("1280x720") == 1 && fe.modeOf("original") == 0,
+                "an older phone-size choice shows the row it takes; Original shows as Docked: " + fe.modeOf("original"));
+        // Original stored, then Docked, Handheld and Docked again: each pick stores its row's size, shows as that choice and takes that row at start and live
+        String stored = "original";
+        check(fe.resolutionEnv(stored).isEmpty() && java.util.Arrays.equals(fe.resolutionLive(stored), new int[] {-1, -1}), "Original itself still sets nothing (the profile's op_mode)");
+        int[][] live = {{1, 1}, {0, 0}, {1, 1}};
+        int[] picks = {0, 1, 0};
+        for (int k = 0; k < picks.length; k++) {
+            stored = fe.modes()[picks[k]];
+            check(fe.modeOf(stored) == picks[k] && java.util.Arrays.equals(fe.resolutionLive(stored), live[k])
+                    && fe.resolutionEnv(stored).equals(List.of("DM_GRAPHICS_SCALE=" + live[k][0], "DM_OPMODE=" + live[k][1])), "pick " + k + ": " + stored);
+        }
+        check(Profile.parse("04007EF01F8AE000\tF\t0\tx\t\t\t\t\t\tscale:1920x1080=0/handheld,2048x1152=1/console").get(0).modeOf("2048x1152") == 0, "the rows in either order");
+        check(sc.modes() == null && sc4.modes() == null && win.modes() == null && l.get(0).modes() == null && sc.modeLabel(0) == null && sc.modeOf("1920x1080") == -1
+                && Profile.parse("0400C3F00006E000\tM\t0\tx\t\t\t\t\t\tscale:2560x1440=1/console,1920x1080=0/handheld,1280x720=2/handheld").get(0).modes() == null
+                && Profile.parse("0400C3F00006E000\tM\t0\tx\t\t\t\t\t\tscale:original=1/console,1920x1080=0/handheld").get(0).modes() == null
+                && Profile.parse("0400C3F00006E000\tM\t0\tx\t\t\t\t\t\tscale:2560x1440=1/handheld,1920x1080=0/handheld").get(0).modes() == null,
+                "three rows, an original row, two handheld rows, window_fn and none: the phone sizes");
         check(!win.resolutionLive() && win.resolutionLive("1280x720") == null && !l.get(0).resolutionLive(), "window_fn / res_levels and none: not live (the next start)");
         // The default frame limit (build.gradle fpsLimitOf, the 16th column): game.tsv fps_limit, 0 without the column, an empty one or a bad value
         Profile lim = Profile.parse("0400486024DEC000\tO\t0\tx\t\t\t\t\t\t\t\t\t\t\t\t30").get(0);

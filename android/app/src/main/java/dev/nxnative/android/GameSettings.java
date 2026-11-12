@@ -5,6 +5,7 @@ import android.text.InputType;
 import android.widget.EditText;
 import android.widget.LinearLayout;
 
+import java.io.File;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
@@ -31,6 +32,62 @@ final class GameSettings {
         Profile prof = Profile.of(id);
         if (prof != null && prof.hasResolution())   // only where it does something: a profile with window_fn or graphics_scale rows
             Ui.add(box, new Ui.Setting(a, "🖼️", "Game resolution", v -> resolution(a, g, again)).value(windowLabel(a, id)).chevron(a).view, 8);
+        if (prof != null && prof.vegetationDetail) {
+            Ui.Setting vegetation = new Ui.Setting(a, "🌿", "Full vegetation", null)
+                    .toggle(a, Prefs.fullVegetation(a, id), (button, on) -> Prefs.fullVegetation(a, id, on));
+            vegetation.value("Turn off to hide some grass and foliage and reduce GPU work. Applies at the next start.");
+            Ui.add(box, vegetation.view, 0);
+        }
+        if (Prefs.skipLayersGame(id)) {   // a game whose profile names layers the picture covers anyway (game.tsv skip_layers)
+            Ui.Setting hid = new Ui.Setting(a, "🚀", "Speedhack: Turn off hidden layers (experimental)", null).toggle(a, Prefs.skipLayers(a, id), (b, on) -> Prefs.skipLayers(a, id, on));
+            hid.value("Skips layers that later drawing covers (much faster where they are drawn). Turn it off if something looks missing");
+            Ui.add(box, hid.view, 0);
+        }
+        if (prof != null && !prof.options.isEmpty()) {
+            File packDir = g.packDir != null ? new File(g.packDir) : null;
+            java.util.Map<String, Ui.Setting> rowSettings = new java.util.LinkedHashMap<>();
+            boolean[] updating = new boolean[1];
+
+            Runnable updateRows = () -> {
+                updating[0] = true;
+                try {
+                    for (Profile.Option opt : prof.options) {
+                        Ui.Setting s = rowSettings.get(opt.env);
+                        if (s == null) continue;
+                        Profile.Option source = Profile.findImpliedBy(prof.options, opt, env -> Prefs.gameOption(a, id, env));
+                        boolean supported = opt.isSupported(packDir);
+                        String prepareNote = !supported ? " Needs Prepare again (tap ⋯ › Prepare again)." : "";
+                        String timing = opt.live ? " Applies from the next frame." : " Applies at the next start.";
+                        if (source != null) {
+                            s.toggle.setChecked(true);
+                            s.toggle.setEnabled(false);
+                            s.view.setAlpha(0.6f);
+                            s.value(opt.description + ". Turned on by " + source.label + "." + prepareNote + timing);
+                        } else {
+                            s.toggle.setChecked(Prefs.gameOption(a, id, opt.env));
+                            s.toggle.setEnabled(true);
+                            s.view.setAlpha(1.0f);
+                            s.value(opt.description + "." + prepareNote + timing);
+                        }
+                    }
+                } finally {
+                    updating[0] = false;
+                }
+            };
+
+            for (Profile.Option opt : prof.options) {
+                String emoji = opt.env.contains("RES") ? "📐" : opt.env.contains("POOL") ? "💾" : opt.env.contains("FPS") ? "⏱️" : "⚙️";
+                Ui.Setting setting = new Ui.Setting(a, emoji, opt.label, null)
+                        .toggle(a, Prefs.gameOption(a, id, opt.env), (button, checked) -> {
+                            if (updating[0]) return;
+                            Prefs.gameOption(a, id, opt.env, checked);
+                            updateRows.run();
+                        });
+                rowSettings.put(opt.env, setting);
+                Ui.add(box, setting.view, 0);
+            }
+            updateRows.run();
+        }
         if (!Prefs.limited(id) && Prefs.ownRate(a, id)) {   // the host found no limiter it can hold for this game: choices would do nothing (the host's frame limiter holds a limited game)
             Ui.Setting fixed = new Ui.Setting(a, "⏱️", "Frame rate cap", null).value("This game picks its own frame rate");
             fixed.view.setClickable(false);
@@ -49,6 +106,11 @@ final class GameSettings {
             Ui.add(box, new Ui.Setting(a, "🖥️", "Display mode", v -> displayMode(a, g, again)).value(displayModeLabel(a, id)).chevron(a).view, 0);
         if (!aspects(prof).isEmpty())   // a profile with a native aspect mod (game.tsv variant rows labelled w:h)
             Ui.add(box, new Ui.Setting(a, "🔳", "Aspect ratio", v -> aspect(a, g, again)).value(aspectLabel(a, id)).chevron(a).view, 0);
+        if (Prefs.steps(id)) {   // a framework of whole steps a frame (fps_steps): Hold 60 fps keeps one step at the cap of 60. The in-game panel changes it live
+            Ui.Setting hold = new Ui.Setting(a, "🎯", "Hold 60 fps", null).toggle(a, Prefs.hold60(a, id), (b, on) -> Prefs.hold60(a, id, on));
+            hold.value(Prefs.HOLD60_TEXT);
+            Ui.add(box, hold.view, 0);
+        }
         Ui.add(box, new Ui.Setting(a, "📐", "Display", v -> display(a, g, again)).value(Prefs.DISPLAY_NAMES[Prefs.stretch(a, id) ? 1 : 0]).chevron(a).view, 0);
         if (Prefs.dlssGame(id)) {   // a game on the DLSS stand-in (game.tsv dlss_standin): its Upscaler is the stand-in (GSR2's sliders under GSR 2, the sharpness under FSR 1)
             int dm = GameUpscaler.dlssMode(a, id);
@@ -102,6 +164,8 @@ final class GameSettings {
 
     static String windowLabel(MainActivity a, String id) {
         String w = Prefs.gameWindow(a, id);
+        Profile p = Profile.of(id);
+        if (p != null && p.modeOf(w) >= 0) return p.modeLabel(p.modeOf(w));   // the two-choice form (Profile.modes): Docked or Handheld
         String l = Prefs.windowName(w, false);
         return Prefs.ownWindow(a, id) ? l : "Default · " + l;
     }
@@ -176,6 +240,17 @@ final class GameSettings {
     }
 
     private static void resolution(MainActivity a, Game g, Runnable done) {
+        Profile mp = Profile.of(g.titleId);
+        String[] modes = mp != null ? mp.modes() : null;
+        if (modes != null) {   // a game with one docked and one handheld row (Profile.modes): those two choices only, as Display shows its two
+            new AlertDialog.Builder(a).setTitle("Game resolution · " + g.name).setSingleChoiceItems(new String[] {mp.modeLabel(0), mp.modeLabel(1)},
+                    mp.modeOf(Prefs.gameWindow(a, g.titleId)), (x, w) -> {
+                Prefs.gameWindow(a, g.titleId, modes[w]);
+                x.dismiss();
+                done.run();
+            }).setNegativeButton("Cancel", null).show();
+            return;
+        }
         String[] labels = new String[Prefs.WINDOWS.length + 1];
         labels[0] = "Default (" + Prefs.windowName(Prefs.defaultWindow(a, g.titleId), false) + ")";
         { Profile lp = Profile.of(g.titleId); for (int li = 0; li < Prefs.WINDOWS.length; li++) labels[li + 1] = lp != null ? lp.windowLabel(Prefs.WINDOWS[li], Prefs.WINDOW_NAMES[li]) : Prefs.WINDOW_NAMES[li]; }   // a choice the game draws at another size says so (Profile.windowLabel)

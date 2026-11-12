@@ -98,6 +98,11 @@ STAGE_NAME = {'vs': 'vertex', 'hs': 'hull', 'ds': 'domain', 'gs': 'geometry', 'p
 
 def red(msg): sys.exit('[RED] ' + msg)
 
+
+def stage(text):
+    """'stage: <text>': the phase the split is in, which Prepare's card shows after "Finding the shaders" (PackService, Job.stepNote); its progress lines then count it"""
+    print(f'stage: {text}', flush=True)
+
 def field(d, fmt, at, where):
     """struct.unpack_from(fmt, d, at) of a field a header or table points at: red() naming where and the offset when it is not inside d (a damaged or cut file)"""
     if not 0 <= at <= len(d) - struct.calcsize(fmt): red(f'{where}: {struct.calcsize(fmt):#x} bytes at {at:#x} lie outside the {len(d):#x} bytes there are')
@@ -896,14 +901,63 @@ def cpk_shaders(path, rel, ents, out):
         scan_blob(d, f'/{rel}/{e[0]}', out)
 
 ZIP = b'PK\x03\x04'
+VZIP = b'VZIP'   # Star Fox's data.zip: a zip archive behind the engine's own 18 MB index (its "vfs.zip.c"), which zipfile reads through its central directory as any other
+VIPER_GLSLC = b'\x91\x68\x86\x19'
+VIPER_CHUNK = 0x10000
+
+def viper_zip_member(z, info):
+    """A member of Star Fox's data.zip (its engine's vfs.zip.c): the central directory calls it stored, but a member whose size on disk differs from its file size is a chain of 64 KB chunks,
+    each a u32 length and an LZ4 block of that length, compressed against the previous chunk's output as its dictionary (a chunk whose length equals what is left is stored raw).
+    The CRC the directory keeps is the decoded data's, so zipfile's own read stops on it; 114,154 members, 33 GB, all check"""
+    import lz4.block
+    z.fp.seek(info.header_offset); h = z.fp.read(30)
+    if h[:4] != ZIP: red(f'{z.filename or "zip"}/{info.filename}: no local header at {info.header_offset:#x}')
+    nlen, xlen = struct.unpack_from('<HH', h, 26)
+    z.fp.seek(info.header_offset + 30 + nlen + xlen); d = z.fp.read(info.compress_size); u = info.file_size
+    out, off = bytearray(), 0
+    while off + 4 <= len(d) and len(out) < u:
+        n = struct.unpack_from('<I', d, off)[0]; off += 4; want = min(VIPER_CHUNK, u - len(out))
+        if not 0 < n <= len(d) - off: red(f'{info.filename}: LZ4 chunk of {n} bytes at {off - 4:#x} runs past the member ({len(d)} bytes)')
+        if n == want: out += d[off:off + n]
+        else:
+            try: out += lz4.block.decompress(d[off:off + n], uncompressed_size=want, dict=bytes(out[-VIPER_CHUNK:])) if out else lz4.block.decompress(d[off:off + n], uncompressed_size=want)
+            except lz4.block.LZ4BlockError as e: red(f'{info.filename}: LZ4 chunk at {off - 4:#x}: {e}')
+        off += n
+    if off != len(d) or len(out) != u: red(f'{info.filename}: the LZ4 chunks make {len(out)} of {u} bytes from {off} of {len(d)}')
+    if zlib.crc32(out) & 0xFFFFFFFF != info.CRC: red(f'{info.filename}: CRC mismatch after the LZ4 chunks')
+    return bytes(out)
+
+def zip_member(z, name):
+    """A zip member's data: zipfile's, or viper_zip_member's for a member the directory calls stored at another size than its file size (Star Fox)"""
+    info = z.getinfo(name)
+    if info.compress_type == 0 and info.compress_size != info.file_size: return viper_zip_member(z, info)
+    return z.read(name)
+
+def viper_shader(d, label):
+    """Star Fox's shader binaries (its engine's _vrender_shader_binary_t, one per data.zip member): the GLSLC output magic, u32 code length, u32 control length, u32 0, a 64-bit hash, then the
+    code area and the NVN2 control section (version 0xc9), nothing else: 2,828 members, 1,480 vertex, 1,300 pixel, 48 compute. One stage each, paired at draw time (separable_pairs).
+    → [(key, stage, control, code)], or None when d is not one (another file that starts with the magic is read as before)"""
+    if len(d) < 0x18 + NVN2_KEY_CTL or d[:4] != VIPER_GLSLC: return None
+    ncode, nctl = struct.unpack_from('<II', d, 4)
+    if 0x18 + ncode + nctl != len(d) or not ncode or not nctl: return None
+    code, ctl = d[0x18:0x18 + ncode], d[0x18 + ncode:]
+    if not nvn2_ctl(ctl): return None
+    st = nvn2_stage(ctl, code)
+    if not st: red(f'{label}: a shader binary of no known stage (control +0x56 {ctl[0x56] if len(ctl) > 0x56 else None}, code {code[:4].hex()})')
+    if why := check(label, st, ctl, code): red(f'{label} ({st}): {why}')
+    return [(f'{label}#VIPER', st, ctl, code)]
+
 def zip_jobs(files, parts=64):
     """Every member of every zip archive in ranges of about equal length (Portal: the whole game in game.zip, 41,416 members, 4.6 GB inflated, Deflate or stored; its GLSLC outputs are the
     221 nxcontent/nvsb/*.nvsb files, but no name is relied on). → ([(path, rel, (ZIP, members)), …], the zip paths). An archive zipfile cannot read is scanned as one file, as before"""
     import zipfile
-    zs = []
-    for p, r in files:
+    zs, shown = [], time.monotonic()
+    for i, (p, r) in enumerate(files):
+        # the full scan gives every RomFS file (186,583 in Ocarina of Time): a 'progress' line at most twice a second, so the phone's card counts them instead of
+        # standing still (the scan's own lines start again from 0 after it)
+        if len(files) >= 1000 and time.monotonic() - shown >= 0.5: print(f'progress: {i}/{len(files)}', flush=True); shown = time.monotonic()
         with open(p, 'rb') as f: h = f.read(4)
-        if h != ZIP: continue
+        if h not in (ZIP, VZIP): continue   # VZIP: Star Fox's data.zip
         try:
             with open(p, 'rb') as source, zipfile.ZipFile(source) as z: zs.append((p, r, [(i.filename, i.file_size) for i in z.infolist() if not i.is_dir()]))
         except (zipfile.BadZipFile, OSError, ValueError) as e: print(f'[RED] /{r}: the zip cannot be read ({e}); scanned as one file', flush=True)
@@ -922,7 +976,7 @@ def zip_shaders(path, rel, names, out):
     import zipfile
     with open(path, 'rb') as source, zipfile.ZipFile(source) as z:
         for nm in names:
-            d = z.read(nm); n = len(out)
+            d = zip_member(z, nm); n = len(out)
             scan_blob(d, f'/{rel}/{nm}', out)
             if len(out) == n and d[:4] != b'MSHD' and b'\x91\x68\x86\x19' in d: out += glslc_shaders(d, f'/{rel}/{nm}', need=False)
 
@@ -2569,6 +2623,11 @@ def scan_blob(d, label, out, depth=0, left=None):
         return
     if d[:4] in PG_STAGES and len(d) >= 0x18 and d[(o := struct.unpack_from('<I', d, 0xc)[0]):o + 4] == CTL_MAGIC: out.extend(pg_shader(d, label)); return
     if shaders := pg_sized_shader(d, label): out.extend(shaders); return
+    if (shaders := viper_shader(d, label)) is not None: out.extend(shaders); return   # Star Fox's shader binaries
+    if d[:4] == b'VIPR':   # Star Fox's resource containers: two of them wrap the engine's NDSR upscaler networks (ounce-nvn2-upper_left_ndsr.bin), 40 shaders each, as a file inside
+        for m in re.finditer(b'NDSR', d):
+            if m.start() + 0x20 <= len(d) and d[m.start() + 4:m.start() + 6] == b'\x00\x01': out.extend(ndsr_shaders(d[m.start():], f'{label}#NDSR@{m.start():#x}'))
+        return
     for m in re.finditer(b'BNSH\0\0\0\0', d):
         if m.start() + 0x20 > len(d): continue   # too near the end for a BNSH header
         size = struct.unpack_from('<I', d, m.start() + 0x1c)[0]
@@ -2596,7 +2655,7 @@ def pixel_input_cover(shaders):
         k = min(ins, key=lambda k: (-len(ins[k] & left), k)); cover.append(k); left -= ins[k]
     return cover
 
-SINGLE_STAGE = ('#GLSLC@', '#UE', '#MTSPK@', '#MGFX@', '#NLG', '#PGSO', '#RAW@', '#TFXO@', '#NEEDLE@', '#SNOWDROP@', '#PHYRE@', '#SUMO@', '#NVNSH@')   # sources whose every shader is a program of one stage: GLSLC outputs, Unreal's shader records, MT Framework's shader package (BNSH variations, Unity programs, MSHD and SDF pair theirs);
+SINGLE_STAGE = ('#GLSLC@', '#VIPER', '#UE', '#MTSPK@', '#MGFX@', '#NLG', '#PGSO', '#RAW@', '#TFXO@', '#NEEDLE@', '#SNOWDROP@', '#PHYRE@', '#SUMO@', '#NVNSH@')   # sources whose every shader is a program of one stage: GLSLC outputs, Unreal's shader records, MT Framework's shader package (BNSH variations, Unity programs, MSHD and SDF pair theirs);
 # Unreal Engine 3's shader caches (ue3_shaders, '#UE3@'); MonoGame's effects, whose passes may name no vertex shader and keep the one bound (Celeste: 10 of its 13 effects draw through SpriteBatch's vertex shader, which is in main); Next Level Games'
 # archives (Luigi's Mansion 3 makes 5,317 programs of one stage each at boot); PlatinumGames' shader objects (Bayonetta 3: one stage each, pg_shader); control sections loose in main
 # (Advance Wars 1+2: Re-Boot Camp's Bink shaders, raw_shaders), which no file pairs; YEBIS's effect file (tfxo_shaders); and Sumo's Ninty_NX descriptors and NVNsh records, one stage
@@ -2805,7 +2864,7 @@ def scan_file_in(args):
     if len(args) > 2 and head[:8] == ONEPACK:   # a range of Trinity packs (trpfs_jobs)
         trinity_shaders(path, rel, args[2], found)
         return rel, uniq_keys(found), var_pairs(found), trees
-    if len(args) > 2 and head[:4] == ZIP and args[2][0] == ZIP:   # members of a zip archive (zip_jobs)
+    if len(args) > 2 and head[:4] in (ZIP, VZIP) and args[2][0] == ZIP:   # members of a zip archive (zip_jobs)
         zip_shaders(path, rel, args[2][1], found)
         return rel, uniq_keys(found), var_pairs(found), trees
     if len(args) > 2 and args[2][0] == UE_LEGACY:   # files of a legacy Unreal pak (ue_legacy_jobs)
@@ -3108,8 +3167,11 @@ def main():
     files, results, common, dumps = [], [], None, []
     for i, (romfs, mainnso) in enumerate(zip(romfs_v, main_v)):
         tag = os.path.basename(os.path.dirname(os.path.abspath(romfs))) if i else ''
+        stage('listing the game\'s files')
         files += sorted(((os.path.join(dp, f), (tag + '/' if tag else '') + posix_rel(os.path.join(dp, f), romfs)) for dp, _, fs in os.walk(romfs) for f in fs), key=lambda t: t[1])   # by the '/' path: the same order on every system
+        stage('reading the game\'s program')
         img = nso_image(mainnso)
+        stage('looking for shaders in the game\'s program')
         if not i:
             import unityfs
             try: common = unityfs.common_strings(img)
@@ -3159,8 +3221,10 @@ def main():
             if failed and os.path.isfile(failed) and open(failed).read().strip() == dg: why = 'an earlier run on these inputs found the targeted scan\'s tables differ from the profile\'s'
             else:
                 print(f'targeted split: {len(want):,} of {len(files):,} RomFS files hold the shaders of the profile\'s shader_map.tsv (main build {", ".join(build_id(m) for m in main_v)}); only these are scanned', flush=True)
+                stage(f'reading the {len(want):,} files that hold shaders')
                 try:
                     out = split_tables(list(results), big, todo, dumps, J, common, zdicts, ScanCache(os.path.join(rd, 'targeted'), dg) if rd else None, targeted=True)
+                    stage('comparing the shaders found with the app\'s list')
                     why = profile_differs(out, pairsout, psopairsout)
                 except Fallback as e: why = str(e)
                 if why:
@@ -3171,9 +3235,12 @@ def main():
         if out is None: print(f'targeted split: not taken, {why}: every file is scanned', flush=True)
     if out is None:
         print(f'split: looking for archives among {len(files):,} RomFS files', flush=True)   # each file is opened (zip_jobs): a minute or more on a large RomFS, before the first progress line
+        stage(f'looking for archives among {len(files):,} files')
         big, todo = scan_jobs(files)
+        stage(f'reading every file of the game ({len(files):,})')
         cd = (os.path.join(rd, 'full') if targeted else rd) if rd else None
         out = split_tables(list(results), big, todo, dumps, J, common, zdicts, ScanCache(cd, scan_digest(inputs, big + todo + mains)) if cd else None)
+    stage('writing the shaders found')
     write_outputs(out, pkg, mapout, factsout, pairsout, psopairsout)
 
 class Fallback(Exception): pass   # the targeted scan cannot give the full scan's outputs (split_tables)
@@ -3285,6 +3352,7 @@ def split_tables(results, big, files, dumps, J, common, zdicts, cache, targeted=
     with pool(J, common, {}, zdicts) as ex:
         n = len(big) + len(files)
         results += pooled(ex, big, n, cache=cache) + pooled(ex, files, n, len(big), chunk=16, cache=cache)
+    stage('sorting the shaders found')
     trees, defer = {}, []
     for rel, uniq, pr, extra in results:
         if extra == 'defer': defer.append(rel)
