@@ -327,11 +327,12 @@ class Tables(unittest.TestCase):
 
     def test_rules(self):
         rows = L.load_rules()
-        self.check_table(rows, ('id', 'kind', 'regex', 'cause', 'doc'))
+        self.check_table(rows, ('id', 'kind', 'regex', 'cause', 'meaning', 'doc'))
         self.assertGreaterEqual(len(rows), 20)
         for r in rows:
             self.assertIn(r['kind'], L.KINDS, r['id'])
             self.assertTrue(r['cause'].endswith('.') and len(r['cause']) < 160, r['id'])
+            self.assertTrue(r['meaning'] and r['meaning'].endswith('.'), f"{r['id']}: missing or malformed meaning")
             if r['doc']:
                 f, _, a = r['doc'].partition('#')
                 self.assertTrue((REPO / f).is_file(), r['doc'])

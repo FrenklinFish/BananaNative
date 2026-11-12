@@ -1,5 +1,10 @@
 package dev.nxnative.android;
 
+import java.io.BufferedReader;
+import java.io.File;
+import java.io.IOException;
+import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.LinkedHashMap;
@@ -23,6 +28,7 @@ final class Profile {
     String gpuTs = "submission";   // game.tsv gpu_timestamps (build.gradle gpuTsOf): "segment" or "submission", what the host does without DM_NVN_GPU_TS (Game settings › GPU timing)
     String window = "";   // game.tsv android_window (build.gradle windowOf): the default Game resolution when the player chose none (Prefs.gameWindow), "" for the main screen's
     boolean vegetationDetail;
+    List<Option> options = Collections.emptyList();
     boolean steps;   // game.tsv has fps_steps rows (build.gradle stepsOf): a framework of whole fixed steps a frame, which Hold 60 fps keeps at one (Prefs.steps)
     boolean presentOnly;   // game.tsv fps_limit_present 1 (build.gradle presentOnlyOf): the frame limit only paces the presents, the game's own logic is not known to follow it (Prefs.presentOnly)
     int fpsLimit;   // game.tsv fps_limit (build.gradle fpsLimitOf): the host's frame limit by default, frames a second (0 = none); the launcher offers a frame limit for it (Prefs.limited)
@@ -56,6 +62,122 @@ final class Profile {
         }
         return env;
     }
+
+    public static final class Option {
+        public final String env;
+        public final String label;
+        public final String description;
+        public final boolean live;   // false = restart, true = live
+        public final String implies; // env var of option implied by this option, or ""
+        public final String needs;   // fixup marker required by this option (e.g. "OOT_PATCHES"), or ""
+
+        public Option(String env, String label, String description, boolean live, String implies, String needs) {
+            this.env = env != null ? env : "";
+            this.label = label != null ? label : "";
+            this.description = description != null ? description : "";
+            this.live = live;
+            this.implies = implies != null ? implies : "";
+            this.needs = needs != null ? needs : "";
+        }
+
+        public Option(String env, String label, String description, boolean live) {
+            this(env, label, description, live, "", "");
+        }
+
+        public boolean hasImplies() { return !implies.isEmpty(); }
+        public boolean hasNeeds() { return !needs.isEmpty(); }
+
+        public String envLine() { return env + "=1"; }
+
+        /** Whether this option's required fixup marker (if any) is present in the pack */
+        public boolean isSupported(File packDir) {
+            return needs.isEmpty() || hasFixupMarker(packDir, needs);
+        }
+
+        @Override public boolean equals(Object o) {
+            if (this == o) return true;
+            if (!(o instanceof Option)) return false;
+            Option that = (Option) o;
+            return live == that.live && env.equals(that.env) && label.equals(that.label)
+                    && description.equals(that.description) && implies.equals(that.implies)
+                    && needs.equals(that.needs);
+        }
+
+        @Override public int hashCode() {
+            return java.util.Objects.hash(env, label, description, live, implies, needs);
+        }
+
+        @Override public String toString() {
+            return env + "|" + label + "|" + description + "|" + (live ? "live" : "restart")
+                    + (hasImplies() ? "|implies=" + implies : "") + (hasNeeds() ? "|needs=" + needs : "");
+        }
+    }
+
+    /** Parse option rows encoded as "<env>|<label>|<description>|<restart|live>[|<implies>[|<needs>]]", ';' between them */
+    static List<Option> parseOptions(String text) {
+        if (text == null || text.trim().isEmpty()) return Collections.emptyList();
+        List<Option> out = new ArrayList<>();
+        for (String row : text.split(";")) {
+            String r = row.trim();
+            if (r.isEmpty()) continue;
+            String[] f = r.split("\\|", -1);
+            if (f.length >= 3 && !f[0].trim().isEmpty()) {
+                boolean live = f.length > 3 && "live".equalsIgnoreCase(f[3].trim());
+                String implies = f.length > 4 ? f[4].trim() : "";
+                String needs = f.length > 5 ? f[5].trim() : "";
+                out.add(new Option(f[0].trim(), f[1].trim(), f[2].trim(), live, implies, needs));
+            }
+        }
+        return Collections.unmodifiableList(out);
+    }
+
+    /** Find an enabled option that implies targetOpt, or null */
+    static Option findImpliedBy(List<Option> options, Option targetOpt, java.util.function.Predicate<String> isOptionOn) {
+        if (options == null || targetOpt == null) return null;
+        for (Option opt : options) {
+            if (opt != targetOpt && !opt.implies.isEmpty() && opt.implies.equals(targetOpt.env) && isOptionOn.test(opt.env)) {
+                return opt;
+            }
+        }
+        return null;
+    }
+
+    /** Build environment lines ("<ENV>=1") for enabled options */
+    static List<String> buildOptionsEnv(List<Option> options, java.util.function.Predicate<String> isOptionOn) {
+        List<String> env = new ArrayList<>();
+        if (options == null || options.isEmpty()) return env;
+        for (Option opt : options) {
+            boolean on = isOptionOn.test(opt.env) || findImpliedBy(options, opt, isOptionOn) != null;
+            if (on) env.add(opt.envLine());
+        }
+        return env;
+    }
+
+    /** Environment lines ("<ENV>=1") for options enabled for this profile */
+    List<String> optionsEnv(java.util.function.Predicate<String> isOptionOn) {
+        return buildOptionsEnv(options, isOptionOn);
+    }
+
+    /** Whether a pack's main.fixups.tsv has "# <marker> 1" */
+    static boolean hasFixupMarker(File packDir, String marker) {
+        if (packDir == null || !packDir.isDirectory() || marker == null || marker.trim().isEmpty()) return false;
+        File f = new File(packDir, "main.fixups.tsv");
+        if (!f.isFile()) return false;
+        String target = "# " + marker.trim();
+        try (BufferedReader r = Files.newBufferedReader(f.toPath(), StandardCharsets.UTF_8)) {
+            String line;
+            while ((line = r.readLine()) != null) {
+                if (line.startsWith(target)) {
+                    String[] parts = line.split("\\s+");
+                    if (parts.length >= 3 && "1".equals(parts[2])) return true;
+                }
+            }
+        } catch (IOException e) {
+            return false;
+        }
+        return false;
+    }
+
 
     /**
      * Whether Game resolution changes while the game runs (the in-game panel): only for a game with graphics_scale rows, whose host changes the graphics scale and operation mode
@@ -197,7 +319,8 @@ final class Profile {
             p.presentOnly = c.length > 17 && c[17].equals("1");
             p.steps = c.length > 18 && c[18].equals("1");
             p.vegetationDetail = c.length > 19 && c[19].equals("1");
-            p.variants = c.length > 20 ? c[20] : "";
+            p.options = parseOptions(c.length > 20 ? c[20] : "");
+            p.variants = c.length > 21 ? c[21] : "";
             out.add(p);
         }
         return Collections.unmodifiableList(out);

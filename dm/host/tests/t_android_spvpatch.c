@@ -160,6 +160,36 @@ static const uint32_t SPV_PFB_DISCARD[] = {
     0x00000033, 0x00050041, 0x00000035, 0x00000036, 0x0000001b, 0x00000034, 0x0004003d, 0x00000018, 0x00000037, 0x00000036, 0x000500b8, 0x00000038,
     0x00000039, 0x00000037, 0x00000031, 0x000300f7, 0x0000003b, 0x00000000, 0x000400fa, 0x00000039, 0x0000003a, 0x0000003b, 0x000200f8, 0x0000003a,
     0x000100fc, 0x000200f8, 0x0000003b, 0x0004003d, 0x00000019, 0x0000003f, 0x0000001b, 0x0003003e, 0x0000003e, 0x0000003f, 0x000100fd, 0x00010038};
+// A pixel shader's inputs for another earlier stage (vka_spv_input_remap), glslangValidator -V --target-env vulkan1.1 of:
+//   layout(location = 5) in vec4 uv; layout(location = 0) noperspective in vec4 fade; layout(location = 6) in vec4 tint; layout(location = 0) out vec4 o;
+//   if (uv.x + fade.x < 0.5) discard; o = tint * uv.y;
+static const uint32_t SPV_REMAP_FRAG[] = {
+    0x07230203, 0x00010300, 0x0008000b, 0x00000021, 0x00000000, 0x00020011, 0x00000001, 0x0006000b, 0x00000001, 0x4c534c47, 0x6474732e, 0x3035342e,
+    0x00000000, 0x0003000e, 0x00000000, 0x00000001, 0x0009000f, 0x00000004, 0x00000004, 0x6e69616d, 0x00000000, 0x00000009, 0x0000000f, 0x0000001a,
+    0x0000001b, 0x00030010, 0x00000004, 0x00000007, 0x00030003, 0x00000002, 0x000001c2, 0x00040005, 0x00000004, 0x6e69616d, 0x00000000, 0x00030005,
+    0x00000009, 0x00007675, 0x00040005, 0x0000000f, 0x65646166, 0x00000000, 0x00030005, 0x0000001a, 0x0000006f, 0x00040005, 0x0000001b, 0x746e6974,
+    0x00000000, 0x00040047, 0x00000009, 0x0000001e, 0x00000005, 0x00030047, 0x0000000f, 0x0000000d, 0x00040047, 0x0000000f, 0x0000001e, 0x00000000,
+    0x00040047, 0x0000001a, 0x0000001e, 0x00000000, 0x00040047, 0x0000001b, 0x0000001e, 0x00000006, 0x00020013, 0x00000002, 0x00030021, 0x00000003,
+    0x00000002, 0x00030016, 0x00000006, 0x00000020, 0x00040017, 0x00000007, 0x00000006, 0x00000004, 0x00040020, 0x00000008, 0x00000001, 0x00000007,
+    0x0004003b, 0x00000008, 0x00000009, 0x00000001, 0x00040015, 0x0000000a, 0x00000020, 0x00000000, 0x0004002b, 0x0000000a, 0x0000000b, 0x00000000,
+    0x00040020, 0x0000000c, 0x00000001, 0x00000006, 0x0004003b, 0x00000008, 0x0000000f, 0x00000001, 0x0004002b, 0x00000006, 0x00000013, 0x3f000000,
+    0x00020014, 0x00000014, 0x00040020, 0x00000019, 0x00000003, 0x00000007, 0x0004003b, 0x00000019, 0x0000001a, 0x00000003, 0x0004003b, 0x00000008,
+    0x0000001b, 0x00000001, 0x0004002b, 0x0000000a, 0x0000001d, 0x00000001, 0x00050036, 0x00000002, 0x00000004, 0x00000000, 0x00000003, 0x000200f8,
+    0x00000005, 0x00050041, 0x0000000c, 0x0000000d, 0x00000009, 0x0000000b, 0x0004003d, 0x00000006, 0x0000000e, 0x0000000d, 0x00050041, 0x0000000c,
+    0x00000010, 0x0000000f, 0x0000000b, 0x0004003d, 0x00000006, 0x00000011, 0x00000010, 0x00050081, 0x00000006, 0x00000012, 0x0000000e, 0x00000011,
+    0x000500b8, 0x00000014, 0x00000015, 0x00000012, 0x00000013, 0x000300f7, 0x00000017, 0x00000000, 0x000400fa, 0x00000015, 0x00000016, 0x00000017,
+    0x000200f8, 0x00000016, 0x000100fc, 0x000200f8, 0x00000017, 0x0004003d, 0x00000007, 0x0000001c, 0x0000001b, 0x00050041, 0x0000000c, 0x0000001e,
+    0x00000009, 0x0000001d, 0x0004003d, 0x00000006, 0x0000001f, 0x0000001e, 0x0005008e, 0x00000007, 0x00000020, 0x0000001c, 0x0000001f, 0x0003003e,
+    0x0000001a, 0x00000020, 0x000100fd, 0x00010038};
+// Whether a variable is decorated Location loc (*var: the first one), and a global variable's storage class (-1: none)
+static int loc_of(const uint32_t *w, size_t n, uint32_t loc, uint32_t *var) {
+    for (size_t i = 5; i < n && (w[i] >> 16); i += w[i] >> 16) if ((w[i] & 0xffff) == 71 && (w[i] >> 16) >= 4 && w[i + 2] == 30 && w[i + 3] == loc) { if (var) *var = w[i + 1]; return 1; }
+    return 0;
+}
+static int storage_of(const uint32_t *w, size_t n, uint32_t var) {
+    for (size_t i = 5; i < n && (w[i] >> 16); i += w[i] >> 16) if ((w[i] & 0xffff) == 59 && w[i + 2] == var) return (int)w[i + 3];
+    return -1;
+}
 int main(void) {
     int val = have_val();
     size_t n = sizeof SPV_TRI_VERT / 4, on = 0; char err[200] = "";
@@ -360,6 +390,45 @@ int main(void) {
         free(x);
         x = vka_spv_pool_fb(SPV_TRI_FRAG, sizeof SPV_TRI_FRAG / 4, 1, 0, 2, 0, VKA_PFB_EARLY, 1, &on, &sites, &early, err, sizeof err);
         CHECK(!x && !err[0], "pool reads: a module that reads no pool is left alone (%s)", err);
+    }
+    {   // vka_spv_input_remap: uv 5 -> 7, tint 6 -> 8, fade (location 0, read through an access chain) a constant (0, 0, 0, 1)
+        size_t rn = sizeof SPV_REMAP_FRAG / 4, ron = 0; uint32_t mv = 0, cs = 0, v_uv = 0, v_fade = 0, v_tint = 0;
+        loc_of(SPV_REMAP_FRAG, rn, 5, &v_uv); loc_of(SPV_REMAP_FRAG, rn, 6, &v_tint);
+        for (size_t i = 5; i < rn; i += SPV_REMAP_FRAG[i] >> 16)
+            if ((SPV_REMAP_FRAG[i] & 0xffff) == 71 && SPV_REMAP_FRAG[i + 2] == 30 && SPV_REMAP_FRAG[i + 3] == 0 && storage_of(SPV_REMAP_FRAG, rn, SPV_REMAP_FRAG[i + 1]) == 1) v_fade = SPV_REMAP_FRAG[i + 1];
+        CHECK(v_uv && v_tint && v_fade, "test module's inputs found");
+        uint64_t map = (~0ull & ~(0xfull << 20) & ~(0xfull << 24)) | 7ull << 20 | 8ull << 24;
+        uint32_t *r = vka_spv_input_remap(SPV_REMAP_FRAG, rn, map, &ron, &mv, &cs, err, sizeof err);
+        CHECK(r, "input remap refused: %s", err);
+        if (r) {
+            uint32_t a = 0, b = 0;
+            CHECK(loc_of(r, ron, 7, &a) && a == v_uv, "uv at location 7");
+            CHECK(loc_of(r, ron, 8, &b) && b == v_tint, "tint at location 8");
+            CHECK(!loc_of(r, ron, 5, NULL) && !loc_of(r, ron, 6, NULL), "nothing left at 5 or 6");
+            CHECK(storage_of(r, ron, v_fade) == 6, "fade a Private variable (storage class %d)", storage_of(r, ron, v_fade));
+            CHECK(mv == (1u << 5 | 1u << 6) && cs == 1u, "moved %#x, constant %#x", mv, cs);
+            if (val) CHECK(validate(r, ron, "input remap"), "input remap valid");
+            free(r);
+        }
+        r = vka_spv_input_remap(SPV_REMAP_FRAG, rn, 0x6543210ull | ~0ull << 28, &ron, &mv, &cs, err, sizeof err);
+        CHECK(!r && !err[0], "an identity map changes nothing (%s)", err);
+        free(r);
+        map = (~0ull & ~(0xfull << 20) & ~(0xfull << 24)) | 7ull << 20 | 7ull << 24;
+        r = vka_spv_input_remap(SPV_REMAP_FRAG, rn, map, &ron, &mv, &cs, err, sizeof err);
+        CHECK(!r && err[0], "two inputs at one location refused");
+        free(r);
+        // DM_VK_REMAP_SPV=<pixel module>:<map in hex>: that module rewritten and validated (the profile's mesh_prepass_cut maps on a game's prepass pixel shaders)
+        const char *rs = getenv("DM_VK_REMAP_SPV");
+        if (rs) {
+            char path[1024]; snprintf(path, sizeof path, "%s", rs); char *c = strrchr(path, ':'); uint64_t m2 = c ? strtoull(c + 1, NULL, 16) : ~0ull; if (c) *c = 0;
+            FILE *f = fopen(path, "rb"); long sz = f && !fseek(f, 0, SEEK_END) ? ftell(f) : -1;
+            uint32_t *x = sz > 20 && !fseek(f, 0, SEEK_SET) ? malloc((size_t)sz) : NULL; size_t xn = x ? fread(x, 1, (size_t)sz, f) / 4 : 0; if (f) fclose(f);
+            r = x ? vka_spv_input_remap(x, xn, m2, &ron, &mv, &cs, err, sizeof err) : NULL;
+            CHECK(r, "%s: input remap refused: %s", path, err);
+            if (r && val) CHECK(validate(r, ron, path), "%s remapped valid", path);
+            printf("t_android_spvpatch: %s remapped: moved %#x, constant %#x\n", path, mv, cs);
+            free(r); free(x);
+        }
     }
     // DM_VK_PFB_SPV_DIR=<folder of .spv modules>: each one that reads the pool rewritten (vertex-pipeline stores allowed, early tests asked for) and validated
     const char *pd = getenv("DM_VK_PFB_SPV_DIR");

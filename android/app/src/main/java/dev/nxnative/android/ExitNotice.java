@@ -21,6 +21,7 @@ final class ExitNotice {
     static final int NONE = -1;
 
     static final String TITLE = "The game stopped unexpectedly";
+    static final String MEANING_TITLE = "What it means";
 
     static final String JAVA = "The app ran into an error and had to close the game.";
     static final String NATIVE = "The game ran into an error and crashed.";
@@ -113,6 +114,16 @@ final class ExitNotice {
         String n = name == null || name.isEmpty() || name.equals("null") ? "The game" : name;
         return n + ": " + cause + (likely == null || likely.isEmpty() ? "" : "\n\nLikely cause: " + likely) + "\n\nShare log sends the log of that run, which says more.";
     }
+
+    /** The "What it means" dialog text: the plain-words meaning, with the technical cause below it */
+    static String meaningMessage(String meaning, String cause) {
+        if (meaning == null || meaning.isEmpty()) return cause == null ? "" : cause;
+        if (cause == null || cause.isEmpty() || cause.equals(meaning)) return meaning;
+        return meaning + "\n\n" + cause;
+    }
+
+    static String meaningMessage(String meaning) { return meaningMessage(meaning, null); }
+    static String meaning(String meaning, String cause) { return meaningMessage(meaning, cause); }
 
     /** The log's block for an uncaught Java exception: "[RED] crash: " before every line of the trace, at most maxLines lines */
     static String crashBlock(String thread, String trace, int maxLines) {

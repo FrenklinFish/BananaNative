@@ -1,0 +1,6 @@
+# What this game needs of an Android phone, for the launcher's readiness check (android/README.md "Readiness check"; the format in dm/games/README.md "Readiness rows").
+# A status row also marks the game as supported on Android: gradle.properties' nxGames builds every such profile into the APK (dm/tools/tests/test_android_games.py).
+
+# Bring-up on Android: ported from upstream's Mac profile; not yet run on a phone (the note). Upstream measured about 8.5 GB resident on the Mac, so phones with
+# less memory may not hold it; no memory row until a phone run measures it
+status	bring-up

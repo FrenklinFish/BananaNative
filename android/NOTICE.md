@@ -19,6 +19,10 @@ games' own shaders translated, not part of this code. The other translator files
 therefore a GPL-3.0-or-later work whatever `nxLsfg` says, and the Mac and iPhone builds stay MIT only as apps: the committed translator `dm/gfx/tools/dmsh_xlate_bin` they run to
 build shader libraries is the same GPL combined work.
 
+**Mesh draws through compute are GPL-3.0-or-later.** On a device without `VK_EXT_mesh_shader` the host draws NVN2 task and mesh programs through compute with
+[`dm/gfx/vk_android/vka_memu.c`](../dm/gfx/vk_android/vka_memu.c), `vka_memu_spv.c`, `vka_memu_draw.inc`, `vka_memu_abi.h` and the passes in `memu/`, after
+[Hokkaido](https://github.com/pavelgajdo/Hokkaido)'s compute mesh emulation (GPL-3.0-or-later; its #569 and #642), so every `libnxhost.so` is a GPL-3.0-or-later work as a whole.
+
 File-backed memory pools (the launcher's per-game **RAM saver (uses storage)**, `DM_MEM_FILEBACK`) come from [Anka Native](https://github.com/EddizEge/AnkaNative)
 v0.2.2 by EddizEge (MIT, "Copyright (c) 2026 EddizEge" with the MIT permission notice in [LICENSE](../LICENSE)): `dm/gfx/vk_android/vka_fileback.h` and its test
 `dm/host/tests/t_android_fileback.c` as they were there, the "File-backed pools" part of `dm/gfx/vk_android/vka_mem.c` with its hook in `dm/gfx/nvn/hle_nvn.c`, and the

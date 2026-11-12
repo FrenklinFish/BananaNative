@@ -149,8 +149,20 @@ class LauncherDigest(unittest.TestCase):
         for kind, path, rows in (('rules', RULES, L.load_rules()), ('noise', NOISE, L.load_noise())):
             out = self.java('table', kind, path).split('\n')
             self.assertEqual([x for x in out if x], [f'ok {r["id"]}' for r in rows], kind)
-        bad = self.file('id\tkind\tregex\tcause\tdoc\nx\tcrash\t(?P<n>a)\tc\t\n')
+        bad = self.file('id\tkind\tregex\tcause\tmeaning\tdoc\nx\tcrash\t(?P<n>a)\tc\tm\t\n')
         self.assertTrue(self.java('table', 'rules', bad).startswith('bad '))
+
+    def test_meanings_match_java(self):
+        """every rule has a meaning and Java and Python read the same meaning"""
+        py_rules = L.load_rules()
+        for r in py_rules:
+            self.assertTrue(r['meaning'], f"{r['id']} has no meaning")
+            self.assertTrue(r['meaning'].endswith('.'), f"{r['id']}: meaning must end with a period")
+        out = self.java('meanings', RULES).splitlines()
+        jv_map = dict(line.split('\t', 1) for line in out if '\t' in line)
+        for r in py_rules:
+            self.assertIn(r['id'], jv_map)
+            self.assertEqual(jv_map[r['id']], r['meaning'], f"meaning mismatch for {r['id']}")
 
     def test_key_patterns_are_bug_reports(self):
         k1, k2 = self.java('keys').split('\n')[:2]

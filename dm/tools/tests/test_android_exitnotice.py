@@ -106,6 +106,11 @@ class ExitNotice(unittest.TestCase):
         self.assertEqual(self.java('line', 'java.lang.IllegalStateException', 'two\nlines'), 'java.lang.IllegalStateException: two lines')
         self.assertEqual(self.java('line', 'java.lang.NullPointerException', '-'), 'java.lang.NullPointerException')
 
+    def test_meaning_text_builder(self):
+        self.assertEqual(self.java('meaning', 'What happened.', 'Technical cause.'), 'What happened.\\n\\nTechnical cause.')
+        self.assertEqual(self.java('meaning', 'What happened.', '-'), 'What happened.')
+        self.assertEqual(self.java('meaning', 'What happened.', 'What happened.'), 'What happened.')
+
 
 class NativeRecord(unittest.TestCase):
     """nxlaunch.c's signal handler stays async-signal-safe: no stdio, no malloc, no locks between its start and its end"""

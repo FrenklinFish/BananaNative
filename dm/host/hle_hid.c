@@ -891,6 +891,11 @@ HLE_FORCE("_ZN2nn3hid22GetVibrationDeviceInfoEPNS0_19VibrationDeviceInfoERKNS0_2
 HLE_FORCE("_ZN2nn3hid24IsVibrationDeviceMountedERKNS0_21VibrationDeviceHandleE", "vibration: device mounted when the channel has an output", unsigned, h_hid_VibMounted, const uint32_t *h) {
     return h && vib_targets(*h);
 }
+// SDK 22 (Switch 2 / Ounce): IsOunceVibrationDeviceMounted replaces IsVibrationDeviceMounted (The Legend of Zelda: Ocarina of Time calls it when rumble is on).
+// The SDK's own call reaches the hid service (CreateHidServerProxy -> sm abort, Result 0xe15 at sdk+0x6c8e54).
+HLE_FORCE("_ZN2nn3hid29IsOunceVibrationDeviceMountedERKNS0_21VibrationDeviceHandleE", "vibration: Ounce device mounted when the channel has an output", unsigned, h_hid_VibMountedOunce, const uint32_t *h) {
+    return h && vib_targets(*h);
+}
 HLE_FORCE("_ZN2nn3hid23GetActualVibrationValueEPNS0_14VibrationValueERKNS0_21VibrationDeviceHandleE", "vibration: last accepted channel value", void, h_hid_VibActual, dm_vibration *v, const uint32_t *h) {
     uint32_t targets = h ? vib_targets(*h) : 0;
     *v = targets ? dm_haptics_actual(__builtin_ctz(targets), *h >> 16 & 1) : (dm_vibration){0, 160, 0, 320};

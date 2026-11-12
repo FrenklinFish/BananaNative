@@ -1324,3 +1324,115 @@ uint32_t *vka_spv_pool_fb(const uint32_t *w, size_t nw, uint32_t set, uint32_t t
     *out_nw = o.n;
     return o.w;
 }
+
+// vka_spv_input_remap: a pixel shader drawn behind another stage than the one it was made for. A depth-only prepass whose own mesh modules Qualcomm's driver draws wrong
+// is drawn with its colour pass's mesh module instead (vka_draw.c mesh_cut, profile mesh_prepass_cut): that module writes the values the prepass's pixel shader reads at
+// other locations, and some not at all. So each user Input variable at location L (L < 16) moves to location (map >> 4L) & 0xf, or, where that nibble is 0xf, becomes a
+// Private vec4 holding (0, 0, 0, 1): what Maxwell reads for a generic attribute no earlier stage writes, and what a vertex shader's padded outputs give (vk_android_spv.py
+// init_outputs). Its decorations go, and before SPIR-V 1.4 it leaves the entry point's interface; access chains into it are retyped as Private pointers
+uint32_t *vka_spv_input_remap(const uint32_t *w, size_t nw, uint64_t map, size_t *out_nw, uint32_t *moved, uint32_t *consts, char *err, size_t errn) {
+    *moved = *consts = 0; if (errn) err[0] = 0;
+    if (nw < 5 || w[0] != 0x07230203) { snprintf(err, errn, "not SPIR-V"); return NULL; }
+    uint32_t bound = w[3], ver = w[1];
+    uint32_t *loc = calloc(bound, 4), *ptr_sc = calloc(bound, 4), *ptr_to = calloc(bound, 4), *var_ty = calloc(bound, 4);
+    uint8_t *kind = calloc(bound, 1);   // 1 an Input variable with a location, 2 a built-in, 4 a constant input (or a pointer into one), 8 a moved input
+    vec_t o = {0}; char *e = err;
+    if (!loc || !ptr_sc || !ptr_to || !var_ty || !kind) { snprintf(e, errn, "out of memory"); goto fail; }
+    for (uint32_t i = 0; i < bound; i++) loc[i] = ~0u;
+    uint32_t t_f32 = 0, t_v4f = 0;
+    for (size_t i = 5; i < nw;) {   // pass 1: types, Input variables, their locations
+        uint32_t op = w[i] & 0xffff, len = w[i] >> 16;
+        if (!len || i + len > nw) { snprintf(e, errn, "bad instruction at word %zu", i); goto fail; }
+        if (op == OpDecorate && len >= 4 && w[i + 1] < bound) { if (w[i + 2] == DecLocation) loc[w[i + 1]] = w[i + 3]; else if (w[i + 2] == 11) kind[w[i + 1]] |= 2; }
+        else if (op == OpTypeFloat && len >= 3 && w[i + 2] == 32 && !t_f32) t_f32 = w[i + 1];
+        else if (op == OpTypeVector && len >= 4 && w[i + 2] == t_f32 && t_f32 && w[i + 3] == 4 && !t_v4f) t_v4f = w[i + 1];
+        else if (op == OpTypePointer && len >= 4 && w[i + 1] < bound) { ptr_sc[w[i + 1]] = w[i + 2]; ptr_to[w[i + 1]] = w[i + 3]; }
+        else if (op == OpVariable && len >= 4 && w[i + 2] < bound && w[i + 3] == SCInput) var_ty[w[i + 2]] = w[i + 1];
+        i += len;
+    }
+    uint16_t taken = 0;
+    for (uint32_t v = 0; v < bound; v++) {
+        if (!var_ty[v] || (kind[v] & 2)) continue;
+        if (loc[v] >= 16) { snprintf(e, errn, "input %u at location %u (%s)", v, loc[v], loc[v] == ~0u ? "none" : "past 15"); goto fail; }
+        uint32_t to = (uint32_t)(map >> (4 * loc[v])) & 0xf;
+        if (to == 0xf) {
+            if (ptr_to[var_ty[v]] != t_v4f || !t_v4f) { snprintf(e, errn, "input at location %u is not a float vec4", loc[v]); goto fail; }
+            kind[v] |= 4; (*consts) |= 1u << loc[v];
+        } else {
+            if (taken >> to & 1) { snprintf(e, errn, "two inputs moved to location %u", to); goto fail; }
+            taken |= (uint16_t)(1u << to);
+            if (to != loc[v]) { kind[v] |= 8; (*moved) |= 1u << loc[v]; loc[v] = to; }
+        }
+    }
+    if (!*consts && !*moved) { e[0] = 0; goto fail; }
+    // Pass 2: pointers derived from a constant input (access chains into it), and refusals: a pointer to it stored, copied, passed or selected
+    for (size_t i = 5; i < nw; i += w[i] >> 16) {
+        uint32_t op = w[i] & 0xffff, len = w[i] >> 16;
+        if ((op == OpAccessChain || op == OpInBoundsAccessChain) && len >= 4 && w[i + 3] < bound && (kind[w[i + 3]] & 4)) {
+            if (ptr_sc[w[i + 1]] != SCInput) { snprintf(e, errn, "access chain %u into a constant input with a pointer of another storage class", w[i + 2]); goto fail; }
+            kind[w[i + 2]] |= 4;
+            continue;
+        }
+        uint32_t from = op == 62 /*OpStore*/ || op == 63 /*OpCopyMemory*/ ? 1 : op == 57 /*OpFunctionCall*/ ? 4 : op == 83 /*OpCopyObject*/ || op == 67 /*OpPtrAccessChain*/ ? 3
+                      : op == 245 /*OpPhi*/ || op == 169 /*OpSelect*/ ? 3 : 0;
+        for (uint32_t k = from; from && k < len; k++) if (w[i + k] < bound && (kind[w[i + k]] & 4)) { snprintf(e, errn, "a constant input's pointer used by opcode %u", op); goto fail; }
+    }
+    // New ids: a Private pointer per pointee a constant input or a chain into one has, the constants 0.0, 1.0 and (0, 0, 0, 1)
+    uint32_t nb = bound, priv_of[8][2], npriv = 0;   // [pointee, Private pointer]
+    for (uint32_t v = 0; v < bound; v++) {
+        if (!(kind[v] & 4)) continue;
+        if (!var_ty[v] || (kind[v] & 2)) continue;
+        uint32_t pt = ptr_to[var_ty[v]]; int f = 0; for (uint32_t k = 0; k < npriv; k++) f |= priv_of[k][0] == pt;
+        if (!f) { if (npriv == 8) { snprintf(e, errn, "too many pointee types"); goto fail; } priv_of[npriv][0] = pt; priv_of[npriv++][1] = nb++; }
+    }
+    for (size_t i = 5; i < nw; i += w[i] >> 16) {
+        uint32_t op = w[i] & 0xffff;
+        if ((op == OpAccessChain || op == OpInBoundsAccessChain) && w[i + 2] < bound && (kind[w[i + 2]] & 4)) {
+            uint32_t pt = ptr_to[w[i + 1]]; int f = 0;
+            for (uint32_t k = 0; k < npriv; k++) f |= priv_of[k][0] == pt;
+            if (!f) { if (npriv == 8) { snprintf(e, errn, "too many pointee types"); goto fail; } priv_of[npriv][0] = pt; priv_of[npriv++][1] = nb++; }
+        }
+    }
+    uint32_t c0 = 0, c1 = 0, cc = 0;
+    if (*consts) { c0 = nb++; c1 = nb++; cc = nb++; }
+    // Pass 3: the module
+    put_n(&o, w, 5); o.w[3] = nb;
+    int decl_done = 0;
+    for (size_t i = 5; i < nw;) {
+        uint32_t op = w[i] & 0xffff, len = w[i] >> 16;
+        if (op == OpEntryPoint && ver < 0x00010400) {
+            size_t at = o.n; if (!put(&o, 0)) goto oom;
+            uint32_t k = 3; while (k < len && (w[i + k] & 0xff000000u) && (w[i + k] & 0xff) && (w[i + k] >> 8 & 0xff) && (w[i + k] >> 16 & 0xff)) k++;   // the name's words (a word with a zero byte ends it)
+            k++; if (k > len) k = len;
+            for (uint32_t j = 1; j < k; j++) if (!put(&o, w[i + j])) goto oom;
+            for (uint32_t j = k; j < len; j++) if (!(w[i + j] < bound && (kind[w[i + j]] & 4) && var_ty[w[i + j]])) { if (!put(&o, w[i + j])) goto oom; }
+            o.w[at] = (uint32_t)(o.n - at) << 16 | OpEntryPoint;
+        } else if ((op == OpDecorate || op == OpDecorateId || op == OpDecorateString) && len >= 3 && w[i + 1] < bound && (kind[w[i + 1]] & 4) && var_ty[w[i + 1]]) {
+            /* dropped: a Private variable takes no interface decoration */
+        } else if (op == OpDecorate && len >= 4 && w[i + 2] == DecLocation && w[i + 1] < bound && (kind[w[i + 1]] & 8)) {
+            if (!put_n(&o, w + i, 3) || !put(&o, loc[w[i + 1]])) goto oom;
+        } else if (op == OpVariable && len >= 4 && w[i + 2] < bound && (kind[w[i + 2]] & 4) && var_ty[w[i + 2]]) {
+            if (!decl_done) {   // the new types and constants, before the first constant input (its pointee types are declared before it)
+                for (uint32_t k = 0; k < npriv; k++) { uint32_t x[] = {4u << 16 | OpTypePointer, priv_of[k][1], SCPrivate, priv_of[k][0]}; if (!put_n(&o, x, 4)) goto oom; }
+                uint32_t x[] = {4u << 16 | OpConstant, t_f32, c0, 0, 4u << 16 | OpConstant, t_f32, c1, 0x3f800000u, 7u << 16 | OpConstantComposite, t_v4f, cc, c0, c0, c0, c1};
+                if (!put_n(&o, x, sizeof x / 4)) goto oom;
+                decl_done = 1;
+            }
+            uint32_t pp = 0; for (uint32_t k = 0; k < npriv; k++) if (priv_of[k][0] == ptr_to[w[i + 1]]) pp = priv_of[k][1];
+            uint32_t x[] = {5u << 16 | OpVariable, pp, w[i + 2], SCPrivate, cc};
+            if (!put_n(&o, x, 5)) goto oom;
+        } else if ((op == OpAccessChain || op == OpInBoundsAccessChain) && len >= 4 && w[i + 2] < bound && (kind[w[i + 2]] & 4)) {
+            uint32_t pp = 0; for (uint32_t k = 0; k < npriv; k++) if (priv_of[k][0] == ptr_to[w[i + 1]]) pp = priv_of[k][1];
+            if (!put(&o, w[i]) || !put(&o, pp) || !put_n(&o, w + i + 2, len - 2)) goto oom;
+        } else if (!put_n(&o, w + i, len)) goto oom;
+        i += len;
+    }
+    free(loc); free(ptr_sc); free(ptr_to); free(var_ty); free(kind);
+    *out_nw = o.n;
+    return o.w;
+oom:
+    snprintf(e, errn, "out of memory");
+fail:
+    free(loc); free(ptr_sc); free(ptr_to); free(var_ty); free(kind); free(o.w);
+    return NULL;
+}
