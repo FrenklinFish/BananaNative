@@ -126,10 +126,11 @@ final class GameSettings {
 
         // ---- Picture ----
         List<ResPresets.Preset> rps = ResPresets.presets(prof);
+        boolean simple = Prefs.simpleRes(a, id);   // a game with Resolution presets and the tester rows off (Settings › Help): Resolution's choices alone, no Advanced, Upscaler or Dynamic resolution
         if (!rps.isEmpty()) {   // a profile with res_preset rows: one Resolution (window and 3D scene together, ResPresets); Advanced shows the two settings apart
             String rc = Prefs.resolutionChoice(a, id);
-            picture.add(track(recRows, Recommend.RES_PRESET, prepared(new Ui.Setting(a, "🖼️", "Resolution", v -> presets(a, g, again)), presetValue(a, g, rps, rc)).chevron(a)));
-            if (ResPresets.ADVANCED.equals(rc)) {
+            picture.add(track(recRows, Recommend.RES_PRESET, prepared(new Ui.Setting(a, "🖼️", "Resolution", v -> presets(a, g, again)), presetValue(a, g, rps, rc, simple)).note(ResPresets.NOTE).chevron(a)));
+            if (ResPresets.ADVANCED.equals(rc) && !simple) {
                 if (prof.hasResolution()) picture.add(new Ui.Setting(a, "🪟", "Window", v -> resolution(a, g, again)).value(windowLabel(a, id)).chevron(a).sub());
                 if (!SceneRes.presets(prof).isEmpty())
                     picture.add(prepared(new Ui.Setting(a, "🎬", "3D scene", v -> scene(a, g, again)), sceneValue(a, g, SceneRes.presets(prof))).chevron(a).sub());
@@ -140,7 +141,8 @@ final class GameSettings {
             if (!SceneRes.presets(prof).isEmpty())   // a profile with scene_scale rows but no presets: the 3D scene below the window by the game's own palette (SceneRes)
                 picture.add(prepared(new Ui.Setting(a, "🎬", "3D scene", v -> scene(a, g, again)), sceneValue(a, g, SceneRes.presets(prof))).chevron(a));
         }
-        if (Prefs.dlssGame(id)) {   // a game on the DLSS stand-in (game.tsv dlss_standin): its Upscaler is the stand-in (GSR2's sliders under GSR 2, the sharpness under FSR 1)
+        if (simple) {   // the Upscaler stays as stored (GameActivity reads the preference); only testers change it for a game with Resolution presets
+        } else if (Prefs.dlssGame(id)) {   // a game on the DLSS stand-in (game.tsv dlss_standin): its Upscaler is the stand-in (GSR2's sliders under GSR 2, the sharpness under FSR 1)
             int dm = GameUpscaler.dlssMode(a, id);
             picture.add(track(recRows, Recommend.UPSCALER, new Ui.Setting(a, "🔍", "Upscaler", v -> dlssMode(a, g, again)).value(shortName(DlssTune.MODE_NAMES[dm])).chevron(a)));
             if (DlssTune.showsClarity(dm))
@@ -175,7 +177,7 @@ final class GameSettings {
             full.says("Normal speed when the frame rate drops", "Slows down with the frame rate");
             speed.add(full);
         }
-        if (Prefs.drsGame(id))
+        if (Prefs.drsGame(id) && !simple)   // the host's dynamic resolution slider: testers only for a game with Resolution presets (Quality is the game's own dynamic resolution)
             speed.add(track(recRows, Recommend.DRS, new Ui.Setting(a, "📏", "Dynamic resolution", v -> drs(a, g, again)).value(drsValue(Prefs.drs(a, id))).chevron(a)));
         speed.add(track(recRows, Recommend.DRIVER, new Ui.Setting(a, "🎮", "GPU driver", v -> driver(a, g, again)).value(driverShort(a, id)).chevron(a)));
 
@@ -483,8 +485,8 @@ final class GameSettings {
     }
 
     /** Game settings' value of Resolution: the preset in force with its window and 3D scene, Advanced with its two values; and Prepare again when the pack lacks the overlay */
-    private static String presetValue(MainActivity a, Game g, List<ResPresets.Preset> ps, String rc) {
-        if (ResPresets.ADVANCED.equals(rc)) return "Advanced: window and 3D scene apart";
+    private static String presetValue(MainActivity a, Game g, List<ResPresets.Preset> ps, String rc, boolean simple) {
+        if (ResPresets.ADVANCED.equals(rc)) return simple ? "Custom setup (window and 3D scene set apart)" : "Advanced: window and 3D scene apart";
         ResPresets.Preset p = ResPresets.of(ps, rc);
         if (p == null) return "";
         String l = ResPresets.label(ps, rc);
@@ -506,22 +508,23 @@ final class GameSettings {
         LinearLayout box = new LinearLayout(a);
         box.setOrientation(LinearLayout.VERTICAL);
         AlertDialog[] d = new AlertDialog[1];
-        box.addView(Ui.small(a, "Sets the game's window and the 3D scene inside it together: lower is faster and softer, menus and text follow the window. "
-                + "Sizes marked about are estimates. The 3D scenes are made from your game files when the game is prepared. Applies at the next start."));
+        boolean simple = Prefs.simpleRes(a, g.titleId);
+        box.addView(Ui.small(a, ResPresets.NOTE + " Menus and text follow the window. Sizes marked about are estimates. The 3D pictures are made from your game files when the game is prepared."));
         android.widget.RadioGroup rg = new android.widget.RadioGroup(a);
-        for (int k = 0; k <= ps.size(); k++) {
+        for (int k = 0; k <= (simple ? ps.size() - 1 : ps.size()); k++) {   // the tester rows add Advanced after the presets
             android.widget.RadioButton rb = new android.widget.RadioButton(a);
             if (k < ps.size()) {
                 ResPresets.Preset p = ps.get(k);
                 boolean missing = p.overlay() && SceneRes.overlay(rows, pd, p.id) == null;
-                rb.setText(p.label + (k == 0 ? " (game default)" : "") + (p.id.equals(recPreset) ? " (recommended for this phone)" : "") + "\n" + p.detail() + (missing ? " \u00b7 needs Prepare again" : ""));
+                rb.setText(ResPresets.itemText(p, k == 0, p.id.equals(recPreset)) + (missing ? " \u00b7 needs Prepare again" : ""));
             } else rb.setText("Advanced (for testers)\nwindow and 3D scene set apart");
             rb.setId(k + 1);
             rg.addView(rb);
         }
         String rc = Prefs.resolutionChoice(a, g.titleId);
         ResPresets.Preset cur = ResPresets.of(ps, rc);
-        rg.check(cur != null ? ps.indexOf(cur) + 1 : ps.size() + 1);
+        if (cur != null) rg.check(ps.indexOf(cur) + 1);
+        else if (!simple) rg.check(ps.size() + 1);   // Advanced; a player's saved custom setup shows none checked
         rg.setOnCheckedChangeListener((x, w) -> {
             Prefs.resPreset(a, g.titleId, w <= ps.size() ? ps.get(w - 1).id : ResPresets.ADVANCED);
             d[0].dismiss();
@@ -534,14 +537,16 @@ final class GameSettings {
     /** Game settings' value of Advanced › 3D scene: the choice's label, and when the pack has no overlay for it (made before the option, or the pack step refused the palette), what to do */
     private static String sceneValue(MainActivity a, Game g, List<SceneRes.Preset> ps) {
         String choice = Prefs.sceneRes(a, g.titleId), label = SceneRes.label(ps, choice);
-        if (SceneRes.of(ps, choice) == null) return label;
+        SceneRes.Preset p = SceneRes.of(ps, choice);
+        if (p == null || p.arg()) return label;   // game arguments (scene_arg) need nothing from Prepare
         File pd = g.packDir != null ? new File(g.packDir) : null;
         return SceneRes.overlay(ps, packScenes(g), pd, choice) != null ? label : label + " · needs Prepare again";
     }
 
     /**
      * Advanced › 3D scene (or 3D scene, for a game with scene_scale rows and no presets): the 3D scene drawn at a scale of the window crop, by the game's own dynamic resolution palette rewritten when the game was prepared (dm/tools/scene_res.py,
-     * DM_ROMFS_OVERLAY); the crop, the menus and the upscaler stay as they are. Game default: the game's own palette. From the next start
+     * DM_ROMFS_OVERLAY); the crop, the menus and the upscaler stay as they are. Game default: the game's own palette. From the next start. For a game with scene_arg rows, the
+     * scale the game's engine takes as arguments (DM_GAME_ARGS_ADD), nothing made at Prepare
      */
     private static void scene(MainActivity a, Game g, Runnable done) {
         List<SceneRes.Preset> ps = SceneRes.presets(Profile.of(g.titleId));
@@ -553,8 +558,12 @@ final class GameSettings {
         LinearLayout box = new LinearLayout(a);
         box.setOrientation(LinearLayout.VERTICAL);
         AlertDialog[] d = new AlertDialog[1];
-        box.addView(Ui.small(a, "The 3D scene as a scale of the window's upscaler output, before the upscaler takes it to the window: lower is faster and softer. Menus and text stay sharp. "
-                + "Made from your game files when the game is prepared; applies at the next start. A DM_ROMFS_OVERLAY line in env.txt wins."));
+        boolean args = ps.stream().allMatch(SceneRes.Preset::arg);
+        box.addView(Ui.small(a, args
+                ? "The 3D scene as a share of the picture, set through the game's own settings: higher is sharper and slower, menus and text stay sharp. "
+                  + "Sizes are the most the game draws; under load its dynamic resolution lowers them. Applies at the next start. A DM_GAME_ARGS_ADD line in env.txt wins."
+                : "The 3D scene as a scale of the window's upscaler output, before the upscaler takes it to the window: lower is faster and softer. Menus and text stay sharp. "
+                  + "Made from your game files when the game is prepared; applies at the next start. A DM_ROMFS_OVERLAY line in env.txt wins."));
         android.widget.RadioGroup rg = new android.widget.RadioGroup(a);
         for (int k = 0; k < labels.length; k++) {
             android.widget.RadioButton rb = new android.widget.RadioButton(a);

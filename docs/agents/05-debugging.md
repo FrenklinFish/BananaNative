@@ -156,7 +156,11 @@ To check a change to the replay layer on a frame without playing to it, or to te
 
 ## On-device diagnostics (Android)
 
-The test app (`dev.nxnative.android`) takes switches from `env.txt` in its files folder and logs each run to `files/logs/`; a crash leaves its report in logcat ([android/TESTING.md](../../android/TESTING.md#diagnostic-switches)). Read a run log with `python3 dm/tools/log_digest.py <log>` first, then `--filter`, and the raw log only around the line numbers they print. Never touch the play app or a real save; run the system driver and Turnip (`DM_VK_DRIVER`).
+The test app (`dev.nxnative.android`) takes switches from `env.txt` in its files folder and logs each run to `files/logs/`; a crash leaves its report in logcat ([android/TESTING.md](../../android/TESTING.md#diagnostic-switches)). Logs: [digest first](#players-issues-and-logs). Never touch the play app or a real save; run the system driver and Turnip (`DM_VK_DRIVER`).
+
+## Players' issues and logs
+
+`scripts/issue_digest.py <number>` (on Forgejo: `issue-digest.yml`) or `log_digest.py <log>`, then the raw log only around named lines.
 
 ## On-device diagnostics (iOS)
 

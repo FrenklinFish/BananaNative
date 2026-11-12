@@ -54,8 +54,16 @@ class Wiring(unittest.TestCase):
         self.assertIn('p.presets = c.length > 22 ? c[22] : "";', (SRC / 'Profile.java').read_text(encoding='utf-8'))
 
     def test_oot_column(self):
-        self.assertEqual(presets_of('0400486024DEC000'), 'quality|Quality|1920x1080|default|0|1920|1080|measured;balanced|Balanced|1920x1080|floor|720|1920|1080|measured;'
-                         'performance|Performance|1280x720|fixed|540|1280|720|measured;max-performance|Max performance|1280x720|fixed|360|1280|720|measured')
+        self.assertEqual(presets_of('0400486024DEC000'), 'quality|Quality|1920x1080|default|0|1920|1080|measured;medium|Balanced|1920x1080|fixed|720|1920|1080|measured;'
+                         'performance|Performance|1280x720|fixed|540|1280|720|measured')
+
+    def test_from_column(self):
+        """Profile column 26 (build.gradle presetFromOf): the earlier ids map to the presets that replaced them"""
+        g = GRADLE.read_text(encoding='utf-8')
+        self.assertIn('presetFromOf(g)].join', g)
+        self.assertIn('p.presetFrom = c.length > 26 ? c[26] : "";', (SRC / 'Profile.java').read_text(encoding='utf-8'))
+        self.assertEqual([c[1:3] for c in rows('0400486024DEC000', 'res_preset_from')], [['balanced', 'medium'], ['max-performance', 'performance']])
+        scene_res.res_presets(game.load('0400486024DEC000'))   # refuses a row naming a preset that is not there
 
     def test_column_matches_the_pack_step(self):
         """Every profile: the presets the launcher offers with a scene of their own are the overlays the pack step makes, at the scale the launcher labels"""

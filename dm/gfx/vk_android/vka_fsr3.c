@@ -254,7 +254,7 @@ static void clear(VkCommandBuffer cb, VkImage img, float v0, float v1) {
     vk.vkCmdClearColorImage(cb, img, VK_IMAGE_LAYOUT_GENERAL, &c, 1, &all);
 }
 
-int vka_dlss_fsr3(VkCommandBuffer cb, vka_img *src, vka_img *dst, vka_img *depth, vka_img *motion, const p_dlss_t2t *o) {
+int vka_dlss_fsr3(VkCommandBuffer cb, vka_img *src, VkFormat sfmt, vka_img *dst, int enc, vka_img *depth, vka_img *motion, const p_dlss_t2t *o) {
     const p_copy_t2t *c = &o->c;
     const NVNcopyRegion *s = &c->sr, *d = &c->dr;
     if (!src || !dst || !depth || !motion || src == dst) { VRED_ONCE("FSR 3.1: the evaluation lacks %s", !depth ? "depth" : !motion ? "motion vectors" : "colour"); return 0; }
@@ -269,9 +269,11 @@ int vka_dlss_fsr3(VkCommandBuffer cb, vka_img *src, vka_img *dst, vka_img *depth
         return 0;
     }
     if (!f3_ready()) return 0;
-    // The output: dst itself when the whole of it is written and it can be a storage image, else an image of its format copied into the rectangle
+    // The output: dst itself when the whole of it is written and it can be a storage image, else an image of its format copied into the rectangle. An sRGB output (enc:
+    // stored as its UNORM twin, and a storage image cannot encode) takes FSR's linear result from an RGBA16F image through the stand-in's encoding copy (vka_dlss_scale)
     VkFormatProperties fp; vk.vkGetPhysicalDeviceFormatProperties(V.pd, dst->f.vk, &fp);
-    if (!(fp.optimalTilingFeatures & VK_FORMAT_FEATURE_STORAGE_IMAGE_BIT)) { VRED_ONCE("FSR 3.1: output format %d is not a storage format", dst->f.vk); return 0; }
+    if (enc ? !vka_dlss_ready() : !(fp.optimalTilingFeatures & VK_FORMAT_FEATURE_STORAGE_IMAGE_BIT)) { VRED_ONCE("FSR 3.1: output format %d is not a storage format (or no encoding copy for sRGB)", dst->f.vk); return 0; }
+    const VkFormat out_fmt = enc ? VK_FORMAT_R16G16B16A16_SFLOAT : dst->f.vk;
     // DM_VK_FSR3_OUT_W / _H: FSR scales to that size, and a linear blit takes it to the game's output rectangle. With the native 4:3 pack the
     // 1920x1080 frame is shown at 1280x960 on a 4:3 handheld's panel: 1280x960 saves 1.1 ms, but the blit and the present resize twice and the panel showed about half the
     // sharpness (Laplacian variance 298 vs 584 on Dagsion's facade), so Fire Emblem's play setup leaves it unset (2026-11-09)
@@ -279,12 +281,13 @@ int vka_dlss_fsr3(VkCommandBuffer cb, vka_img *src, vka_img *dst, vka_img *depth
     {
         int fw = VKA_ENV("DM_VK_FSR3_OUT_W", 0), fh = VKA_ENV("DM_VK_FSR3_OUT_H", 0);
         const VkFormatFeatureFlags blit = VK_FORMAT_FEATURE_BLIT_SRC_BIT | VK_FORMAT_FEATURE_BLIT_DST_BIT | VK_FORMAT_FEATURE_SAMPLED_IMAGE_FILTER_LINEAR_BIT;
-        if (fw >= (int)rw && fh >= (int)rh && (uint32_t)fw <= ow && (uint32_t)fh <= oh && (fp.optimalTilingFeatures & blit) == blit) { uw = (uint32_t)fw; uh = (uint32_t)fh; }
+        if (fw >= (int)rw && fh >= (int)rh && (uint32_t)fw <= ow && (uint32_t)fh <= oh && (enc || (fp.optimalTilingFeatures & blit) == blit)) { uw = (uint32_t)fw; uh = (uint32_t)fh; }
     }
     const int scaled = uw != ow || uh != oh;
-    int direct = !scaled && (dst->usage & VK_IMAGE_USAGE_STORAGE_BIT) && !d->xoffset && !d->yoffset && uw == dst->w && uh == dst->h;
+    int direct = !enc && !scaled && (dst->usage & VK_IMAGE_USAGE_STORAGE_BIT) && !d->xoffset && !d->yoffset && uw == dst->w && uh == dst->h;
     if (!direct && !(dst->usage & VK_IMAGE_USAGE_TRANSFER_DST_BIT)) return 0;
-    VkImageView vcol = vka_view(src, src->f.vk, VK_IMAGE_VIEW_TYPE_2D, VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1, NULL);
+    // The colour through the texture's own view format: an sRGB input arrives linear, as on the console (its raw UNORM values read as linear were too bright)
+    VkImageView vcol = vka_view(src, sfmt ? sfmt : src->f.view ? src->f.view : src->f.vk, VK_IMAGE_VIEW_TYPE_2D, VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1, NULL);
     VkImageView vdep = vka_view(depth, depth->f.vk, VK_IMAGE_VIEW_TYPE_2D, VK_IMAGE_ASPECT_DEPTH_BIT, 0, 1, 0, 1, NULL);
     VkImageView vmv = vka_view(motion, motion->f.vk, VK_IMAGE_VIEW_TYPE_2D, VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1, NULL);
     VkImageView vout = direct ? vka_view(dst, dst->f.vk, VK_IMAGE_VIEW_TYPE_2D, VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1, NULL) : VK_NULL_HANDLE;
@@ -292,8 +295,8 @@ int vka_dlss_fsr3(VkCommandBuffer cb, vka_img *src, vka_img *dst, vka_img *depth
 
     // Images by sizes; the old set goes once the GPU is past it
     f3_res *R = F.res;
-    if (!R || R->rw != rw || R->rh != rh || R->uw != uw || R->uh != uh || (!direct && (!R->out.img || R->out_fmt != dst->f.vk))) {
-        f3_res *n = res_make(rw, rh, uw, uh, dst->f.vk, !direct);
+    if (!R || R->rw != rw || R->rh != rh || R->uw != uw || R->uh != uh || (!direct && (!R->out.img || R->out_fmt != out_fmt))) {
+        f3_res *n = res_make(rw, rh, uw, uh, out_fmt, !direct);
         if (!n) return 0;
         if (R) vka_after(vka_fence_last(), res_free, R);
         F.res = R = n; F.first = 1; F.parity = 0;
@@ -384,7 +387,10 @@ int vka_dlss_fsr3(VkCommandBuffer cb, vka_img *src, vka_img *dst, vka_img *depth
       pass(cb, sharpen ? P_ACCS : P_ACC, v, dc(uw, 8), dc(uh, 8), off); }
     if (sharpen) { VkImageView v[] = {exposure, R->up[q].view, vout}; pass(cb, P_RCAS, v, dc(uw, 16), dc(uh, 16), off); }
 #undef MIP
-    if (!direct) {
+    if (enc) {
+        vka_barrier(cb);
+        if (!vka_dlss_scale(cb, R->out.view, 0, 0, (int)uw, (int)uh, uw, uh, dst, 0, d->xoffset, d->yoffset, (int)ow, (int)oh, 1)) { F.parity = q; return 0; }
+    } else if (!direct) {
         VkImageSubresourceLayers l = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
         vka_barrier(cb);
         if (scaled) {
@@ -397,7 +403,7 @@ int vka_dlss_fsr3(VkCommandBuffer cb, vka_img *src, vka_img *dst, vka_img *depth
     }
     vka_barrier(cb);
     F.parity = q;
-    static int noted; if (!noted++) VLOG("DLSS replaced by FSR 3.1: %ux%u -> %ux%u%s, sharpening %s", rw, rh, uw, uh, scaled ? " (then a linear blit to the output)" : "", sharpen ? "on" : "off");
+    static int noted; if (!noted++) VLOG("DLSS replaced by FSR 3.1: %ux%u -> %ux%u%s, sharpening %s", rw, rh, uw, uh, enc ? " (then sRGB-encoded into the output)" : scaled ? " (then a linear blit to the output)" : "", sharpen ? "on" : "off");
     return 1;
 }
 #endif

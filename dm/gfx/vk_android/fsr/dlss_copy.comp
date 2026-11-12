@@ -1,0 +1,18 @@
+#version 450
+#extension GL_GOOGLE_include_directive : require
+// NVN2's DLSS stand-in (vka_dlss.c vka_dlss_scale): a rectangle of a colour image, read through a view that decodes an sRGB texture, scaled bilinearly to the output size
+// into the replay's RGBA16F work image, sRGB-encoded with pc.enc. It takes the place of a blit where the input and the output texture differ in sRGB (a blit converts by the
+// images' formats, and the replay stores sRGB textures as their UNORM twin), and writes FSR 3.1's linear result to an sRGB output (vka_fsr3.c)
+layout(local_size_x = 8, local_size_y = 8) in;
+layout(set = 0, binding = 0) uniform sampler2D tex;   // a linear sampler
+layout(set = 0, binding = 4, rgba16f) uniform writeonly image2D dst;
+layout(push_constant) uniform P { vec2 base, scale, rcp; ivec2 size; int enc; } pc;   // input rectangle origin and input texels per output texel; 1 / the input image's size
+#include "dlss_srgb.h"
+void main() {
+    ivec2 p = ivec2(gl_GlobalInvocationID.xy);
+    if (any(greaterThanEqual(p, pc.size))) return;
+    vec4 t = textureLod(tex, (pc.base + (vec2(p) + 0.5) * pc.scale) * pc.rcp, 0.0);
+    vec3 c = max(t.rgb, vec3(0.0));
+    if (pc.enc != 0) c = dlss_srgb_enc(c);
+    imageStore(dst, p, vec4(c, t.a));
+}

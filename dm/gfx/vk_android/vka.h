@@ -365,9 +365,13 @@ void vka_gp_commit(VkCommandBuffer cb, uint64_t fence);
 void vka_gp_sub_frame(uint64_t f);
 void vka_img_barrier(VkCommandBuffer cb, VkImage img, VkImageAspectFlags aspect, VkImageLayout from, VkImageLayout to);
 // NVN2's DLSS stand-in upscalers (vka_dlss.c): mode 2 = FSR 1 with the jitter taken out, 3 = Snapdragon GSR2 3-pass; writes the output rectangle of d (level dl) from
-// the input rectangle of s (level sl), outside any render pass. Returns the mode done (3, or 2 when GSR2 lacks depth / motion), 0 = not done (the caller blits)
-int vka_dlss_fsr3(VkCommandBuffer cb, vka_img *src, vka_img *dst, vka_img *depth, vka_img *motion, const p_dlss_t2t *o);   // vka_fsr3.c: FSR 3.1 for DM_VK_DLSS=4; 0 = not done (the caller falls back to FSR 1)
-int vka_dlss_run(VkCommandBuffer cb, const p_dlss *o, int mode, vka_img *s, uint32_t sl, int sx, int sy, int iw, int ih, vka_img *d, uint32_t dl, int dx, int dy, int ow, int oh);
+// the input rectangle of s (level sl), outside any render pass. Returns the mode done (3, or 2 when GSR2 lacks depth / motion), 0 = not done (the caller blits).
+// sfmt: the input texture's view format (an sRGB texture's decodes; its image may be shared with the UNORM twin); enc: the output texture is sRGB (stored as its UNORM
+// twin), so the result is written sRGB-encoded
+int vka_dlss_fsr3(VkCommandBuffer cb, vka_img *src, VkFormat sfmt, vka_img *dst, int enc, vka_img *depth, vka_img *motion, const p_dlss_t2t *o);   // vka_fsr3.c: FSR 3.1 for DM_VK_DLSS=4; 0 = not done (the caller falls back to FSR 1)
+int vka_dlss_run(VkCommandBuffer cb, const p_dlss *o, int mode, vka_img *s, uint32_t sl, VkFormat sfmt, int sx, int sy, int iw, int ih, vka_img *d, uint32_t dl, int enc, int dx, int dy, int ow, int oh);
+int vka_dlss_scale(VkCommandBuffer cb, VkImageView in, int sx, int sy, int iw, int ih, uint32_t tw, uint32_t th, vka_img *d, uint32_t dl, int dx, int dy, int ow, int oh, int enc);   // a scaled copy, sRGB-encoded with enc
+int vka_dlss_ready(void);   // the stand-in's pipelines are made (vka_dlss_scale can run)
 // The control line "screenshot" (vka_ctl.c): the present copies the window texture's crop into its command buffer, then hands the texels to the PNG writer once that submission is done
 void vka_ctl_shot_record(VkCommandBuffer cb, vka_img *im, VkFormat fmt, int cx, int cy, int cw, int ch);
 void vka_ctl_shot_done(VkFence fence);

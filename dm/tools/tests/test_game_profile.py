@@ -1,5 +1,6 @@
 # dm/games/game.py's profile-key validation, on a synthetic profile: pso_gpu (the GPU architectures the app's offline pipeline archive is made for, beside pso_mtl4) takes, none and no others,
-# and a profile without the key generates its header unchanged; romfs_check (a RomFS file line that tells a version's data apart) takes <path> <line> <expected | main>
+# and a profile without the key generates its header unchanged; romfs_check (a RomFS file line that tells a version's data apart) takes <path> <line> <expected | main>;
+# scene_arg (a 3D scene choice passed as game arguments) takes <name> <scale | -> <arguments> <label>
 from pathlib import Path
 import os
 import subprocess
@@ -51,6 +52,27 @@ class RomfsCheck(unittest.TestCase):
             rc, out = header(rows)
             self.assertNotEqual(rc, 0, rows)
             self.assertIn(': romfs_check takes <path in the RomFS> <line, from 1>', out, rows)
+
+
+
+class SceneArg(unittest.TestCase):
+    def test_valid_rows(self):
+        for rows in ('scene_arg\ts075\t0.75\t-a={s} -b={s}\t75%: 3D 1440x810\n', 'scene_arg\tfixed\t-\t-no_render_dynres_enabled\tNo dynamic resolution\n'):
+            self.assertEqual(header(rows), (0, ''), rows)
+
+    def test_rejected_rows(self):
+        for rows, msg in (('scene_arg\tx\t0.75\t-a={s}\n', 'scene_arg takes'),                     # no label
+                          ('scene_arg\ta/b\t0.75\t-a={s}\tX\n', 'scene_arg takes'),
+                          ('scene_arg\tx\t0.75\ta={s}\tX\n', 'scene_arg takes'),                   # not an argument
+                          ('scene_arg\tx\t0.75\t-a={s}|b\tX\n', 'scene_arg takes'),
+                          ('scene_arg\tx\tbig\t-a={s}\tX\n', 'scene_arg takes'),
+                          ('scene_arg\tx\t0.75\t-a=1\tX\n', 'goes into the arguments'),             # a scale it does not use
+                          ('scene_arg\tx\t5\t-a={s}\tX\n', 'goes into the arguments'),
+                          ('scene_arg\tx\t-\t-a={s}\tX\n', 'needs a scale'),
+                          ('scene_arg\tx\t0.5\t-a={s}\tX\nscene_arg\tx\t0.6\t-a={s}\tY\n', 'the name is taken')):
+            rc, out = header(rows)
+            self.assertNotEqual(rc, 0, rows)
+            self.assertIn(msg, out, rows)
 
 
 if __name__ == '__main__':

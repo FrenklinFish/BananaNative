@@ -89,6 +89,28 @@ def by_build(main_id):   # the profile whose build rows register this main build
     return next((g for g in all_games() if any(b.get('main') == main_id for b in g.builds().values())), None)
 
 
+def scene_args(g):
+    """The profile's scene_arg rows (the Android launcher's 3D scene choices that the game's engine takes as arguments, DM_GAME_ARGS_ADD; build.gradle sceneOf):
+    <name> <scale or -> <arguments, {s} for the scale> <label> → [(name, scale or None, the arguments with {s} replaced, label)]. ValueError on a malformed row"""
+    out, seen = [], {r[0] for r in g.values('scene_scale') if r} | {r[0] for r in g.values('res_preset') if r}
+    for r in g.values('scene_arg'):
+        usage = f'scene_arg takes <name> <scale or -> <arguments, each starting with -, {{s}} for the scale; no | ; " \\> <label>: {r}'
+        if len(r) < 4 or not re.fullmatch(r'[A-Za-z0-9_-]+', r[0]) or not r[3].strip(): raise ValueError(usage)
+        name, sc, args, label = r[0], r[1], r[2].split(), ' '.join(r[3:]).strip()
+        if name in seen: raise ValueError(f'scene_arg {name}: the name is taken (another scene_arg, a scene_scale or a res_preset)')
+        seen.add(name)
+        if not args or any(not a.startswith('-') or len(a) < 2 for a in args) or any(c in r[2] + label for c in '|;"\\'): raise ValueError(usage)
+        if sc == '-':
+            if '{s}' in r[2]: raise ValueError(f'scene_arg {name}: {{s}} needs a scale: {r}')
+            scale = None
+        else:
+            try: scale = float(sc)
+            except ValueError: raise ValueError(usage)
+            if not 0 < scale <= 4 or '{s}' not in r[2]: raise ValueError(f'scene_arg {name}: a scale (above 0, at most 4) goes into the arguments as {{s}}: {r}')
+        out.append((name, scale, ' '.join(a.replace('{s}', sc) for a in args), label))
+    return out
+
+
 def header(g):
     """the host's game_profile.h: the profile constants the host uses, as macros"""
     q = lambda s: '"' + s.replace('\\', '\\\\').replace('"', '\\"') + '"'
@@ -124,6 +146,8 @@ def header(g):
     for rc in g.values('romfs_check'):   # a RomFS file line that tells the version's own data from another version's (the Android launcher's RomfsCheck: Prepare and the card): <path> <line> <expected | main>
         if len(rc) != 3 or not rc[0] or rc[0].startswith('/') or '..' in rc[0].split('/') or not rc[1].isdigit() or int(rc[1]) < 1 or not rc[2].strip() or any(c in ''.join(rc) for c in '|;'):
             sys.exit(f"{g.id}: romfs_check takes <path in the RomFS> <line, from 1> <expected line (no | or ;), or main for the version's main build ID>: {rc}")
+    try: scene_args(g)   # the launcher's 3D scene choices passed as game arguments (build.gradle sceneOf, SceneRes)
+    except ValueError as e: sys.exit(f'{g.id}: {e}')
     aw = g.get('android_window', '')   # the Android launcher's default Game resolution for this game when the player chose none (Prefs.gameWindow): one of Prefs.WINDOWS
     if aw and aw not in ('1920x1080', 'original', '1280x720'): sys.exit(f'{g.id}: android_window must be 1920x1080, original or 1280x720: {aw}')
     pl = g.get('pad_layout', 'simple')   # the virtual gamepad's first layout (DmGamepad.m; afterwards whatever the player switched to in game is kept): simple = 2D, full = 3D (D-pad, right stick, L3 / R3),
@@ -143,6 +167,8 @@ def header(g):
     if tds not in ('on', 'off'): sys.exit(f'{g.id}: tex_dyn_slots must be on or off: {tds}')
     tsf = g.get('tex_soft', 'off')   # large block-compressed packaged textures kept without their finest level (Android: vka_tex.c "Soft textures", vka_soft.h; from plumber-racer-2's nvn_mtl.m tex_soft): on / off
     if tsf not in ('on', 'off'): sys.exit(f'{g.id}: tex_soft must be on or off: {tsf}')
+    evw = g.get('event_wait', 'on')   # Android: GPU event and sync waits across NVN queues honoured by the Vulkan replay (vka_worker.c qs_on; DM_VK_EVENT_WAIT overrides): on / off
+    if evw not in ('on', 'off'): sys.exit(f'{g.id}: event_wait must be on or off: {evw}')
     av1 = g.get('av1_decoder', 'hardware')   # Android: AV1 movies on the phone's hardware decoder (MediaCodec, the default) or dav1d frame-parallel (hle_movie_av1.c mav1_send)
     if av1 not in ('hardware', 'dav1d'): sys.exit(f'{g.id}: av1_decoder must be hardware or dav1d: {av1}')
     vcr = g.get('vconv_range', 'off')   # vertex attributes converted on the CPU only over the vertices each draw reads (nvn_mtl.m vc_draw_range): on / off
@@ -306,6 +332,7 @@ def header(g):
          f'#define DM_GAME_TEX_DIRTY_UPLOAD {int(tdu == "on")}',
          f'#define DM_GAME_TEX_DYN_SLOTS {int(tds == "on")}',
          f'#define DM_GAME_TEX_SOFT {int(tsf == "on")}',
+         f'#define DM_GAME_EVENT_WAIT {int(evw == "on")}',
          f'#define DM_GAME_GPU_TS_SEGMENT {int(gts == "segment")}',
          f'#define DM_GAME_DRAW_BARRIERS_GAME {int(dbr == "game")}',
          f'#define DM_GAME_VCONV_RANGE {int(vcr == "on")}',

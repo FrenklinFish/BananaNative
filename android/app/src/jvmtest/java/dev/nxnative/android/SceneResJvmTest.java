@@ -49,6 +49,19 @@ public final class SceneResJvmTest {
         check(SceneRes.note(all, "720p", ov).equals("[nxlaunch] scene resolution 720p (About 720p): DM_ROMFS_OVERLAY " + ov.getPath()), "note: " + SceneRes.note(all, "720p", ov));
         check(SceneRes.note(all, "540p", null).startsWith("[RED] ") && SceneRes.note(all, "540p", null).contains("Prepare again"), "a missing overlay is red");
         check(SceneRes.note(all, "gone", null).startsWith("[RED] "), "an unknown choice is red");
+
+        // scene_arg rows (Star Fox): game arguments, nothing in the pack
+        List<SceneRes.Preset> ar = SceneRes.parse("s075|75%: 3D up to 1440x810|0.75|arg|-render_resolution_scale_console=0.75 -render_resolution_scale_handheld=0.75;"
+                + "nodynres|No dynamic resolution|-|arg|-no_render_dynres_enabled;empty|x|1|arg|;720p|About 720p|0.6133|fixed");
+        check(ar.size() == 3 && ar.get(0).arg() && ar.get(1).arg() && !ar.get(2).arg(), "an arg row without arguments is skipped: " + ar);
+        check(ar.get(0).scale == 0.75 && Double.isNaN(ar.get(1).scale) && ar.get(2).args.isEmpty(), "scales and arguments");
+        check(SceneRes.argLine(ar, "s075").equals("DM_GAME_ARGS_ADD=-render_resolution_scale_console=0.75 -render_resolution_scale_handheld=0.75"), "arg line: " + SceneRes.argLine(ar, "s075"));
+        check(SceneRes.argLine(ar, "nodynres").equals("DM_GAME_ARGS_ADD=-no_render_dynres_enabled"), "a choice without a scale");
+        check(SceneRes.argLine(ar, "") == null && SceneRes.argLine(ar, "gone") == null && SceneRes.argLine(ar, "720p") == null, "Game default, unknown and overlay choices add no arguments");
+        check(SceneRes.overlay(ar, Map.of("s075", "scene_res/720p"), pack, "s075") == null, "an arg choice never takes an overlay folder");
+        check(SceneRes.note(ar, "s075", null).equals("[nxlaunch] scene resolution s075 (75%: 3D up to 1440x810): DM_GAME_ARGS_ADD -render_resolution_scale_console=0.75 -render_resolution_scale_handheld=0.75"),
+                "arg note: " + SceneRes.note(ar, "s075", null));
+        check(SceneRes.label(ar, "nodynres").equals("No dynamic resolution"), "arg label");
         System.out.println("ok");
     }
 }

@@ -23,6 +23,12 @@ shader_versions	v131072
 # Android: the game's DLSS (NVN2) runs on vka's stand-in, Snapdragon GSR2 3-pass (vka_dlss.c); the launcher's Upscaler row offers its modes, with Motion clarity
 # (DM_VK_GSR2_CLARITY) and Temporal sharpness (DM_VK_DLSS_SHARP) sliders, in Game settings and the in-game panel
 dlss_standin	1
+# The 3D scene (Game settings › 3D scene): the engine's own settings render.resolution_scale_console (0.5 on this console) and _handheld (0.833) as game arguments, which the
+# engine reads before its settings file and keeps (README.md "The Picture"). Sizes at the phone's 1920x1080 output; dynamic resolution lowers them to 0.8 under load
+scene_arg	s060	0.6	-render_resolution_scale_console={s} -render_resolution_scale_handheld={s}	60%: 3D up to 1152x648
+scene_arg	s075	0.75	-render_resolution_scale_console={s} -render_resolution_scale_handheld={s}	75%: 3D up to 1440x810
+scene_arg	s100	1.0	-render_resolution_scale_console={s} -render_resolution_scale_handheld={s}	100%: 3D up to 1920x1080
+scene_arg	nodynres	-	-no_render_dynres_enabled	The game's 50%, no dynamic resolution: 3D 960x540
 
 # ---- Files ----
 # main imports nothing from subsdk1 (C / libc) or subsdk2 (NintendoSDK_DLSS) that the host does not supply (dm/games/profile_guess.py modules)

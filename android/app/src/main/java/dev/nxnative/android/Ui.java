@@ -351,6 +351,36 @@ final class Ui {
     /** The back button of a page's header */
     static ImageView back(Context c, View.OnClickListener l) { return iconButton(c, R.drawable.ic_back, "Back", Kind.TONAL, l); }
 
+    /**
+     * Makes a card one touch target that a D-pad or controller can reach: focusable, with an accent ring while focused (the ring replaces the edge, so nothing moves),
+     * and l on a tap or the controller's confirm button. The card's own buttons stay separate stops
+     */
+    static void focusCard(Context c, LinearLayout card, View.OnClickListener l) {
+        android.graphics.drawable.StateListDrawable s = new android.graphics.drawable.StateListDrawable();
+        s.addState(new int[]{android.R.attr.state_focused}, round(col(c, R.color.bn_card), dp(c, 20), col(c, R.color.bn_accent), dp(c, 2.5f)));
+        s.addState(new int[]{}, card.getBackground());
+        card.setBackground(s);
+        card.setFocusable(true);
+        card.setClickable(true);
+        card.setOnClickListener(l);
+    }
+
+    /** A state line as a pill (the tint, a hairline edge), like the state chip of the settings pages; the words and their color are set by status() */
+    static TextView pill(TextView t) {
+        Context c = t.getContext();
+        t.setBackground(round(col(c, R.color.bn_tint), dp(c, 999), col(c, R.color.bn_card_stroke), dp(c, 1)));
+        t.setPadding(dp(c, 10), dp(c, 4), dp(c, 12), dp(c, 4));
+        return t;
+    }
+
+    /** A group's label with an action at its right ("Your games" and Add game) */
+    static LinearLayout sectionHeader(Context c, CharSequence label, View action) {
+        LinearLayout top = row(c);
+        top.addView(section(c, label), weight());
+        top.addView(action);
+        return top;
+    }
+
     // ---- Buttons ----
 
     private static void style(Context c, View b, Kind k, float radiusDp) {

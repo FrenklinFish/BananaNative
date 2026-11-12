@@ -74,6 +74,28 @@ final class ResPresets {
     /** A profile's presets (Profile.presets); empty without the profile */
     static List<Preset> presets(Profile p) { return p == null ? Collections.emptyList() : parse(p.presets); }
 
+    /** The subtitle of the Resolution setting, the same in Game settings and the in-game panel: what it sets, and when each part applies */
+    static final String NOTE = "Window and 3D picture together; lower is faster and softer. In a running game the window changes at once, the 3D picture the next time the game starts.";
+
+    /** One choice as both lists show it: "Quality (game default, recommended for this phone)" over its second line */
+    static String itemText(Preset p, boolean dflt, boolean recommended) {
+        String tag = recommended ? " (recommended)" : dflt ? " (the game's own)" : "";
+        return p.label + tag + "\n" + p.detail();
+    }
+
+    /**
+     * A stored choice that the profile no longer offers, mapped to the preset it was replaced by (Profile.presetFrom, game.tsv res_preset_from: "old=new;old=new"): the stored value
+     * itself for Advanced, "", a preset the profile has, or an id without a row
+     */
+    static String mapStored(List<Preset> ps, String from, String stored) {
+        if (stored == null || stored.isEmpty() || ADVANCED.equals(stored) || of(ps, stored) != null || from == null) return stored;
+        for (String r : from.split(";")) {
+            int eq = r.indexOf('=');
+            if (eq > 0 && r.substring(0, eq).trim().equals(stored) && of(ps, r.substring(eq + 1).trim()) != null) return r.substring(eq + 1).trim();
+        }
+        return stored;
+    }
+
     /** The preset of an id; null for Advanced, "" or an id the profile no longer has */
     static Preset of(List<Preset> ps, String id) {
         if (ps == null || id == null) return null;

@@ -61,6 +61,11 @@ fps_steps	d00e4f399e411d0613aa8d26b1c02fef	0x37c8410	0x8	0x210	0x214
 # Large block-compressed textures from the game's files kept without their finest level on the Vulkan replay (Android; README, Memory): ported from plumber-racer-2 (MIT,
 # copyright seedds), where it made a race fit an iPhone 18 Pro. Textures the game copies from stay whole (its terrain arrays are filled by copies: the road went purple without it)
 tex_soft	on
+# A workaround (2026-11-12, issue #181): the game's GPU event and sync waits across queues pass, in the order it submitted, as before 2026-11-09. Honoured, they park 6 times a frame
+# (1 whole, 5 after a cut), so the replay makes 9 submissions a frame instead of 4: 34-39 fps against 52-60 (README, Found on this game), and the device is lost on Turnip V39 loading
+# into a race (open, only with them). The reporter's Snapdragon 8 Gen 3 on Turnip ran 10-20 fps on 0.3.12 and 30-60 with DM_VK_EVENT_WAIT=0. Open: the cost of a cut (not the waits'
+# order) is the cause; DM_VK_EVENT_WAIT=1 honours them for an A/B
+event_wait	off
 # agl's render buffer binding: Donkey Kong Bananza's clears are wrapped in render conditions; the same engine, not yet checked on this game
 render_cond	on
 # The 3D scenes' size follows the operation mode and the Switch 2 graphics scale, not the window (README, Render resolution): the Android launcher's Game resolution

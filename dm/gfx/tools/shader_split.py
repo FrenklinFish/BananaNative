@@ -2988,6 +2988,31 @@ def posix_rel(path, root):   # a file's path in the RomFS, with '/' on every sys
 def scan_batch(jobs):   # scan_file over a batch of jobs, in a pool worker
     return [scan_file(j) for j in jobs]
 
+SPILL = int(os.environ.get('DM_SPLIT_SPILL', 32 << 20))   # bytes: a worker's pickled result larger than this comes back through a file (scan_batch_spilled)
+
+def scan_batch_spilled(jobs):
+    """scan_batch in a pool worker, its result pickled here: ('b', bytes) when small, ('f', path) of a temporary file holding it when larger than SPILL.
+    The pool sends a worker's result back through a pipe in one write; on Windows a write of a very large result (one archive's shaders, hundreds of MB)
+    fails with WinError 87 (ERROR_INVALID_PARAMETER) in multiprocessing's PipeConnection, and the split stopped (Pokemon Pokopia, issue #202).
+    unspill reads it back in the parent and deletes the file"""
+    data = pickle.dumps(scan_batch(jobs), protocol=pickle.HIGHEST_PROTOCOL)
+    if len(data) <= SPILL: return 'b', data
+    import tempfile
+    fd, path = tempfile.mkstemp(prefix='dm_split_', suffix='.pkl')
+    try:
+        with os.fdopen(fd, 'wb') as f: f.write(data)
+    except BaseException:
+        _remove(path); raise
+    return 'f', path
+
+def unspill(v):   # scan_batch_spilled's value → scan_batch's result; a file is deleted once read. Read with ResultUnpickler: only the types a scan result holds
+    kind, x = v
+    if kind == 'f':
+        try:
+            with open(x, 'rb') as f: return ResultUnpickler(f).load()
+        finally: _remove(x)
+    return ResultUnpickler(__import__('io').BytesIO(x)).load()
+
 
 class InProcess:
     """J=1: the pool's jobs run in this process, one after the other, no worker processes (the phone's packer runs in the app's process, which must not
@@ -3141,12 +3166,12 @@ def pooled(ex, jobs, total, start=0, chunk=1, cache=None):
                 kept[first] = r = scan_batch(b); cache.add(first, r); done += len(b)
                 if done == start + len(jobs) or time.monotonic() - shown >= 0.5: print(f'progress: {done}/{total}', flush=True); shown = time.monotonic()
         else:
-            futures = {ex.submit(scan_batch, b): first for first, b in todo}
+            futures = {ex.submit(scan_batch_spilled, b): first for first, b in todo}
             pending = set(futures)
             while pending:   # a timed wait, not as_completed: the count is shown every half second even while one slow range is all that is left
                 finished, pending = cf.wait(pending, timeout=0.5, return_when=cf.FIRST_COMPLETED)
                 for f in finished:   # each result into the cache as it comes
-                    kept[futures[f]] = r = f.result(); cache.add(futures[f], r); done += len(r)
+                    kept[futures[f]] = r = unspill(f.result()); cache.add(futures[f], r); done += len(r)
                 if not pending or time.monotonic() - shown >= 0.5: print(f'progress: {done}/{total}', flush=True); shown = time.monotonic()
     finally:
         AT = None
@@ -3363,7 +3388,8 @@ def split_tables(results, big, files, dumps, J, common, zdicts, cache, targeted=
         import unityfs
         for k in unityfs.KNOWN_TREES: trees.setdefault(k, unityfs.known_tree(*k))
         byrel = {r: p for p, r in files}
-        with pool(J, common, trees, zdicts) as ex: again = list(ex.map(scan_file, [(byrel[r], r) for r in defer]))
+        with pool(J, common, trees, zdicts) as ex: again = ([scan_file((byrel[r], r)) for r in defer] if isinstance(ex, InProcess) else   # workers' large results through a file (scan_batch_spilled)
+                     [x for v in ex.map(scan_batch_spilled, [[(byrel[r], r)] for r in defer]) for x in unspill(v)])
         for rel, uniq, pr, extra in again:
             if extra == 'defer': red(f'{rel}: Unity serialized file without type trees, and no bundle has a Shader type tree of the same hash to borrow')
         results = [r for r in results if r[3] != 'defer'] + again

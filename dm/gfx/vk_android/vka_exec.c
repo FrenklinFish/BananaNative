@@ -296,10 +296,24 @@ uint64_t guest_ns(void);
 enum { SEGQ = 128 };   // queries per submission slot
 static VkQueryPool g_sqp; static int g_sq_n, g_sq_base, g_seg = -1;
 static PFN_vkGetQueryPoolResults g_sq_get; static double g_sq_ns;
+// Segment timestamps are read when a submission's effects run (post_run), which for a report carried to a later signal can be after its slot has been reused and its
+// queries reset (a frame has more submissions than NSLOT slots). A slot keeps the results of its last SHN uses (sh_save, at the reuse, once its work is done); a report knows
+// its slot's use (pop.q0)
+enum { SHN = 4 };
+static uint64_t g_sh[NSLOT][SHN][SEGQ]; static _Atomic uint32_t g_sh_use[NSLOT][SHN], g_slot_use[NSLOT]; static int g_slot_nq[NSLOT];
+static void sh_save(unsigned slot);
 static int seg_ts(void) {
     if (g_seg < 0) { const char *e = getenv("DM_NVN_GPU_TS"); g_seg = e && *e ? !strcmp(e, "segment") : DM_GAME_GPU_TS_SEGMENT;
                      VLOG("counter timestamps: %s (profile key gpu_timestamps; DM_NVN_GPU_TS=segment / submission)", g_seg ? "GPU time of their place in the submission" : "one time for the whole submission"); }
     return g_seg;
+}
+static uint64_t sh_get(uint32_t qi, uint32_t use, PFN_vkGetQueryPoolResults get) {   // a report's GPU time: the slot's saved results, else its query as long as the slot has not been reused
+    unsigned slot = qi / SEGQ, idx = qi % SEGQ; uint64_t t = 0;
+    for (int j = 0; j < SHN; j++) if (atomic_load(&g_sh_use[slot][j]) == use) return g_sh[slot][j][idx];
+    if (atomic_load(&g_slot_use[slot]) == use && !get(V.dev, g_sqp, qi, 1, 8, &t, 8, VK_QUERY_RESULT_64_BIT)) {
+        for (int j = 0; j < SHN; j++) if (atomic_load(&g_sh_use[slot][j]) == use) return g_sh[slot][j][idx];   // (reused meanwhile)
+        return t; }
+    return 0;
 }
 static void post_run(void *ops_, int n) {   // the completion thread, in submission order, before the fence reads as done
     pop *ops = ops_;
@@ -307,11 +321,22 @@ static void post_run(void *ops_, int n) {   // the completion thread, in submiss
     uint64_t ticks = nvn_timestamp_from_ns(g);
     uint64_t gq[SEGQ], tmax = 0; int nq = 0;   // segment timestamps: each report's GPU time, the latest of them
     for (int i = 0; i < n && g_sqp; i++) if (ops[i].kind == 2 && ops[i].v) {
-        uint64_t t = 0; if (g_sq_get(V.dev, g_sqp, ops[i].v - 1, 1, 8, &t, 8, VK_QUERY_RESULT_64_BIT) || !t) { ops[i].v = 0; continue; }
+        uint64_t t = sh_get(ops[i].v - 1, (uint32_t)ops[i].q0, g_sq_get);
+        if (!t) { ops[i].v = 0; continue; }
         if (nq < SEGQ) { gq[nq++] = t; if (t > tmax) tmax = t; } else ops[i].v = 0;
     }
     if (atomic_load_explicit(&g_synclog, memory_order_relaxed) > 0) for (int i = 0; i < n; i++) if (ops[i].kind == 2 && ops[i].type == NVN_COUNTER_TYPE_TIMESTAMP) {
         VLOG("sync done: %d reports written at %.2f ms (the submission's GPU work done)", n, ms_now()); break; }
+    // DM_VK_TS_LOG=<submissions>: what the game reads from its timestamp reports: per submission with reports, its completion time (ms on the guest clock, mod 100 s) and each
+    // report's type, address and time relative to the completion (negative: earlier), as written into memory below
+    static _Atomic int tslog = -1; int tsl = atomic_load(&tslog); if (tsl < 0) { tsl = VKA_ENV("DM_VK_TS_LOG", 0); atomic_store(&tslog, tsl); }
+    if (tsl > 0) { char b[700], lb[160]; int k = 0, nt = 0, shown = 0; uint64_t first = 0, last = 0; lb[0] = 0;
+        for (int i = 0, q = 0; i < n; i++) if (ops[i].kind == 2) { uint64_t tk = ticks; double gms = -1; if (ops[i].v && g_sqp && q < nq) { gms = (double)(tmax - gq[q]) * g_sq_ns / 1e6; uint64_t back = (uint64_t)((double)(tmax - gq[q]) * g_sq_ns); tk = nvn_timestamp_from_ns(g > back ? g - back : 0); } q += ops[i].v ? 1 : 0;
+            if (ops[i].type != NVN_COUNTER_TYPE_TIMESTAMP && ops[i].type != NVN_COUNTER_TYPE_TIMESTAMP_TOP) continue;
+            uint64_t ns = nvn_timestamp_to_ns(tk); if (!nt) first = ns; last = ns; nt++;
+            char one[160]; snprintf(one, sizeof one, " [%s %#llx %+.2f%s%s slot %d gpu-%.2f]", ops[i].type == NVN_COUNTER_TYPE_TIMESTAMP_TOP ? "top" : "bot", (unsigned long long)ops[i].addr, ((double)ns - (double)nvn_timestamp_to_ns(ticks)) / 1e6, ops[i].v ? "" : " completion", "", ops[i].v ? (int)((ops[i].v - 1) / SEGQ) : -1, gms);
+            if (shown < 4) { shown++; k += snprintf(b + k, sizeof b - (size_t)k, "%s", one); } snprintf(lb, sizeof lb, "%s", one); }
+        if (nt && atomic_fetch_sub(&tslog, 1) > 0) VLOG("ts log: submission completes at %.2f ms, %d timestamp reports spanning %.2f ms (%s):%s ... last%s", fmod((double)g / 1e6, 100000.0), nt, (double)(last - first) / 1e6, g_sqp ? "segment" : "submission", b, lb); }
     for (int i = 0, q = 0; i < n; i++) {
         if (ops[i].kind == 4) { atomic_store(&g_rc_done, ops[i].addr); continue; }   // DM_VK_RC_LOG: this submission's reports up to here are written
         if (ops[i].kind == 5 || ops[i].kind == 6) { oq_done(&ops[i], ticks); continue; }   // a counted samples-passed report, queries given back (Occlusion queries)
@@ -464,6 +489,13 @@ static void replay_nice(void) {
 // its first part, at or after the game submitted it, and the CPU's writes since belong to the game's later submissions, whose own start takes them. Done again at each
 // continuation it cost Mario Kart World 1.8.0, which parks 6 times a frame (5 of them after a cut), ~0.7 ms each on the Adreno 840 phone: 9 submissions a frame
 // instead of 4, texture prepare 6.8 ms a frame instead of 3.9
+static void sh_save(unsigned slot) {   // the slot's last use is done: its segment timestamps are read before its queries are reset
+    uint32_t use = atomic_load(&g_slot_use[slot]); int nq = g_slot_nq[slot];
+    if (!g_sqp || !use || nq <= 0) return;
+    int j = (int)(use % SHN); atomic_store(&g_sh_use[slot][j], 0);
+    for (int i = 0; i < nq && i < SEGQ; i++) { uint64_t t = 0; if (g_sq_get(V.dev, g_sqp, (uint32_t)(slot * SEGQ + (unsigned)i), 1, 8, &t, 8, VK_QUERY_RESULT_64_BIT)) t = 0; g_sh[slot][j][i] = t; }
+    atomic_store(&g_sh_use[slot][j], use); g_slot_nq[slot] = 0;
+}
 static int g_sub_cont;
 void vka_rp_sub_cont(int on) { g_sub_cont = on != 0; }
 void vka_rp_sub_begin(void) {
@@ -496,6 +528,7 @@ void vka_rp_sub_begin(void) {
         if (g_slot_ts[k]) gpu_slot_done(k);   // its GPU times are there (its timeline fence may come later)
     } else if (g_slot[k].fence) vka_wait_done(g_slot[k].fence, UINT64_MAX);
     g_t_slot += now_ns() - ts0;
+    sh_save(k);   // the slot's segment timestamps, kept for reports whose effects run later (carried to a signal), before this use resets them
     uint64_t done = vka_done();
     for (unsigned i = 0; i < NSLOT; i++) if (g_slot_ts[i] && g_slot[i].fence <= done) gpu_slot_done(i);
     g_cb = g_slot[k].cb;
@@ -506,7 +539,7 @@ void vka_rp_sub_begin(void) {
     if (ts_init()) {
         qf.reset(g_cb, g_qp, k * QPS, QPS); qf.write(g_cb, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, g_qp, k * QPS);
         g_slot_frame[k] = g_frame; g_slot_ts[k] = 1; g_slot_parts[k] = 1; g_part_seen = 0; gpu_tag_begin(g_frame);
-        g_sq_n = 0; g_sq_base = (int)k * SEGQ;
+        g_sq_n = 0; g_sq_base = (int)k * SEGQ; g_slot_nq[k] = 0; atomic_fetch_add(&g_slot_use[k], 1);
         if (seg_ts() && !g_sqp) {
             VkQueryPoolCreateInfo ci = {VK_STRUCTURE_TYPE_QUERY_POOL_CREATE_INFO, .queryType = VK_QUERY_TYPE_TIMESTAMP, .queryCount = NSLOT * SEGQ};
             if (qf.create(V.dev, &ci, NULL, &g_sqp)) { g_sqp = VK_NULL_HANDLE; g_seg = 0; VRED("segment timestamps: no query pool: one time for the whole submission"); }
@@ -622,9 +655,9 @@ enum { NCARRY = 64 };
 static carry_t g_carry[NCARRY]; static int g_ncarry;
 static pop *carry_take(uint64_t fence, uint64_t signal, pop *ops, int *n) {
     if (!signal) {
-        // A counter report's segment timestamp (kind 2, v: its query in the slot's range) is read when the effects run, which can be after the slot is reused (it waits for its
-        // own fence, not the timeline): such a report takes the completion time instead, as one with no segment query does
-        for (int i = 0; i < *n; i++) if (ops[i].kind == 2) ops[i].v = 0;
+        // A counter report's segment timestamp (kind 2, v: its query in the slot's range, q0: the slot's use) is read when the effects run, which can be after the slot is
+        // reused (it waits for its own fence, not the timeline): sh_save keeps the slot's results at its reuse. (Before 2026-11-12 such a report took the completion time, the
+        // same for every report carried to one signal: a game reading the GPU time between two of them read 0 ms, Ocarina of Time's dynamic resolution with the GPU waits on)
         if (g_ncarry < NCARRY) { g_carry[g_ncarry++] = (carry_t){fence, ops, *n}; *n = 0; return NULL; }
         VRED_ONCE("completion effects of more than %d unsignalled commits: dropped (events and counter reports not written)", NCARRY);   // (vka_qsched.h keeps it to QS_DEFER_MAX)
         free(ops); *n = 0; return NULL;
@@ -1041,7 +1074,10 @@ static void copy_t2t(const p_copy_t2t *c) {
 
 // NVN2's DLSS (OP_DLSS, hle_nvn.c "NVN2's DLSS"): the network has no Vulkan counterpart, so the replay writes the output texture itself, so the game's post chain reads a
 // picture (Fire Emblem Fortune's Weave's 3D was black with the evaluation dropped). DM_VK_DLSS (live) picks how: 4 = FSR 3.1 (vka_fsr3.c), 3 = Snapdragon GSR2 3-pass (the default), 2 = FSR 1 with
-// the jitter taken out, both in vka_dlss.c; 1 = a bilinear blit of the input subrectangle to the output size (also what 2 and 3 fall back to); 0 leaves the output unwritten (A/B)
+// the jitter taken out, both in vka_dlss.c; 1 = a bilinear blit of the input subrectangle to the output size (also what 2 and 3 fall back to); 0 leaves the output unwritten (A/B).
+// The colour's and the output's sRGB-ness is the textures' (NVN formats), not their images': the replay stores an sRGB texture as its UNORM twin, and one image may be shared
+// by a texture and its twin. An sRGB input is read through its decoding view and an sRGB output written encoded, as DLSS reads and writes them on the console; a blit, which
+// moves the stored values as they are, is used only where both textures agree
 static void dlss_eval(const p_dlss *o) {
     static uint64_t n;
     int mode = VKA_ENV("DM_VK_DLSS", 3);
@@ -1068,15 +1104,33 @@ static void dlss_eval(const p_dlss *o) {
         if (dy + oh > (int)d->h) oh = (int)d->h - dy;
         if (iw <= 0 || ih <= 0 || ow <= 0 || oh <= 0) return;
     }
+    vka_fmt cf, of;
+    if (!vka_fmt_of(ct->d.format, &cf)) cf = s->f;
+    if (!vka_fmt_of(ot->d.format, &of)) of = d->f;
+    const VkFormat sfmt = cf.vk == s->f.vk ? cf.view : VK_FORMAT_UNDEFINED;   // the texture's view format over its image (a format of its own: the image's view)
+    const int in_srgb = sfmt != VK_FORMAT_UNDEFINED ? cf.srgb : s->f.srgb, enc = of.vk == d->f.vk ? of.srgb : d->f.srgb;
+    {   // once per change: what the game hands DLSS (NGX's feature flags: 1 IsHDR, 2 MVLowRes, 4 MVJittered, 8 DepthInverted, 0x20 DoSharpening, 0x40 AutoExposure)
+        static uint64_t last; uint64_t sig = (uint64_t)ct->d.format << 48 | (uint64_t)ot->d.format << 32 | o->flags;
+        if (sig != last) { last = sig;
+            VLOG("DLSS stand-in: colour NVN format %#x (VkFormat %d, %s), output NVN format %#x (VkFormat %d, %s), flags %#x (%s, auto exposure %s), pre-exposure %.3f",
+                 ct->d.format, s->f.vk, in_srgb ? "sRGB: read decoded" : "linear", ot->d.format, d->f.vk, enc ? "sRGB: written encoded" : "linear", o->flags,
+                 o->flags & 1 ? "HDR" : "LDR", o->flags & 0x40 ? "on" : "off", o->pre_exposure); }
+    }
     if (mode == 4) {   // FSR 3.1 (vka_fsr3.c): its inputs as a copy record's rectangles; FSR 1 / bilinear when it cannot run
         p_dlss_t2t f = {0};
         f.c.src = ct; f.c.dst = ot; f.c.sr = (NVNcopyRegion){sx, sy, 0, iw, ih, 1}; f.c.dr = (NVNcopyRegion){dx, dy, 0, ow, oh, 1};
         f.depth = o->tex[DLSS_DEPTH]; f.motion = o->tex[DLSS_MOTION]; memcpy(f.jitter, o->jitter, sizeof f.jitter); memcpy(f.mv, o->mv, sizeof f.mv); f.reset = o->reset;
         vka_img *z = f.depth ? vka_tex_get(f.depth, g_cb) : NULL, *m = f.motion ? vka_tex_get(f.motion, g_cb) : NULL;
-        if (!o->base[DLSS_DEPTH][0] && !o->base[DLSS_DEPTH][1] && !o->base[DLSS_MOTION][0] && !o->base[DLSS_MOTION][1] && vka_dlss_fsr3(g_cb, s, d, z, m, &f)) { vka_img_written(d); g_stat_ops++; return; }
+        if (!o->base[DLSS_DEPTH][0] && !o->base[DLSS_DEPTH][1] && !o->base[DLSS_MOTION][0] && !o->base[DLSS_MOTION][1] && vka_dlss_fsr3(g_cb, s, sfmt, d, enc, z, m, &f)) { vka_img_written(d); g_stat_ops++; return; }
         mode = 2;
     }
-    if (mode >= 2 && vka_dlss_run(g_cb, o, mode, s, sl, sx, sy, iw, ih, d, dl, dx, dy, ow, oh)) { vka_img_written(d); g_stat_ops++; return; }
+    if (mode >= 2 && vka_dlss_run(g_cb, o, mode, s, sl, sfmt, sx, sy, iw, ih, d, dl, enc, dx, dy, ow, oh)) { vka_img_written(d); g_stat_ops++; return; }
+    if (in_srgb != enc) {   // the bilinear scale through the decoding view, encoded for an sRGB output: a blit would carry one texture's encoding into the other
+        VkImageView v = (s->usage & VK_IMAGE_USAGE_SAMPLED_BIT) && s->samples == 1 && !s->f.kind ? vka_view(s, sfmt ? sfmt : s->f.view, VK_IMAGE_VIEW_TYPE_2D, VK_IMAGE_ASPECT_COLOR_BIT, sl, 1, 0, 1, NULL) : VK_NULL_HANDLE;
+        uint32_t tw = s->w >> sl ? s->w >> sl : 1, th = s->h >> sl ? s->h >> sl : 1;
+        if (vka_dlss_scale(g_cb, v, sx, sy, iw, ih, tw, th, d, dl, dx, dy, ow, oh, enc)) { vka_img_written(d); g_stat_ops++; return; }
+        VRED_ONCE("DLSS stand-in: input and output differ in sRGB (NVN formats %#x → %#x) and the encoding copy cannot run: a blit, whose picture is off in brightness", ct->d.format, ot->d.format);
+    }
     if ((s->f.kind && s->f.kind < 3) || s->f.kind != d->f.kind || s->f.bw > 1 || s->samples > 1) {
         VRED_ONCE("DLSS stand-in: formats %#x → %#x cannot be blitted (integer, compressed or multisampled): the output stays unwritten", ct->d.format, ot->d.format); return; }
     VkImageBlit r = {{VK_IMAGE_ASPECT_COLOR_BIT, sl, 0, 1}, {{sx, sy, 0}, {sx + iw, sy + ih, 1}}, {VK_IMAGE_ASPECT_COLOR_BIT, dl, 0, 1}, {{dx, dy, 0}, {dx + ow, dy + oh, 1}}};
@@ -1344,7 +1398,8 @@ static int exec(const uint8_t *p, int depth) {   // 1: parked at a wait (g_pk ho
                 vka_rp_note_ts();
             }
             int counted = t == NVN_COUNTER_TYPE_SAMPLES_PASSED && oq_report(ad, (uint32_t)t);   // (Occlusion queries: its record is written by oq_done)
-            if (!counted) post((pop){2, 0, q, (uint32_t)t, ad});
+            if (q) g_slot_nq[g_sq_base / SEGQ] = g_sq_n;
+            if (!counted) post((pop){2, 0, q, (uint32_t)t, ad, q ? atomic_load(&g_slot_use[g_sq_base / SEGQ]) : 0});
             if (DM_GAME_RENDER_COND) rc_note(ad, t == NVN_COUNTER_TYPE_TIMESTAMP || t == NVN_COUNTER_TYPE_TIMESTAMP_TOP ? RCK_TS : counted ? RCK_OQ : RCK_CONST);
             if (atomic_load_explicit(&g_synclog, memory_order_relaxed) > 0) VLOG("sync report: frame %llu type %llu at draw %llu of the submission, part %d, recording at %.2f ms", (unsigned long long)g_frame,
                                                                            (unsigned long long)t, (unsigned long long)(g_stat_draws - g_sub_draws0), g_nx + 1, ms_now());

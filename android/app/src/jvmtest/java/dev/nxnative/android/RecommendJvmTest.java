@@ -133,7 +133,17 @@ public final class RecommendJvmTest {
         List<Recommend.Row> oot = Recommend.parse(args[2]);
         check(Recommend.values(oot, gf).equals(Map.of("res_preset", "performance", "vegetation", "off")), "Ocarina of Time's values from GLES's facts: " + Recommend.values(oot, gf));
         check("system".equals(Recommend.driver(oot, gf)), "Ocarina of Time's driver from GLES's facts: " + Recommend.driver(oot, gf));
-        check(Recommend.values(oot, Readiness.facts("")).isEmpty() && Recommend.driver(oot, Readiness.facts("")) == null, "no facts at all: nothing (the card stays away)");
+        Map<String, String> thorOld = new LinkedHashMap<>(gf);
+        thorOld.put("driver.version", "0x802a4035");
+        check(Recommend.driver(oot, thorOld) == null, "Ocarina of Time: Qualcomm 0x802a4035 (Adreno 740): no system driver");
+        thorOld.put("driver.version", "0x80320040");
+        check("system".equals(Recommend.driver(oot, thorOld)), "Ocarina of Time: Qualcomm 0x80320040: system driver");
+        // top bit set: the compare is unsigned 32-bit, never a signed int
+        for (String[] c : new String[][] {{"0x8031ffff", "n"}, {"0x80320000", "y"}, {"0xffffffff", "y"}, {"0x7fffffff", "n"}, {"0x0", "n"}}) {
+            thorOld.put("driver.version", c[0]);
+            check("y".equals(c[1]) == "system".equals(Recommend.driver(oot, thorOld)), "Ocarina of Time gate at " + c[0] + ": " + Recommend.driver(oot, thorOld));
+        }
+        check(Recommend.values(oot, Readiness.facts("")).equals(Map.of("res_preset", "performance", "vegetation", "off")) && Recommend.driver(oot, Readiness.facts("")) == null, "no facts at all: the any row (Performance, Full vegetation off) and no driver");
         check(Recommend.glFacts("Qualcomm", "OpenGL ES 3.2 Mesa 25.1.0").equals("gpu.vendor=0x5143\ndriver.id=13\n"), "Mesa on an Adreno");
         check(Recommend.glFacts("ARM", "OpenGL ES 3.2 v1.r44p0-01eac0").equals("gpu.vendor=0x13b5\ndriver.id=9\n"), "Arm's own driver");
         check(Recommend.glFacts("Google", "x").isEmpty() && Recommend.glFacts(null, null).isEmpty() && Recommend.keep("").isEmpty(), "an unknown vendor: nothing");

@@ -343,12 +343,11 @@ class Profiles(unittest.TestCase):
     def test_oot(self):
         g = game.load('0400486024DEC000')
         ps = {p[0]: p for p in scene_res.res_presets(g)}
-        self.assertEqual(list(ps), ['quality', 'balanced', 'performance', 'max-performance'])
+        self.assertEqual(list(ps), ['quality', 'medium', 'performance'])
         self.assertEqual((ps['quality'][1], ps['quality'][4]), ('1920x1080', None), 'the default is today\'s start: 1080p and the game\'s own palette')
-        self.assertEqual((ps['balanced'][1], ps['balanced'][2]), ('1920x1080', 'floor')); self.assertAlmostEqual(ps['balanced'][4], 720 / 1080)
+        self.assertEqual((ps['medium'][1], ps['medium'][2], ps['medium'][5]), ('1920x1080', 'fixed', 'Balanced')); self.assertAlmostEqual(ps['medium'][4], 720 / 1080)
         self.assertEqual((ps['performance'][1], ps['performance'][2], ps['performance'][4]), ('1280x720', 'fixed', 0.75))
-        self.assertEqual((ps['max-performance'][1], ps['max-performance'][2], ps['max-performance'][4]), ('1280x720', 'fixed', 0.5))
-        self.assertEqual([p[0] for p in scene_res.presets(g)], ['720p', '720p-min', '540p', '480p', '360p', 'balanced', 'performance', 'max-performance'])
+        self.assertEqual([p[0] for p in scene_res.presets(g)], ['720p', '720p-min', '540p', '480p', '360p', 'medium', 'performance'])
 
 
 if __name__ == '__main__':

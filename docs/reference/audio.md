@@ -319,6 +319,14 @@ For a replaced DSP renderer the size query keeps the service's work-buffer contr
 - **Fix:** `hle_codec.c` keeps the manager in host state (its pointer in that first word) and decodes with the `sdk`'s software `OpusDecoder`: Enqueue queues the packet and takes an I/O buffer, Execute decodes every waiting packet on the caller's thread and signals the event, Dequeue hands back a frame and its buffer. So a request is never "executing". A packet the decoder refuses completes as 20 ms of silence, with a red line. `ResetHardwareOpusDecoder` and `FinalizeHardwareOpusDecoder` serve both interfaces.
 - **Found on:** Xenoblade Chronicles 2, Nintendo Switch 2 Edition (`0400E95004038001`) (SDK 21.4.4: a mono manager of 128 decoders and 255 I/O buffers, a stereo one of 72 and 160, 48 kHz, 20 ms frames); [Star Fox](../../dm/games/0400E88025B1A000/README.md) (the same figures).
 
+### The older interface's Reset taken for a manager's decoder
+
+- **Symptom:** a game whose sound streams are Opus is nearly silent (cutscene voices and music missing; button sounds remain), with a healthy output: `audren: rendered 12000 frames, 205 of them not silent` where the release before had about 10,000. No `[RED]` codec line.
+- **Cause:** `ResetHardwareOpusDecoder` and `FinalizeHardwareOpusDecoder` serve both C interfaces, and the manager form (above) looked its decoder up in `objmap` first, taking any entry whose third word was not zero for one of its own. A decoder of the older interface has the software `OpusDecoderType` there, which the `sdk`'s `InitializeOpusDecoder` fills with the work buffer at +0 and +8 and its size at +0x10 (Ocarina of Time's `sdk+0x327750`). Read as a manager's decoder it had a "manager" (the work buffer), so Reset locked a mutex inside the game's libopus state and called `ResetOpusDecoder` on the work buffer: the decoder's state was overwritten and later frames decoded to silence. Finalize freed host memory at the work buffer's address.
+- **Fix:** `hle_codec.c` lists a manager's decoders in a registry of their own, by the game's object; Reset and Finalize take the manager path only for a decoder found there. `objmap` holds only the older interface's states.
+- **Found on:** [The Legend of Zelda: Ocarina of Time](../../dm/games/0400486024DEC000/README.md) (imports only the older interface; v0.3.12 and v0.3.13, every driver).
+- **Check:** `make -C dm/host/tests GAME=<id> run` (`t_opus_hw`: Reset and Finalize of the older interface reach its software state and leave the work buffer alone); on a run log, the `not silent` count of the `audren: rendered` lines.
+
 ## Timing and catch-up
 
 ### At least one rendered frame between two updates

@@ -131,10 +131,16 @@ def optionsOf = { String game ->
         [env, label, desc, mode, implies, needs].collect { it.replaceAll(/[\t\n\\"]/, ' ').replaceAll(/[;|]/, ',').trim() }.join('|')
     }.join(';')
 }
-// The 3D scene overlays for Advanced (game.tsv scene_scale rows, only with a scene_scale_palette row: dm/tools/scene_res.py): "<name>|<label>|<scale>|<mode>", ';' between them (Profile.scenes, SceneRes)
-def sceneOf = { String game -> tsvRows(game, 'scene_scale_palette').isEmpty() ? '' : tsvRows(game, 'scene_scale').findAll { it.size() >= 4 }.collect { c ->
-    def name = c[1].trim(); def label = c.size() > 4 ? c.drop(4).join(' ').trim() : name
-    [name, label ?: name, c[2].trim(), c[3].trim()].collect { it.replaceAll(/[\t\n\\"]/, ' ').replaceAll(/[;|]/, ',').trim() }.join('|') }.join(';') }
+// The 3D scene choices for Advanced (or 3D scene): the overlays (game.tsv scene_scale rows, only with a scene_scale_palette row: dm/tools/scene_res.py), "<name>|<label>|<scale>|<mode>",
+// then the game arguments (scene_arg rows: dm/games/game.py scene_args checks them), "<name>|<label>|<scale or ->|arg|<arguments with {s} replaced>"; ';' between them (Profile.scenes, SceneRes)
+def sceneOf = { String game ->
+    def clean = { String s -> s.replaceAll(/[\t\n\\"]/, ' ').replaceAll(/[;|]/, ',').trim() }
+    def label = { c, String name -> (c.size() > 4 ? c.drop(4).join(' ').trim() : name) ?: name }
+    def overlays = tsvRows(game, 'scene_scale_palette').isEmpty() ? [] : tsvRows(game, 'scene_scale').findAll { it.size() >= 4 }.collect { c ->
+        [c[1].trim(), label(c, c[1].trim()), c[2].trim(), c[3].trim()].collect(clean).join('|') }
+    def args = tsvRows(game, 'scene_arg').findAll { it.size() >= 5 }.collect { c ->
+        [c[1].trim(), label(c, c[1].trim()), c[2].trim(), 'arg', c[3].trim().split(/\s+/).collect { it.replace('{s}', c[2].trim()) }.join(' ')].collect(clean).join('|') }
+    (overlays + args).join(';') }
 // The Resolution presets (game.tsv res_preset rows, the first the default; a floor:H / fixed:H scene needs a scene_scale_palette row and the window's scene_output row, else the
 // row is left out; dm/tools/scene_res.py checks the rows): "<id>|<label>|<window>|<default, floor or fixed>|<height>|<output width>|<output height>|<measured or open>", ';' between them (Profile.presets, ResPresets)
 def presetsOf = { String game ->
@@ -147,6 +153,11 @@ def presetsOf = { String game ->
         if (m == null || (m[0] != 'default' && (!pal || o == null))) return null
         [id, label ?: id, win, m[0], m[1], o ? o[0][0] : '0', o ? o[0][1] : '0', o ? o[1] : 'open'].collect { it.replaceAll(/[\t\n\\"]/, ' ').replaceAll(/[;|]/, ',').trim() }.join('|')
     }.findAll { it != null }.join(';') }
+// The Resolution choices that earlier profiles had (game.tsv res_preset_from rows, "<old id> <id>"): "<old id>=<id>", ';' between them (Profile.presetFrom, ResPresets.mapStored).
+// A row naming an id the profile does not offer, or an old id that is still a preset, is left out (dm/tools/scene_res.py res_presets refuses it)
+def presetFromOf = { String game ->
+    def ids = presetsOf(game).split(';').findAll { it }.collect { it.split('\\|')[0] }
+    tsvRows(game, 'res_preset_from').findAll { it.size() >= 3 && it[1].trim() ==~ /[A-Za-z0-9_-]+/ && it[2].trim() in ids && !(it[1].trim() in ids) }.collect { it[1].trim() + '=' + it[2].trim() }.join(';') }
 // The pixel shaders the game's Speedhack setting drops (game.tsv skip_layers: shader keys, comma separated), or empty. The launcher then offers the toggle (Prefs.skipLayersGame)
 def skipLayersOf = { String game -> tsvRows(game, 'skip_layers').with { rs -> rs.isEmpty() || rs[0].size() < 2 ? '' : rs[0][1].trim().replaceAll(/[^0-9a-fA-F,]/, '') } }
 // The recommended settings per phone (game.tsv recommend rows: "<match> <setting>=<value> …", in order, a later matching row winning; Recommend.java, dm/games/README.md
@@ -193,7 +204,7 @@ def recommendOf = { String game ->
         }
         match + '|' + set.join(' ')
     }.join(';') }
-def nxProfiles = nxGames.collect { g -> [g, nameOf(g).replaceAll(/[\t\n\\"]/, ' '), shaderTotalOf(g), shaderInputsOf(g), buildsOf(g), reqsOf(g), statusOf(g), deltaOf(g), stampOf(g), resolutionOf(g), romfsChecksOf(g), gpuTsOf(g), windowOf(g), decoupleOf(g), drsOf(g), fpsLimitOf(g), dlssOf(g), presentOnlyOf(g), stepsOf(g), tsvRows(g, 'mesh_vegetation_cut').isEmpty() ? '' : '1', optionsOf(g), sceneOf(g), presetsOf(g), skipLayersOf(g), recommendOf(g), variantsOf(g)].join('\\t') }.join('\\n')
+def nxProfiles = nxGames.collect { g -> [g, nameOf(g).replaceAll(/[\t\n\\"]/, ' '), shaderTotalOf(g), shaderInputsOf(g), buildsOf(g), reqsOf(g), statusOf(g), deltaOf(g), stampOf(g), resolutionOf(g), romfsChecksOf(g), gpuTsOf(g), windowOf(g), decoupleOf(g), drsOf(g), fpsLimitOf(g), dlssOf(g), presentOnlyOf(g), stepsOf(g), tsvRows(g, 'mesh_vegetation_cut').isEmpty() ? '' : '1', optionsOf(g), sceneOf(g), presetsOf(g), skipLayersOf(g), recommendOf(g), variantsOf(g), presetFromOf(g)].join('\\t') }.join('\\n')
 def lockOf = { String key -> def f = new File(repo, 'dm/gfx/tools/dmsh_chain.lock'); f.isFile() ? (f.readLines().find { it.startsWith(key + '\t') }?.split('\t')?.getAt(1) ?: 'unknown') : 'unknown' }
 
 android {

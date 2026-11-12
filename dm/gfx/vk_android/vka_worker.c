@@ -76,7 +76,7 @@ uint64_t vka_rp_sub_commit_sig(uint64_t reserved, uint64_t signal);   // vka_exe
 int vka_rp_exec_pk(const uint8_t *handle, uint64_t fence, qs_cont *out);
 int vka_rp_resume(const qs_cont *c, uint64_t fence, qs_cont *out);
 static qs g_qs;
-static int g_qs_on = -1;   // DM_VK_EVENT_WAIT (default 1; read when the worker starts)
+static int g_qs_on = -1;   // DM_VK_EVENT_WAIT (default: the profile's event_wait, on unless it says off; read when the worker starts)
 static _Thread_local int t_worker;
 static _Atomic uint64_t g_park_min = UINT64_MAX, g_cpu_want; static _Atomic int g_cpu_nwait; static uint64_t g_stuck_t;   // what a park holds back; the highest fence CPU threads block on, how many; since when the worker is stuck
 static int g_kick;   // (under g_mu) an event word written on the CPU
@@ -212,12 +212,12 @@ static int qs_gate_cb(void *c, qs_sub *s, volatile uint32_t *w, uint32_t mode, u
 }
 static int qs_on(void) {
     if (g_qs_on < 0) {
-        const char *e = getenv("DM_VK_EVENT_WAIT"); g_qs_on = !e || atoi(e);
+        const char *e = getenv("DM_VK_EVENT_WAIT"); g_qs_on = e ? atoi(e) != 0 : DM_GAME_EVENT_WAIT; int by_prof = !e;
         e = getenv("DM_VK_EVENT_PARK_MS"); double ms = e ? atof(e) : 200; if (!(ms >= 0)) ms = 200;
         g_qs.run = qs_run_cb; g_qs.done = qs_done_cb; g_qs.now = qs_now_cb; g_qs.timeout = qs_timeout_cb; g_qs.park_ns = (uint64_t)(ms * 1e6);
         e = getenv("DM_VK_EVENT_LOG"); g_evlog = e ? atoi(e) : 0; if (g_evlog > 0 || vka_qtrace_on()) g_qs.note = qs_note_cb;
         e = getenv("DM_VK_EVENT_GATE"); g_gate_on = !e || atoi(e); if (g_gate_on) g_qs.gate = qs_gate_cb;
-        VLOG("GPU waits across NVN queues: %s%s", g_qs_on ? "a wait parks its queue until its producer is replayed (DM_VK_EVENT_WAIT=0: every wait passes)" : "every wait passes (DM_VK_EVENT_WAIT=0)",
+        VLOG("GPU waits across NVN queues: %s%s", g_qs_on ? "a wait parks its queue until its producer is replayed (DM_VK_EVENT_WAIT=0: every wait passes)" : by_prof ? "every wait passes (profile event_wait off; DM_VK_EVENT_WAIT=1 honours them)" : "every wait passes (DM_VK_EVENT_WAIT=0)",
              !g_qs_on ? "" : g_gate_on ? "; a wait for an event the CPU sets is replayed at once and the GPU waits (DM_VK_EVENT_GATE=0: parked)" : "; waits for the CPU park too (DM_VK_EVENT_GATE=0)");
     }
     return g_qs_on;

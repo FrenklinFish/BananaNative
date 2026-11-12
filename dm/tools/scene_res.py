@@ -230,6 +230,11 @@ def res_presets(g):
             if not 0.05 <= scale <= 1.0: raise Error(f'{g.id}: res_preset {pid}: {h} lines at a {outs[win][1]}-line output is scale {scale:.4g}, outside 0.05..1')
         out.append((pid, win, mode, h, scale, ' '.join(v[3:]) or pid))
     if len({p[0] for p in out}) != len(out): raise Error(f'{g.id}: res_preset ids repeat')
+    ids = {p[0] for p in out}
+    for v in g.values('res_preset_from'):   # the choices that earlier profiles had: a stored one takes the preset it names (launcher: ResPresets.mapStored)
+        if len(v) < 2: raise Error(f'{g.id}: res_preset_from takes <old id> <res_preset id>: {v}')
+        if v[1] not in ids: raise Error(f'{g.id}: res_preset_from {v[0]}: {v[1]} is not a res_preset id')
+        if v[0] in ids: raise Error(f'{g.id}: res_preset_from {v[0]}: still a res_preset id')
     return out
 
 

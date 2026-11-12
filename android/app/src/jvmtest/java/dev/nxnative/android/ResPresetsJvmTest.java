@@ -65,6 +65,14 @@ public final class ResPresetsJvmTest {
         check(ResPresets.current(ps, p, scenes, "", true, "1920x1080", "old").equals(ResPresets.ADVANCED), "a scene row without a scale matches nothing");
         check(ResPresets.current(ps, p, scenes, "", true, "original", "").equals(ResPresets.ADVANCED), "Original: no preset");
 
+        // A stored choice the profile no longer offers (res_preset_from): mapped to the preset after it; the rest as stored
+        String from = "older=performance;oldest=quality;gone=nothere";
+        check(ResPresets.mapStored(ps, from, "older").equals("performance") && ResPresets.mapStored(ps, from, "oldest").equals("quality"), "an earlier id takes its successor");
+        check(ResPresets.mapStored(ps, from, "quality").equals("quality") && ResPresets.mapStored(ps, from, ResPresets.ADVANCED).equals(ResPresets.ADVANCED)
+                && ResPresets.mapStored(ps, from, "").isEmpty() && ResPresets.mapStored(ps, from, "gone").equals("gone") && ResPresets.mapStored(ps, from, "other").equals("other") && ResPresets.mapStored(ps, from, "balanced").equals("balanced")
+                && ResPresets.mapStored(ps, null, "older").equals("older"), "a preset, Advanced, nothing, a row to nowhere, no rows: as stored");
+        check(ResPresets.itemText(pf, false, true).equals("Performance (recommended)\nwindow 1280x720 · 3D about 960x540") && ResPresets.itemText(q, true, false).startsWith("Quality (the game's own)\n"), "the list text");
+
         // What a start takes
         check(ResPresets.window(ps, "performance", "1920x1080").equals("1280x720") && ResPresets.window(ps, ResPresets.ADVANCED, "2560x1440").equals("2560x1440"), "window");
         check(ResPresets.scene(ps, "performance", "540p").equals("performance") && ResPresets.scene(ps, "quality", "540p").isEmpty(), "a preset's scene: its id, or the palette");

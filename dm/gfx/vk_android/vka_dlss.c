@@ -6,6 +6,8 @@
 //   3 = Snapdragon GSR2 3-pass (the default; BSD-3-Clause shaders in gsr2/, LICENSE there): convert, activate (depth clip, luma history), upscale (history
 //       accumulation: the temporal anti-aliasing DLSS did), then RCAS and the tonemap undone. DM_VK_GSR2_CLARITY 0..4 (default 2) picks the row c0..c4 of G_TUNES (c2 is m2),
 //       from more history (steadier) to less ghosting; DM_VK_GSR2_TUNE (0..7) forces a row; DM_VK_GSR2_VREJ / _VLO / _VK / _SFCAP / _MVNEAR / _BOXMOTW / _BSMOV override fields.
+// The colour is read through the input texture's own view format (sfmt; vka_exec.c dlss_eval takes it from the texture, as an image may be shared by a texture and
+// its sRGB twin), so an sRGB input arrives linear; RCAS sRGB-encodes for an sRGB output (enc), which the replay stores as its UNORM twin.
 // Both end in a 1:1 blit of an RGBA16F work image into the output texture. DM_VK_DLSS_SHARP (0..100, default 15) is RCAS's strength; DM_VK_DLSS_JX / _JY and
 // DM_VK_GSR2_MV are the jitter's and the motion vectors' signs. Every switch is read at every evaluation; DM_VK_GPUPROF lists the passes.
 // 0 = not done (no push descriptors, a pipeline or work image failed, no depth or motion for GSR2, the output format cannot be blitted): the caller's bilinear blit
@@ -17,7 +19,7 @@
 #include <stdlib.h>
 #include <string.h>
 
-enum { P_PREP, P_EASU, P_RCAS, P_GCONV, P_GACT, P_GUP, NPIPE };
+enum { P_PREP, P_EASU, P_RCAS, P_GCONV, P_GACT, P_GUP, P_COPY, NPIPE };
 typedef struct { VkImage img; VkDeviceMemory mem; VkImageView view; uint32_t w, h; } wimg;
 // GSR2's tunes: motion -> current weight, motion -> box shrink, history weight scale, 3-pass box tolerance, the motion ramp (lo, hi; hi <= lo = off), history
 // weight scale on the ramp (-1 = hscale), anti-flicker fade and box shrink on the ramp, Catmull-Rom history (1 everywhere, 2 along the ramp), the cap of the
@@ -58,8 +60,8 @@ static int dl_ready(void) {
     if (!r) r = vk.vkCreateSampler(V.dev, &si, NULL, &D.ns);
     si.magFilter = si.minFilter = VK_FILTER_LINEAR;
     if (!r) r = vk.vkCreateSampler(V.dev, &si, NULL, &D.ls);
-    const uint32_t *code[NPIPE] = {vka_dlss_prep, vka_dlss_easu, vka_dlss_rcas, vka_gsr2_convert, vka_gsr2_activate, vka_gsr2_upscale};
-    size_t size[NPIPE] = {sizeof vka_dlss_prep, sizeof vka_dlss_easu, sizeof vka_dlss_rcas, sizeof vka_gsr2_convert, sizeof vka_gsr2_activate, sizeof vka_gsr2_upscale};
+    const uint32_t *code[NPIPE] = {vka_dlss_prep, vka_dlss_easu, vka_dlss_rcas, vka_gsr2_convert, vka_gsr2_activate, vka_gsr2_upscale, vka_dlss_copy};
+    size_t size[NPIPE] = {sizeof vka_dlss_prep, sizeof vka_dlss_easu, sizeof vka_dlss_rcas, sizeof vka_gsr2_convert, sizeof vka_gsr2_activate, sizeof vka_gsr2_upscale, sizeof vka_dlss_copy};
     for (int k = 0; k < NPIPE && !r; k++) {
         VkShaderModuleCreateInfo mi = {VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO, .codeSize = size[k], .pCode = code[k]}; VkShaderModule m = VK_NULL_HANDLE;
         r = vk.vkCreateShaderModule(V.dev, &mi, NULL, &m);
@@ -117,20 +119,40 @@ static void dpass(VkCommandBuffer cb, int pipe, const VkImageView in[4], const V
     vka_barrier(cb);
 }
 static uint32_t fbits(float f) { uint32_t u; memcpy(&u, &f, 4); return u; }
-static VkImageView src_view(vka_img *im, uint32_t lv, VkImageAspectFlags asp) {
+// A sampled view of im in fmt (the texture's view format: an sRGB texture's view decodes, see vka_dlss_run), else in the image's own view format
+static VkImageView src_view(vka_img *im, uint32_t lv, VkImageAspectFlags asp, VkFormat fmt) {
     if (im->samples > 1 || !(im->usage & VK_IMAGE_USAGE_SAMPLED_BIT)) return VK_NULL_HANDLE;
-    return vka_view(im, im->f.view ? im->f.view : im->f.vk, VK_IMAGE_VIEW_TYPE_2D, asp, lv, 1, 0, 1, NULL);
+    return vka_view(im, fmt ? fmt : im->f.view ? im->f.view : im->f.vk, VK_IMAGE_VIEW_TYPE_2D, asp, lv, 1, 0, 1, NULL);
 }
-
-int vka_dlss_run(VkCommandBuffer cb, const p_dlss *o, int mode, vka_img *s, uint32_t sl, int sx, int sy, int iw, int ih, vka_img *d, uint32_t dl, int dx, int dy, int ow, int oh) {
-    if (mode < 2 || mode > 3 || !dl_ready()) return 0;
-    if (d->f.kind) { VRED_ONCE("DLSS stand-in: an integer or depth output (VkFormat %d): the bilinear path instead", d->f.vk); return 0; }
+static int blit_dst_ok(vka_img *d) {
     if (D.blit_fmt != d->f.vk) {
         VkFormatProperties fp; vk.vkGetPhysicalDeviceFormatProperties(V.pd, d->f.vk, &fp); D.blit_fmt = d->f.vk; D.blit_ok = (fp.optimalTilingFeatures & VK_FORMAT_FEATURE_BLIT_DST_BIT) != 0;
         if (!D.blit_ok) VRED("DLSS stand-in: the output's VkFormat %d is no blit destination: the bilinear blit instead", d->f.vk);
     }
-    if (!D.blit_ok) return 0;
-    VkImageView cv = src_view(s, sl, VK_IMAGE_ASPECT_COLOR_BIT);
+    return D.blit_ok;
+}
+
+// The scaling copy (fsr/dlss_copy.comp): the rectangle sx, sy, iw x ih of the colour view in (an image of tw x th) scaled bilinearly to ow x oh, sRGB-encoded when enc,
+// through the RGBA16F work image r into d's rectangle dx, dy (level dl). For an input and an output texture that differ in sRGB, where a blit would move the encoded
+// values as they are (vka_exec.c dlss_eval), and for FSR 3.1's linear result into an sRGB output (vka_fsr3.c). 0 = not done
+int vka_dlss_scale(VkCommandBuffer cb, VkImageView in, int sx, int sy, int iw, int ih, uint32_t tw, uint32_t th, vka_img *d, uint32_t dl, int dx, int dy, int ow, int oh, int enc) {
+    if (!in || !dl_ready() || d->f.kind || !blit_dst_ok(d) || !wimg_get(cb, &D.r, ow, oh)) return 0;
+    vka_barrier(cb);
+    struct { float base[2], scale[2], rcp[2]; int32_t size[2], enc; int32_t pad[23]; } pc = {{(float)sx, (float)sy}, {(float)iw / ow, (float)ih / oh}, {1.0f / tw, 1.0f / th}, {ow, oh}, enc, {0}};
+    _Static_assert(sizeof pc == 128, "push constants");
+    { VkImageView v[4] = {in}; VkSampler sm[4] = {D.ls}; dpass(cb, P_COPY, v, sm, D.r.view, VK_NULL_HANDLE, &pc, ow, oh); }
+    VkImageBlit bl = {{VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1}, {{0, 0, 0}, {ow, oh, 1}}, {VK_IMAGE_ASPECT_COLOR_BIT, dl, 0, 1}, {{dx, dy, 0}, {dx + ow, dy + oh, 1}}};
+    vk.vkCmdBlitImage(cb, D.r.img, VK_IMAGE_LAYOUT_GENERAL, d->img, VK_IMAGE_LAYOUT_GENERAL, 1, &bl, VK_FILTER_NEAREST);
+    vka_barrier(cb);
+    return 1;
+}
+int vka_dlss_ready(void) { return dl_ready(); }
+
+int vka_dlss_run(VkCommandBuffer cb, const p_dlss *o, int mode, vka_img *s, uint32_t sl, VkFormat sfmt, int sx, int sy, int iw, int ih, vka_img *d, uint32_t dl, int enc, int dx, int dy, int ow, int oh) {
+    if (mode < 2 || mode > 3 || !dl_ready()) return 0;
+    if (d->f.kind) { VRED_ONCE("DLSS stand-in: an integer or depth output (VkFormat %d): the bilinear path instead", d->f.vk); return 0; }
+    if (!blit_dst_ok(d)) return 0;
+    VkImageView cv = src_view(s, sl, VK_IMAGE_ASPECT_COLOR_BIT, sfmt);
     if (!cv) { VRED_ONCE("DLSS stand-in: no sampled view of the input colour (VkFormat %d): the bilinear blit instead", s->f.vk); return 0; }
     float sharp = VKA_ENVF("DM_VK_DLSS_SHARP", 15); sharp = sharp < 0 ? 0 : sharp > 100 ? 100 : sharp; sharp /= 100;
     float jsx = VKA_ENVF("DM_VK_DLSS_JX", 1), jsy = VKA_ENVF("DM_VK_DLSS_JY", 1);
@@ -140,8 +162,8 @@ int vka_dlss_run(VkCommandBuffer cb, const p_dlss *o, int mode, vka_img *s, uint
         const tex_t *dt = o->tex[DLSS_DEPTH], *mt = o->tex[DLSS_MOTION];
         vka_img *di = dt ? vka_tex_get(dt, cb) : NULL, *mi = mt ? vka_tex_get(mt, cb) : NULL;
         uint32_t dlv = 0, mlv = 0;
-        VkImageView dv = di && (di->aspect & VK_IMAGE_ASPECT_DEPTH_BIT) && vka_img_lv(di, &dlv) ? src_view(di, dlv, VK_IMAGE_ASPECT_DEPTH_BIT) : VK_NULL_HANDLE;
-        VkImageView mv = mi && (mi->aspect & VK_IMAGE_ASPECT_COLOR_BIT) && vka_img_lv(mi, &mlv) ? src_view(mi, mlv, VK_IMAGE_ASPECT_COLOR_BIT) : VK_NULL_HANDLE;
+        VkImageView dv = di && (di->aspect & VK_IMAGE_ASPECT_DEPTH_BIT) && vka_img_lv(di, &dlv) ? src_view(di, dlv, VK_IMAGE_ASPECT_DEPTH_BIT, 0) : VK_NULL_HANDLE;
+        VkImageView mv = mi && (mi->aspect & VK_IMAGE_ASPECT_COLOR_BIT) && vka_img_lv(mi, &mlv) ? src_view(mi, mlv, VK_IMAGE_ASPECT_COLOR_BIT, 0) : VK_NULL_HANDLE;
         if (!dv || !mv) { VRED_ONCE("DLSS stand-in: GSR2 without a sampled depth (%s) or motion (%s) image: FSR 1 instead", dv ? "ok" : "none", mv ? "ok" : "none"); mode = 2; }
         else {
             if (o->base[DLSS_DEPTH][0] || o->base[DLSS_DEPTH][1] || o->base[DLSS_MOTION][0] || o->base[DLSS_MOTION][1]) VRED_ONCE("DLSS stand-in: depth / motion rectangles away from the origin: read from the origin");
@@ -205,8 +227,8 @@ int vka_dlss_run(VkCommandBuffer cb, const p_dlss *o, int mode, vka_img *s, uint
         { VkImageView in[4] = {D.t.view}; VkSampler sm[4] = {D.ls}; dpass(cb, P_EASU, in, sm, D.e.view, VK_NULL_HANDLE, pe, ow, oh); }
         how = "FSR 1 EASU + RCAS";
     }
-    {   // RCAS on the scene colour (tonemapped), the tonemap undone
-        struct { uint32_t con0[4]; int32_t size[2], itm; int32_t pad[25]; } pr = {{fbits(sharp), 0, 0, 0}, {ow, oh}, 1, {0}};
+    {   // RCAS on the scene colour (tonemapped), the tonemap undone, sRGB-encoded for an sRGB output
+        struct { uint32_t con0[4]; int32_t size[2], itm, enc; int32_t pad[24]; } pr = {{fbits(sharp), 0, 0, 0}, {ow, oh}, 1, enc, {0}};
         VkImageView in[4] = {D.e.view}; VkSampler sm[4] = {D.ns}; dpass(cb, P_RCAS, in, sm, D.r.view, VK_NULL_HANDLE, &pr, ow, oh);
     }
     VkImageBlit bl = {{VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1}, {{0, 0, 0}, {ow, oh, 1}}, {VK_IMAGE_ASPECT_COLOR_BIT, dl, 0, 1}, {{dx, dy, 0}, {dx + ow, dy + oh, 1}}};

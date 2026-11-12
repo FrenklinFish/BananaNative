@@ -259,6 +259,8 @@ public final class MainActivity extends Activity {
                 .value("Can this phone run your games?").chevron(this).view);   // (ReadinessActivity.java)
         help.addView(new Ui.Setting(this, "🧪", "Graphics self-test", v -> startActivity(new Intent(this, SelftestActivity.class))).value("Needs no game").chevron(this).view);
         help.addView(new Ui.Setting(this, "📨", "Share log", v -> shareLog()).value("The newest log").chevron(this).view);
+        help.addView(new Ui.Setting(this, "🧰", "Tester settings", null).toggle(this, Prefs.testerRows(this), (b, on) -> Prefs.testerRows(this, on))
+                .says("Showing the rows made for testing: Advanced resolution, Upscaler and Dynamic resolution", "Hidden: a game with Resolution choices shows just those").view);   // (Prefs.simpleRes)
         if (BuildConfig.NX_PLAY) {   // a test build always takes adb's commands (Prefs.adbControl)
             Ui.Setting adb = new Ui.Setting(this, "🛠", "ADB control (debug)", null)
                     .value("Lets adb commands add games, start Prepare and install GPU drivers. Off: only you, in the app");
@@ -443,14 +445,10 @@ public final class MainActivity extends Activity {
         gameBox.removeAllViews();
         if (games.isEmpty() && !Ondevice.showing()) { gameBox.addView(emptyCard()); return; }
         // while a game is being prepared its card says what happens (the steps card would only repeat it), and the heading's Add game still adds another game
-        LinearLayout top = Ui.row(this);
-        TextView h = Ui.section(this, "Your games");
-        top.addView(h, Ui.weight());
         Button add = Ui.button(this, "Add game", Ui.Kind.QUIET, v -> addGame());
         add.setCompoundDrawablesRelativeWithIntrinsicBounds(Ui.icon(this, R.drawable.ic_add, R.color.bn_accent), null, null, null);
         add.setCompoundDrawablePadding(dp(6));
-        top.addView(add);
-        gameBox.addView(top);
+        gameBox.addView(Ui.sectionHeader(this, "Your games", add));
         // One card per game: while a game is being prepared its card is the progress card (Ondevice), at the game's place, or first for a game not listed yet
         View pc = Ondevice.cardView();
         if (pc != null && pc.getParent() instanceof ViewGroup) ((ViewGroup) pc.getParent()).removeView(pc);
@@ -460,6 +458,8 @@ public final class MainActivity extends Activity {
             if (pc != null && Ondevice.shows(g)) { Ui.add(gameBox, pc, gameBox.getChildCount() == 1 ? 4 : Ui.GAP); pc = null; continue; }
             Ui.add(gameBox, gameCard(g), gameBox.getChildCount() == 1 ? 4 : Ui.GAP);
         }
+        // A controller or keyboard starts on the first game's card (nothing happens in touch mode, where cards take no focus)
+        if (getCurrentFocus() == null && gameBox.getChildCount() > 1) gameBox.getChildAt(1).requestFocus();
     }
 
     /** No game yet: the banana, the three steps, and Add game */
@@ -516,8 +516,8 @@ public final class MainActivity extends Activity {
         boolean other = Profile.of(g.titleId) == null;   // no profile in this APK: it cannot run here (Profile.missing says why)
         TextView st = other ? Ui.status(this, "Not in this app version", R.color.bn_danger) : Ui.status(this, "Checking…", R.color.bn_text_2);
         LinearLayout.LayoutParams sp = Ui.wrap();
-        sp.topMargin = dp(2);
-        info.addView(st, sp);
+        sp.topMargin = dp(6);
+        info.addView(Ui.pill(st), sp);
         top.addView(info, Ui.weight());
         top.addView(Ui.more(this, "Manage " + g.name, v -> manage(g)));
         c.addView(top);
@@ -528,6 +528,7 @@ public final class MainActivity extends Activity {
             return c;
         }
         Ui.add(c, play, 16);
+        Ui.focusCard(this, c, v -> { if (play.isEnabled()) play.performClick(); });   // the card's confirm = the big button, whatever it has become (Play, Prepare, …)
         check(g, st, play, info);
         c.setOnLongClickListener(v -> { manage(g); return true; });
         return c;

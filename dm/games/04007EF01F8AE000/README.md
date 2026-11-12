@@ -109,6 +109,8 @@ NVN2's DLSS is recorded as `OP_DLSS` (`hle_nvn.c`, "NVN2's DLSS"). Vulkan has no
 - **FSR 1** (`DM_VK_DLSS=2`): EASU and RCAS on the tonemapped input. The game jitters every frame (Halton(2,3), ±0.5 input pixels), which a spatial upscaler shows as crawling edges, so EASU's sampling moves with the frame's jitter (`DM_VK_DLSS_UNJITTER`, default 1); this cuts still-edge crawl by 15-30 %, not to zero. 1.30 ms on the Pad 3. RCAS strength `DM_VK_DLSS_SHARP` (0..100, default 15).
 - **Bilinear** (`DM_VK_DLSS=1`): a blit. 0.08 ms.
 
+The stand-in reads the colour and writes the output by their textures' own formats, sRGB decoded and encoded ([The DLSS stand-in ignored sRGB textures](../../../docs/reference/rendering.md#the-dlss-stand-in-ignored-srgb-textures-android), found on Star Fox). Every mode drew this game right before that change, which with sRGB on either side could not have been, so its colour and output are not sRGB and its picture stays as it was (the new `DLSS stand-in: colour NVN format` log line will show it).
+
 With `dlss_standin 1` the launcher's Upscaler row (a game's ⋯ Manage › Game settings, and live in the in-game panel's Performance tab) offers the stand-in's modes in place of the generic choices, with its sliders beside it (`DlssTune.java`, `GameUpscaler.java`, `GameSettings.java`):
 
 | Row | Choices | Default | Lever |

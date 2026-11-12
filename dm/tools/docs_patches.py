@@ -116,6 +116,8 @@ SWITCH_BINDING = [
      'why': 'as tex_flush_upload, for pools the CPU writes without a flush'}),
     ('tex_soft', '', {'what': 'large block-compressed textures kept without their finest level', 'now': 'game', 'goal': 'game', 'purpose': 'memory',
      'why': 'a loss of detail chosen for a game that does not fit a device otherwise'}),
+    ('event_wait', 'off', {'what': 'GPU event and sync waits across queues passed on the Vulkan replay', 'now': 'game', 'goal': 'host', 'purpose': 'frame rate',
+     'why': 'parked waits cost this game a third of its frame rate and lose the device on Turnip V39; waits that cost no extra submissions would let every game keep them'}),
     ('tex_dyn_slots', '', {'what': "buffer-texture handles indexed through c2's tables", 'now': 'game', 'goal': 'host', 'purpose': 'shaders',
      'why': "right only where the handle comes from c2's tables: the translator could prove that per shader"}),
     ('feedback_snap', '', {'what': 'draws that sample their own colour attachment read a snapshot', 'now': 'game', 'goal': 'host', 'purpose': 'rendering',

@@ -177,6 +177,23 @@ class Verdicts(Base):
         self.assertEqual(h['switches'], ['DM_VK_DRIVER=Mainline_Turnip_v32', 'DM_WATCH_STALL=25'])
         self.assertEqual(d['errors']['groups'], []); self.assertEqual(d['errors']['expected_stubs'], {'lines': 1, 'groups': 1})
 
+    def test_graphics_section(self):
+        g = ['[dm] [vk] mesh draws through compute: 10 draws in 5 batches (2.0 a batch), 3 render passes split for one, 0 not prepared',
+             '[dm] [vk] lower vegetation detail: 1 mesh draws omitted',
+             '[dm] [vk] texture pool reads: 8 modules report the pool IDs they read (49 reads given the code, 4 pixel modules with early depth tests and a twin without, 0 refused; DM_VK_POOL_FB=0 off)',
+             '[dm] [vk] texture pool reads: 1 readbacks (0 put off, every slot waiting), 3 IDs read in them, 3 slots made for a read (0 images made, 0.0 MiB, 0 of them for an ID made before: evicted and read again)',
+             '[dm] [vk] image cache limit 2658 MiB: images 4 MiB',
+             '[dm] [vk] image cache limit 1583 MiB: images 57 MiB',
+             '[dm] [vk] lower vegetation detail: 4096 mesh draws omitted']
+        d = self.digest(start() + g + frames(1))
+        by = {e['label']: e for e in d['graphics']}
+        self.assertEqual(by['vegetation cut']['count'], 2); self.assertIn('4096', by['vegetation cut']['last'])
+        self.assertEqual(by['texture pool reads']['count'], 1); self.assertEqual(by['texture pool read modules']['count'], 1)
+        self.assertIn('2658', by['image cache limit']['first']); self.assertIn('1583', by['image cache limit']['last'])
+        self.assertNotIn('first', by['vegetation cut'])
+        out = L.render(d)
+        self.assertIn('-- graphics', out); self.assertIn('vegetation cut ×2, last L', out)
+
     def test_cut_short(self):
         d = self.digest(start()[:22])
         self.assertEqual(d['verdict']['kind'], 'cut_short')

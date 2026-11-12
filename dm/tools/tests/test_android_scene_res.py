@@ -24,10 +24,13 @@ def rows(game, key):
     return [line.split('\t') for line in t.read_text(encoding='utf-8').splitlines() if line.startswith(key + '\t')]
 
 
-def scene_of(game):   # build.gradle sceneOf, in Python
-    if not rows(game, 'scene_scale_palette'): return ''
+def scene_of(game):   # build.gradle sceneOf, in Python: the overlays (scene_scale, with a palette), then the game arguments (scene_arg)
     clean = lambda s: re.sub(r'[;|]', ',', re.sub(r'[\t\n\\"]', ' ', s)).strip()
-    return ';'.join('|'.join(clean(x) for x in (c[1].strip(), ' '.join(c[4:]).strip() or c[1].strip(), c[2].strip(), c[3].strip())) for c in rows(game, 'scene_scale') if len(c) >= 4)
+    ov = [] if not rows(game, 'scene_scale_palette') else \
+        ['|'.join(clean(x) for x in (c[1].strip(), ' '.join(c[4:]).strip() or c[1].strip(), c[2].strip(), c[3].strip())) for c in rows(game, 'scene_scale') if len(c) >= 4]
+    ar = ['|'.join(clean(x) for x in (c[1].strip(), ' '.join(c[4:]).strip() or c[1].strip(), c[2].strip(), 'arg', ' '.join(w.replace('{s}', c[2].strip()) for w in c[3].split())))
+          for c in rows(game, 'scene_arg') if len(c) >= 5]
+    return ';'.join(ov + ar)
 
 
 class Wiring(unittest.TestCase):
@@ -44,8 +47,21 @@ class Wiring(unittest.TestCase):
         self.assertEqual([tuple(p.split('|')[2:]) for p in s.split(';')], [('0.6133', 'fixed'), ('0.6133', 'floor'), ('0.46875', 'fixed'), ('0.4166667', 'fixed'), ('0.3125', 'fixed')],
                          'each row\'s scale and mode, for the migration to presets (ResPresets.current)')
 
+    def test_starfox_args(self):
+        s = scene_of('0400E88025B1A000')
+        self.assertEqual([p.split('|')[0] for p in s.split(';')], ['s060', 's075', 's100', 'nodynres'])
+        self.assertTrue(all(p.split('|')[3] == 'arg' for p in s.split(';')), s)
+        self.assertEqual(s.split(';')[1].split('|')[4], '-render_resolution_scale_console=0.75 -render_resolution_scale_handheld=0.75', 'the scale in both of the engine\'s settings')
+        self.assertEqual(s.split(';')[3].split('|')[2:], ['-', 'arg', '-no_render_dynres_enabled'], "a bool setting: the engine's -no_<name>")
+        import sys; sys.path.insert(0, str(REPO / 'dm/games')); import game
+        self.assertEqual([(n, a) for n, _, a, _ in game.scene_args(game.load('0400E88025B1A000'))], [tuple(p.split('|')[0::4]) for p in s.split(';')], "game.py's reading and build.gradle's agree")
+        g = GRADLE.read_text(encoding='utf-8')
+        self.assertIn("tsvRows(game, 'scene_arg')", g); self.assertIn("it.replace('{s}', c[2].trim())", g)
+        act = (SRC / 'GameActivity.java').read_text(encoding='utf-8')
+        self.assertLess(act.index('SceneRes.argLine(scenes, sceneName)'), act.index('env.addAll(user);'), "the player's own DM_GAME_ARGS_ADD line comes later and wins")
+
     def test_games_without_the_palette_have_none(self):
-        for game in ('040074A01BF12000', '0400C3F00006E000'):   # checked on their RomFS: neither has a ResolutionReduceScale palette
+        for game in ('040074A01BF12000', '0400C3F00006E000'):   # checked on their RomFS: neither has a ResolutionReduceScale palette (nor scene_arg rows)
             self.assertEqual(scene_of(game), '', game)
 
     def test_start_and_settings(self):

@@ -29,7 +29,7 @@ final class Profile {
     String window = "";   // game.tsv android_window (build.gradle windowOf): the default Game resolution when the player chose none (Prefs.gameWindow), "" for the main screen's
     boolean vegetationDetail;
     List<Option> options = Collections.emptyList();
-    String scenes = "";   // game.tsv scene_scale rows with a scene_scale_palette (build.gradle sceneOf): "name|label|scale|mode", ';' between them; Game settings › Resolution › Advanced › 3D scene (SceneRes.presets)
+    String scenes = "";   // game.tsv scene_scale rows with a scene_scale_palette, then scene_arg rows (build.gradle sceneOf): "name|label|scale|mode" or "name|label|scale|arg|arguments", ';' between them; Game settings › Resolution › Advanced › 3D scene (SceneRes.presets)
     String presets = "";   // game.tsv res_preset rows with their windows' scene_output rows (build.gradle presetsOf): "id|label|window|mode|height|outW|outH|measured", ';' between them; Game settings › Resolution (ResPresets)
     boolean steps;   // game.tsv has fps_steps rows (build.gradle stepsOf): a framework of whole fixed steps a frame, which Hold 60 fps keeps at one (Prefs.steps)
     boolean presentOnly;   // game.tsv fps_limit_present 1 (build.gradle presentOnlyOf): the frame limit only paces the presents, the game's own logic is not known to follow it (Prefs.presentOnly)
@@ -37,6 +37,7 @@ final class Profile {
     boolean drs;   // game.tsv has drs_ctl rows (build.gradle drsOf): the host can steer the game's dynamic resolution (Prefs.drsGame)
     String recommend = "";   // game.tsv recommend rows (build.gradle recommendOf): "<match>|<setting>=<value> …", ';' between them; the recommended settings per phone (Recommend, Prefs.recommended)
     String skipLayers = "";   // game.tsv skip_layers (build.gradle skipLayersOf): pixel shader keys whose draws the Speedhack setting drops (Prefs.skipLayersGame), "" = not offered
+    String presetFrom = "";   // game.tsv res_preset_from rows (build.gradle presetFromOf): "<old id>=<id>", ';' between them; a stored Resolution that the profile no longer has takes the id it maps to (ResPresets.mapStored)
     String variants = "";   // game.tsv variant rows (build.gradle variantsOf): "<name>=<label>", ',' between them; a native 4:3 mod is "43=4:3" (Game settings › Aspect ratio)
 
     /** The variant whose label is w:h (a native aspect mod: "43" for "4:3"), or null when the profile has none */
@@ -339,6 +340,7 @@ final class Profile {
             p.skipLayers = c.length > 23 ? c[23] : "";
             p.recommend = c.length > 24 ? c[24] : "";
             p.variants = c.length > 25 ? c[25] : "";
+            p.presetFrom = c.length > 26 ? c[26] : "";
             out.add(p);
         }
         return Collections.unmodifiableList(out);

@@ -438,12 +438,13 @@ final class SidePanel extends FrameLayout {
             box.addView(hold);
         }
         fpsNow = note("");
-        if (Prefs.dlssGame(game()) || GameUpscaler.shown(act, game())) {   // right under the frame rate cap: the Upscaler (the game's own upscaler and the window's scaling to the screen), for games whose network it replaces; for a game on the DLSS stand-in (no network to replace), the stand-in's modes with Motion clarity / sharpness
+        boolean simple = Prefs.simpleRes(act, game());   // a game with Resolution presets, tester rows off: no Upscaler or Dynamic resolution here (Settings › Help › Tester settings)
+        if (!simple && (Prefs.dlssGame(game()) || GameUpscaler.shown(act, game()))) {   // right under the frame rate cap: the Upscaler (the game's own upscaler and the window's scaling to the screen), for games whose network it replaces; for a game on the DLSS stand-in (no network to replace), the stand-in's modes with Motion clarity / sharpness
             GameUpscaler.rows(act, game(), box);
             note(act instanceof GameActivity && ((GameActivity) act).live() ? "Applies from the next frame, kept for this game (the same setting as Game settings › Upscaler)."
                     : "Applies at the next start (this run takes no live changes: DM_CTL is off).");
         }
-        if (Prefs.drsGame(game())) {
+        if (Prefs.drsGame(game()) && !simple) {
             TextView drsHead = head("Dynamic resolution");   // the render size's range (Prefs.DRS), applied at each step; the heading shows it
             box.addView(DrsSlider.view(act, Prefs.drs(act, game()), drsHead::setText, i -> { Prefs.drs(act, game(), i); Native.drsSet(Prefs.DRS[i][0], Prefs.DRS[i][1]); }));
         }
@@ -535,13 +536,15 @@ final class SidePanel extends FrameLayout {
         java.util.List<ResPresets.Preset> ps = ResPresets.presets(p);
         if (!ps.isEmpty()) {
             String rc = Prefs.resolutionChoice(act, game());
-            Button pr = row(ID_RES_PRESET, "Resolution", ResPresets.label(ps, rc));
+            boolean simple = Prefs.simpleRes(act, game());   // the tester rows are off (Settings › Help): the profile's choices alone
+            Button pr = row(ID_RES_PRESET, "Resolution", ResPresets.ADVANCED.equals(rc) && simple ? "Custom setup" : ResPresets.label(ps, rc));
             pr.setOnClickListener(v -> {
-                String[] labels = new String[ps.size() + 1];
-                for (int k = 0; k < ps.size(); k++) labels[k] = ps.get(k).label + " \u00b7 " + ps.get(k).detail();
-                labels[ps.size()] = "Advanced (window and 3D scene set apart)";
+                String recPreset = Prefs.rec(act, game(), Recommend.RES_PRESET);
+                String[] labels = new String[simple ? ps.size() : ps.size() + 1];   // the same choices and words as Game settings › Resolution
+                for (int k = 0; k < ps.size(); k++) labels[k] = ResPresets.itemText(ps.get(k), k == 0, ps.get(k).id.equals(recPreset));
+                if (!simple) labels[ps.size()] = "Advanced (for testers)\nwindow and 3D scene set apart";
                 ResPresets.Preset cur0 = ResPresets.of(ps, Prefs.resolutionChoice(act, game()));
-                new AlertDialog.Builder(act).setTitle("Resolution").setSingleChoiceItems(labels, cur0 != null ? ps.indexOf(cur0) : ps.size(), (d, w) -> {
+                new AlertDialog.Builder(act).setTitle("Resolution").setSingleChoiceItems(labels, cur0 != null ? ps.indexOf(cur0) : simple ? -1 : ps.size(), (d, w) -> {
                     Prefs.resPreset(act, game(), w < ps.size() ? ps.get(w).id : ResPresets.ADVANCED);   // the game's own setting: the next start takes it too
                     if (now) {
                         int[] m = p.resolutionLive(Prefs.startWindow(act, game()));
@@ -551,9 +554,8 @@ final class SidePanel extends FrameLayout {
                     restyle(ID_RES_PRESET);
                 }).setNegativeButton("Cancel", null).show();
             });
-            note(now ? "The window changes now; the 3D scene at the next start. Kept for this game (the same setting as Game settings › Resolution)."
-                    : "Applies at the next start (the same setting as Game settings › Resolution).");
-            if (!ResPresets.ADVANCED.equals(rc)) return;
+            note(ResPresets.NOTE + " Kept for this game (the same setting as Game settings › Resolution).");
+            if (!ResPresets.ADVANCED.equals(rc) || simple) return;
         }
         String winTitle = ps.isEmpty() ? "Game resolution" : "Advanced \u00b7 Window";
         String cur = Prefs.gameWindow(act, game());

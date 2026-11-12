@@ -72,18 +72,26 @@ scene_scale_palette	Pack/Bootup.Nin_Ounce_NVN2.pack.zs	ModelSceneExtensionParam	
 # fork's 1275x717 is 2048x1152 x the game's own 0.62223, likely a docked run (console scale 1). The console rows have no output row: no preset uses them
 scene_output	1920x1080	1920x1080	measured
 scene_output	1280x720	1280x720	measured
-# Resolution presets (the launcher's one Resolution setting; the first row is the default, today's start): window and 3D scene together. Scales from the outputs above:
-# balanced floor 720/1080 = 0.666667 (the game's own levels 0.75, 0.71112 and 0.66667 stay, the lower ones are raised to it), performance 540/720 = 0.75, max-performance
-# 360/720 = 0.5. Max resolution (DM_OOT_MAX_RESOLUTION) takes the controller's full-scale path: meant for Quality (whether it still reads the palette is open)
+# Resolution (the launcher's one player-facing setting, three choices; the first row is the default, today's start): window and 3D scene together. Scales from the outputs above:
+# quality is the game's own dynamic resolution (the palette as shipped, its controller lowers the scene under load); medium (labelled Balanced) fixes the scene at 720/1080 = 0.666667
+# (the game's own level 2, 1280x720 in the 1920x1080 window); performance fixes it at 540/720 = 0.75 (the game's own level 0, 960x540 in the 1280x720 window). A fixed row writes the
+# one scale into every palette level, so the game's controller has nothing to lower. Max resolution (DM_OOT_MAX_RESOLUTION) takes the controller's full-scale path: meant for Quality.
+# Earlier ids: balanced (floor:720, dynamic) and max-performance (fixed:360, 640x360) are no choice any more; a stored one takes the id after it (res_preset_from). The id of Balanced is
+# new on purpose: a pack made before keeps a floor overlay under the old name, which must not pass for the fixed one (the launcher says "needs Prepare again" until the pack has it)
 res_preset	quality	1920x1080	default	Quality
-res_preset	balanced	1920x1080	floor:720	Balanced
+res_preset	medium	1920x1080	fixed:720	Balanced
 res_preset	performance	1280x720	fixed:540	Performance
-res_preset	max-performance	1280x720	fixed:360	Max performance
+res_preset_from	balanced	medium
+res_preset_from	max-performance	performance
 # Recommended settings (dm/games/README.md "Recommended settings"), from the phone measurements in README.md "Recommended settings on Qualcomm phones" (2026-11-12, Adreno 840,
-# Kokiri Forest): the phone's own Qualcomm driver draws this game 1.5-2x faster than Turnip; Performance and Full vegetation off take 3.7 and 1.6 ms off a 42.7 ms GPU frame
-recommend	driver.id=8	driver=system
-# (README.md "Recommended settings on Qualcomm phones": Performance and Full vegetation off, the settings that change this game's frame time there)
-recommend	gpu.vendor=0x5143	res_preset=performance	vegetation=off
+# Kokiri Forest): the phone's own Qualcomm driver draws this game 1.5-2x faster than Turnip; Performance and Full vegetation off take 3.7 and 1.6 ms off a 42.7 ms GPU frame.
+# Gate (STOPGAP, cause inside the driver open; README.md "Recommended settings on Qualcomm phones", Forgejo #182): Qualcomm's 2023 driver 0x802a4035 (Adreno 740, AYN Thor)
+# crashed in a burst of pipeline compiles, so the system driver is recommended only from driver.version 0x80320000 (0x80320040 and 0x8034a02c ran well), keyed on the reported version
+recommend	driver.id=8,driver.version>=0x80320000	driver=system
+# The game starts in its fastest picture on every phone (2026-11-12): Performance and Full vegetation off are the settings that change its frame time (README.md "Recommended settings on
+# Qualcomm phones"); a player who never chose Resolution gets Performance (Prefs.resolutionChoice takes the recommended preset), an explicit choice stays. Not changed: the Upscaler
+# (Native 48.7 ms, Bilinear no change, so SGSR stays), Max resolution and Texture pool x2 (more work and memory, off), Unlocked frame rate (no fps gain). No Hold 60 fps: fps_steps is not set
+recommend	any	res_preset=performance	vegetation=off
 # Advanced › 3D scene (testers): fixed scales, labelled by scale (the launcher adds the size at the Advanced window where it has an output row). Names kept from before the
 # presets: a stored choice keeps working (ResPresets.current maps it to a preset where one matches)
 scene_scale	720p	0.6133	fixed	Fixed 0.6133

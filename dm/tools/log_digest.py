@@ -470,6 +470,67 @@ def perf_lines(p):
     return out
 
 
+# ---------------------------------------------------------------- graphics state lines
+
+# Counter and state lines of the Vulkan replay that say what a run's picture went through (mesh draws, vegetation cut, texture pool reads, image cache, pacing,
+# pipelines). Each label keeps its count, its first and its last line: most of these lines are running totals, so the last one is the run's total. The section
+# answers the "what was the replay doing" questions of a rendering report without reading the log. (label, regex matched at the line's start, keep the first line too)
+GFX = (
+    ('swapchain', '[dm] [vk] swapchain ', False),
+    ('GPU clock floor', '[dm] [vk] GPU clock floor', False),
+    ('mesh path', '[dm] [vk] mesh draws through compute (', False),
+    ('mesh draws through compute', '[dm] [vk] mesh draws through compute: ', False),
+    ('mesh_prepass_cut', '[dm] [vk] mesh_prepass_cut', False),
+    ('vegetation cut', '[dm] [vk] lower vegetation detail', False),
+    ('texture pool read modules', r'[dm] [vk] texture pool reads: \d+ modules', False),
+    ('texture pool reads', r'[dm] [vk] texture pool reads: \d+ readbacks', False),
+    ('image cache limit', '[dm] [vk] image cache limit', True),
+    ('image cache pruned', '[dm] [vk] image cache pruned', False),
+    ('image cache over limit', '[dm] [vk] image cache: ', False),
+    ('finalized pool evictions', '[dm] [vk] finalized pool ', False),
+    ('pace', '[dm] [vk] pace up to frame', False),
+    ('pace cost', '[dm] [vk] pace cost', False),
+    ('long compiles', '[dm] [vk] long compile', False),
+    ('pipeline cache', '[dm] [vk] pipeline cache: ', False),
+    ('present interval', '[dm] [nvn] the game sets present interval', False),
+    ('graphics scale', '[dm] [nvn] WindowInitialize', False),
+)
+
+GFX_RX = [(label, re.compile(re.escape(p).replace(re.escape('\\d+'), r'\d+')), first) for label, p, first in GFX]
+
+
+class Gfx:
+    def __init__(self): self.seen = {}   # label -> [count, first (n, line) or None, last (n, line)]
+
+    def feed(self, n, line):
+        if not line.startswith(('[dm] [vk] ', '[dm] [nvn] ')): return
+        for label, rx, first in GFX_RX:
+            if rx.match(line):
+                s = self.seen.get(label)
+                if s is None: self.seen[label] = [1, (n, line) if first else None, (n, line)]
+                else: s[0] += 1; s[2] = (n, line)
+                return
+
+    def summary(self):
+        out = []
+        for label, _p, _f in GFX:
+            s = self.seen.get(label)
+            if not s: continue
+            e = {'label': label, 'count': s[0], 'last_line': s[2][0], 'last': redact(s[2][1], 300)}
+            if s[1] and s[1][0] != s[2][0]: e['first_line'], e['first'] = s[1][0], redact(s[1][1], 300)
+            out.append(e)
+        return out
+
+
+def gfx_lines(g):
+    o = []
+    for e in g:
+        strip = lambda t: re.sub(r'^\[dm\] \[(vk|nvn)\] ', '', t)
+        if 'first' in e: o.append(f"{e['label']} ×{e['count']}, first L{e['first_line']}: {strip(e['first'])}")
+        o.append(f"{e['label']}" + ('' if 'first' in e else f" ×{e['count']}") + f", last L{e['last_line']}: {strip(e['last'])}")
+    return o
+
+
 # ---------------------------------------------------------------- the digest
 
 ENV_RX = re.compile(r'^\[nxlaunch\] env ([A-Z_][A-Z0-9_]*)=(.*)$')
@@ -530,6 +591,7 @@ class Digest:
         self.dropped_keys = 0
         self.flags = collections.Counter()
         self.perf = Perf()
+        self.gfx = Gfx()
         self.tomb = None
 
     # -- the run log
@@ -561,6 +623,7 @@ class Digest:
             m = TIME_RX.match(line)
             if m: self.last_time = float(m.group(1) or m.group(2))
         self.perf.feed(n, line)
+        self.gfx.feed(n, line)
         if 'graceful exit' in line: self.flags['graceful'] += 1
         i = self.rules_rx.search(line)
         if i >= 0: self._hit(i, n, line, 'log')
@@ -755,7 +818,7 @@ class Digest:
         rules = sorted((self._rule(i) for i in self.rule_hits), key=lambda r: (r['first_line'] or 10 ** 12, r['id']))
         return {'file': name, 'bytes': size, 'lines': self.n, 'key_lines_dropped': self.dropped_keys, 'header': header, 'stage': stage,
                 'verdict': self.verdict(rec), 'crash': crash, 'errors': errors, 'symptoms': self.symptom_matches(), 'rules': rules,
-                'perf': self.perf.summary(), 'tail': [{'line': n, 'text': redact(t)} for n, t in self.tail]}
+                'perf': self.perf.summary(), 'graphics': self.gfx.summary(), 'tail': [{'line': n, 'text': redact(t)} for n, t in self.tail]}
 
 
 def render(d):
@@ -814,6 +877,8 @@ def render(d):
         if len(rs) > 12: o.append(f'  +{len(rs) - 12} more rules')
     p = perf_lines(d['perf'])
     if p: o.append('-- performance'); o += [f'  {x}' for x in p]
+    g = gfx_lines(d.get('graphics') or [])
+    if g: o.append('-- graphics'); o += [f'  {x}' for x in g]
     if d['tail']:
         o.append(f"-- tail (last {len(d['tail'])} lines)")
         o += [f"  L{t['line']}: {t['text']}" for t in d['tail']]
