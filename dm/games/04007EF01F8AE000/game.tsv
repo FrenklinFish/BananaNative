@@ -43,6 +43,11 @@ av1_decoder	dav1d
 # foliage lit dark, dungeon at about 25 fps (GPU 36 ms); Turnip T30 and Gen8 V39 play the dungeon at 29-30 fps with characters correct; and README.md "Rendering
 # fixes": "the stock driver stays not recommended for play"
 recommend	driver.id=8,driver.version&0xffc00000=0x80000000,driver.version&0x3ff000<0x320000	driver=18
+# Every phone: FSR 3.1 as the Upscaler (the DLSS stand-in's DM_VK_DLSS=4). README.md "DLSS on a stand-in", per #151: finer detail than GSR 2 (c2) and about 30-40 % less
+# unexplained flicker in camera pans and dashes, still edges equal at the default sharpness 0.5; the cost about 2 ms more GPU on Turnip, about 34 against 26 ms on an older
+# stock driver (#151), about 3 ms more on the Pad 3's stock 512.800. It runs on Turnip and on Qualcomm's own driver, switches live, is clean with frame generation where GSR 2 is.
+# A driver row sets only the driver, so this row and the one above apply independently; a player's own Upscaler choice is kept
+recommend	any	upscaler=fsr3
 # Android, resolution: the game builds six render configurations (output size, render size its DLSS takes to the output, shadow and level-of-detail settings; slots main+0x223e0b0)
 # and picks one by the performance mode (Boost: the docked family, Normal: the handheld one), the graphics scale and the display's largest buffer, again on each notification 31.
 # The host writes the player's output (DM_WINDOW_SIZE) and render size (DM_RENDER_PCT: 33 / 50 / 59 / 67 / 100 % of it) into all six and answers the performance mode from the graphics

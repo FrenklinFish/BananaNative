@@ -74,7 +74,7 @@ public final class RecommendJvmTest {
 
         // Fire Emblem's row (args[1]): Qualcomm's driver before 512.800 (the host's qcom_old) → an installed Turnip; the tested phone's 512.842 is not one
         List<Recommend.Row> fe = Recommend.parse(args[1]);
-        check(fe.size() == 1 && fe.get(0).driverRow(), "Fire Emblem's row: " + args[1]);
+        check(fe.size() == 2 && fe.get(0).driverRow() && !fe.get(1).driverRow(), "Fire Emblem's rows: " + args[1]);
         check(Recommend.driver(fe, honor) == null, "512.842 (" + honor.get("driver.version") + "): no recommendation");
         Map<String, String> thor = new LinkedHashMap<>(honor);
         thor.put("driver.version", String.format("%#x", (512 << 22) | (676 << 12) | 53));
@@ -83,6 +83,11 @@ public final class RecommendJvmTest {
         check(Recommend.driver(fe, thor) == null, "512.800.77: none");
         thor.put("driver.version", String.format("%#x", (512 << 22) | (676 << 12))); thor.put("driver.id", "18");
         check(Recommend.driver(fe, thor) == null, "another driver ID: none");
+        // and its upscaler row (any): FSR 3.1 on every driver the game starts with, the old Qualcomm one included, and before any readiness check; the driver row adds no upscaler
+        Map<String, String> old = new LinkedHashMap<>(honor);
+        old.put("driver.version", String.format("%#x", (512 << 22) | (676 << 12) | 53));
+        for (Map<String, String> f : java.util.Arrays.asList(honor, turnip, old, thor, null, facts()))
+            check(Recommend.values(fe, f).equals(Map.of(Recommend.UPSCALER, "fsr3")) && Recommend.index(Recommend.DLSS_MODES, Recommend.values(fe, f).get(Recommend.UPSCALER)) == 3, "Fire Emblem's upscaler: FSR 3.1 on " + f);
 
         // What is kept of a readiness answer: the facts a match reads, no names
         String kept = Recommend.keep(new String(Files.readAllBytes(Paths.get(args[0])), StandardCharsets.UTF_8));
