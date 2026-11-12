@@ -334,7 +334,7 @@ Every patch bound tighter than it could be: the open gaps, then the blocked, kep
 - **`build` → unreviewed**, frame rate, unreviewed, judgement: Fire Emblem Fortune's Weave no depth pre-pass (the game's own co_disable_depth_prepass mode). One load at the setter call reads the config flag; the same mode in a later update would need the call found again
 - **`build` → unreviewed**, rendering, unreviewed, judgement: Fire Emblem Fortune's Weave native 4:3 variant (VARIANT_CUTS['43']: camera aspect and ui2d pane rules). An opt-in variant (Game settings › Aspect ratio) of about 230 words in code caves of this main; each ui2d rule names panes of this build's layouts
 
-- **v131072 `main`** `db93b012…` ([patches.py:379](../../dm/games/04007EF01F8AE000/patches.py#L379))
+- **v131072 `main`** `db93b012…` ([patches.py:387](../../dm/games/04007EF01F8AE000/patches.py#L387))
   - cut `+0xb9cb0c`: no depth pre-pass: ldrb w1, [x8, #0x74] -> mov w1, wzr
 
 ### Fire Emblem: Three Houses

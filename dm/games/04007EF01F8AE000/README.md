@@ -143,7 +143,7 @@ The 82 movies are AV1 at 2560x1440. Android's default sends AV1 to the phone's h
 
 ## Android extras (Project Weave)
 
-- **Upscaler › FSR 3.1** (`DM_VK_DLSS=4`, `vka_fsr3.c`): AMD FidelityFX FSR 3.1's temporal passes (SPIR-V in `dm/gfx/vk_android/fsr3/`, MIT) on the stand-in's inputs: the game's reversed-Z depth, motion vectors in UV units (scale 960x540), jitter in input pixels and the reset. `DM_VK_FSR3_SHARP` sets its RCAS (0 to 1, default 0.8). It falls back to FSR 1 when the inputs do not fit (a subrectangle base, a larger input texture).
+- **Upscaler › FSR 3.1** (`DM_VK_DLSS=4`, `vka_fsr3.c`): AMD FidelityFX FSR 3.1's temporal passes (SPIR-V in `dm/gfx/vk_android/fsr3/`, MIT) on the stand-in's inputs: the game's reversed-Z depth, motion vectors in UV units (scale 960x540), jitter in input pixels and the reset. The Sharpness slider sets its RCAS (`DM_VK_FSR3_SHARP`, 0 to 1, default 0.5: at 0.8 still characters' outlines shimmered about a third more than under GSR 2). It falls back to FSR 1 when the inputs do not fit (a subrectangle base, a larger input texture).
 - **Game settings › Display mode** (`display_modes 1080 720`, `DM_VI_MAX_RES`): `host_env` gives the game its 1080p display buffer mode (a 960x540 scene upscaled to 1920x1080); 720 is a 640x360 scene upscaled to 1280x720, about 8 ms less GPU time in Dagsion on an Adreno 740 and a softer picture. The game picks the scene size itself from preset objects (table main+0x223e0b0, `{out_w, out_h, in_w, in_h}`).
 - `DM_VK_VIEW_LEARN=0` (`host_env`): with learning on, the autosave notice could alternate between normal and bright blue on restart (learned pairs `64 37 3840 2160` and `64 43 3840 2160`). A workaround.
 - `DM_VK_PRESENT_FILTER=2` (`host_env`): a Lanczos-2 present with mild sharpening when the 1920x1080 frame is scaled down to a smaller panel; at 1:1 the bilinear present is exact and it is skipped.
@@ -165,7 +165,7 @@ The game keeps its 1920x1080 window and scene; its cameras take a 4:3 aspect and
 
 | Group in `patches.py` | What it does |
 |---|---|
-| `_V11` | Camera aspect 4:3; UI projection squeezed; panes at the top and bottom moved to the 4:3 edges (the edge rule); minimap pinned; full-screen overlays stretched (the overlay rule); sliding menu containers anchored |
+| `_V11` | Camera aspect 4:3; UI projection squeezed; panes at the top and bottom moved to the 4:3 edges (the edge rule); the minimap's rotating centre left to the game; full-screen overlays stretched (the overlay rule); sliding menu containers anchored |
 | `_SCISSOR43` | Clip rectangles (the minimap) squeezed like the rest of the UI |
 | `_UI_V12` | Base Menu cursor (the `L_List` container is not scaled), dialog text in its box (`A_Contents` children not moved), tall half-screen dimmers (the shop's `Fade01`) cover the full height |
 | `_UI_V13` | The Armorer's Buy/Sell and help panels keep their 4:3 heights while their empty parent panes slide |
