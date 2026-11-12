@@ -20,9 +20,13 @@ final class PictureFit {
     static int stepOfSize(int pct) { return Math.round((size(pct) - SIZE_MIN) / (float) SIZE_STEP); }
 
     /** {x, y, w, h} of the picture in a w x h view, normalized to it */
-    static float[] rect(int w, int h, float px, float py, boolean stretch, int sizePct) {
+    static float[] rect(int w, int h, float px, float py, boolean stretch, int sizePct) { return rect(w, h, px, py, stretch, sizePct, 16f / 9f); }
+
+    /** The same for a picture shown at aspect (width / height): 16:9 as the game draws it, or DM_VK_PICTURE_ASPECT's (Game settings › Aspect ratio 4:3) */
+    static float[] rect(int w, int h, float px, float py, boolean stretch, int sizePct, float aspect) {
         float pw = 1, ph = 1;
-        if (!stretch && w > 0 && h > 0) { if (w * 9f > h * 16f) pw = h * 16f / 9f / w; else ph = w * 9f / 16f / h; }
+        if (!(aspect > 0)) aspect = 16f / 9f;
+        if (!stretch && w > 0 && h > 0) { if (w > h * aspect) pw = h * aspect / w; else ph = w / aspect / h; }
         float s = size(sizePct) / 100f;
         pw *= s; ph *= s;
         px = Math.max(0, Math.min(1, px)); py = Math.max(0, Math.min(1, py));

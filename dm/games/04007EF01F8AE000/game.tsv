@@ -46,6 +46,10 @@ graphics_scale	1920x1080	0	handheld
 # The default when the player has chosen none: 1920x1080, handheld (the launcher's own default, written out so one line changes it; original = docked)
 android_window	1920x1080
 
+# ---- Variants (patches.py VARIANT_CUTS; Game settings > Aspect ratio) ----
+# 43: native 4:3 (cameras and UI laid out for 4:3, shown at 4:3): main only
+variant	43	main	4:3
+
 # ---- Files ----
 modules	main subsdk2 sdk
 romfs_marker	Fs.bin.zst

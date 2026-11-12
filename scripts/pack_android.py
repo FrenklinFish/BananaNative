@@ -375,6 +375,39 @@ def rewrite(py, srcs, out, jobs, g, in_process=False):
             log.close()
 
 
+def variants(g):
+    """The profile's game.tsv variant rows (`variant <name> <modules> <label>`): [(name, [module, ...])]"""
+    return [(v[0], (v[1] if len(v) > 1 and v[1] else 'main').replace(',', ' ').split()) for v in g.values('variant') if v and v[0]]
+
+
+def rewrite_variants(py, srcs, out, g, in_process=False):
+    """Each variant row's modules rewritten again with DM_PATCH_VARIANT=<name> (patch_nso.py VARIANT_CUTS: a game's native 4:3 mod) into out/<name>/,
+    keyed '<the module's rewrite_key> variant=<name>' (the launcher's PackCheck checks it the same way); a module whose key matches is kept. Both versions
+    stay in the pack, so the launcher's Game settings › Aspect ratio switches between them without another Prepare: the host loads a module from
+    out/<name>/ when DM_PATCH_VARIANT=<name> (loader.c)"""
+    for v, mods in variants(g):
+        if not v.isalnum(): raise Error(f'{g.id}: variant name {v!r} is not a plain folder name')
+        vout = out / v; vout.mkdir(exist_ok=True)
+        for m in mods:
+            if m not in srcs: raise Error(f'{g.id}: variant {v} names module {m}, which the profile does not have')
+            key = rewrite_key(srcs[m], g) + f' variant={v}'; kf = vout / f'{m}.android.key'
+            if (vout / f'{m}.patched.bin').is_file() and kf.is_file() and kf.read_text().strip() == key:
+                print(f'  {m} ({v}): unchanged, kept'); continue
+            kf.unlink(missing_ok=True); shutil.rmtree(staging(vout, m), ignore_errors=True)
+            print(f'  {m} ({v}): rewriting', flush=True)
+            t0, src, log = time.monotonic(), rewriter_src(srcs[m], out, m), vout / f'rewrite_{m}.log'
+            args = [str(src), str(staging(vout, m)), m, '--target', 'android']
+            if in_process: rc = run_in_process(REPO / 'dm/tools/patch_nso.py', args, {'DM_GAME': g.id, 'DM_REWRITE_J': '1', 'DM_PATCH_VARIANT': v}, log)
+            else:
+                with open(log, 'w') as f:
+                    rc = subprocess.call([py, str(REPO / 'dm/tools/patch_nso.py'), *args], env=child_env(DM_GAME=g.id, DM_PATCH_VARIANT=v), stdout=f, stderr=subprocess.STDOUT)
+            if rc:
+                tail = log.read_text(errors='replace').splitlines()[-20:]
+                raise Error(f'patch_nso.py exit code {rc} on {m} (variant {v}):\n' + '\n'.join(tail))
+            swap_in(vout, m, key)
+            print(f'  {m} ({v}): done ({time.monotonic() - t0:.1f} s)', flush=True)
+
+
 VK_BUILD = REPO / 'dm/gfx/tools/vk_android_build.py'
 VK_BUILD_WIN = REPO / 'dm/gfx/tools/vk_android_win.py'   # vk_android_build.py with what Windows needs put around it (that file's header)
 SPLIT = REPO / 'dm/gfx/tools/shader_split.py'
@@ -557,7 +590,9 @@ def main():
             if gaps: raise Error(f'--keep-code: the rewrite step has not finished for {", ".join(gaps)} in {out}: run the rewrite step again')
             print('  modules kept as they are (--keep-code)')
         else:
-            try: rewrite(sys.executable, srcs, out, max(1, a.j), g, a.in_process)
+            try:
+                rewrite(sys.executable, srcs, out, max(1, a.j), g, a.in_process)
+                rewrite_variants(sys.executable, srcs, out, g, a.in_process)   # game.tsv variant rows (a native 4:3 mod) into <pack>/<variant>/
             finally: shutil.rmtree(out / '.nup-src', ignore_errors=True)   # the module copies a NUP game's rewrite read (rewriter_src)
         if a.code_only: print(f'done: the modules in {out} (--code-only: pack.tsv and the shaders unchanged)'); return
         if a.keep_code: upgrade_keys(srcs, out, g)   # before the copy below replaces the game.tsv an earlier key was made with (a rewrite run did it in rewrite)
