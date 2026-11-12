@@ -374,32 +374,8 @@ _UI_V20 = [
     (0x005d257c, '00000000', 'bb50ff17', 'v20: b 0x5a6868'),
 ]
 
-# Minimap view cone: the game turns the cone (L_Player's Sight, minimap +0x1c8) with the camera's yaw and the arrow (Player, +0x1d0) with
-# the character's facing, so the cone showed where the camera looked, not where the character faced, and the two split apart whenever the
-# character turned. The cone now takes the arrow's rotation (the two sprites point the same way at the same angle): after each of the
-# game's two arrow updates (0x1926844 the minimap, 0x1926498 the other view) a cave copies it to the cone and marks the cone for a new
-# matrix, using only x8 / w9, which the game reloads right after. Checked in Dagsion through a walk and a camera turn.
-_CONE = [
-    (0x01926844, '09610139', 'e00d0014', 'cone: b 0x1929fc4 (after the arrow rotation store)'),
-    (0x01929fc4, '00000000', '09610139', 'cone cave: strb w9, [x8, #0x58] (the arrow, as replaced)'),
-    (0x01929fc8, '00000000', '88e640f9', 'cone cave: ldr x8, [x20, #0x1c8] (Sight)'),
-    (0x01929fcc, '00000000', '004500bd', 'cone cave: str s0, [x8, #0x44] (the arrow rotation)'),
-    (0x01929fd0, '00000000', '09614139', 'cone cave: ldrb w9, [x8, #0x58]'),
-    (0x01929fd4, '00000000', '29011c32', 'cone cave: orr w9, w9, #0x10'),
-    (0x01929fd8, '00000000', '09610139', 'cone cave: strb w9, [x8, #0x58]'),
-    (0x01929fdc, '00000000', '1bf2ff17', 'cone cave: b 0x1926848'),
-    (0x01926498, '09610139', '6b170014', 'cone (other view): b 0x192c244'),
-    (0x0192c244, '00000000', '09610139', 'cone cave: strb w9, [x8, #0x58] (the arrow, as replaced)'),
-    (0x0192c248, '00000000', '88e640f9', 'cone cave: ldr x8, [x20, #0x1c8] (Sight)'),
-    (0x0192c24c, '00000000', '004500bd', 'cone cave: str s0, [x8, #0x44] (the arrow rotation)'),
-    (0x0192c250, '00000000', '09614139', 'cone cave: ldrb w9, [x8, #0x58]'),
-    (0x0192c254, '00000000', '29011c32', 'cone cave: orr w9, w9, #0x10'),
-    (0x0192c258, '00000000', '09610139', 'cone cave: strb w9, [x8, #0x58]'),
-    (0x0192c25c, '00000000', '90e8ff17', 'cone cave: b 0x192649c'),
-]
-
 _MAIN = 'db93b0125f4850601d61c3edde012f8e'
-VARIANT_CUTS = {'43': {_MAIN: _V11 + _SCISSOR43 + _UI_V12 + _UI_V13 + _UI_V14 + _UI_V15 + _UI_V16 + _UI_V17 + _UI_V18 + _UI_V20 + _CONE}}
+VARIANT_CUTS = {'43': {_MAIN: _V11 + _SCISSOR43 + _UI_V12 + _UI_V13 + _UI_V14 + _UI_V15 + _UI_V16 + _UI_V17 + _UI_V18 + _UI_V20}}
 
 BINDING = [
     {'what': "Fire Emblem Fortune's Weave native 4:3 variant (VARIANT_CUTS['43']: camera aspect and ui2d pane rules)", 'now': 'build', 'goal': 'unreviewed', 'purpose': 'rendering',
