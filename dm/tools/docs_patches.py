@@ -165,6 +165,8 @@ SWITCH_BINDING = [
      'why': "the game's table of render configurations, at a fixed offset per main build (the build, the heap and the game's own sizes checked before each write); a fingerprint of the selector that reads it could find it in other builds"}),
     ('render_quality', '', {'what': "the performance mode and the display's largest buffer each graphics quality answers (DM_GFX_QUALITY)", 'now': 'game', 'goal': 'game', 'purpose': 'rendering',
      'why': "which render configuration family the game picks for each answer was read in the game's selector"}),
+    ('rt_pool', '', {'what': "the render target pool sized at load for the starting render setting (at least the first larger size on a device of more than 12 GB), and render_cfg's max_render raised with it (DM_RT_POOL_MB; loader.c)", 'now': 'build', 'goal': 'engine', 'purpose': 'memory',
+     'why': "the pool's size is one movz in the game's text, at a fixed offset per build (the build and the word checked before the write); a fingerprint of the pool's constructor call could find it in other builds"}),
     ('op_mode', '', {'what': 'the operation mode at start', 'now': 'game', 'goal': 'game', 'purpose': 'runtime', 'why': "the game's controls (handheld: the touch screen instead of a gyro pointer)"}),
 ]
 

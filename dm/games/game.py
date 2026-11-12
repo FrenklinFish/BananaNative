@@ -275,6 +275,36 @@ def header(g):
             sys.exit(f'{g.id}: render_cfg needs one render_quality row: quality=<boost|normal>:<level 0-3> performance=<boost|normal>:<level 0-3>: {qr}')
         rq = [int(m[0][1] == 'boost'), int(m[0][2]), int(m[1][1] == 'boost'), int(m[1][2])]
     elif g.get('render_quality', ''): sys.exit(f'{g.id}: render_quality needs a render_cfg row')
+    # A render target pool the loader sizes (loader.c rt_pool_apply, dm/host/rt_pool.h; README.md rt_pool): <build ID> <module> <word offset> <the word there, 8 hex: movz w, lsl #16
+    # of the game's own MiB << 4> <the game's own MiB> then 1-4 larger sizes, ascending, each <MiB>=<WxH> (render_cfg's max_render while at least that size is written), and
+    # optionally out_h=<lines> (an output that tall or taller takes at least the first larger size). Needs a render_cfg row of the same main build (the setting that picks the
+    # size, the cap it raises) and a low-RAM key (the device gate: vka_low_ram)
+    rtp = []
+    for r in (g.values('rt_pool') if g.get('rt_pool', '') else []):
+        tiers = [re.fullmatch(r'(\d{1,4})=(\d{1,5})x(\d{1,5})', x) for x in r[5:] if not x.startswith('out_h=')]
+        outh = [x[6:] for x in r[5:] if x.startswith('out_h=')]
+        ok = len(r) >= 6 and re.fullmatch(r'[0-9a-f]{32}', r[0]) and r[1] in mods and re.fullmatch(r'0x[0-9a-fA-F]+', r[2]) and re.fullmatch(r'[0-9a-f]{8}', r[3]) \
+            and r[4].isdigit() and 1 <= len(tiers) <= 4 and all(tiers) and len(outh) <= 1 and all(x.isdigit() and 0 < int(x) <= 4320 for x in outh) \
+            and all(not x.startswith('out_h=') for x in r[5:5 + len(tiers)])
+        if ok:
+            w, base, off = int(r[3], 16), int(r[4]), int(r[2], 0)
+            mbs = [int(t[1]) for t in tiers]; ws = [int(t[2]) for t in tiers]; hs = [int(t[3]) for t in tiers]
+            ok = (w & 0xFFE00000) == 0x52A00000 and (w >> 5) & 0xFFFF == base << 4 and 16 <= base < mbs[0] and all(a < b for a, b in zip(mbs, mbs[1:])) and mbs[-1] <= 4095 \
+                and off % 4 == 0 and all(ws) and all(hs) and all(a <= b and c <= d for a, b, c, d in zip(ws, ws[1:], hs, hs[1:]))
+        if not ok:
+            sys.exit(f"{g.id}: rt_pool takes <build ID (32 hex)> <module> <word offset (a multiple of 4)> <the word there (8 hex): movz w, #<the game's own MiB << 4>, lsl #16>"
+                     f" <the game's own MiB> <MiB>=<max_render WxH> (1 to 4, the MiB ascending up to 4095, the sizes not shrinking) [out_h=<lines>]: {r}")
+        rc = [x for x in g.values('render_cfg') if x and x[0] == r[0]]
+        if r[1] != 'main' or len(rc) != 1:
+            sys.exit(f'{g.id}: rt_pool needs a render_cfg row of the same main build (the setting that picks the size, the max_render it raises): {r}')
+        cm = dict(x.split('=', 1) for x in rc[0][7:] if '=' in x).get('max_render', '0x0').split('x')
+        if ws[0] < int(cm[0]) or hs[0] < int(cm[1]):
+            sys.exit(f"{g.id}: rt_pool max_render must be at least render_cfg's {'x'.join(cm)}: {r}")
+        if not (int(lpp) or int(lic) or int(lap)):
+            sys.exit(f"{g.id}: rt_pool needs a low-RAM key (low_ram_place_part_mb, low_ram_img_cache_max_mb or low_ram_app_pool_mb), the device gate: a device of 12 GB or less gets a larger pool only when the starting setting needs it, a larger device at least the first larger size")
+        if any(x.startswith('{' + q(r[0]) + ', ' + q(r[1]) + ',') for x in rtp): sys.exit(f'{g.id}: rt_pool: one row per build and module: {r}')
+        arr = lambda v: '{' + ', '.join(map(str, v)) + '}'
+        rtp.append('{' + q(r[0]) + f', {q(r[1])}, {r[2]}, 0x{r[3]}u, {base}, {len(mbs)}, {arr(mbs)}, {arr(ws)}, {arr(hs)}, {outh[0] if outh else 0}' + '}')
     # Depth-only mesh prepass draws of mesh modules Qualcomm's driver draws wrong (vka_draw.c mesh_cut; a workaround, cause open: rendering.md "Depth-only mesh prepass
     # drawn as spikes on Qualcomm's driver"): one row per pair, <prepass mesh shader key> <colour pass mesh shader key> [<map>], 16 hex digits each. The map says where the
     # colour mesh module writes what the prepass mesh module writes: <prepass location>:<colour location>,... (locations 0-14; "-": none of them). The prepass is then
@@ -387,6 +417,7 @@ def header(g):
          f'#define DM_GAME_DRS_CTL {{{", ".join(drs) or "{\"\", 0, 0, 0, 0}"}}}', f'#define DM_GAME_NDRS_CTL {len(drs)}',
          '#define DM_GAME_RENDER_CFG {' + (', '.join(rcf) or '{"", 0, 0, 0, 0, 0, {{0, 0, 0, 0}}, 0, 0, 0, 0, 0}') + '}', f'#define DM_GAME_NRENDER_CFG {len(rcf)}',
          '#define DM_GAME_RENDER_QUALITY {' + ', '.join(map(str, rq)) + '}', f'#define DM_GAME_RENDER_DEFAULT_OUT {q(aw or "1920x1080")}',
+         '#define DM_GAME_RT_POOL {' + (', '.join(rtp) or '{"", "", 0, 0, 0, 0, {0}, {0}, {0}, 0}') + '}', f'#define DM_GAME_NRT_POOL {len(rtp)}',
          '#define DM_GAME_RES_LEVELS {' + (', '.join(rlv) or '{"", 0, 0, 0, {{0, 0}}}') + '}', f'#define DM_GAME_NRES_LEVELS {len(rlv)}',
          *([f'#define DM_GAME_NVN_API_MAJOR {api.split(".")[0]}', f'#define DM_GAME_NVN_API_MINOR {api.split(".")[1]}'] if g.get('device_api', '') else []),   # without the key: by the SDK version (hle_nvn.c nvn_api)
          '']

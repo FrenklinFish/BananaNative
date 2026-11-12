@@ -2,7 +2,7 @@
 # and a profile without the key generates its header unchanged; romfs_check (a RomFS file line that tells a version's data apart) takes <path> <line> <expected | main>;
 # scene_arg (a 3D scene choice passed as game arguments) takes <name> <scale | -> <arguments> <label>;
 # the low-RAM keys (low_ram_place_part_mb, low_ram_img_cache_max_mb, low_ram_app_pool_mb: Android, devices of 12 GB or less) take MiB in their ranges and generate 0 when unset;
-# low_ram_app_pool_mb from 1024 MiB to below the profile's app_pool
+# low_ram_app_pool_mb from 1024 MiB to below the profile's app_pool; rt_pool (a render target pool's movz, loader.c) takes a checked word and needs render_cfg and a low-RAM key
 from pathlib import Path
 import os
 import subprocess
@@ -133,6 +133,76 @@ class RenderCfg(unittest.TestCase):   # render_cfg + render_quality (hle_render.
             rc, out = header(RC + RQ + row)
             self.assertNotEqual(rc, 0, k)
             self.assertIn(f': render_cfg and {k} are two levers for one setting: keep one', out, k)
+
+
+RP = 'rt_pool\t0123456789abcdef0123456789abcdef\tmain\t0x646f88\t52a7e009\t1008\t1536=1920x1080\t2048=2560x1440\tout_h=1440\n'
+LR = 'low_ram_place_part_mb\t256\n'
+
+
+class RtPool(unittest.TestCase):   # rt_pool (loader.c rt_pool_apply, rt_pool.h): the row, its word check and what it needs (render_cfg of the build, a low-RAM key)
+    def macros(self, rows):
+        with tempfile.TemporaryDirectory() as d:
+            Path(d, ID).mkdir()
+            (Path(d, ID) / 'game.tsv').write_text(TSV + rows)
+            r = subprocess.run([sys.executable, str(GAME), 'header', ID, str(Path(d, ID) / 'game.h')], env={**os.environ, 'DM_GAMES_DIR': d}, capture_output=True, text=True)
+            self.assertEqual(r.returncode, 0, r.stderr)
+            return [ln for ln in (Path(d, ID) / 'game.h').read_text().splitlines() if 'RT_POOL' in ln]
+
+    def test_row(self):
+        self.assertEqual(self.macros(RC + RQ + LR + RP), ['#define DM_GAME_RT_POOL {{"0123456789abcdef0123456789abcdef", "main", 0x646f88, 0x52a7e009u, 1008, 2, {1536, 2048}, '
+                                                          '{1920, 2560}, {1080, 1440}, 1440}}', '#define DM_GAME_NRT_POOL 1'])
+        self.assertEqual(self.macros(RC + RQ + LR + RP.replace('2048=', '4095=')).count('#define DM_GAME_NRT_POOL 1'), 1)
+        # one larger size, no out_h; four sizes; the same max_render twice
+        self.assertEqual(self.macros(RC + RQ + LR + RP.replace('\t2048=2560x1440\tout_h=1440', ''))[0],
+                         '#define DM_GAME_RT_POOL {{"0123456789abcdef0123456789abcdef", "main", 0x646f88, 0x52a7e009u, 1008, 1, {1536}, {1920}, {1080}, 0}}')
+        self.assertIn('1008, 4, {1100, 1536, 2048, 3000}, {1280, 1920, 2560, 2560}, {720, 1080, 1440, 1440}, 1440}}',
+                      self.macros(RC + RQ + LR + RP.replace('\t1536=', '\t1100=1280x720\t1536=').replace('\tout_h', '\t3000=2560x1440\tout_h'))[0])
+
+    def test_none(self):
+        self.assertEqual(self.macros(''), ['#define DM_GAME_RT_POOL {{"", "", 0, 0, 0, 0, {0}, {0}, {0}, 0}}', '#define DM_GAME_NRT_POOL 0'])
+
+    def test_rejected_rows(self):
+        bad = [RP.replace('52a7e009', '52a7e00'),             # not 8 hex
+               RP.replace('52a7e009', '52ac0009'),            # the word's immediate is not the game's own size
+               RP.replace('52a7e009', 'd2a7e009'),            # movz x: not the w form
+               RP.replace('52a7e009', '52807e09'),            # no lsl #16
+               RP.replace('\t1536=', '\t1008='),             # not larger
+               RP.replace('\t2048=', '\t1536='),             # not ascending
+               RP.replace('\t2048=', '\t4096='),             # past movz w, lsl #16
+               RP.replace('2560x1440', '1600x900'),             # a max_render smaller than the one before
+               RP.replace('\t1536=1920x1080\t2048=2560x1440', ''),   # no larger size
+               RP.replace('\tout_h=1440', '\t2100=2560x1440\t2200=2560x1440\t2300=2560x1440\tout_h=1440'),   # five
+               RP.replace('\tout_h=1440', '\tout_h=x'),
+               RP.replace('\tout_h=1440', '\tout_h=1440\tout_h=1080'),
+               RP.replace('\t2048=2560x1440\tout_h=1440', '\tout_h=1440\t2048=2560x1440'),   # out_h before a size
+               RP.replace('0x646f88', '0x646f8a'),            # not a word
+               RP.replace('0x646f88', '646f88'),
+               RP.replace('\tmain\t', '\tsdk\t'),             # not a module of the profile
+               RP.replace('1536=1920x1080', '1536=1920'),
+               RP.replace('1536=1920x1080', '1536'),
+               RP.replace('1536=1920x1080', 'max_render=1920x1080'),
+               RP.replace('0123456789abcdef', 'xyz', 1)]
+        for rows in bad:
+            rc, out = header(RC + RQ + LR + rows)
+            self.assertNotEqual(rc, 0, rows)
+            self.assertIn(': rt_pool takes <build ID (32 hex)> <module>', out, rows)
+
+    def test_needs(self):
+        rc, out = header(LR + RP)
+        self.assertNotEqual(rc, 0)
+        self.assertIn(': rt_pool needs a render_cfg row of the same main build', out)
+        rc, out = header(RC.replace('0123456789abcdef', 'fedcba9876543210', 1) + RQ + LR + RP)
+        self.assertNotEqual(rc, 0)
+        self.assertIn(': rt_pool needs a render_cfg row of the same main build', out)
+        rc, out = header(RC + RQ + LR + RP.replace('1536=1920x1080', '1536=1280x540'))
+        self.assertNotEqual(rc, 0)
+        self.assertIn(": rt_pool max_render must be at least render_cfg's 1280x720", out)
+        rc, out = header(RC + RQ + RP)
+        self.assertNotEqual(rc, 0)
+        self.assertIn(': rt_pool needs a low-RAM key', out)
+        rc, out = header(RC + RQ + LR + RP + RP)
+        self.assertNotEqual(rc, 0)
+        self.assertIn(': rt_pool: one row per build and module', out)
 
 
 class LowRam(unittest.TestCase):

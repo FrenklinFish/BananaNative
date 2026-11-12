@@ -2,6 +2,9 @@
 // (tests/t_render_cfg.c) checks every output, ratio and cap without a game
 #pragma once
 #include <stdint.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
 
 #define RCFG_MAX 8   // configurations per row (game.py checks the count)
 typedef struct {
@@ -15,8 +18,8 @@ typedef struct {
     unsigned min_h;                    // the smallest output height the launcher offers
 } rcfg_row_t;
 
-// Render scale in percent: 33 (exactly 1/3), 50, 59, 67 (exactly 2/3); 0 when another value
-static inline int rcfg_scale_ok(int pct) { return pct == 33 || pct == 50 || pct == 59 || pct == 67; }
+// Render scale in percent: 33 (exactly 1/3), 50, 59, 67 (exactly 2/3), 100 (the output: a ratio of 1, the upscaler only anti-aliases); 0 when another value
+static inline int rcfg_scale_ok(int pct) { return pct == 33 || pct == 50 || pct == 59 || pct == 67 || pct == 100; }
 
 // x * num / den rounded to the nearest even number (halves up), at least 2
 static inline unsigned rcfg_even(unsigned x, unsigned num, unsigned den) {
@@ -29,12 +32,13 @@ static inline unsigned rcfg_even_down(unsigned x, unsigned num, unsigned den) {
     return q < 2 ? 2 : (unsigned)q;
 }
 
-// The render size for an output and a scale: each side rounded to even, except 33 %, which is the output / 3 rounded down (the heights of 720, 1080, 1152 and 1440 divide by 3,
+// The render size for an output and a scale: each side rounded to even, except 100 %, which is the output as it is, and 33 %, which is the output / 3 rounded down (the heights of 720, 1080, 1152 and 1440 divide by 3,
 // so the ratio is exactly 3 and the game's DLSS call picks its 3x method; a width may be odd, as the game's own 853x480). Then capped at max_w x max_h (0: no cap): a larger size
 // is the output scaled by the largest factor that fits, rounded down to even, so the output's aspect is kept. Returns 1 when the cap changed it
 static inline int rcfg_render(unsigned ow, unsigned oh, int pct, unsigned max_w, unsigned max_h, unsigned *rw, unsigned *rh) {
     unsigned num = pct == 67 ? 2 : pct == 50 ? 1 : (unsigned)pct, den = pct == 67 ? 3 : pct == 50 ? 2 : 100;
-    if (pct == 33) { *rw = ow / 3; *rh = oh / 3; }
+    if (pct == 100) { *rw = ow; *rh = oh; }
+    else if (pct == 33) { *rw = ow / 3; *rh = oh / 3; }
     else { *rw = rcfg_even(ow, num, den); *rh = rcfg_even(oh, num, den); }
     if (!max_w || !max_h || (*rw <= max_w && *rh <= max_h)) return 0;
     if ((uint64_t)max_w * oh <= (uint64_t)max_h * ow) { *rw = rcfg_even_down(ow, max_w, ow); *rh = rcfg_even_down(oh, max_w, ow); }   // the width limits
@@ -53,3 +57,19 @@ static inline int rcfg_max_res(unsigned ow, unsigned oh, int quality_min) {
 
 // An output height as a size of the row's original aspect (720 → 1280x720 for a 16:9 original); width rounded to even
 static inline unsigned rcfg_width_of(const rcfg_row_t *r, unsigned h) { return rcfg_even(h, r->orig_w, r->orig_h); }
+
+// The setting a run starts with, from DM_WINDOW_SIZE (win; NULL or empty: def, the profile's android_window) and DM_RENDER_PCT (pct; NULL or empty: 50), read the same way by the
+// loader (the render target pool it picks, loader.c rt_pool_apply) and by hle_render.c (the sizes it writes, and the [RED] lines for what was wrong). Returns 0, or the bits: 1 the
+// size is not WxH or original (the row's original instead), 2 below the row's smallest output height (that height, at the value's aspect), 4 the percent is not one of
+// rcfg_scale_ok's (50 instead)
+static inline int rcfg_setting(const rcfg_row_t *r, const char *win, const char *def, const char *pct, unsigned *ow, unsigned *oh, int *p) {
+    int bad = 0; unsigned a = 0, b = 0; char x;
+    if (!win || !*win) win = def;
+    if (!strcmp(win, "original")) { a = r->orig_w; b = r->orig_h; }
+    else if (sscanf(win, "%ux%u%c", &a, &b, &x) != 2 || !a || !b || a > 7680 || b > 4320) { bad |= 1; a = r->orig_w; b = r->orig_h; }
+    else if (b < r->min_h) { bad |= 2; a = rcfg_even(r->min_h, a, b); b = r->min_h; }
+    *ow = a; *oh = b;
+    *p = pct && *pct ? atoi(pct) : 50;
+    if (!rcfg_scale_ok(*p)) { bad |= 4; *p = 50; }
+    return bad;
+}
