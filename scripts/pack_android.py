@@ -7,6 +7,8 @@
 #   shaders/v-<DMSH_VK_CHAIN>/dmsh_vk.lib, inputs.tsv   the game's shaders as SPIR-V for the Vulkan replay (dm/gfx/tools/vk_android_build.py; android/SHADERS.md), the library
 #                of this source tree's version: an up-to-date one in the shader cache is copied, else it is built from the Switch shader package
 #   build_src.sha256, rewrite_<module>.log
+#   scene_res/<preset>/<RomFS path>, scene_res.tsv   for a profile with scene_scale_palette rows: the game's dynamic resolution palette rewritten, one RomFS overlay folder per
+#                scene_scale row and per res_preset row with a floor or fixed scene (dm/tools/scene_res.py), which the launcher's Resolution passes as DM_ROMFS_OVERLAY; made from the dump's own RomFS
 # The RomFS is not in the pack (the app gives the host <game folder>/<romfs> as DM_ROMFS) and neither is anything else of the dump but the rewritten code.
 # The game may be a NUP file instead of a folder (android/NUP.md): its packages are read in place (pack_dump.scan, dm/tools/nup.py), the modules and the RomFS are
 # named `<name>.nup:update/<version>/...` (or `:base/...`), the DLC `<name>.nup:addon/<title ID>/romfs`, and pack.tsv's paths are relative to the folder holding the file.
@@ -456,6 +458,19 @@ def map_keys(path):
     with open(path) as f: return {c[3] for c in (l.rstrip('\n').split('\t') for l in f) if len(c) > 4 and c[0].endswith('.bin')}
 
 
+def selected_keys(profile_dir):
+    """The shaders the phone's shaders step builds for a profile with a selected set (shader_seen.tsv): its keys that the map has, sorted, each once, as
+    ShaderLibs.selection reads them (the map's column 4 of every row but comments and the header); None without a shader_seen.tsv (the whole map). vk_android_build.py
+    adds the pixel shaders paired with them. The profile's manifest (vk_delta.tsv) holds exactly that set (vk_android_delta.phone_keys), so a build of the whole map
+    reuses nothing outside it from an older library and translates every other shader (Pokopia: 123,000 of its 131,426, about 6 hours on a Mac, at each new version)"""
+    seen = Path(profile_dir) / 'shader_seen.tsv'
+    if not seen.is_file(): return None
+    import vk_android_delta
+    with open(Path(profile_dir) / 'shader_map.tsv', encoding='utf-8') as f:
+        keys = {c[3] for c in (l.rstrip('\n').split('\t', 4) for l in f if l.strip() and not l.startswith('#') and not l.startswith('package\t')) if len(c) > 3}
+    return vk_android_delta.selection(seen.read_text(encoding='utf-8'), keys)
+
+
 def split_shaders(a, g, vdir, pkg, parts=None):   # parts: the version's (romfs, exefs) when they are not vdir's own (pack_dump.version_part)
     """The Switch shader package from the dump, as the phone's split step makes it (the version's romfs and main, android/app PackService "split"): shader_split.py into
     <pkg> (written beside it, then renamed, so a stopped split leaves no half package). Its tables go beside the package. The library is the profile's (its shader_map.tsv
@@ -502,11 +517,21 @@ def pack_shaders(a, g, work, out, vdir, parts=None):
         print(f'shaders: building the Vulkan library {lib} from {pkg} with {py} (J={a.J}; about 10 minutes on DKB)', flush=True)
         (work / 'android-shaders' / 'work').mkdir(parents=True, exist_ok=True)
         env = child_env(DM_GAME=g.id, J=str(a.J), WORK=str(work / 'android-shaders' / 'work'))
+        keys = selected_keys(g.dir)   # a profile with a selected set (shader_seen.tsv): only its shaders, as the phone builds them (PackService, ShaderLibs.selection)
+        if keys is not None:
+            if not keys: raise Error(f'the profile\'s shader_seen.tsv names none of the shaders of its shader_map.tsv')
+            print(f'shaders: the profile selects {len(keys):,} shaders (shader_seen.tsv) and the pixel shaders paired with them, as the phone builds', flush=True)
         if absent := absent_optional(g, pkg):   # a registered build without some of the map's shaders (shader_optional.tsv): the library is built without them
             print(f'shaders: {len(absent)} of the profile\'s shaders are not in this build of the game (shader_optional.tsv); the library leaves them out '
                   '(the [RED] "not in the package" line below counts them)', flush=True)
             env['DMSH_VK_REQUIRE_ALL'] = '0'
-        r = subprocess.run([py, str(VK_BUILD_WIN if WINDOWS else VK_BUILD), '--target', 'vulkan', str(pkg), str(cache)], env=env)
+            if keys is not None: keys = [k for k in keys if k not in absent]
+        args = []
+        if keys:   # on Windows a file the wrapper reads (vk_android_win.py "@<file>"): thousands of keys pass a command line's 32,767 characters there
+            if WINDOWS:
+                kf = work / 'android-shaders' / 'keys.txt'; write_lf(kf, ''.join(k + '\n' for k in keys)); args = ['@' + str(kf)]
+            else: args = keys
+        r = subprocess.run([py, str(VK_BUILD_WIN if WINDOWS else VK_BUILD), '--target', 'vulkan', str(pkg), str(cache), *args], env=env)
         if r.returncode: raise Error(f'vk_android_build.py exit code {r.returncode} (a package that lacks the profile\'s shaders stops it: delete {pkg} and the split runs again)')
         if not library_current(lib, g): raise Error(f'vk_android_build.py finished but {lib} is not a full library of {g.id} with the current inputs')
     else: print(f'shaders: {lib} is current (game {g.id}, inputs {dmsh_chain.inputs(g)})')
@@ -525,6 +550,31 @@ def pack_shaders(a, g, work, out, vdir, parts=None):
     if others:   # kept: another APK (the test and the play app, an older build) may load one of them from this pack; delete by hand to save the space
         print(f'shaders: kept the libraries of other versions in {out / "shaders"}: {", ".join(others)} (about 350 MB each)')
     return dst / VK_LIB
+
+
+def scene_overlays(g, romfs, out):
+    """The Scene resolution overlays (dm/tools/scene_res.py) of a profile with scene_scale_palette rows, from this RomFS into <out>/scene_res/<preset>/: [(preset, folder in the
+    pack)]. A palette that is not the profile's (another build) or a failed check is a [RED] line and no overlay: the pack is made all the same, the launcher's Scene resolution
+    then offers nothing. Folders of presets the profile no longer has are removed"""
+    d = out / 'scene_res'
+    if not g.values('scene_scale_palette'):
+        shutil.rmtree(d, ignore_errors=True); return []
+    stage('writing the scene resolution overlays')
+    sys.path.insert(0, str(REPO / 'dm/tools'))
+    import scene_res
+    try:
+        names = {p[0] for p in scene_res.presets(g)}
+        if d.is_dir():
+            for f in d.iterdir():
+                if f.is_dir() and f.name not in names: shutil.rmtree(f)
+        made = scene_res.make(str(romfs), d, g)
+    except (scene_res.Error, scene_res.nup.Error, OSError) as e:
+        print(f'[RED] scene resolution overlays not made: {e}', flush=True)
+        shutil.rmtree(d, ignore_errors=True); return []
+    except Exception as e:   # anything else: the option is optional, the pack is made all the same (scene_res turns what it knows into Error; this is the last guard)
+        print(f'[RED] scene resolution overlays not made: {type(e).__name__}: {e}', flush=True)
+        shutil.rmtree(d, ignore_errors=True); return []
+    return [(m[0], f'scene_res/{m[0]}') for m in made]
 
 
 def commit():   # the packer's commit; DM_PACKER_COMMIT when the repository's tool has none (the phone: no git there, the app passes the commit it was built from)
@@ -598,12 +648,13 @@ def main():
         if a.keep_code: upgrade_keys(srcs, out, g)   # before the copy below replaces the game.tsv an earlier key was made with (a rewrite run did it in rewrite)
         shutil.copyfile(g.dir / 'game.tsv', out / 'game.tsv')
         shaders = None if a.no_shaders else pack_shaders(a, g, folder.parent / f'{app:016X}-work', out, vdir, (romfs, exe))
+        scenes = scene_overlays(g, romfs, out)
         top = folder.parent if pack_dump.nup.is_nup(folder) else folder   # a NUP file's paths are `<name>.nup:<package>/...`, relative to its folder
         rel = lambda p: p.relative_to(top).as_posix()
         rows = [('format', str(FORMAT)), ('title_id', f'{app:016X}'), ('name', g.get('name', '')), ('version', str(ver)), ('target', 'android'),
                 ('modules', ' '.join(mods)), *[('build', f'{m}={ids[m]}') for m in mods], ('romfs', rel(romfs)),
                 *[('aoc', f'{tid - app - 0x1000}\t{rel(p)}') for tid, p in sorted(dlc.items())],
-                *([('shaders', shaders.relative_to(out).as_posix())] if shaders else []), ('packer', commit()), *([('made_by', a.made_by)] if a.made_by else [])]
+                *([('shaders', shaders.relative_to(out).as_posix())] if shaders else []), *[('scene_res', f'{n}\t{p}') for n, p in scenes], ('packer', commit()), *([('made_by', a.made_by)] if a.made_by else [])]
         stage('writing the pack\'s list of files')
         tmp = out / 'pack.tsv.partial'
         write_lf(tmp, ''.join(f'{k}\t{v}\n' for k, v in rows)); os.replace(tmp, out / 'pack.tsv')

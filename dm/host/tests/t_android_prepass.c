@@ -34,6 +34,16 @@ int main(void) {
     CHECK(vkpp_prepass(&q, scene, 2) && vkpp_prepass(&q, layer1, 2) && !vkpp_prepass(&q, shadow, 2), "two depth images the colour draws tested against: both cut, the shadow not");
     CHECK(!vkpp_prepass(&q, 0, 2), "no depth target: drawn as asked");
 
+    // which cut prepass draws are still run with rasterizer discard (prepass_side): those whose shaders write guest memory. Ocarina of Time's 65a079a285d693a0 has a
+    // storage buffer it adds into (binding 7, RW); d98076e4148db34f only reads its uniform and storage buffers
+    dmsh_vk_bind rd[3] = {{.binding = 0, .kind = DMSH_VK_KIND_CBUF}, {.binding = 4, .kind = DMSH_VK_KIND_SBUF}, {.binding = 5, .kind = DMSH_VK_KIND_CBUF}};
+    dmsh_vk_bind wr[3] = {{.binding = 0, .kind = DMSH_VK_KIND_CBUF}, {.binding = 7, .kind = DMSH_VK_KIND_SBUF, .flags = DMSH_VK_BF_RW}, {.binding = 5, .kind = DMSH_VK_KIND_CBUF}};
+    dmsh_vk_bind img[1] = {{.binding = 9, .kind = DMSH_VK_KIND_IMG, .flags = DMSH_VK_BF_ATOMIC}};
+    dmsh_vk_bind unk[1] = {{.binding = 9, .kind = DMSH_VK_KIND_SBUF, .flags = DMSH_VK_BF_NOSLOT}};
+    CHECK(!vkpp_binds_write(rd, 3) && !vkpp_binds_write(NULL, 0), "a shader that only reads writes nothing: its cut prepass is not run");
+    CHECK(vkpp_binds_write(wr, 3), "a storage buffer it writes: run with rasterizer discard");
+    CHECK(vkpp_binds_write(img, 1) && vkpp_binds_write(unk, 1), "image atomics, or a slot not decoded: counted as writes");
+
     if (g_fail) { printf("t_android_prepass: %d FAILED\n", g_fail); return 1; }
     printf("PASS: mesh_prepass_cut depth-image rule (vka_prepass.h): by shape, a depth texture renewed each frame still matches, a shadow image does not\n");
     return 0;

@@ -6,6 +6,7 @@
 // each module (GL depth 0) is written there as <key>.in.spv (folded) and <key>.cs.spv / .vs.spv / .flat.spv, for a look with spirv-dis or an interpreter
 #include "../../gfx/vk_android/vka_memu_spv.h"
 #include "../../gfx/vk_android/vka_memu_abi.h"
+#include "../../gfx/vk_android/vka_memu_order.h"
 #include "../../gfx/vk_android/vka_spvpatch.h"
 #include "../../gfx/vk_android/vka_shlib.h"
 #include "memu/memu_fixtures.h"
@@ -66,8 +67,44 @@ static int convert(const uint32_t *w, size_t nw, int gl, const char *tag, vka_me
     return ok;
 }
 
+// A batch's entries matched to the draws replayed (vka_memu_order.h): a record met twice in one look-ahead (one command list called for the depth prepass, then for
+// the colour pass, another program bound between) has an entry per meeting, taken in order; the old lookup (the record's first entry) gave the second meeting the first's
+static void t_order(void) {
+    static const char rec[4] = {0};   // three draw records: a, b, c
+    const void *a = &rec[0], *b = &rec[1], *c = &rec[2];
+    vka_memu_order o; vka_memu_order_reset(&o);
+    // the look-ahead met a, b (the prepass), then a, b again (the colour pass), then c
+    CHECK(vka_memu_order_add(&o, a) == 0 && vka_memu_order_add(&o, b) == 1 && vka_memu_order_add(&o, a) == 2 && vka_memu_order_add(&o, b) == 3 && vka_memu_order_add(&o, c) == 4, "entries in walk order");
+    CHECK(vka_memu_order_find(&o, a) == 0 && vka_memu_order_find(&o, a) == 0, "find does not take");
+    CHECK(vka_memu_order_take(&o, a) == 0 && vka_memu_order_take(&o, b) == 1, "prepass meetings: entries 0, 1");
+    CHECK(vka_memu_order_find(&o, a) == 2, "after the prepass, record a still has an entry (the colour pass's)");
+    CHECK(vka_memu_order_take(&o, a) == 2 && vka_memu_order_take(&o, b) == 3, "colour pass meetings: entries 2, 3, not the prepass's 0, 1");
+    CHECK(vka_memu_order_take(&o, a) == -1 && o.next == 4 && vka_memu_order_find(&o, b) == -1, "a third meeting of a has no entry (the replay looks ahead again), the cursor unchanged");
+    CHECK(vka_memu_order_take(&o, c) == 4 && o.next == 5, "c");
+    // a draw the replay does not meet (a render condition skipped it) is passed over
+    vka_memu_order_reset(&o); vka_memu_order_add(&o, a); vka_memu_order_add(&o, b); vka_memu_order_add(&o, c);
+    CHECK(vka_memu_order_take(&o, b) == 1 && vka_memu_order_find(&o, a) == -1 && vka_memu_order_take(&o, c) == 2, "an entry not met is passed over");
+    // full
+    vka_memu_order_reset(&o); for (int i = 0; i < VKA_MEMU_ORDER_MAX; i++) vka_memu_order_add(&o, a);
+    CHECK(vka_memu_order_add(&o, b) == -1 && o.n == VKA_MEMU_ORDER_MAX, "a full batch takes no more");
+}
+
+// A generated vertex shader against a pixel shader (vka_memu_vs_feeds' parts): the locations each writes and reads. Every pixel shader input must be a vertex output
+// (Vulkan; Qualcomm refuses the pipeline with -13), so the prewarm list drops a record of a pair that leaves one unwritten
+static void t_feeds(void) {
+    char err[256]; vka_memu_layout L; uint64_t in = 1;
+    CHECK(vka_memu_fs_input_locs(MEMU_FS_PRIM, sizeof MEMU_FS_PRIM / 4, &in) && in == 0x3, "pixel shader inputs at locations 0 and 1 (%#llx)", (unsigned long long)in);
+    CHECK(vka_memu_layout_of(MEMU_MESH_TRI, sizeof MEMU_MESH_TRI / 4, &L, err, sizeof err) && vka_memu_vs_locs(&L) == 0x5, "triangle mesh writes 0 and 2");
+    CHECK(in & ~vka_memu_vs_locs(&L), "triangle mesh leaves location 1 unwritten");
+    CHECK(vka_memu_layout_of(MEMU_MESH_PTS, sizeof MEMU_MESH_PTS / 4, &L, err, sizeof err) && vka_memu_vs_locs(&L) == 0x2, "points mesh writes location 1 (per primitive)");
+    CHECK(!vka_memu_fs_input_locs(MEMU_MESH_TRI, 3, &in), "not SPIR-V: cannot tell");
+    CHECK(vka_memu_fs_input_locs(MEMU_MESH_TRI, sizeof MEMU_MESH_TRI / 4, &in) && in == 0, "a mesh module has no user inputs");
+}
+
 int main(void) {
     g_val = system("spirv-val --version >/dev/null 2>&1") == 0;
+    t_order();
+    t_feeds();
     char err[256]; vka_memu_layout L; size_t on;
     // The layouts
     CHECK(vka_memu_layout_of(MEMU_MESH_TRI, sizeof MEMU_MESH_TRI / 4, &L, err, sizeof err), "triangle mesh layout (%s)", err);

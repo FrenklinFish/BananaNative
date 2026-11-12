@@ -168,8 +168,9 @@ void vka_img_barrier(VkCommandBuffer cb, VkImage img, VkImageAspectFlags aspect,
 
 // ---------- Images by serial ----------
 typedef struct view_ent { struct view_ent *next; VkImageView v; VkFormat f; VkImageViewType t; VkImageAspectFlags asp; uint32_t l0, nl, a0, na; VkComponentMapping swz; } view_ent;
-typedef struct { uint64_t serial; vka_img *im; } smap_ent;   // serial 0 = empty, im NULL with a serial = a texture that has no image (format refused)
-static smap_ent *g_map; static size_t g_mapcap, g_mapn;
+#define VKA_SMAP_IM vka_img
+#include "vka_smap.h"
+static vksm g_smap;   // (under g_tmu) texture serial -> image; the entry's im NULL = a texture that has no image (format refused)
 static vka_img **g_live; static int g_nlive, g_livecap; static uint64_t g_live_gen;   // g_live_gen: raised when an image joins or leaves g_live (vka_tex_prepare's sorted list)
 // Live images (2026-11-10): the list (g_live), each image's place in it and chains by storage address (vka_livemap.h). A new texture looked for an image of its storage and
 // shape (vka_tex_get, same_shape) and for a GPU-written image over its storage (gpu_image_over) by walking every live image, and an image that went was looked for in the list
@@ -182,7 +183,7 @@ static void live_add(vka_img *im) { if (vkl_add(&g_live, &g_nlive, &g_livecap, &
 static void live_del(vka_img *im) { if (vkl_del(g_live, &g_nlive, &g_lvx, im)) g_live_gen++; }                // caller holds g_tmu; nothing when im is not live
 static vka_img *live_first(const uint8_t *mem, int *k) { return vkl_first(g_live, g_nlive, &g_lvx, mem, k); }   // the live images whose storage starts at mem: the first, then live_next
 static vka_img *live_next(const vka_img *im, const uint8_t *mem, int *k) { return vkl_next(g_live, g_nlive, &g_lvx, im, mem, k); }
-static uint64_t *g_cpuw; static size_t g_cpuwcap, g_cpuwn;   // serials the CPU wrote before their image existed (a set, open addressing)
+static vksm g_cpuw;   // (under g_tmu) serials the CPU wrote before their image existed (a set: vksm with no images)
 static pthread_mutex_t g_tmu = PTHREAD_MUTEX_INITIALIZER;
 static uint64_t g_img_bytes;
 static vksoft_set g_soft_hard; static uint64_t g_soft_n, g_soft_bytes, g_soft_made, g_soft_whole;   // (under g_tmu) soft textures ("Soft textures" below): live, the storage bytes left out, made, made whole
@@ -210,47 +211,14 @@ void vka_tex_alias_stats(char *b, size_t n) {
     snprintf(b, n, "images not GPU-written: cleared %.0f MB (%d, %.0f MB would fit their storage), filled once %.0f MB (%d, %.0f MB fit), tracked %.0f MB (%d, %.0f MB fit); GPU-written %.0f MB",
              by[0][0] / 1e6, cnt[0], by[0][1] / 1e6, by[1][0] / 1e6, cnt[1], by[1][1] / 1e6, by[2][0] / 1e6, cnt[2], by[2][1] / 1e6, gw / 1e6);
 }
-static size_t hslot(uint64_t s, size_t cap) { return (size_t)((s * 0x9E3779B97F4A7C15ull) >> 20) & (cap - 1); }
-static smap_ent *map_get(uint64_t s) { if (!g_mapcap) return NULL; for (size_t i = hslot(s, g_mapcap);; i = (i + 1) & (g_mapcap - 1)) { if (g_map[i].serial == s) return &g_map[i]; if (!g_map[i].serial) return NULL; } }
 static _Atomic uint32_t g_tgen, *g_tver, *g_sver;   // the recording thread's view memo: see unref_locked
-static void map_put(uint64_t s, vka_img *im);
-static void map_grow(void) {
-    size_t oc = g_mapcap; smap_ent *om = g_map;
-    g_mapcap = oc ? oc * 2 : 1024; g_map = calloc(g_mapcap, sizeof *g_map); g_mapn = 0;
-    for (size_t i = 0; i < oc; i++) if (om[i].serial && om[i].serial != ~0ull) map_put(om[i].serial, om[i].im);
-    free(om);
-}
-static void map_put(uint64_t s, vka_img *im) {
-    if ((g_mapn + 1) * 2 > g_mapcap) map_grow();
-    size_t i = hslot(s, g_mapcap);
-    while (g_map[i].serial && g_map[i].serial != ~0ull && g_map[i].serial != s) i = (i + 1) & (g_mapcap - 1);
-    if (g_map[i].serial != s) g_mapn++;
-    g_map[i] = (smap_ent){s, im};
-}
-static void map_del(uint64_t s) { smap_ent *e = map_get(s); if (e) { e->serial = ~0ull; e->im = NULL; atomic_fetch_add_explicit(&g_tgen, 1, memory_order_release); } }   // a tombstone (never a valid serial)
-static void map_del_im(vka_img *im) {
-    if (!g_mapcap || !im) return;
-    int del = 0;
-    for (size_t i = 0; i < g_mapcap; i++) {
-        if (g_map[i].serial && g_map[i].serial != ~0ull && g_map[i].im == im) {
-            g_map[i].serial = ~0ull;
-            g_map[i].im = NULL;
-            del = 1;
-        }
-    }
-    if (del) atomic_fetch_add_explicit(&g_tgen, 1, memory_order_release);
-}
+static smap_ent *map_get(uint64_t s) { return vksm_get(&g_smap, s); }
+static void map_put(uint64_t s, vka_img *im) { vksm_put(&g_smap, s, im); }   // (no memory for a new key: the texture has no entry, so its next lookup makes its image again; the old image goes when its refs do)
+static void map_del(uint64_t s) { if (vksm_del(&g_smap, s)) atomic_fetch_add_explicit(&g_tgen, 1, memory_order_release); }   // a tombstone (never a valid serial)
+static void map_del_im(vka_img *im) { if (im && vksm_del_im(&g_smap, im)) atomic_fetch_add_explicit(&g_tgen, 1, memory_order_release); }
 static int cpuw_take(uint64_t s, int add) {   // add: insert; else: remove and say whether it was there
-    if (add && (g_cpuwn + 1) * 2 > g_cpuwcap) {
-        size_t oc = g_cpuwcap; uint64_t *o = g_cpuw; g_cpuwcap = oc ? oc * 2 : 256; g_cpuw = calloc(g_cpuwcap, 8); g_cpuwn = 0;
-        for (size_t i = 0; i < oc; i++) if (o[i] && o[i] != ~0ull) cpuw_take(o[i], 1);
-        free(o);
-    }
-    if (!g_cpuwcap) return 0;
-    for (size_t i = hslot(s, g_cpuwcap);; i = (i + 1) & (g_cpuwcap - 1)) {
-        if (g_cpuw[i] == s) { if (!add) g_cpuw[i] = ~0ull; return 1; }
-        if (!g_cpuw[i]) { if (add) { g_cpuw[i] = s; g_cpuwn++; } return 0; }
-    }
+    if (add) { vksm_put(&g_cpuw, s, NULL); return 0; }
+    return vksm_del(&g_cpuw, s);
 }
 
 static void img_destroy(void *arg) {
@@ -3137,7 +3105,7 @@ int vka_cap_sreg(int id, samp_par *p, int *n) {
 }
 int vka_cap_cpuw(uint64_t serial) {
     pthread_mutex_lock(&g_tmu);
-    int r = 0; if (g_cpuwcap) for (size_t i = hslot(serial, g_cpuwcap);; i = (i + 1) & (g_cpuwcap - 1)) { if (g_cpuw[i] == serial) { r = 1; break; } if (!g_cpuw[i]) break; }
+    int r = vksm_get(&g_cpuw, serial) != NULL;
     pthread_mutex_unlock(&g_tmu);
     return r;
 }

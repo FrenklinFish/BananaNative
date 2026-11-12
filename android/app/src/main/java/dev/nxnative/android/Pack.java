@@ -25,6 +25,7 @@ final class Pack {
     final List<String> builds;   // "main=<build ID>" rows: the NSO builds the code was rewritten from (PackCheck.build)
     final String packer;   // the commit of the tools that made it ("" when not recorded)
     final String madeBy;   // its made_by row: "app <version>" when this app's pack step made it, "" for a pack from other tools (or from before the row)
+    final Map<String, String> scenes = new LinkedHashMap<>();   // its scene_res rows: Scene resolution preset → its RomFS overlay folder in the pack (SceneRes; none from older packs)
 
     private Pack(File dir, Map<String, List<String>> rows) throws IOException {
         this.dir = dir;
@@ -50,6 +51,10 @@ final class Pack {
         packer = pk == null || pk.isEmpty() ? "" : pk.get(0);
         List<String> mb = rows.get("made_by");
         madeBy = mb == null || mb.isEmpty() ? "" : mb.get(0);
+        for (String v : rows.getOrDefault("scene_res", List.of())) {
+            String[] c = v.split("\t", 2);
+            if (c.length == 2) scenes.put(c[0], c[1]);
+        }
     }
 
     /** Whether this app made the pack (its made_by row), so its code can be updated without asking when only the tools changed */

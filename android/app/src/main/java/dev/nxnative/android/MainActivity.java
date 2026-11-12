@@ -51,6 +51,7 @@ public final class MainActivity extends Activity {
     private BananaBackgroundView bananas;   // the drifting bananas behind the screen
     private Ui.Setting overlayRow, resRow, capRow, upsRow, sharpRow, drsRow, lsfgRow, gpuRow, updateRow;
     private boolean resumed, settingsPage;
+    private Game settingsGame;   // the game whose settings page shows (GameSettings), else null
     private boolean merged;   // the list's duplicates were merged (Game.collapse) since this activity started
     private File pendingGame;   // a game folder (or .nup) waiting for its pack folder
     private String pendingId;
@@ -59,48 +60,89 @@ public final class MainActivity extends Activity {
     @Override protected void onCreate(Bundle saved) {
         super.onCreate(saved);
         if (saved != null) settingsPage = saved.getBoolean("settings");
+        if (saved != null && saved.getString("game_settings") != null)   // a fold or unfold makes the activity again: the game's settings page stays open
+            for (Game g : Game.load(this)) if (g.gameDir.equals(saved.getString("game_settings"))) { settingsGame = g; break; }
         FrameLayout frame = new FrameLayout(this);
         bananas = new BananaBackgroundView(this);
         frame.addView(bananas, new FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
         setContentView(frame);
         build();
         if (saved == null) { setIntent(gated(getIntent())); fromIntent(getIntent()); }   // start() reads no_pause from getIntent() too
+        GpuGl.probe(this, () -> { if (!isFinishing() && settingsGame != null) gameSettingsAgain(); });   // the GPU's name and, before any readiness check, the system driver's facts for the recommendations
         Updater.onStart(this);   // the release app: a newer release on GitHub opens the update popup (once per process start: not on a resume or a rotation)
     }
 
     @Override protected void onSaveInstanceState(Bundle out) {
         super.onSaveInstanceState(out);
         out.putBoolean("settings", settingsPage);
+        if (settingsGame != null) out.putString("game_settings", settingsGame.gameDir);
     }
 
     /** Rotation, a window resize: the same page again */
     @Override public void onConfigurationChanged(Configuration c) {
         super.onConfigurationChanged(c);
+        int y = settingsGame != null ? scrollY() : 0;
         build();
-        if (resumed) { onResumeViews(); if (!settingsPage) Ondevice.resume(this); }
+        if (settingsGame != null) scrollTo(y);
+        if (resumed) { onResumeViews(); if (onHome()) Ondevice.resume(this); }
     }
+
+    /** Home shows (not Settings, not a game's settings page) */
+    private boolean onHome() { return !settingsPage && settingsGame == null; }
 
     /** Home ↔ Settings */
     private void page(boolean settings) {
-        if (settingsPage == settings) return;
+        if (settingsPage == settings && settingsGame == null) return;
         settingsPage = settings;
+        settingsGame = null;
         if (settings) Ondevice.pause(this);   // its card is on Home only: no updates while Settings shows
         build();
         if (resumed) { onResumeViews(); if (!settings) Ondevice.resume(this); }
     }
 
+    /** A game's settings page (its ⋯ › Game settings, GameSettings): a full page in place of Home; Back returns to Home */
+    void gameSettings(Game g) {
+        settingsGame = g;
+        settingsPage = false;
+        Ondevice.pause(this);
+        build();
+        if (resumed) onResumeViews();
+    }
+
+    /** The game's settings page again after a choice changed its rows, scrolled where it was */
+    private void gameSettingsAgain() {
+        if (settingsGame == null) return;
+        int y = scrollY();
+        build();
+        scrollTo(y);
+    }
+
+    /** The game's page at its top (another tab) */
+    void gameSettingsTop() { if (settingsGame != null) build(); }
+
+    /** The page's ScrollView (Ui.page: the first view above the bananas) */
+    private android.widget.ScrollView pageScroll() {
+        FrameLayout frame = (FrameLayout) bananas.getParent();
+        return frame.getChildCount() > 1 && frame.getChildAt(1) instanceof android.widget.ScrollView ? (android.widget.ScrollView) frame.getChildAt(1) : null;
+    }
+    private int scrollY() { android.widget.ScrollView s = pageScroll(); return s == null ? 0 : s.getScrollY(); }
+    private void scrollTo(int y) { android.widget.ScrollView s = pageScroll(); if (s != null && y > 0) s.post(() -> s.scrollTo(0, y)); }
+
     @SuppressWarnings("deprecation")
     @Override public void onBackPressed() {
-        if (settingsPage) page(false);
+        if (settingsPage || settingsGame != null) page(false);
         else super.onBackPressed();
     }
 
-    /** (Re)builds the current page above the bananas (Ui.page: the same gutter, width and header spacing as every screen) */
+    /** (Re)builds the current page above the bananas (Ui.page: the same gutter, width and header spacing as every screen; a game's settings page wider on a wide window, for its rail) */
     private void build() {
         FrameLayout frame = (FrameLayout) bananas.getParent();
         while (frame.getChildCount() > 1) frame.removeViewAt(1);
-        LinearLayout content = Ui.page(this, frame, 640);
-        if (settingsPage) buildSettings(content);
+        boolean wide = getResources().getConfiguration().screenWidthDp >= 600;
+        LinearLayout content = Ui.page(this, frame, settingsGame != null && wide ? 1040 : 640);
+        if (settingsGame != null) for (Game x : Game.load(this)) if (x.gameDir.equals(settingsGame.gameDir)) { settingsGame = x; break; }   // its folders as they are now (Folders, Import pack)
+        if (settingsGame != null) { accessCard = null; gameBox = null; overlayRow = null; GameSettings.build(this, content, settingsGame, this::gameSettingsAgain, () -> page(false)); }
+        else if (settingsPage) buildSettings(content);
         else buildHome(content);
     }
 
@@ -281,7 +323,7 @@ public final class MainActivity extends Activity {
      *  the pickers (android/TESTING.md); --es add_game <folder or .nup> takes Add game's own path instead (gamePicked: all of a folder's games added, Prepare asked); save is the save folder Folders would pick for it (test runs of a play or release app keep away from the user's saves/<id>) */
     private void fromIntent(Intent i) {
         i = gated(i);
-        if (settingsPage && (i.hasExtra("game") || i.hasExtra("add_game") || i.hasExtra("ondevice_dump") || i.hasExtra("ondevice_pause"))) page(false);   // these act on Home's cards
+        if ((settingsPage || settingsGame != null) && (i.hasExtra("game") || i.hasExtra("add_game") || i.hasExtra("ondevice_dump") || i.hasExtra("ondevice_pause"))) page(false);   // these act on Home's cards
         Ondevice.fromIntent(this, i);   // --es ondevice_dump <dump folder> [--ez ondevice_start true] (Ondevice)
         GpuDriver.fromIntent(this, i);   // --es gpu_driver_zip <zip> / --es gpu_driver <name | system>
         PackUi.fromIntent(this, i);   // test app: --es pack_title <id> --es pack_export <folder> | --es pack_import <zip or folder>
@@ -318,7 +360,7 @@ public final class MainActivity extends Activity {
 
     /** A game a frontend sent that needs the user (FrontendLaunch.ready): its card's Play says what is missing and offers the fix; a new game takes the steps of a picked one */
     private void fromFrontend(File game) {
-        if (settingsPage) page(false);
+        if (!onHome()) page(false);
         refresh();   // FrontendLaunch may have added its card
         if (needAccess(game)) return;
         for (Game g : games) if (GameList.samePath(g.gameDir, game.getPath())) { launch(g); return; }
@@ -669,45 +711,53 @@ public final class MainActivity extends Activity {
     /** The game's Manage sheet, also from its progress card's ⋯ while it is being prepared (Ondevice) */
     void manageGame(Game g) { manage(g); }
 
+    /** A game's page (⋯ on its card, or a long press; GameSettings): its settings, saves and storage under tabs, Play in its header */
+    private void manage(Game g) { GameSettings.open(this, g); }
+
     /**
-     * A game's Manage sheet (⋯ on its card, or a long press): a list of actions (its folders, its settings, its log, its saves, Prepare again for a dump), its facts
-     * (title ID, folders) below, and, apart at the bottom, Remove from the list (asked first; it deletes nothing on the storage). Play never sits next to it.
+     * A game's page, its Saves tab (save backups in &lt;Switch2&gt;/save-backups/&lt;id&gt;/, verified; a restore backs up the current save first: SaveUi, SaveStore) or its
+     * Storage tab: Prepare again from a dump, the pack as one .zip out and in (PackUi, PackZip: an import goes into the app's packs/&lt;id&gt; and is checked before
+     * it replaces anything), its folders, the home screen shortcut, its log, its facts (title ID, folders) under a closed Details, and Remove from list apart at the
+     * bottom (asked first; it deletes nothing on the storage). An action that works on Home's card (Prepare, Remove) goes back to Home first
      */
-    private void manage(Game g) {
-        LinearLayout box = new LinearLayout(this);
-        box.setOrientation(LinearLayout.VERTICAL);
-        File save = Folders.save(this, g);
-        String lp = Pack.libraryProblem(new File(g.packDir), g.titleId);
+    void gameTab(LinearLayout content, Game g, boolean savesTab) {
         String noProfile = Profile.missing(g.titleId, g.name);
-        AlertDialog[] d = new AlertDialog[1];
-        if (noProfile != null) Ui.add(box, Ui.small(this, noProfile), 0);
-        // Saves: backups in <Switch2>/save-backups/<id>/, verified; a restore backs up the current save first (SaveUi, SaveStore)
-        if (noProfile == null) Ui.add(box, new Ui.Setting(this, "⚙️", "Game settings", v -> { d[0].dismiss(); GameSettings.dialog(this, g); }).chevron(this).view, 0);
-        if (noProfile == null && Shortcuts.supported(this))
-            Ui.add(box, new Ui.Setting(this, "🏠", "Add to home screen", v -> { d[0].dismiss(); Shortcuts.pin(this, g); }).value("A shortcut that starts this game").chevron(this).view, 0);
-        Ui.add(box, new Ui.Setting(this, "📁", "Folders", v -> { d[0].dismiss(); Folders.dialog(this, g); }).chevron(this).view, 0);
-        Ui.add(box, new Ui.Setting(this, "💾", "Back up saves", v -> { d[0].dismiss(); SaveUi.backup(this, g); }).value(SaveUi.backupLine(this, g)).chevron(this).view, 0);
-        Ui.add(box, new Ui.Setting(this, "↩️", "Restore saves", v -> { d[0].dismiss(); SaveUi.restoreList(this, g); }).chevron(this).view, 0);
-        Ui.add(box, new Ui.Setting(this, "📥", "Import save", v -> { d[0].dismiss(); SaveUi.importPick(this, g); }).chevron(this).view, 0);
+        if (savesTab) {
+            LinearLayout saves = Ui.add(content, Ui.listCard(this), 16);
+            saves.addView(new Ui.Setting(this, "💾", "Back up saves", v -> SaveUi.backup(this, g)).value(SaveUi.backupLine(this, g)).chevron(this).view);
+            saves.addView(new Ui.Setting(this, "♻️", "Restore saves", v -> SaveUi.restoreList(this, g)).value("From a backup; the current save is backed up first").chevron(this).view);
+            saves.addView(new Ui.Setting(this, "📥", "Import save", v -> SaveUi.importPick(this, g)).value("A .zip or a save folder").chevron(this).view);
+            File save = Folders.save(this, g);
+            TextView where = Ui.add(content, Ui.small(this, "The save: " + (save != null ? save.getPath() : "not set")), 6);
+            where.setTextSize(12);
+            where.setTextIsSelectable(true);
+            where.setPadding(dp(4), 0, dp(4), 0);
+            return;
+        }
+        Ui.add(content, Ui.section(this, "Pack"), 16);
+        LinearLayout pack = Ui.add(content, Ui.listCard(this), 6);
         if (Ondevice.isDump(new File(g.gameDir)) && noProfile == null)
-            Ui.add(box, new Ui.Setting(this, "🔁", "Prepare again", v -> { d[0].dismiss(); Ondevice.prepare(this, new File(g.gameDir), true); }).value("Remakes what does not fit").chevron(this).view, 0);
-        // The pack as one .zip, out and in (PackUi, PackZip): an import goes into the app's packs/<id> and is checked before it replaces anything
-        Ui.add(box, new Ui.Setting(this, "📦", "Export pack…", v -> { d[0].dismiss(); PackUi.exportPick(this, g); }).value("One .zip, into a folder you pick").chevron(this).view, 0);
-        if (noProfile == null)
-            Ui.add(box, new Ui.Setting(this, "📲", "Import pack…", v -> { d[0].dismiss(); PackUi.importPick(this, g); }).value("A .zip or a pack folder").chevron(this).view, 0);
+            pack.addView(new Ui.Setting(this, "🔁", "Prepare again", v -> { page(false); Ondevice.prepare(this, new File(g.gameDir), true); }).value("Remakes what does not fit").chevron(this).view);
         if (Ondevice.shows(g))   // its card is the progress card: the job's own Manage (Forget, the deletes)
-            Ui.add(box, new Ui.Setting(this, "⏳", "Preparing", v -> { d[0].dismiss(); Ondevice.manageJob(this); }).value("Forget the job or delete its working files").chevron(this).view, 0);
-        Ui.add(box, new Ui.Setting(this, "📨", "Share log", v -> { d[0].dismiss(); shareLog(g.titleId); }).chevron(this).view, 0);
-        TextView info = Ui.small(this, "Title ID: " + g.titleId + "\nGame: " + (PickedNup.is(this, g.gameDir) ? new File(g.gameDir).getName() + " (.nup used where it is, picked with the file picker)"
+            pack.addView(new Ui.Setting(this, "⏳", "Preparing", v -> { page(false); Ondevice.manageJob(this); }).value("Forget the job or delete its files").chevron(this).view);
+        pack.addView(new Ui.Setting(this, "📦", "Export pack…", v -> PackUi.exportPick(this, g)).value("One .zip, into a folder you pick").chevron(this).view);
+        if (noProfile == null)
+            pack.addView(new Ui.Setting(this, "📲", "Import pack…", v -> PackUi.importPick(this, g)).value("A .zip or a pack folder").chevron(this).view);
+        pack.addView(new Ui.Setting(this, "📁", "Folders", v -> Folders.dialog(this, g)).value("Game, pack and save folders").chevron(this).view);
+        Ui.add(content, Ui.section(this, "More"), 16);
+        LinearLayout more = Ui.add(content, Ui.listCard(this), 6);
+        if (noProfile == null && Shortcuts.supported(this))
+            more.addView(new Ui.Setting(this, "🏠", "Add to home screen", v -> Shortcuts.pin(this, g)).value("A shortcut that starts this game").chevron(this).view);
+        more.addView(new Ui.Setting(this, "📨", "Share log", v -> shareLog(g.titleId)).value("This game's newest log").chevron(this).view);
+        String lp = Pack.libraryProblem(new File(g.packDir), g.titleId);
+        File save = Folders.save(this, g);
+        Ui.Details info = Ui.details(this, "Title ID: " + g.titleId + "\nGame: " + (PickedNup.is(this, g.gameDir) ? new File(g.gameDir).getName() + " (.nup used where it is, picked with the file picker)"
                 : g.gameDir + (Nup.isNup(new File(g.gameDir)) ? " (.nup)" : "")) + "\nPack: " + g.packDir
                 + "\nShaders: " + (lp == null ? "present (" + BuildConfig.NX_DMSH_VK_CHAIN + ")" : lp) + "\nSaves: " + (save != null ? save.getPath() : "not set"));
-        info.setTextIsSelectable(true);
-        info.setTextSize(12);
-        info.setPadding(dp(4), 0, dp(4), 0);
-        Ui.add(box, info, 16);
-        Ui.add(box, Ui.divider(this), 16, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(1)));
-        Ui.add(box, Ui.button(this, "Remove from list", Ui.Kind.DANGER, v -> { d[0].dismiss(); confirmRemove(g); }), 16);
-        d[0] = Ui.sheet(this, g.name, box).setPositiveButton("Done", null).show();
+        info.text.setTextSize(12);
+        Ui.add(content, info, 8);
+        Ui.add(content, Ui.divider(this), 12, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(1)));
+        Ui.add(content, Ui.button(this, "Remove from list", Ui.Kind.DANGER, v -> { page(false); confirmRemove(g); }), 12, Ui.wrap());
     }
 
     private void openAccessSettings() {

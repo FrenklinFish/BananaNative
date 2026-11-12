@@ -99,6 +99,12 @@ final class PadMap {
     /** A source as the editor names it: Android's name with BUTTON_ dropped ("A", "L1", "DPAD_UP") */
     static String label(int src) { String n = SOURCES[src]; return n.startsWith("BUTTON_") ? n.substring(7) : n; }
 
+    /** A game's Button mapping row: its own mapping's summary, or for a game without one Settings' mapping named as such ("As in Settings: no buttons moved"), so the row never reads "Default · Default" */
+    static String gameLabel(boolean own, String spec) {
+        String s = summary(spec);
+        return own ? s : "As in Settings: " + (s.equals("Default") ? "no buttons moved" : s);
+    }
+
     /** A spec as the settings row shows it */
     static String summary(String spec) {
         if (spec == null || spec.isEmpty()) return "Default";

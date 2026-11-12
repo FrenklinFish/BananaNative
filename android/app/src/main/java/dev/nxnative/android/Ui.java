@@ -500,37 +500,73 @@ final class Ui {
 
     // ---- List rows ----
 
-    /** One row of a list card or a sheet: an emoji tile, a title over its current value, and a chevron (or a switch); the whole row is the touch target */
+    /**
+     * One row of a list card or a sheet: an emoji tile, a one-line title over its value across the whole width (up to three lines: the value, or for a switch what its
+     * state does, says(…)), a short status line when the setting needs something (status(…): "Needs Prepare again: …"), its tags on a line of their own (so they never
+     * squeeze the text), a muted note, and a chevron (or a switch); the whole row is the touch target (a switch row's tap flips the switch). Compact: 52 dp high, 36 dp tiles
+     */
     static final class Setting {
         final LinearLayout view;
-        final TextView value;
+        final TextView title, value, status, tag, badge, note;   // tag: Recommended / Changed (Ui.tag); badge: a fixed label such as Experimental; note: a muted line under them
+        final TextView tile;
+        private final LinearLayout tags;   // the line of the badge and the tag
         Switch toggle;
 
         Setting(Context c, String emoji, String title, View.OnClickListener l) {
             view = row(c);
-            view.setPadding(dp(c, 10), dp(c, 8), dp(c, 12), dp(c, 8));
-            view.setMinimumHeight(dp(c, 60));
-            view.setBackground(ripple(c, round(Color.TRANSPARENT, dp(c, 14), 0, 0)));
+            view.setPadding(dp(c, 10), dp(c, 7), dp(c, 10), dp(c, 7));
+            view.setMinimumHeight(dp(c, 52));
+            view.setBackground(ripple(c, round(Color.TRANSPARENT, dp(c, 12), 0, 0)));
             view.setOnClickListener(l);
-            TextView tile = text(c, emoji, 18, R.color.bn_text, 400);
+            tile = text(c, emoji, 17, R.color.bn_text, 400);
             tile.setGravity(Gravity.CENTER);
             tile.setIncludeFontPadding(false);
-            tile.setBackground(round(col(c, R.color.bn_tint), dp(c, 12), 0, 0));
+            tile.setBackground(round(col(c, R.color.bn_tint), dp(c, 11), 0, 0));
             tile.setImportantForAccessibility(View.IMPORTANT_FOR_ACCESSIBILITY_NO);
-            view.addView(tile, new LinearLayout.LayoutParams(dp(c, 40), dp(c, 40)));
+            view.addView(tile, new LinearLayout.LayoutParams(dp(c, 36), dp(c, 36)));
             LinearLayout col = new LinearLayout(c);
             col.setOrientation(LinearLayout.VERTICAL);
-            col.setPadding(dp(c, 14), 0, dp(c, 8), 0);
-            TextView t = text(c, title, 16, R.color.bn_text, 600);
-            t.setSingleLine(true);
-            t.setEllipsize(TextUtils.TruncateAt.END);
-            col.addView(t);
+            col.setPadding(dp(c, 12), 0, dp(c, 8), 0);
+            this.title = text(c, title, 15, R.color.bn_text, 600);
+            this.title.setMaxLines(2);   // one line at the normal font scale (titles are kept short); a large font scale wraps it rather than cut it
+            this.title.setEllipsize(TextUtils.TruncateAt.END);
+            col.addView(this.title);
             value = small(c, "");
-            value.setMaxLines(2);
+            value.setMaxLines(3);
             value.setEllipsize(TextUtils.TruncateAt.END);
             value.setVisibility(View.GONE);   // shown by value(…) when there is one
-            col.addView(value);
+            LinearLayout.LayoutParams vp = fill();
+            vp.topMargin = dp(c, 1);
+            col.addView(value, vp);
+            status = text(c, "", 12, R.color.bn_danger, 600);
+            status.setMaxLines(2);
+            status.setVisibility(View.GONE);   // shown by status(…)
+            LinearLayout.LayoutParams sp = fill();
+            sp.topMargin = dp(c, 2);
+            col.addView(status, sp);
+            tags = row(c);
+            badge = Ui.tag(c, "", true);
+            badge.setVisibility(View.GONE);
+            LinearLayout.LayoutParams bp = wrap();
+            bp.setMarginEnd(dp(c, 6));
+            tags.addView(badge, bp);
+            tag = Ui.tag(c, "", false);
+            tag.setVisibility(View.GONE);
+            tags.addView(tag, wrap());
+            tags.setVisibility(View.GONE);
+            LinearLayout.LayoutParams lp = wrap();
+            lp.topMargin = dp(c, 3);
+            col.addView(tags, lp);
+            note = small(c, "");
+            note.setMaxLines(2);
+            note.setEllipsize(TextUtils.TruncateAt.END);
+            note.setVisibility(View.GONE);   // shown by note(…)
+            col.addView(note);
             view.addView(col, weight());
+        }
+
+        private void line() {
+            tags.setVisibility(tag.getVisibility() == View.VISIBLE || badge.getVisibility() == View.VISIBLE ? View.VISIBLE : View.GONE);
         }
 
         Setting chevron(Context c) {
@@ -541,15 +577,184 @@ final class Ui {
             return this;
         }
 
+        /** A switch at the end; a tap anywhere on a row without its own action flips it (when it is enabled) */
         Setting toggle(Context c, boolean on, android.widget.CompoundButton.OnCheckedChangeListener l) {
             toggle = new Switch(c);
             toggle.setChecked(on);
-            toggle.setOnCheckedChangeListener(l);
+            toggle.setOnCheckedChangeListener((b, x) -> { if (l != null) l.onCheckedChanged(b, x); says(); });   // the value line follows the switch (says)
             view.addView(toggle);
+            if (!view.hasOnClickListeners()) view.setOnClickListener(v -> { if (toggle.isEnabled()) toggle.toggle(); });
             return this;
         }
 
         Setting value(CharSequence s) { value.setText(s); value.setVisibility(s == null || s.length() == 0 ? View.GONE : View.VISIBLE); return this; }
+        /** What the setting needs before it works, in a short line of its own under the value (null: none), so the value still says what the setting does */
+        Setting status(CharSequence s) { status.setText(s); status.setVisibility(s == null || s.length() == 0 ? View.GONE : View.VISIBLE); return this; }
+        /** The tag on the tags' line (null: none); warn picks the warning tint (Ui.tag) */
+        Setting tag(Context c, CharSequence s, boolean warn) {
+            if (s == null || s.length() == 0) { tag.setVisibility(View.GONE); line(); return this; }
+            tag.setText(s); styleTag(c, tag, warn); tag.setVisibility(View.VISIBLE);
+            line();
+            return this;
+        }
+        /** A fixed label before the tag (Experimental), in the warning tint (null: none) */
+        Setting badge(CharSequence s) {
+            badge.setText(s == null ? "" : s);
+            badge.setVisibility(s == null || s.length() == 0 ? View.GONE : View.VISIBLE);
+            line();
+            return this;
+        }
+        /** The muted line under the value (null: none) */
+        Setting note(CharSequence s) { note.setText(s); note.setVisibility(s == null || s.length() == 0 ? View.GONE : View.VISIBLE); return this; }
+
+        private CharSequence onText, offText;
+        /** A switch row's value line in words for each state (what On does, what Off does): it follows the switch, so it never contradicts it */
+        Setting says(CharSequence on, CharSequence off) { onText = on; offText = off; says(); return this; }
+        private void says() { if (toggle != null && (onText != null || offText != null)) value(toggle.isChecked() ? onText : offText); }
+
+        /** A row that belongs to the row above it (Resolution's Window, the Upscaler's sharpness): set in, with a smaller tile */
+        Setting sub() {
+            Context c = view.getContext();
+            view.setPaddingRelative(dp(c, 30), dp(c, 4), dp(c, 10), dp(c, 4));
+            view.setMinimumHeight(dp(c, 46));
+            LinearLayout.LayoutParams lp = (LinearLayout.LayoutParams) tile.getLayoutParams();
+            lp.width = lp.height = dp(c, 28);
+            tile.setLayoutParams(lp);
+            tile.setTextSize(14);
+            title.setTextSize(14);
+            return this;
+        }
+    }
+
+    /** A choice of a few words side by side in one rounded track (Recommended | Custom): the picked one on banana yellow. pick gets the index when the player picks another */
+    static final class Segmented extends LinearLayout {
+        private final TextView[] items;
+        private int selected;
+
+        Segmented(Context c, String[] labels, int sel, java.util.function.IntConsumer pick) {
+            super(c);
+            setOrientation(HORIZONTAL);
+            setBackground(round(col(c, R.color.bn_tint), dp(c, 14), col(c, R.color.bn_card_stroke), dp(c, 1)));
+            int p = dp(c, 3);
+            setPadding(p, p, p, p);
+            items = new TextView[labels.length];
+            for (int k = 0; k < labels.length; k++) {
+                int i = k;
+                TextView t = text(c, labels[k], 14, R.color.bn_text, 700);
+                t.setGravity(Gravity.CENTER);
+                t.setSingleLine(true);
+                t.setEllipsize(TextUtils.TruncateAt.END);
+                t.setMinHeight(dp(c, 40));
+                t.setPadding(dp(c, 10), 0, dp(c, 10), 0);
+                t.setClickable(true);
+                t.setFocusable(true);
+                t.setOnClickListener(v -> { if (i != selected) { select(i); pick.accept(i); } });
+                items[k] = t;
+                addView(t, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1));
+            }
+            select(sel);
+        }
+
+        void select(int k) {
+            selected = k;
+            Context c = getContext();
+            for (int i = 0; i < items.length; i++) {
+                boolean on = i == k;
+                items[i].setBackground(on ? round(col(c, R.color.bn_banana), dp(c, 11), 0, 0) : ripple(c, round(Color.TRANSPARENT, dp(c, 11), 0, 0)));
+                items[i].setTextColor(col(c, on ? R.color.bn_on_banana : R.color.bn_text_2));
+                items[i].setSelected(on);
+            }
+        }
+    }
+
+    /**
+     * A page's tabs under its header (a game's page: Performance, Saves, Storage): the words in a row that scrolls sideways when they do not fit, the current
+     * one in the accent over a short bar, a hairline under them all. pick gets the index when the player picks another
+     */
+    static LinearLayout tabs(Context c, String[] labels, int sel, java.util.function.IntConsumer pick) {
+        LinearLayout out = new LinearLayout(c);
+        out.setOrientation(LinearLayout.VERTICAL);
+        android.widget.HorizontalScrollView hs = new android.widget.HorizontalScrollView(c);
+        hs.setHorizontalScrollBarEnabled(false);
+        hs.setOverScrollMode(View.OVER_SCROLL_NEVER);
+        LinearLayout row = row(c);
+        for (int k = 0; k < labels.length; k++) {
+            int i = k;
+            boolean on = k == sel;
+            LinearLayout tab = new LinearLayout(c);
+            tab.setOrientation(LinearLayout.VERTICAL);
+            TextView t = text(c, labels[k], 15, on ? R.color.bn_accent : R.color.bn_text_2, on ? 700 : 600);
+            t.setSingleLine(true);
+            t.setGravity(Gravity.CENTER);
+            t.setPadding(dp(c, 12), dp(c, 10), dp(c, 12), dp(c, 8));
+            tab.addView(t);
+            View bar = new View(c);
+            bar.setBackground(round(col(c, R.color.bn_accent), dp(c, 2), 0, 0));
+            bar.setVisibility(on ? View.VISIBLE : View.INVISIBLE);
+            LinearLayout.LayoutParams bl = new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(c, 3));
+            bl.leftMargin = bl.rightMargin = dp(c, 8);
+            tab.addView(bar, bl);
+            tab.setBackground(ripple(c, round(Color.TRANSPARENT, dp(c, 10), 0, 0)));
+            tab.setClickable(true);
+            tab.setFocusable(true);
+            tab.setSelected(on);
+            tab.setContentDescription(labels[k] + (on ? ", tab, selected" : ", tab"));
+            tab.setOnClickListener(v -> { if (i != sel) pick.accept(i); });
+            row.addView(tab, wrap());
+        }
+        hs.addView(row);
+        out.addView(hs, fill());
+        out.addView(divider(c));
+        return out;
+    }
+
+    /** One entry of a page's side rail (wide screens: the sections of Game settings): an emoji and a label, the current one on the tint in the accent */
+    static TextView navItem(Context c, String emoji, CharSequence label, boolean selected, View.OnClickListener l) {
+        TextView t = text(c, emoji + "   " + label, 15, selected ? R.color.bn_accent : R.color.bn_text, selected ? 700 : 600);
+        t.setSingleLine(true);
+        t.setEllipsize(TextUtils.TruncateAt.END);
+        t.setGravity(Gravity.CENTER_VERTICAL);
+        t.setMinHeight(dp(c, 46));
+        t.setPadding(dp(c, 14), 0, dp(c, 12), 0);
+        t.setBackground(ripple(c, round(selected ? col(c, R.color.bn_tint) : Color.TRANSPARENT, dp(c, 12), 0, 0)));
+        t.setClickable(true);
+        t.setFocusable(true);
+        t.setSelected(selected);
+        t.setContentDescription(label);
+        t.setOnClickListener(l);
+        return t;
+    }
+
+    /** A page's state chip under its header ("Adreno 840 · Qualcomm 842.44"): a leaf dot and the words, on the tint */
+    static TextView statusChip(Context c, CharSequence s) {
+        TextView t = text(c, "", 12, R.color.bn_text, 600);
+        t.setSingleLine(true);
+        t.setEllipsize(TextUtils.TruncateAt.END);
+        t.setBackground(round(col(c, R.color.bn_tint), dp(c, 999), col(c, R.color.bn_card_stroke), dp(c, 1)));
+        t.setPadding(dp(c, 10), dp(c, 5), dp(c, 12), dp(c, 5));
+        statusChip(t, s);
+        return t;
+    }
+
+    /** A state chip's words again (they become known later) */
+    static void statusChip(TextView t, CharSequence s) {
+        android.text.SpannableString sp = new android.text.SpannableString("●  " + s);
+        sp.setSpan(new android.text.style.ForegroundColorSpan(col(t.getContext(), R.color.bn_leaf)), 0, 1, 0);
+        t.setText(sp);
+        t.setContentDescription(s);
+    }
+
+    /** A small rounded tag (a row's "Recommended" or "Changed"): the accent on the tint, or with warn the danger colour on the warning tint; both read in light and dark */
+    static TextView tag(Context c, CharSequence s, boolean warn) {
+        TextView t = text(c, s, 11, R.color.bn_accent, 700);
+        t.setSingleLine(true);
+        t.setPadding(dp(c, 8), dp(c, 2), dp(c, 8), dp(c, 2));
+        styleTag(c, t, warn);
+        return t;
+    }
+    private static void styleTag(Context c, TextView t, boolean warn) {
+        t.setTextColor(col(c, warn ? R.color.bn_danger : R.color.bn_accent));
+        t.setBackground(round(col(c, warn ? R.color.bn_warn_tint : R.color.bn_tint), dp(c, 999), 0, 0));
     }
 
     // ---- Dialogs ----

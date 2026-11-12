@@ -121,6 +121,7 @@ public final class ReadinessActivity extends Activity {
                     List<String> env = new ArrayList<>();
                     GpuDriver.env(app, null, env);
                     String v = Native.readiness(Readiness.driverEnv(env));
+                    Prefs.rememberFacts(app, d == null ? GpuDriver.SYSTEM : d.dir.getName(), v);   // what the recommended settings match on (Recommend)
                     vulkan = v;
                     probedDriver = drv;
                 }

@@ -34,6 +34,8 @@ public final class PadMapJvmTest {
         check(PadMap.summary("").equals("Default"), "summary default");
         check(PadMap.summary("BUTTON_A=A,BUTTON_B=B").equals("Custom (2 buttons moved)"), PadMap.summary("BUTTON_A=A,BUTTON_B=B"));
         check(PadMap.summary("BUTTON_A=B").equals("Custom (as the default)"), "summary unchanged");
+        check(PadMap.gameLabel(false, "").equals("As in Settings: no buttons moved") && PadMap.gameLabel(false, "BUTTON_A=A,BUTTON_B=B").equals("As in Settings: Custom (2 buttons moved)")
+              && PadMap.gameLabel(true, "").equals("Default"), "a game's row names where its mapping comes from, never Default · Default");
         System.out.println("ok");
     }
 }

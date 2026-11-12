@@ -37,8 +37,8 @@ final class DrsSlider {
         return box;
     }
 
-    /** A dialog with the slider; with settingsDefault non-null a "Default" switch first (on: set.accept(null)). done after OK */
-    static void dialog(Context c, String suffix, int index, String settingsDefault, boolean own, Consumer<Integer> set, Runnable done) {
+    /** A dialog with the slider; with dfltLabel non-null a switch of that label first ("Default (Settings: 40%)", "Recommended (50%)"; on: set.accept(null)). done after OK */
+    static void dialog(Context c, String suffix, int index, String dfltLabel, boolean own, Consumer<Integer> set, Runnable done) {
         LinearLayout box = new LinearLayout(c);
         box.setOrientation(LinearLayout.VERTICAL);
         int pad = Ui.dp(c, 20); box.setPadding(pad, pad / 2, pad, 0);
@@ -46,9 +46,9 @@ final class DrsSlider {
         AlertDialog[] dlg = new AlertDialog[1];
         LinearLayout slider = view(c, index, t -> { if (dlg[0] != null) dlg[0].setTitle(t + suffix); }, i -> cur[0] = i);
         CheckBox dflt = null;
-        if (settingsDefault != null) {
+        if (dfltLabel != null) {
             dflt = new CheckBox(c);
-            dflt.setText("Default (Settings: " + settingsDefault + ")");
+            dflt.setText(dfltLabel);
             dflt.setChecked(!own);
             slider.setAlpha(own ? 1f : 0.4f);
             dflt.setOnCheckedChangeListener((b, on) -> slider.setAlpha(on ? 0.4f : 1f));

@@ -314,7 +314,7 @@ HLE_FORCE("_ZN2nn2oe28SetResumeNotificationEnabledEb", "resume notification swit
 HLE_FORCE("_ZN2nn2oe42SetOperationModeChangedNotificationEnabledEb", "operation mode change notification switch", void, h_oe_SetOpModeNtf, unsigned on) { g_ntf_opmode = on & 0xff; }
 HLE_FORCE("_ZN2nn2oe44SetPerformanceModeChangedNotificationEnabledEb", "performance mode change notification switch", void, h_oe_SetPerfModeNtf, unsigned on) { g_ntf_perfmode = on & 0xff; }
 
-// The Horizon language code (nn::settings::LanguageCode, the 18 of nn::settings::Language) for a language tag: one of those codes in any letter case, or a BCP-47 style
+// The Horizon language code (nn::settings::LanguageCode, the 18 of nn::settings::Language, Polish and Thai) for a language tag: one of those codes in any letter case, or a BCP-47 style
 // tag as a phone or a player writes it (fr-FR, de_DE, es-MX, pt-PT, zh-TW, zh-Hant-HK). A tag the console has no language for gets en-US, and 0 is returned (1 for a
 // code it knows). Before, DM_LANG went to the game as typed, and fr-FR, which no game knows, fell back to the game's own first language (Japanese in Mario Kart World)
 static int dm_lang_code(const char *tag, char out[8]) {
@@ -341,6 +341,8 @@ static int dm_lang_code(const char *tag, char out[8]) {
     else if (!strcmp(lang, "pt")) c = !strcmp(region, "br") ? "pt-BR" : "pt";
     else if (!strcmp(lang, "ru")) c = "ru";
     else if (!strcmp(lang, "ko")) c = "ko";
+    else if (!strcmp(lang, "pl")) c = "pl";
+    else if (!strcmp(lang, "th")) c = "th";   // Thai: after pl in the same SDK 21 table; Donkey Kong Bananza (1.1) carries THth messages   // Polish: SDK 21's settings table lists it after pt-BR; Ocarina of Time and Donkey Kong Bananza (1.1) carry EUpl messages
     else if (!strcmp(lang, "zh"))   // the script decides, else the region: Traditional for Taiwan, Hong Kong and Macao
         c = !strcmp(script, "hant") || (!script[0] && (!strcmp(region, "tw") || !strcmp(region, "hk") || !strcmp(region, "mo"))) ? "zh-Hant" : "zh-Hans";
     memset(out, 0, 8);
@@ -355,7 +357,7 @@ static void dm_lang(char out[8]) {
     int ok = dm_lang_code(e, out);
     static int once;
     if (!once++) {
-        if (!ok) LOG("[RED] DM_LANG=%s: no console language for it: en-US (the codes: ja, en-US, en-GB, fr, fr-CA, de, it, es, es-419, nl, pt, pt-BR, ru, ko, zh-Hans, zh-Hant)", e);
+        if (!ok) LOG("[RED] DM_LANG=%s: no console language for it: en-US (the codes: ja, en-US, en-GB, fr, fr-CA, de, it, es, es-419, nl, pt, pt-BR, ru, ko, zh-Hans, zh-Hant, pl, th)", e);
         else if (strcmp(e, out)) LOG("language: DM_LANG=%s is %s", e, out);
     }
 }

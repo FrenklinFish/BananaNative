@@ -163,7 +163,15 @@ static int init_once(void) {
     int x_gpl = has_ext(de, nde, VK_EXT_GRAPHICS_PIPELINE_LIBRARY_EXTENSION_NAME) && has_ext(de, nde, VK_KHR_PIPELINE_LIBRARY_EXTENSION_NAME);
     if (x_gpl) { dext[ndext++] = VK_KHR_PIPELINE_LIBRARY_EXTENSION_NAME; dext[ndext++] = VK_EXT_GRAPHICS_PIPELINE_LIBRARY_EXTENSION_NAME; }
     int mesh_ext = has_ext(de, nde, VK_EXT_MESH_SHADER_EXTENSION_NAME); const char *mesh_env = getenv("DM_VK_MESH");   // restart only: the device's extensions
-    int x_mesh = mesh_ext && !(mesh_env && !strcmp(mesh_env, "0"));
+    // Qualcomm's own driver takes NVN2 mesh draws through compute (vka_memu) by default, not its VK_EXT_mesh_shader: its mesh pipelines draw foliage wrong, a depth-only
+    // prepass as spikes past the mesh stage and, with the mesh_prepass_cut workaround, Ocarina of Time's tree leaves, flowers, ferns and bushes not at all, while the
+    // compute path draws them all and its house runs faster (docs/reference/rendering.md "Depth-only mesh prepass drawn as spikes on Qualcomm's driver", Open: the
+    // driver's fault). Keyed on the driver ID it reports. DM_VK_MESH=1 takes the extension there, =0 leaves it off on every driver
+    VkPhysicalDeviceDriverProperties pdr0 = {VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DRIVER_PROPERTIES};
+    VkPhysicalDeviceProperties2 pp0 = {VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2, .pNext = &pdr0};
+    vk.vkGetPhysicalDeviceProperties2(V.pd, &pp0);
+    int mesh_qcom = mesh_ext && pdr0.driverID == VK_DRIVER_ID_QUALCOMM_PROPRIETARY && !(mesh_env && *mesh_env);
+    int x_mesh = mesh_ext && !(mesh_env && !strcmp(mesh_env, "0")) && !mesh_qcom;
     if (x_mesh) dext[ndext++] = VK_EXT_MESH_SHADER_EXTENSION_NAME;
     int x_ph = has_ext(de, nde, "VK_QCOM_queue_perf_hint");
     if (x_ph) dext[ndext++] = "VK_QCOM_queue_perf_hint";
@@ -269,7 +277,7 @@ static int init_once(void) {
     { const char *e = getenv("DM_VK_MESH_EMU"); V.cs_groups = V.props.limits.maxComputeWorkGroupCount[0];   // compute through vka_memu.c (docs/reference/rendering.md "Mesh draws through compute")
       V.memu = e && *e ? strcmp(e, "0") != 0 : !V.task;
       if (V.memu) VLOG("mesh draws through compute (vka_memu.c): %s", e && *e ? "DM_VK_MESH_EMU=1" : V.mesh ? "the device has mesh shaders but no task shaders" : "the device has no mesh shaders (DM_VK_MESH_EMU=0: skipped instead)"); }
-    VLOG("mesh shading (NVN2 task and mesh programs): %s", V.task ? "on" : V.mesh ? "mesh shaders only (no taskShader)" : !mesh_ext ? "not on this device" : !x_mesh ? "off (DM_VK_MESH=0)" : "extension without the mesh stage");
+    VLOG("mesh shading (NVN2 task and mesh programs): %s", V.task ? "on" : V.mesh ? "mesh shaders only (no taskShader)" : !mesh_ext ? "not on this device" : !x_mesh ? (mesh_qcom ? "off on Qualcomm's driver: mesh draws through compute (its mesh pipelines draw foliage wrong; DM_VK_MESH=1 takes them)" : "off (DM_VK_MESH=0)") : "extension without the mesh stage");
     if (V.mesh) VLOG("mesh shading limits: workgroups mesh %u / task %u invocations, mesh output %u vertices / %u primitives / %u components / %u bytes, task payload %u bytes, mesh shared %u bytes",
                      V.mesh_inv, V.task_inv, V.mesh_out_v, V.mesh_out_p, pmesh.maxMeshOutputComponents, pmesh.maxMeshOutputMemorySize, V.task_payload, pmesh.maxMeshSharedMemorySize);
     VLOG("subgroups: size %u, stages %#x (geometry %s, fragment %s, vertex %s), operations %#x, quad operations in all stages %s, required size stages %#x", p11.subgroupSize, p11.subgroupSupportedStages,

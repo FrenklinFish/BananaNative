@@ -427,6 +427,32 @@ class Launcher(unittest.TestCase):
         (d / 'shader_seen.tsv').write_text('# a comment 00000000000000cc\nkey\tstage\n00000000000000bb\tvertex\n00000000000000aa\tpixel\n00000000000000dd\tpixel\n00000000000000bb\tvertex\n')
         self.assertEqual(self.java('selection', d), '00000000000000aa,00000000000000bb', 'only keys of the map, sorted, once')
 
+    def test_mac_pack_builds_the_phones_selection(self):
+        """scripts/pack_android.py builds the keys the phone builds (issue 178: it built Pokopia's whole map, 131,426 shaders, where its manifest and the phone hold
+        the selected set, so a new version translated every other shader from scratch): pack_android.selected_keys is ShaderLibs.selection, on a fixture and on
+        every profile with a shader_seen.tsv"""
+        sys.path.insert(0, str(REPO / 'scripts'))
+        import pack_android
+        d = self.tmp / 'sel_mac'; d.mkdir(exist_ok=True)
+        (d / 'shader_map.tsv').write_text('# kind: evidence\npackage\tindex\tstage\tdm_ctl_sha16\tsource\n'
+                                          'vs_0.bin\t0\tvs\t00000000000000bb\tx\nps_0.bin\t0\tps\t00000000000000aa\tx\n')
+        self.assertIsNone(pack_android.selected_keys(d), 'no shader_seen.tsv: the whole map')
+        (d / 'shader_seen.tsv').write_text('key\tstage\n00000000000000bb\tvertex\n00000000000000dd\tpixel\n')
+        self.assertEqual(','.join(pack_android.selected_keys(d)), self.java('selection', d))
+        seen = sorted(p.parent for p in (REPO / 'dm/games').glob('*/shader_seen.tsv') if (p.parent / 'shader_map.tsv').is_file())
+        self.assertTrue(seen, 'Pokopia (0400A3A01EE4C000) has a selected set')
+        for p in seen:
+            with self.subTest(profile=p.name):
+                self.assertEqual(','.join(pack_android.selected_keys(p)), self.java('selection', p))
+
+    def test_windows_wrapper_reads_a_keys_file(self):
+        """vk_android_win.py "@<file>": the keys of the file, one a line (pack_android.py passes a selected set so on Windows); other arguments as they are"""
+        sys.path.insert(0, str(REPO / 'dm/gfx/tools'))
+        import vk_android_win
+        f = self.tmp / 'keys.txt'; f.write_text('00000000000000aa\n\n00000000000000bb\n')
+        self.assertEqual(vk_android_win.expand_args(['--target', 'vulkan', 'pkg', 'out', '@' + str(f)]),
+                         ['--target', 'vulkan', 'pkg', 'out', '00000000000000aa', '00000000000000bb'])
+
     def test_absent_optional(self):
         """A split that lacks only keys of the profile's shader_optional.tsv is the profile's (PackService splitMatchesProfile), and the shaders step leaves those out;
         a missing key that is not optional, a key the profile lacks, or no shader_optional.tsv is not"""

@@ -109,9 +109,16 @@ public final class ReadinessJvmTest {
         String rep = Readiness.report("head", f, Readiness.evaluate(f, game));
         check(rep.startsWith("head\nGPU: Test GPU") && rep.contains("[FAIL] Compute shared memory") && rep.contains("-- facts --\n") && rep.contains("limit.maxComputeSharedMemorySize=32768"), "report");
 
+        // Game settings' state chip: the driver in a few words from the kept facts, the GPU's name from GLES's renderer string
+        check("Qualcomm 842.44".equals(Readiness.driverWord(Readiness.facts("driver.id=8\ndriver.version=0x8034a02c"))), "Qualcomm's driver version as its build string shows it");
+        check("Turnip 26.1.0".equals(Readiness.driverWord(Readiness.facts("driver.id=13\ndriver.version=0x6801000"))), "Turnip's Mesa version");
+        check(Readiness.driverWord(Readiness.facts("driver.id=9\ndriver.version=0x1")) == null && Readiness.driverWord(Readiness.facts("")) == null, "another driver, or none known");
+        check("Adreno 840".equals(Readiness.gpuName("Adreno (TM) 840")) && Readiness.gpuName(" ") == null && Readiness.gpuName(null) == null, "the GPU's name");
+
         // A real phone's facts against a real profile's rows (the test's arguments)
         if (a.length >= 2) {
             Map<String, String> real = Readiness.merge(new String(Files.readAllBytes(new File(a[0]).toPath()), StandardCharsets.UTF_8), 14.66, 36);
+            check("Qualcomm 842.44".equals(Readiness.driverWord(real)), "the tested phone's driver: " + Readiness.driverWord(real));
             List<Readiness.Req> req = Readiness.parseReqs(a[1]);
             check(!req.isEmpty(), "the profile's rows parse");
             List<Readiness.Check> rl = Readiness.evaluate(real, req);

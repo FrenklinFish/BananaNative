@@ -40,6 +40,7 @@ static uint64_t held;                            // the keys "held" for the key-
 uint64_t dm_cheats_keys(void) { return held; }
 static char moddir[1100];                        // the module folder (loader.c), with the rewriter's main.changed.tsv
 const char *dm_module_dir(void) { return moddir; }
+const char *dm_main_dir(void) { return moddir; }   // (loader.c: main's folder, its variant's with DM_PATCH_VARIANT; the pack's here)
 
 static int checks, fails;
 #define CHECK(c, s) do { checks++; int ok_ = !!(c); fails += !ok_; printf("%s %s\n", ok_ ? "✓" : "✗", s); } while (0)

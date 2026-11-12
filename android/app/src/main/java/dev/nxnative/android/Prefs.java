@@ -110,11 +110,17 @@ final class Prefs {
     static boolean steps(String titleId) { Profile p = Profile.of(titleId); return p != null && p.steps; }
     /** Hold 60 fps (per game, default off), for steps games at the cap of 60: one step a frame always, where the game's own mode runs two (30 fps) after a frame its work
      *  overran. A frame that runs long then plays a little slower instead of dropping to 30 (DM_FPS_HOLD60=1 at start, Native.hold60Set while it runs) */
-    static boolean fullVegetation(Context c, String titleId) { return of(c).getBoolean(gameKey("full_vegetation", titleId), true); }
+    static boolean fullVegetation(Context c, String titleId) { return of(c).getBoolean(gameKey("full_vegetation", titleId), Recommend.bool(rec(c, titleId, Recommend.VEGETATION), true)); }
     static void fullVegetation(Context c, String titleId, boolean on) { of(c).edit().putBoolean(gameKey("full_vegetation", titleId), on).commit(); }
-    static boolean gameOption(Context c, String titleId, String env) { return of(c).getBoolean(gameKey("opt_" + env, titleId), false); }
+    /** Advanced › 3D scene (Game settings, a game with scene_scale rows: SceneRes; before the Resolution presets, Scene resolution): the row's name, "" for Game default (the game's own palette).
+     *  Applies under Advanced only (resolutionChoice); a value from before the presets picks the preset it matches (ResPresets.current) */
+    static String sceneRes(Context c, String titleId) { return of(c).getString(gameKey("scene_res", titleId), ""); }
+    static void sceneRes(Context c, String titleId, String name) {
+        if (name == null || name.isEmpty()) of(c).edit().remove(gameKey("scene_res", titleId)).commit(); else of(c).edit().putString(gameKey("scene_res", titleId), name).commit();
+    }
+    static boolean gameOption(Context c, String titleId, String env) { return of(c).getBoolean(gameKey("opt_" + env, titleId), Recommend.bool(rec(c, titleId, Recommend.OPTION + env), false)); }
     static void gameOption(Context c, String titleId, String env, boolean on) { of(c).edit().putBoolean(gameKey("opt_" + env, titleId), on).commit(); }
-    static boolean hold60(Context c, String titleId) { return of(c).getBoolean(gameKey("hold60", titleId), false); }
+    static boolean hold60(Context c, String titleId) { return of(c).getBoolean(gameKey("hold60", titleId), Recommend.bool(rec(c, titleId, Recommend.HOLD60), false)); }
     static void hold60(Context c, String titleId, boolean on) { of(c).edit().putBoolean(gameKey("hold60", titleId), on).commit(); }
     static final String HOLD60_TEXT = "Off: the game drops to 30 fps when it cannot keep 60, as on the console. On: the game always runs its 60 fps mode and Banana Native does not hold frames, so it never drops to 30; the frame rate is less even and the game runs a little slower while under 60. Only with the 60 fps cap";
     static boolean limited(String titleId) { Profile p = Profile.of(titleId); return p != null && (p.decoupled || p.fpsLimit > 0); }
@@ -127,10 +133,13 @@ final class Prefs {
     /** A limited game's cap as saved, without capOf (which turns 45 and 40 into 30 for the other games): its own, else its profile's fps_limit, else the main screen's default, as one of PACE_CAPS */
     static int paceCap(Context c, String titleId) {
         int pl = profileLimit(titleId);
-        return paceOf(of(c).getInt(gameKey("fps_cap", titleId), pl > 0 ? pl : of(c).getInt("fps_cap", -1)));
+        Integer r = recCap(c, titleId);   // the recommended limit comes before the profile's and the main screen's (Recommend.effective)
+        return paceOf(of(c).getInt(gameKey("fps_cap", titleId), r != null ? r : pl > 0 ? pl : of(c).getInt("fps_cap", -1)));
     }
+    /** The recommended frame rate cap as the launcher stores it (Recommend.cap), null for none */
+    static Integer recCap(Context c, String titleId) { return Recommend.cap(rec(c, titleId, Recommend.FPS_CAP), limited(titleId)); }
     /** Game settings › Reset to defaults: every choice of the game's own back to the main screen's default (Extra environment's lines stay) */
-    static final String[] GAME_SETTINGS = {"window", "fps_cap", "gpu_driver", "gpu_ts", "pause_return", "ndsr_choice2", "ndsr_sharp", "drs2", "ram_saver", "decouple", "hold60", "full_vegetation", "gsr2_clarity", "dlss_sharp", "dlss_mode", "aspect"};
+    static final String[] GAME_SETTINGS = {"window", "fps_cap", "gpu_driver", "gpu_ts", "pause_return", "ndsr_choice2", "ndsr_sharp", "drs2", "ram_saver", "decouple", "hold60", "full_vegetation", "gsr2_clarity", "dlss_sharp", "dlss_mode", "scene_res", "res_preset", "aspect"};
     static void resetGame(Context c, String titleId) {
         SharedPreferences.Editor e = of(c).edit();
         for (String k : GAME_SETTINGS) e.remove(gameKey(k, titleId));
@@ -139,6 +148,135 @@ final class Prefs {
             for (Profile.Option opt : p.options) e.remove(gameKey("opt_" + opt.env, titleId));
         }
         e.commit();
+    }
+
+    // ---- Recommended settings per phone (game.tsv recommend rows: Recommend). Computed at each read, never stored: a release that changes a recommendation reaches every
+    // player who did not set that setting for the game. The game's own value wins, then the recommendation, then the main screen's default, then the built-in one ----
+
+    /** What the readiness check found on a driver (Recommend.keep of its answer), kept per driver choice (Recommend.SYSTEM or an installed driver's folder name):
+     *  GameActivity's start-up check and the Readiness check screen write it; the matches read it */
+    static void rememberFacts(Context c, String driverChoice, String vulkan) {
+        String k = Recommend.keep(vulkan);
+        if (!k.isEmpty() && !k.equals(of(c).getString("vk_facts@" + driverChoice, ""))) of(c).edit().putString("vk_facts@" + driverChoice, k).commit();
+    }
+    /** The phone's own driver's facts from GLES (Recommend.glFacts; GpuGl at the launcher's start), kept only while no readiness check has answered on that driver, so
+     *  the recommendations show from a fresh install on; the check's own answer replaces them */
+    static void rememberGlFacts(Context c, String glFacts) {
+        String k = Recommend.keep(glFacts);
+        if (!k.isEmpty() && of(c).getString("vk_facts@" + Recommend.SYSTEM, "").isEmpty()) of(c).edit().putString("vk_facts@" + Recommend.SYSTEM, k).commit();
+    }
+    static java.util.Map<String, String> facts(Context c, String driverChoice) { return Readiness.facts(of(c).getString("vk_facts@" + driverChoice, "")); }
+
+    /** The game's process pins the recommended driver when its readiness check starts (GameActivity.readinessHold): the driver opens once a process, so facts the check
+     *  writes cannot move the start to another driver than the one checked */
+    private static String pinnedFor, pinnedDriver;
+    static void pinDriver(Context c, String titleId) { pinnedDriver = recommendedDriver(c, titleId); pinnedFor = titleId; }
+
+    /** The recommended driver choice (Recommend.SYSTEM or an installed driver's folder) of the rows matching the phone's own driver, null for none (or none installed) */
+    static String recommendedDriver(Context c, String titleId) {
+        if (titleId == null) return null;
+        if (titleId.equals(pinnedFor)) return pinnedDriver;
+        Profile p = Profile.of(titleId);
+        if (p == null || p.recommend.isEmpty()) return null;
+        java.util.Map<String, String> sys = facts(c, Recommend.SYSTEM);
+        String want = Recommend.driver(Recommend.parse(p.recommend), sys);
+        if (want == null) return null;
+        java.util.Map<String, java.util.Map<String, String>> inst = new java.util.LinkedHashMap<>();
+        for (GpuDriver.Info i : GpuDriver.installed(c)) inst.put(i.dir.getName(), facts(c, i.dir.getName()));
+        return Recommend.resolveDriver(want, sys, inst, of(c).getString("gpu_driver", ""));
+    }
+
+    /** The driver choice a game starts with (GpuDriver.selected's): Recommend.SYSTEM or a folder name */
+    static String driverChoice(Context c, String titleId) {
+        GpuDriver.Info i = GpuDriver.selected(c, titleId);
+        return i == null ? Recommend.SYSTEM : i.dir.getName();
+    }
+
+    /** The recommended values for a game on this phone, setting → value in a row's words (the driver as a driver choice): the rows on the facts of the driver it starts
+     *  with, and the driver rows on the phone's own driver's. Empty without rows, or before the readiness check has run on that driver (only "any" rows then) */
+    static java.util.Map<String, String> recommended(Context c, String titleId) {
+        Profile p = titleId == null ? null : Profile.of(titleId);
+        if (p == null || p.recommend.isEmpty()) return java.util.Collections.emptyMap();
+        java.util.Map<String, String> out = new java.util.LinkedHashMap<>(Recommend.values(Recommend.parse(p.recommend), facts(c, driverChoice(c, titleId))));
+        String d = recommendedDriver(c, titleId);
+        if (d != null) out.put(Recommend.DRIVER, d);
+        return out;
+    }
+    static String rec(Context c, String titleId, String setting) { return recommended(c, titleId).get(setting); }
+
+    /** Every recommended setting the game offers (Game settings shows each), as it stands: its value, the player's own or not, the recommendation */
+    static java.util.List<Recommend.State> recStates(Context c, String titleId) {
+        java.util.List<Recommend.State> out = new java.util.ArrayList<>();
+        Profile p = Profile.of(titleId);
+        if (p == null) return out;
+        java.util.Map<String, String> r = recommended(c, titleId);
+        if (!ResPresets.presets(p).isEmpty()) out.add(state(Recommend.RES_PRESET, resolutionChoice(c, titleId), ownResolution(c, titleId), r));
+        out.add(state(Recommend.DRIVER, driverChoice(c, titleId), GpuDriver.choice(c, titleId) != null, r));
+        boolean dlss = dlssGame(titleId);
+        out.add(state(Recommend.UPSCALER, dlss ? Recommend.DLSS_MODES[GameUpscaler.dlssMode(c, titleId)] : Recommend.UPSCALERS[GameUpscaler.mode(c, titleId)],
+                      dlss ? GameUpscaler.ownDlssMode(c, titleId) : GameUpscaler.ownMode(c, titleId), r));
+        if (steps(titleId)) out.add(state(Recommend.HOLD60, Recommend.onOff(hold60(c, titleId)), own(c, "hold60", titleId), r));
+        boolean lim = limited(titleId);
+        out.add(state(Recommend.FPS_CAP, Recommend.capName(lim ? paceCap(c, titleId) : fpsCap(c, titleId), lim), ownFpsCap(c, titleId), r));
+        if (drsGame(titleId)) out.add(state(Recommend.DRS, Recommend.DRS_VALUES[drs(c, titleId)], ownDrs(c, titleId), r));
+        if (p.vegetationDetail) out.add(state(Recommend.VEGETATION, Recommend.onOff(fullVegetation(c, titleId)), own(c, "full_vegetation", titleId), r));
+        if (skipLayersGame(titleId)) out.add(state(Recommend.SKIP_LAYERS, Recommend.onOff(skipLayers(c, titleId)), own(c, "vk_skip_layers", titleId), r));
+        for (Profile.Option o : p.options) {
+            String k = Recommend.OPTION + o.env;
+            out.add(new Recommend.State(k, o.label, Recommend.onOff(gameOption(c, titleId, o.env)), own(c, "opt_" + o.env, titleId), r.get(k)));
+        }
+        return out;
+    }
+    private static Recommend.State state(String setting, String value, boolean own, java.util.Map<String, String> r) {
+        String v = setting.equals(Recommend.DRIVER) && Recommend.SYSTEM.equals(value) ? "system" : value, rv = r.get(setting);
+        if (setting.equals(Recommend.DRIVER) && Recommend.SYSTEM.equals(rv)) rv = "system";
+        return new Recommend.State(setting, Recommend.label(setting), v, own, rv);
+    }
+    private static boolean own(Context c, String key, String titleId) { return of(c).contains(gameKey(key, titleId)); }
+
+    /** Game settings › Use recommended (the "Recommended for this phone" card): the game's own values of the settings that have a recommendation on this phone are removed, so they take it again; the rest stays */
+    static void backToRecommended(Context c, String titleId) {
+        SharedPreferences.Editor e = of(c).edit();
+        for (Recommend.State s : recStates(c, titleId))
+            if (s.recommended != null) for (String k : Recommend.prefKeys(s.setting, dlssGame(titleId))) e.remove(gameKey(k, titleId));
+        e.commit();
+    }
+
+    /** A recommended value's short name, as the player reads it (a changed row's "Recommended: …" line, a list's "Recommended (…)"): the preset's label, the driver's name
+     *  without its version, the Upscaler's or Dynamic resolution's name as its list shows it, a cap in fps, On / Off */
+    static String recName(Context c, String titleId, String setting, String v) {
+        if (setting.equals(Recommend.RES_PRESET)) { ResPresets.Preset p = ResPresets.of(ResPresets.presets(Profile.of(titleId)), v); return p == null ? v : p.label; }
+        if (setting.equals(Recommend.DRIVER)) {
+            if (v.equals("system")) return "System";
+            for (GpuDriver.Info i : GpuDriver.installed(c)) if (i.dir.getName().equals(v)) return i.name;
+        }
+        if (v.equals("on") || v.equals("off")) return v.equals("on") ? "On" : "Off";
+        if (setting.equals(Recommend.UPSCALER)) {
+            boolean dl = dlssGame(titleId);
+            int i = Recommend.index(dl ? Recommend.DLSS_MODES : Recommend.UPSCALERS, v);
+            String n = i < 0 ? v : (dl ? DlssTune.MODE_NAMES : GameUpscaler.MODES)[i];
+            return n.contains(" (") ? n.substring(0, n.indexOf(" (")) : n;
+        }
+        if (setting.equals(Recommend.DRS)) { int i = Recommend.index(Recommend.DRS_VALUES, v); return i < 0 ? v : DRS_NAMES[i]; }
+        if (setting.equals(Recommend.FPS_CAP)) return v.equals("own") ? "the game's own" : v + " fps";
+        return v;
+    }
+
+    /** A recommended value's name in the "Recommended for this phone" card, where it stands without its row: on / off and numbers say what they are ("Hold 60 off", "30 fps cap") */
+    static String recCardName(Context c, String titleId, String setting, String v) {
+        String n = recName(c, titleId, setting, v);
+        if (v.equals("on") || v.equals("off")) {
+            String what = setting.equals(Recommend.HOLD60) ? "Hold 60" : setting.startsWith(Recommend.OPTION) ? optionLabel(titleId, setting) : Recommend.label(setting);
+            return what + " " + v;
+        }
+        if (setting.equals(Recommend.FPS_CAP)) return n + " cap";
+        if (setting.equals(Recommend.DRS)) return "Dynamic resolution " + n;
+        return n;
+    }
+    private static String optionLabel(String titleId, String setting) {
+        Profile p = Profile.of(titleId);
+        if (p != null) for (Profile.Option o : p.options) if (setting.equals(Recommend.OPTION + o.env)) return o.label;
+        return setting;
     }
 
     /** Dynamic resolution, for games whose profile has drs_ctl rows (the host steers them: probe.c drs_install): the range the render size moves in, as % of the window,
@@ -155,7 +293,11 @@ final class Prefs {
     static int drs(Context c) { int v = of(c).getInt("drs2", DRS_DEFAULT); return v >= 0 && v < DRS.length ? v : DRS_DEFAULT; }
     static void drsDefault(Context c, int v) { of(c).edit().putInt("drs2", v).commit(); }
     static boolean ownDrs(Context c, String titleId) { return of(c).contains(gameKey("drs2", titleId)); }
-    static int drs(Context c, String titleId) { int v = of(c).getInt(gameKey("drs2", titleId), drs(c)); return v >= 0 && v < DRS.length ? v : drs(c); }
+    static int drs(Context c, String titleId) {
+        int r = Recommend.index(Recommend.DRS_VALUES, rec(c, titleId, Recommend.DRS)), d = r >= 0 ? r : drs(c);   // the recommended range before the main screen's
+        int v = of(c).getInt(gameKey("drs2", titleId), d);
+        return v >= 0 && v < DRS.length ? v : d;
+    }
     /** null removes the game's own choice */
     static void drs(Context c, String titleId, Integer v) {
         if (v == null) of(c).edit().remove(gameKey("drs2", titleId)).commit(); else of(c).edit().putInt(gameKey("drs2", titleId), v).commit();
@@ -173,6 +315,36 @@ final class Prefs {
     static void gameWindow(Context c, String titleId, String v) { put(c, gameKey("window", titleId), v); }
     static boolean ownWindow(Context c, String titleId) { return of(c).contains(gameKey("window", titleId)); }
 
+    /** Resolution (a game whose profile has res_preset rows: ResPresets): the stored preset id or ResPresets.ADVANCED, "" when the player chose neither. null: back to the default */
+    static String resPreset(Context c, String titleId) { return of(c).getString(gameKey("res_preset", titleId), ""); }
+    static void resPreset(Context c, String titleId, String v) { put(c, gameKey("res_preset", titleId), v); }
+    /**
+     * The Resolution choice in force for a game with presets: a preset id or ResPresets.ADVANCED; "" for a game without presets. Nothing stored: the preset that the choices
+     * from before the presets match (the game's own Game resolution or the main screen's, and Scene resolution: ResPresets.current), the profile's default without them
+     */
+    static String resolutionChoice(Context c, String titleId) {
+        Profile p = Profile.of(titleId);
+        java.util.List<ResPresets.Preset> ps = ResPresets.presets(p);
+        if (ps.isEmpty()) return "";
+        boolean legacy = ownWindow(c, titleId) || of(c).contains("window") || !sceneRes(c, titleId).isEmpty();
+        String stored = resPreset(c, titleId), r = rec(c, titleId, Recommend.RES_PRESET);
+        if (stored.isEmpty() && !ownResolution(c, titleId) && ResPresets.of(ps, r) != null) stored = r;   // nothing of the game's own: the recommended preset, before the main screen's window
+        return ResPresets.current(ps, p, SceneRes.presets(p), stored, legacy, gameWindow(c, titleId), sceneRes(c, titleId));
+    }
+    /** Whether the player chose this game's Resolution: a preset or Advanced, or (from before the presets) its own window or 3D scene */
+    static boolean ownResolution(Context c, String titleId) {
+        return !resPreset(c, titleId).isEmpty() || ownWindow(c, titleId) || !sceneRes(c, titleId).isEmpty();
+    }
+    /** The window the game starts with: its Resolution preset's, else (Advanced, or a game without presets) Game resolution's (gameWindow) */
+    static String startWindow(Context c, String titleId) {
+        return ResPresets.window(ResPresets.presets(Profile.of(titleId)), resolutionChoice(c, titleId), gameWindow(c, titleId));
+    }
+    /** The 3D scene overlay the game starts with, by its name in the pack's scene_res rows ("" for the game's own palette): its preset's, else (Advanced, or a game without presets) Advanced › 3D scene's */
+    static String startScene(Context c, String titleId) {
+        java.util.List<ResPresets.Preset> ps = ResPresets.presets(Profile.of(titleId));
+        return ps.isEmpty() ? sceneRes(c, titleId) : ResPresets.scene(ps, resolutionChoice(c, titleId), sceneRes(c, titleId));
+    }
+
     /**
      * The frame rate cap (the in-game panel): -1 = not set (the game profile's fps_target), 0 = the game's own, else 15, 20, 30 or 60. DM_FPS_TARGET for the host at
      * start, and Native.fpsCapSet while the game runs. A DM_FPS_TARGET line in env.txt overrides it for a run. 40 and 45 are no longer offered (they did not hold):
@@ -188,8 +360,10 @@ final class Prefs {
     }
     static int fpsCap(Context c) { return capOf(of(c).getInt("fps_cap", -1)); }
     static void fpsCap(Context c, int v) { of(c).edit().putInt("fps_cap", v).commit(); }
-    /** The game's cap: its own (set in its Game settings or its in-game panel), else the default */
-    static int fpsCap(Context c, String titleId) { return capOf(of(c).getInt(gameKey("fps_cap", titleId), fpsCap(c))); }
+    /** The game's cap: its own (set in its Game settings or its in-game panel), else the recommended one, else the default */
+    static int fpsCap(Context c, String titleId) { Integer r = limited(titleId) ? null : recCap(c, titleId); return capOf(of(c).getInt(gameKey("fps_cap", titleId), r != null ? r : fpsCap(c))); }
+    /** Whether the game starts with a cap chosen for it, its own or the recommended one (a limited game passes DM_FPS_LIMIT only then: GameActivity) */
+    static boolean chosenFpsCap(Context c, String titleId) { return ownFpsCap(c, titleId) || recCap(c, titleId) != null; }
 
     /**
      * Whether the host found that this game picks its own frame rate (its cap status reports no rate it can hold: Native.fpsCapStatus rates 0), as the last run
@@ -211,7 +385,7 @@ final class Prefs {
      *  dropped (DM_VK_SKIP_FS). Off by default: the layers were judged hidden by eye in a few places only */
     static boolean skipLayersGame(String titleId) { Profile p = Profile.of(titleId); return p != null && !p.skipLayers.isEmpty(); }
     static String skipLayersKeys(String titleId) { Profile p = Profile.of(titleId); return p == null ? "" : p.skipLayers; }
-    static boolean skipLayers(Context c, String titleId) { return of(c).getBoolean(gameKey("vk_skip_layers", titleId), false); }
+    static boolean skipLayers(Context c, String titleId) { return of(c).getBoolean(gameKey("vk_skip_layers", titleId), Recommend.bool(rec(c, titleId, Recommend.SKIP_LAYERS), false)); }
     static void skipLayers(Context c, String titleId, boolean on) { of(c).edit().putBoolean(gameKey("vk_skip_layers", titleId), on).commit(); }
     /** Game settings › Instanced draws (DM_VK_INSTANCE): runs of draws that repeat one mesh drawn as one instanced draw. Off by default (a GPU loss on Adreno 830 with Turnip, open) */
     static boolean instancedDraws(Context c, String titleId) { return of(c).getBoolean(gameKey("vk_instance", titleId), false); }

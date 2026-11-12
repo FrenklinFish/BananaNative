@@ -131,9 +131,69 @@ def optionsOf = { String game ->
         [env, label, desc, mode, implies, needs].collect { it.replaceAll(/[\t\n\\"]/, ' ').replaceAll(/[;|]/, ',').trim() }.join('|')
     }.join(';')
 }
+// The 3D scene overlays for Advanced (game.tsv scene_scale rows, only with a scene_scale_palette row: dm/tools/scene_res.py): "<name>|<label>|<scale>|<mode>", ';' between them (Profile.scenes, SceneRes)
+def sceneOf = { String game -> tsvRows(game, 'scene_scale_palette').isEmpty() ? '' : tsvRows(game, 'scene_scale').findAll { it.size() >= 4 }.collect { c ->
+    def name = c[1].trim(); def label = c.size() > 4 ? c.drop(4).join(' ').trim() : name
+    [name, label ?: name, c[2].trim(), c[3].trim()].collect { it.replaceAll(/[\t\n\\"]/, ' ').replaceAll(/[;|]/, ',').trim() }.join('|') }.join(';') }
+// The Resolution presets (game.tsv res_preset rows, the first the default; a floor:H / fixed:H scene needs a scene_scale_palette row and the window's scene_output row, else the
+// row is left out; dm/tools/scene_res.py checks the rows): "<id>|<label>|<window>|<default, floor or fixed>|<height>|<output width>|<output height>|<measured or open>", ';' between them (Profile.presets, ResPresets)
+def presetsOf = { String game ->
+    def outs = tsvRows(game, 'scene_output').findAll { it.size() >= 4 && it[2].trim() ==~ /\d+x\d+/ }.collectEntries { c -> [(c[1].trim()): [c[2].trim().split('x'), c[3].trim()]] }
+    def pal = !tsvRows(game, 'scene_scale_palette').isEmpty()
+    tsvRows(game, 'res_preset').findAll { it.size() >= 4 }.collect { c ->
+        def id = c[1].trim(); def win = c[2].trim(); def t = c[3].trim(); def label = c.size() > 4 ? c.drop(4).join(' ').trim() : id
+        def m = t == 'default' ? ['default', '0'] : (t =~ /^(floor|fixed):(\d+)$/).with { it.find() ? [it.group(1), it.group(2)] : null }
+        def o = outs[win]
+        if (m == null || (m[0] != 'default' && (!pal || o == null))) return null
+        [id, label ?: id, win, m[0], m[1], o ? o[0][0] : '0', o ? o[0][1] : '0', o ? o[1] : 'open'].collect { it.replaceAll(/[\t\n\\"]/, ' ').replaceAll(/[;|]/, ',').trim() }.join('|')
+    }.findAll { it != null }.join(';') }
 // The pixel shaders the game's Speedhack setting drops (game.tsv skip_layers: shader keys, comma separated), or empty. The launcher then offers the toggle (Prefs.skipLayersGame)
 def skipLayersOf = { String game -> tsvRows(game, 'skip_layers').with { rs -> rs.isEmpty() || rs[0].size() < 2 ? '' : rs[0][1].trim().replaceAll(/[^0-9a-fA-F,]/, '') } }
-def nxProfiles = nxGames.collect { g -> [g, nameOf(g).replaceAll(/[\t\n\\"]/, ' '), shaderTotalOf(g), shaderInputsOf(g), buildsOf(g), reqsOf(g), statusOf(g), deltaOf(g), stampOf(g), resolutionOf(g), romfsChecksOf(g), gpuTsOf(g), windowOf(g), decoupleOf(g), drsOf(g), fpsLimitOf(g), dlssOf(g), presentOnlyOf(g), stepsOf(g), tsvRows(g, 'mesh_vegetation_cut').isEmpty() ? '' : '1', optionsOf(g), skipLayersOf(g), variantsOf(g)].join('\\t') }.join('\\n')
+// The recommended settings per phone (game.tsv recommend rows: "<match> <setting>=<value> …", in order, a later matching row winning; Recommend.java, dm/games/README.md
+// "Recommended settings"): "<match>|<setting>=<value> …", ';' between them (Profile.recommend). A typo fails the build: an unknown setting, a value the setting does not take,
+// a setting this game does not offer, a match on a fact that is not allowed (never a name: driver differences key on what the driver reports) or a driver row that sets
+// more than the driver. The value lists are Recommend.java's (dm/tools/recommend.py checks the same; test_android_recommend.py keeps the three the same)
+def recFacts = ['gpu.vendor', 'gpu.device', 'driver.id', 'driver.version', 'vk.api']
+def recFactPrefixes = ['feature.', 'ext.', 'limit.']
+def recCond = ~/([A-Za-z0-9_.]+)(?:&(0[xX][0-9a-fA-F]+|[0-9]+))?(!=|>=|<=|=|>|<)([0-9A-Za-z_.]+)/
+def recommendOf = { String game ->
+    def rows = tsvRows(game, 'recommend')
+    if (rows.isEmpty()) return ''
+    def fail = { String why -> throw new GradleException("dm/games/$game/game.tsv: recommend: $why (dm/games/README.md \"Recommended settings\")") }
+    def presets = presetsOf(game).split(';').findAll { it }.collect { it.split('\\|')[0] }
+    def opts = optionsOf(game).split(';').findAll { it }.collect { it.split('\\|')[0] }
+    def limited = decoupleOf(game) == '1' || fpsLimitOf(game) != ''
+    def dlss = dlssOf(game) == '1'
+    rows.collect { c ->
+        def words = c.drop(1).collectMany { it.trim().split(/\s+/) as List }.findAll { it }
+        if (words.size() < 2) fail("a row takes <match> <setting>=<value> …: ${c.join(' ')}")
+        def match = words[0]
+        if (match != 'any') match.split(',').each { cond ->
+            def m = recCond.matcher(cond)
+            if (!m.matches()) fail("the condition '$cond' is not <fact>[&<mask>]<op><value> (op =, !=, >=, <=, >, <)")
+            def f = m.group(1)
+            if (!(f in recFacts || recFactPrefixes.any { f.startsWith(it) && f.length() > it.length() })) fail("a match reads ${recFacts.join(', ')} and ${recFactPrefixes.collect { it + '*' }.join(', ')} (what the driver reports, never a name), not $f")
+        }
+        def set = words.drop(1)
+        set.each { kv ->
+            def eq = kv.indexOf('=')
+            if (eq <= 0 || eq == kv.length() - 1) fail("'$kv' is not <setting>=<value>")
+            def k = kv.substring(0, eq), v = kv.substring(eq + 1)
+            def take = { List ok, boolean offered -> if (!offered) fail("$k: this game does not offer the setting"); if (!(v in ok)) fail("$k takes ${ok.join(', ')}, not $v") }
+            if (k == 'res_preset') take(presets, !presets.isEmpty())
+            else if (k == 'driver') { if (!(v == 'system' || v ==~ /[1-9][0-9]*/)) fail("driver takes system or a VkDriverId (a number), not $v"); if (set.size() > 1) fail("a driver row sets only the driver: ${set.join(' ')}") }
+            else if (k == 'upscaler') take(dlss ? ['gsr2', 'fsr1', 'bilinear', 'fsr3'] : ['nearest', 'bilinear', 'fsr1', 'native', 'sgsr1'], true)
+            else if (k == 'hold60') take(['on', 'off'], stepsOf(game) == '1')
+            else if (k == 'fps_cap') take(limited ? ['60', '45', '40', '30', '20'] : ['own', '60', '30', '20', '15'], true)
+            else if (k == 'drs') take(['off', '80', '70', '60', '50', '40', '30'], drsOf(game) == '1')
+            else if (k == 'vegetation') take(['on', 'off'], !tsvRows(game, 'mesh_vegetation_cut').isEmpty())
+            else if (k == 'skip_layers') take(['on', 'off'], skipLayersOf(game) != '')
+            else if (k.startsWith('option.')) take(['on', 'off'], k.substring(7) in opts)
+            else fail("unknown setting $k (res_preset, driver, upscaler, hold60, fps_cap, drs, vegetation, skip_layers, option.<ENV>)")
+        }
+        match + '|' + set.join(' ')
+    }.join(';') }
+def nxProfiles = nxGames.collect { g -> [g, nameOf(g).replaceAll(/[\t\n\\"]/, ' '), shaderTotalOf(g), shaderInputsOf(g), buildsOf(g), reqsOf(g), statusOf(g), deltaOf(g), stampOf(g), resolutionOf(g), romfsChecksOf(g), gpuTsOf(g), windowOf(g), decoupleOf(g), drsOf(g), fpsLimitOf(g), dlssOf(g), presentOnlyOf(g), stepsOf(g), tsvRows(g, 'mesh_vegetation_cut').isEmpty() ? '' : '1', optionsOf(g), sceneOf(g), presetsOf(g), skipLayersOf(g), recommendOf(g), variantsOf(g)].join('\\t') }.join('\\n')
 def lockOf = { String key -> def f = new File(repo, 'dm/gfx/tools/dmsh_chain.lock'); f.isFile() ? (f.readLines().find { it.startsWith(key + '\t') }?.split('\t')?.getAt(1) ?: 'unknown') : 'unknown' }
 
 android {

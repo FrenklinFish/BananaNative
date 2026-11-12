@@ -107,6 +107,17 @@ vka_shader *vka_memu_by_key(uint64_t key) {
     return NULL;
 }
 
+int vka_memu_vs_feeds(vka_shader *vs, vka_shader *fs) {
+    if (!vs || vs->memu != 2 || !fs || !fs->e || fs->e->stage != DMSH_VK_STAGE_FS) return 1;
+    vka_shader *ms = vka_shader_by_key(vs->key ^ VKA_MEMU_KEY_VS); vka_memu_sh *d = ms ? vka_memu_of(ms) : NULL;
+    if (!d) return 1;
+    char err[128]; size_t nb = 0; uint64_t in = 0;
+    uint32_t *w = vka_shader_memu_words(fs, &nb, err, sizeof err);   // (the pixel shader's base words; their inputs are every module's)
+    int known = w && vka_memu_fs_input_locs(w, nb / 4, &in);
+    free(w);
+    return !known || !(in & ~vka_memu_vs_locs(&d->L));
+}
+
 // ---------- The arena ----------
 // One per submission in flight: taken at the submission's first emulated batch (its counter cleared in the command buffer), given the submission's fence at its commit
 // (vka_memu_retire), free again once that fence is done. Its control words are host-visible: before reuse, the most the last submission asked for is read, and an arena

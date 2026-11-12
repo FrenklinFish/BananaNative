@@ -1281,9 +1281,9 @@ static void memu_before_draw(const uint8_t *p, const p_draw *d) {
     if (!vka_memu_on()) return;
     if (g_memu_sub != g_n_sub) { g_memu_sub = g_n_sub; g_memu_cover = 0; }
     int mesh = d && d->prim == NVN_PRIM_MESH;
-    vka_memu_cur(p);
-    if (!vka_rp_on()) { if (!g_memu_cover || (mesh && !vka_memu_has(p))) memu_scan(p); return; }
-    if (mesh && !vka_memu_has(p)) { vka_rp_end(); vka_memu_n_splits++; memu_scan(p); }
+    if (!vka_rp_on()) { if (!g_memu_cover || (mesh && !vka_memu_has(p))) memu_scan(p); }
+    else if (mesh && !vka_memu_has(p)) { vka_rp_end(); vka_memu_n_splits++; memu_scan(p); }
+    vka_memu_cur(p);   // (after the look-ahead: the next entry of this record in the batch, which moves past it; a record met twice in one look-ahead has an entry per meeting)
 }
 
 static void seg_write(const void *a) { struct { VkCommandBuffer cb; VkPipelineStageFlagBits st; uint32_t q; } w; memcpy(&w, a, sizeof w); qf.write(w.cb, w.st, g_sqp, w.q); }

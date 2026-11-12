@@ -258,6 +258,28 @@ final class Readiness {
         try { return Long.decode(v.trim()) == VENDOR_QUALCOMM; } catch (NumberFormatException e) { return true; }
     }
 
+    /**
+     * The system driver in a few words for a page's state chip (Game settings), from the facts the launcher keeps (driver.id, driver.version): Qualcomm's own driver with
+     * the version it shows in its build string (driverVersion 512.842.44 reads 842.44), Mesa Turnip with its Mesa version; null for another driver (the caller says "System driver")
+     */
+    static String driverWord(Map<String, String> f) {
+        if (f == null) return null;
+        long v;
+        try { v = Long.decode(f.getOrDefault("driver.version", "").trim()); } catch (NumberFormatException e) { return null; }
+        switch (f.getOrDefault("driver.id", "").trim()) {
+            case "8": return "Qualcomm " + ((v >> 12) & 0x3ff) + "." + (v & 0xfff);   // VK_DRIVER_ID_QUALCOMM_PROPRIETARY
+            case "13": return "Turnip " + ((v >> 22) & 0x3ff) + "." + ((v >> 12) & 0x3ff) + "." + (v & 0xfff);   // VK_DRIVER_ID_MESA_TURNIP
+            default: return null;
+        }
+    }
+
+    /** A GPU's name as GLES's renderer string gives it, made short for the chip: "Adreno (TM) 840" reads "Adreno 840"; null or blank: null */
+    static String gpuName(String renderer) {
+        if (renderer == null) return null;
+        String s = renderer.replace("(TM)", "").replace("(R)", "").replaceAll("\\s+", " ").trim();
+        return s.isEmpty() ? null : s;
+    }
+
     /** The GPU and driver in one line: name, driver name and info, driver ID and version, and a custom driver's name */
     static String gpu(Map<String, String> f) {
         if (!f.containsKey("gpu.name")) return "GPU not reported" + (f.containsKey("error") ? " (" + f.get("error") + ")" : f.containsKey("unchecked") ? " (" + f.get("unchecked") + ")" : "");

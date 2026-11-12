@@ -37,6 +37,12 @@ dlss_standin	1
 # Android: the 2560x1440 AV1 movies (50-70 Mbit/s) decode on dav1d frame-parallel, not the phone's hardware decoder: Qualcomm's c2.qti.av1.decoder on the Adreno 740
 # dropped 521 of 1200 frames of NR14_00 (22-23 fps), dav1d frame-parallel plays it and the opening at 30 fps with no drops (dm/games/README.md av1_decoder)
 av1_decoder	dav1d
+# ---- Recommended settings (the launcher, Recommend.java; dm/games/README.md recommend) ----
+# Phone's own driver Qualcomm's before 512.800 (driverID 8, VkPhysicalDeviceProperties.driverVersion major 512, minor below 800: the host's own qcom_old rule, vka_dev.c):
+# an installed Turnip (driverID 18, MESA_TURNIP). README.md "Tested devices": on the AYN Thor (Adreno 740) the stock 512.676.53 runs with faults, characters and some
+# foliage lit dark, dungeon at about 25 fps (GPU 36 ms); Turnip T30 and Gen8 V39 play the dungeon at 29-30 fps with characters correct; and README.md "Rendering
+# fixes": "the stock driver stays not recommended for play"
+recommend	driver.id=8,driver.version&0xffc00000=0x80000000,driver.version&0x3ff000<0x320000	driver=18
 # Android, Game resolution: the game picks its output from the display's largest buffer (hle_vi.c: 4K in console mode, the 1080p screen in handheld mode) and its render
 # preset from that, the graphics scale and the performance mode. Docked it renders 1024x576 and DLSS takes it to 2048x1152; handheld 960x540 to 1920x1080 (the crops
 # WindowCrop logs). It queries the largest buffer every frame and picks the preset again when it changes, so the in-game panel can switch it while the game runs.

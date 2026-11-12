@@ -43,3 +43,8 @@ uint32_t *vka_memu_vs(const vka_memu_layout *L, size_t *out_nw, char *err, size_
 // A pixel shader of per-primitive inputs (PerPrimitiveEXT, made Flat by the library build) for a vertex pipeline: the decoration, MeshShadingEXT and SPV_EXT_mesh_shader
 // dropped, every such input flat. malloc'd (*out_nw words); NULL with err empty when the module has none
 uint32_t *vka_memu_fs_flat(const uint32_t *w, size_t nw, size_t *out_nw, char *err, size_t errn);
+// The locations a mesh layout's vertex shader (vka_memu_vs) writes: bit L for location L (per-vertex and per-primitive ones)
+uint64_t vka_memu_vs_locs(const vka_memu_layout *L);
+// The user input locations a pixel shader reads (bit L for location L; an array takes one location per element) into *mask: 1, or 0 when it cannot tell (a block of
+// inputs, a 64-bit or matrix input, a location past 63, not SPIR-V)
+int vka_memu_fs_input_locs(const uint32_t *w, size_t nw, uint64_t *mask);

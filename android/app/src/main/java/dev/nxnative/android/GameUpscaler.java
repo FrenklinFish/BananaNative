@@ -35,7 +35,12 @@ final class GameUpscaler {
     static int mode(Context c) { int m = Prefs.of(c).getInt("ndsr_choice2", MODE_DEFAULT); return m >= 0 && m < MODES.length ? m : MODE_DEFAULT; }
     static void modeDefault(Context c, int m) { Prefs.of(c).edit().putInt("ndsr_choice2", m).commit(); }
     static boolean ownMode(Context c, String titleId) { return Prefs.of(c).contains(Prefs.gameKey("ndsr_choice2", titleId)); }
-    static int mode(Context c, String titleId) { int m = Prefs.of(c).getInt(Prefs.gameKey("ndsr_choice2", titleId), mode(c)); return m >= 0 && m < MODES.length ? m : mode(c); }
+    /** The game's own choice, else the recommended one (Prefs.recommended), else the main screen's */
+    static int mode(Context c, String titleId) {
+        int r = Prefs.dlssGame(titleId) ? -1 : Recommend.index(Recommend.UPSCALERS, Prefs.rec(c, titleId, Recommend.UPSCALER)), d = r >= 0 ? r : mode(c);
+        int m = Prefs.of(c).getInt(Prefs.gameKey("ndsr_choice2", titleId), d);
+        return m >= 0 && m < MODES.length ? m : d;
+    }
     static void mode(Context c, String titleId, Integer m) {
         if (m == null) Prefs.of(c).edit().remove(Prefs.gameKey("ndsr_choice2", titleId)).commit(); else Prefs.of(c).edit().putInt(Prefs.gameKey("ndsr_choice2", titleId), m).commit();
         push(c, titleId);
@@ -69,7 +74,10 @@ final class GameUpscaler {
 
     // A game on the DLSS stand-in: its Upscaler row is the stand-in's mode (DlssTune.MODE_NAMES), stored per game only (no main-screen default: no other game has the stand-in)
     static boolean ownDlssMode(Context c, String titleId) { return Prefs.of(c).contains(Prefs.gameKey("dlss_mode", titleId)); }
-    static int dlssMode(Context c, String titleId) { return DlssTune.clamp(Prefs.of(c).getInt(Prefs.gameKey("dlss_mode", titleId), DlssTune.MODE_DEFAULT), DlssTune.MODE_NAMES.length, DlssTune.MODE_DEFAULT); }
+    static int dlssMode(Context c, String titleId) {   // the game's own, else the recommended one (Prefs.recommended), else the stand-in's default
+        int r = Recommend.index(Recommend.DLSS_MODES, Prefs.rec(c, titleId, Recommend.UPSCALER)), d = r >= 0 ? r : DlssTune.MODE_DEFAULT;
+        return DlssTune.clamp(Prefs.of(c).getInt(Prefs.gameKey("dlss_mode", titleId), d), DlssTune.MODE_NAMES.length, d);
+    }
     static void dlssMode(Context c, String titleId, Integer v) {
         if (v == null) Prefs.of(c).edit().remove(Prefs.gameKey("dlss_mode", titleId)).commit(); else Prefs.of(c).edit().putInt(Prefs.gameKey("dlss_mode", titleId), v).commit();
         push(c, titleId);

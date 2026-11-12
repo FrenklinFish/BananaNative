@@ -34,8 +34,8 @@ final class PadMapUi {
 
     /** The value a settings row shows */
     static String label(Activity a, String titleId) {
-        String s = PadMap.summary(titleId == null ? Prefs.padMap(a) : Prefs.padMap(a, titleId));
-        return titleId == null || Prefs.ownPadMap(a, titleId) ? s : "Default · " + s;
+        if (titleId == null) return PadMap.summary(Prefs.padMap(a));
+        return PadMap.gameLabel(Prefs.ownPadMap(a, titleId), Prefs.padMap(a, titleId));
     }
 
     private static void edit(Activity a, String title, String note, String spec, int labelled, Consumer<String> save, String resetName, Runnable reset) {

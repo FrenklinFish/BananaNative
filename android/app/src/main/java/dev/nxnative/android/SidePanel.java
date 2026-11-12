@@ -64,7 +64,7 @@ final class SidePanel extends FrameLayout {
     }
 
     // The ids of the choices a rebuild gives the focus back to (restyle)
-    private static final int ID_SIZE = 5000, ID_TEXT = 5100, ID_FIT = 5200, ID_MAP = 5300, ID_ONE = 5400, ID_RES = 5500;
+    private static final int ID_SIZE = 5000, ID_TEXT = 5100, ID_FIT = 5200, ID_MAP = 5300, ID_ONE = 5400, ID_RES = 5500, ID_RES_PRESET = 5590;
 
     SidePanel(Activity a, Rows rows) {
         super(a);
@@ -524,12 +524,38 @@ final class SidePanel extends FrameLayout {
      * (Profile.hasResolution). A game with graphics_scale rows changes now: the host takes the choice's graphics scale and operation mode and posts the console's change
      * notifications, which the game answers by querying them again and resizing its scenes (Native.graphicsModeSet, hle_oe.c nxhost_graphics_mode_set). A window_fn or res_levels
      * game takes it at the next start. A game with one docked and one handheld row gets those two as radio buttons instead (Profile.modes).
+     * A game with Resolution presets (ResPresets) gets them instead: the preset's window changes now, its 3D scene at the next start (the RomFS overlay is read at boot);
+     * under Advanced the window row follows as before.
      */
     private void resolutionRow() {
         Profile p = Profile.of(game());
         if (p == null || !p.hasResolution()) return;
         head("Resolution");
         boolean now = p.resolutionLive() && act instanceof GameActivity;
+        java.util.List<ResPresets.Preset> ps = ResPresets.presets(p);
+        if (!ps.isEmpty()) {
+            String rc = Prefs.resolutionChoice(act, game());
+            Button pr = row(ID_RES_PRESET, "Resolution", ResPresets.label(ps, rc));
+            pr.setOnClickListener(v -> {
+                String[] labels = new String[ps.size() + 1];
+                for (int k = 0; k < ps.size(); k++) labels[k] = ps.get(k).label + " \u00b7 " + ps.get(k).detail();
+                labels[ps.size()] = "Advanced (window and 3D scene set apart)";
+                ResPresets.Preset cur0 = ResPresets.of(ps, Prefs.resolutionChoice(act, game()));
+                new AlertDialog.Builder(act).setTitle("Resolution").setSingleChoiceItems(labels, cur0 != null ? ps.indexOf(cur0) : ps.size(), (d, w) -> {
+                    Prefs.resPreset(act, game(), w < ps.size() ? ps.get(w).id : ResPresets.ADVANCED);   // the game's own setting: the next start takes it too
+                    if (now) {
+                        int[] m = p.resolutionLive(Prefs.startWindow(act, game()));
+                        if (m != null && !Native.graphicsModeSet(m[0], m[1])) Native.note("Resolution: this host cannot change the window live; it applies at the next start");
+                    }
+                    d.dismiss();
+                    restyle(ID_RES_PRESET);
+                }).setNegativeButton("Cancel", null).show();
+            });
+            note(now ? "The window changes now; the 3D scene at the next start. Kept for this game (the same setting as Game settings › Resolution)."
+                    : "Applies at the next start (the same setting as Game settings › Resolution).");
+            if (!ResPresets.ADVANCED.equals(rc)) return;
+        }
+        String winTitle = ps.isEmpty() ? "Game resolution" : "Advanced \u00b7 Window";
         String cur = Prefs.gameWindow(act, game());
         String[] modes = p.modes();
         if (modes != null) {   // a game with one docked and one handheld row (Profile.modes): those two radio buttons only, drawn as the Frame rate cap's
@@ -538,6 +564,7 @@ final class SidePanel extends FrameLayout {
             if (p.modeOf(cur) >= 0) g.check(ID_RES + 1 + p.modeOf(cur));   // Original shows as Docked (Profile.modeOf)
             g.setOnCheckedChangeListener((gr, id) -> {
                 Prefs.gameWindow(act, game(), modes[id - ID_RES - 1]);   // the game's own setting: the next start takes it too
+                if (!ps.isEmpty()) Prefs.resPreset(act, game(), ResPresets.ADVANCED);   // a window chosen under Advanced keeps Advanced
                 if (now) {
                     int[] m = p.resolutionLive(Prefs.gameWindow(act, game()));
                     if (m != null && !Native.graphicsModeSet(m[0], m[1])) Native.note("Game resolution: this host cannot change it live; it applies at the next start");
@@ -547,14 +574,15 @@ final class SidePanel extends FrameLayout {
             box.addView(g);
             return;
         }
-        Button r = row(ID_RES, "Game resolution", (Prefs.ownWindow(act, game()) ? "" : "Default · ") + Prefs.windowName(cur, false));
+        Button r = row(ID_RES, winTitle, (Prefs.ownWindow(act, game()) ? "" : "Default · ") + Prefs.windowName(cur, false));
         r.setOnClickListener(v -> {
             String[] labels = new String[Prefs.WINDOWS.length + 1];
             labels[0] = "Default (" + Prefs.windowName(Prefs.defaultWindow(act, game()), false) + ")";
             { Profile lp = Profile.of(game()); for (int li = 0; li < Prefs.WINDOWS.length; li++) labels[li + 1] = lp != null ? lp.windowLabel(Prefs.WINDOWS[li], Prefs.WINDOW_NAMES[li]) : Prefs.WINDOW_NAMES[li]; }   // a choice the game draws at another size says so (Profile.windowLabel)
             int checked = Prefs.ownWindow(act, game()) ? 1 + Math.max(0, java.util.Arrays.asList(Prefs.WINDOWS).indexOf(cur)) : 0;
-            new AlertDialog.Builder(act).setTitle("Game resolution").setSingleChoiceItems(labels, checked, (d, w) -> {
+            new AlertDialog.Builder(act).setTitle(winTitle).setSingleChoiceItems(labels, checked, (d, w) -> {
                 Prefs.gameWindow(act, game(), w == 0 ? null : Prefs.WINDOWS[w - 1]);   // the game's own setting: the next start takes it too
+                if (!ps.isEmpty()) Prefs.resPreset(act, game(), ResPresets.ADVANCED);   // a window chosen under Advanced keeps Advanced
                 if (now) {
                     int[] m = p.resolutionLive(Prefs.gameWindow(act, game()));
                     if (m != null && !Native.graphicsModeSet(m[0], m[1])) Native.note("Game resolution: this host cannot change it live; it applies at the next start");

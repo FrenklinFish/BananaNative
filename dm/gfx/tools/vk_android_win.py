@@ -11,7 +11,7 @@
 #   package reads    record_index opens each .bin with os.open(..., os.O_RDONLY) and _rec reads records with os.pread: on Windows os.open needs O_BINARY
 #                    (without it CR LF is read as LF and 0x1a ends the read) and os.pread is a locked lseek + read, as in dm/tools/nup.py
 # Elsewhere (macOS, Linux) nothing is changed: this only runs vk_android_build.py. When vk_android_build.py changes for another reason, these belong in it.
-# Usage: as vk_android_build.py (vk_android_win.py --target vulkan <package dir> <output cache dir> [key...])
+# Usage: as vk_android_build.py (vk_android_win.py --target vulkan <package dir> <output cache dir> [key... | @<file of keys>])
 import builtins, functools, io, os, runpy, subprocess, sys, tempfile, threading
 HERE = os.path.dirname(os.path.abspath(__file__))
 BUILD = os.path.join(HERE, 'vk_android_build.py')
@@ -70,7 +70,18 @@ def install():
         os.pread = pread
 
 
+def expand_args(args):
+    """An argument "@<file>" is the keys of that file, one a line (scripts/pack_android.py passes a selected set this way: thousands of keys pass the 32,767
+    characters of a Windows command line); the others as they are"""
+    out = []
+    for a in args:
+        if a.startswith('@') and len(a) > 1:
+            with open(a[1:], encoding='utf-8') as f: out += [l.strip() for l in f if l.strip()]
+        else: out.append(a)
+    return out
+
+
 if __name__ == '__main__':
     if os.name == 'nt': install()
-    sys.argv = [BUILD] + sys.argv[1:]
+    sys.argv = [BUILD] + expand_args(sys.argv[1:])
     runpy.run_path(BUILD, run_name='__main__')

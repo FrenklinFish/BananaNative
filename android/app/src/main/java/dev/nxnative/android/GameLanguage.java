@@ -4,7 +4,7 @@ import java.util.Locale;
 
 /**
  * The game's language (Game settings › Game language): one of the console's language codes (nn::settings::LanguageCode), passed to the host as DM_LANG, or the
- * phone's language (the default), mapped to the console's code as the host maps DM_LANG (hle_oe.c dm_lang_code: fr-FR is fr, es-MX is es-419, zh-TW is zh-Hant).
+ * phone's language (the default), mapped to the console's code as the host maps DM_LANG (hle_oe.c dm_lang_code: fr-FR is fr, pl-PL is pl, th-TH is th, es-MX is es-419, zh-TW is zh-Hant).
  * A phone language the console has no code for sets nothing: the host's default, en-US. A DM_LANG line of env.txt or the game's extra environment comes later and
  * wins. Whether the game has that language is the game's own matter (it falls back to one it has). No Android classes: GameLanguageJvmTest runs it.
  */
@@ -12,9 +12,9 @@ final class GameLanguage {
     private GameLanguage() {}
 
     /** The console's language codes, in the order the picker lists them, and their names */
-    static final String[] CODES = {"en-US", "en-GB", "ja", "fr", "fr-CA", "de", "it", "es", "es-419", "nl", "pt", "pt-BR", "ru", "ko", "zh-Hans", "zh-Hant"};
+    static final String[] CODES = {"en-US", "en-GB", "ja", "fr", "fr-CA", "de", "it", "es", "es-419", "nl", "pt", "pt-BR", "ru", "ko", "zh-Hans", "zh-Hant", "pl", "th"};
     static final String[] NAMES = {"English (US)", "English (UK)", "Japanese", "French", "French (Canada)", "German", "Italian", "Spanish (Spain)", "Spanish (Latin America)",
-            "Dutch", "Portuguese", "Portuguese (Brazil)", "Russian", "Korean", "Chinese (Simplified)", "Chinese (Traditional)"};
+            "Dutch", "Portuguese", "Portuguese (Brazil)", "Russian", "Korean", "Chinese (Simplified)", "Chinese (Traditional)", "Polish", "Thai"};
 
     /** The console's code for a BCP-47 language tag (Locale.toLanguageTag: "fr-FR", "zh-Hant-TW"), null when the console has no such language */
     static String code(String tag) {
@@ -36,6 +36,8 @@ final class GameLanguage {
             case "pt": return region.equals("br") ? "pt-BR" : "pt";
             case "ru": return "ru";
             case "ko": return "ko";
+            case "pl": return "pl";
+            case "th": return "th";
             case "zh": return script.equals("hant") || script.isEmpty() && (region.equals("tw") || region.equals("hk") || region.equals("mo")) ? "zh-Hant" : "zh-Hans";
             default: return null;
         }

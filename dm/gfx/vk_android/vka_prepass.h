@@ -7,6 +7,7 @@
 // named the image its prepass draws of the next one used, and no prepass draw was cut (2026-11-12). The shadow images differ in format and size from the scene's depth.
 #pragma once
 #include <stdint.h>
+#include "../nvn/dmsh_abi_vk.h"
 
 // A depth target's identity: a hash of its shape; never 0 (0: no depth target)
 static inline uint64_t vkpp_depth_shape(uint32_t format, uint32_t w, uint32_t h, uint32_t depth, uint32_t samples, uint32_t layer) {
@@ -37,5 +38,13 @@ static inline int vkpp_prepass(vkpp_pair *p, uint64_t dep, uint64_t f) {
     if (!dep) return 0;
     for (int k = 0; k < VKPP_SLOTS; k++)
         if (p->seen[k] && p->dep[k] == dep && f - p->seen[k] <= VKPP_SEEN_FRAMES) { p->cut = f; return 1; }
+    return 0;
+}
+
+// A shader's bindings write guest memory: a binding it writes or does atomics on, or one whose slot or kind the library could not tell. A cut prepass draw whose task or
+// mesh shader writes is still run with rasterizer discard (vka_draw.c prepass_side), so what it writes for the draws after it is there
+static inline int vkpp_binds_write(const dmsh_vk_bind *b, unsigned n) {
+    for (unsigned j = 0; b && j < n; j++)
+        if ((b[j].flags & (DMSH_VK_BF_RW | DMSH_VK_BF_ATOMIC | DMSH_VK_BF_NOSLOT)) || b[j].kind == DMSH_VK_KIND_GMEM_LOG || b[j].kind == DMSH_VK_KIND_UNKNOWN) return 1;
     return 0;
 }

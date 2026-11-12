@@ -74,7 +74,7 @@ final class GpuDriver {
 
     /** A game's own pick (its Game settings), stored per title ID: absent = the default above, SYSTEM = the phone's own driver, else a driver's folder name
      *  (":" is never in one, DriverZip.safe()) */
-    static final String SYSTEM = ":system";
+    static final String SYSTEM = Recommend.SYSTEM;
     static String choice(Context c, String titleId) { return Prefs.of(c).getString(Prefs.gameKey("gpu_driver", titleId), null); }
     /** null: back to the default */
     static void choice(Context c, String titleId, String v) {
@@ -83,9 +83,11 @@ final class GpuDriver {
         else Prefs.of(c).edit().putString(k, v).commit();
     }
 
-    /** The driver a game starts with: its own pick, else the default; null = the system's (also when the picked one was removed) */
+    /** The driver a game starts with: its own pick, else the recommended one for this phone (Prefs.recommendedDriver: only one installed here), else the default; null = the
+     *  system's (also when the picked one was removed) */
     static Info selected(Context c, String titleId) {
         String s = choice(c, titleId);
+        if (s == null) s = Prefs.recommendedDriver(c, titleId);
         if (s == null) return selected(c);
         if (s.equals(SYSTEM)) return null;
         for (Info i : installed(c)) if (i.dir.getName().equals(s)) return i;

@@ -1130,6 +1130,13 @@ static void *pw_main(void *a) {
         else {
             for (int s = 0; s < 5; s++) if (r.key[s] && vka_shader_variant_key(r.key[s])) bad = 2;   // an older list's instanced variant: dropped quietly
             for (int s = 0; s < 5 && !bad; s++) if (r.key[s] && !(sh[s] = vka_shader_by_key(r.key[s]))) bad = 1;
+            // A mesh shader's generated vertex shader with a pixel shader whose inputs it does not write: no draw pairs them, so a record of an older host (before
+            // 73ed0b5c a draw met twice in a look-ahead took its first meeting's vertex shader: docs/reference/rendering.md "Mesh draws through compute matched to the
+            // wrong meeting of a record"), which Qualcomm's driver refuses with -13 at every start. Dropped
+            if (!bad && sh[0] && sh[0]->memu == 2 && !vka_memu_vs_feeds(sh[0], sh[1])) {
+                bad = 3; static _Atomic int n; if (atomic_fetch_add(&n, 1) < 4) VLOG("prewarm: record of vertex %016llx and pixel %016llx dropped: the mesh shader's vertex shader does not write the pixel shader's inputs (a record of an older host)",
+                                                                                (unsigned long long)sh[0]->key, (unsigned long long)sh[1]->key);
+            }
         }
         vka_layout lay;
         if (!bad && !vka_layout_of(sh, r.kind == VKA_PW_CS, &lay)) bad = 1;

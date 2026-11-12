@@ -666,3 +666,32 @@ uint32_t *vka_memu_fs_flat(const uint32_t *w, size_t nw, size_t *out_nw, char *e
     free(flat); free(pp);
     *out_nw = n; return o;
 }
+
+// ---------- What a vertex shader of a layout writes, what a pixel shader reads ----------
+uint64_t vka_memu_vs_locs(const vka_memu_layout *L) {
+    uint64_t m = 0;
+    for (int k = 0; k < L->nvloc; k++) m |= 1ull << L->vloc[k];
+    for (int k = 0; k < L->nploc; k++) m |= 1ull << L->ploc[k];
+    return m;
+}
+int vka_memu_fs_input_locs(const uint32_t *w, size_t nw, uint64_t *mask) {
+    mod_t m; char err[64]; *mask = 0;
+    if (!mod_read(&m, w, nw, err, sizeof err)) { mod_free(&m); return 0; }
+    int ok = 1;
+    for (size_t i = 5; i < m.first_fn && ok;) {
+        uint32_t op = m.w[i] & 0xffff, len = m.w[i] >> 16;
+        if (op == OpVariable && len >= 4 && m.w[i + 3] == SCInput) {
+            uint32_t id = m.w[i + 2], t = ptr_pointee(&m, m.w[i + 1], NULL), n = 1, el = t;
+            if (m.bi[id] < 0) {
+                if (T_op(&m, t) == OpTypeArray) { n = array_len(&m, t, &el); if (!n) ok = 0; }
+                uint32_t ct = T_op(&m, el) == OpTypeVector ? T_w(&m, el)[2] : el;
+                if (m.loc[id] < 0 || !scalar_kind(&m, ct) || m.loc[id] + n > 64) ok = 0;   // (a block, a 64-bit or matrix input, past 63)
+                else for (uint32_t k = 0; k < n; k++) *mask |= 1ull << (m.loc[id] + k);
+            }
+        }
+        i += len;
+    }
+    mod_free(&m);
+    if (!ok) *mask = 0;
+    return ok;
+}

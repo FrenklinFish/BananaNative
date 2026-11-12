@@ -2042,6 +2042,7 @@ typedef struct {
 static prepass_snap g_pps[32]; static uint64_t g_pps_seq;   // the prepass draws last seen, by pair and indirect record
 static vka_shader *g_fs_sub;   // set while prepass_draw draws: the pixel shader in place of the bound one, and no mesh_cut
 static int g_sub_drawn;        // prepass_draw's draw got as far as its draw command
+static int g_pp_side;          // set while prepass_side draws: no mesh_cut
 static void prepass_note(const vka_dstate *d, int i, uint64_t ind, vka_shader *fs) {
     uint64_t vka_frame(void);
     prepass_snap *s = &g_pps[0];
@@ -2114,7 +2115,7 @@ static void prepass_unlisted(const vka_dstate *d, const p_set_rt *rt, int has_rt
 // -1: a prepass draw, not drawn; 1: a colour draw to test LEQUAL for EQUAL; 2 + i: a colour draw that prepass_draw gives its depth first (pair i); 0: neither
 static int mesh_cut(const vka_dstate *d, const p_set_rt *rt, int has_rt, uint64_t key, uint64_t ind, vka_shader *fs) {
     static const uint64_t cut[][4] = DM_GAME_MESH_PREPASS_CUT;
-    if (g_fs_sub) return 0;
+    if (g_fs_sub || g_pp_side) return 0;
     int m = VKA_ENV("DM_VK_MESH_PREPASS_SKIP", -1);
     if (m < 0 ? V.memu || V.driver_id != VK_DRIVER_ID_QUALCOMM_PROPRIETARY : !m) return 0;   // (through compute the driver's mesh stage, whose fault this is, is not used)
     uint64_t vka_frame(void), f = vka_frame() + 1, dep = depth_id(rt, has_rt);
@@ -2153,6 +2154,22 @@ static int prepass_draw(const vka_dstate *d, const p_set_rt *rt, int has_rt, con
              (unsigned long long)cut[i][0], (unsigned long long)cut[i][1], (unsigned long long)s->fs->key);
     g_fs_sub = fs; g_sub_drawn = 0; draw_body(&d2, rt, has_rt, sc, has_sc, dw, NULL); g_fs_sub = NULL;
     return g_sub_drawn;
+}
+// A task or mesh shader of the draw writes guest memory (vka_prepass.h)
+static int mesh_writes(vka_shader *const *sh) {
+    for (int st = 6; st <= 7; st++) if (sh[st] && vkpp_binds_write(sh[st]->b, sh[st]->e->bind_count)) return 1;
+    return 0;
+}
+// A cut prepass draw (mesh_cut -1) whose task or mesh shader writes guest memory is still run, with rasterizer discard: its writes happen, nothing is rasterized. Ocarina of
+// Time's foliage prepass mesh shaders that write (65a079a285d693a0 and others: an atomic add into a storage buffer per drawn instance) feed what the game draws next; with the
+// prepass not run at all, the colour pass of those plants drew nothing (the trees' leaves, flowers and ferns of Kokiri Forest were missing on Qualcomm's driver, 2026-11-12).
+// DM_VK_MESH_PREPASS_SIDE=0 (live): not run, as before
+static void prepass_side(const vka_dstate *d, const p_set_rt *rt, int has_rt, const p_scissor *sc, int has_sc, const p_draw *dw, vka_shader *const *sh) {
+    if (!VKA_ENV("DM_VK_MESH_PREPASS_SIDE", 1) || !mesh_writes(sh)) return;
+    static vka_dstate d2; d2 = *d; d2.rast_discard = 1;
+    static _Atomic int logged; if (atomic_fetch_add(&logged, 1) < 4)
+        VLOG("mesh_prepass_cut: prepass %016llx writes guest memory: run with rasterizer discard, so its writes happen and nothing is rasterized", (unsigned long long)sh[7]->key);
+    g_pp_side = 1; draw_body(&d2, rt, has_rt, sc, has_sc, dw, NULL); g_pp_side = 0;
 }
 // Indirect-count multi-draws (nvnCommandBufferMultiDraw*IndirectCount, hle_nvn.c: one record per draw, each naming the whole multi-draw). NVN's GPU reads the count when
 // it runs the draws, so it sees what the work before them wrote. The replay used to read the count on the CPU while recording, which is only right when the count's
@@ -2221,7 +2238,7 @@ static void draw_body(vka_dstate *d, const p_set_rt *rt, int has_rt, const p_sci
         { const char *sk = getenv("DM_VK_MESH_SKIP"); char hex[17]; snprintf(hex, sizeof hex, "%016llx", (unsigned long long)sh[7]->key);
           if (sk && *sk && strstr(sk, hex)) { g_skipped++; return; } }
         { int c = mesh_cut(d, rt, has_rt, sh[7]->key, dw->ind, sh[1]);   // profile mesh_prepass_cut (a workaround)
-          if (c < 0) { g_skipped++; return; }
+          if (c < 0) { prepass_side(d, rt, has_rt, sc, has_sc, dw, sh); g_skipped++; return; }
           eq_relax = c == 1 || (c >= 2 && !prepass_draw(d, rt, has_rt, sc, has_sc, dw, c - 2)); }
         if (g_fs_sub) sh[1] = g_fs_sub;   // prepass_draw's depth: the prepass's pixel shader, its inputs moved for this mesh module
         if (d->bst[6] && d->bst[6] != mp) VRED_ONCE("mesh draw: a program bound at the task stage bit apart from the mesh program; drawn with the mesh program's own task shader, if any");
@@ -2236,9 +2253,13 @@ static void draw_body(vka_dstate *d, const p_set_rt *rt, int has_rt, const p_sci
         if (!dw->ind && dw->count <= 0) return;
         if (d->tf_on) VRED_ONCE("transform feedback with a mesh draw: drawn without capture");
         if (V.memu) {   // through compute: its mesh work was done before the pass opened; it draws the arena with the mesh shader's vertex shader
-            memu_e = memu_find(g_memu_cur);
+            memu_e = memu_find();
             if (!memu_e) { vka_memu_n_skip++; SKIP("mesh draw through compute that the look-ahead did not prepare: skipped"); }
             if (!memu_e->ok) { g_skipped++; g_skip_dev[VKS_SHADER]++; return; }   // (logged where its shaders were refused)
+            if (memu_e->ms != sh[7] || memu_e->ts != sh[6]) {   // the look-ahead's state at this draw was not the replay's: its compute work and vertex shader are another program's
+                vka_memu_n_skip++;
+                SKIP("mesh draw through compute prepared for mesh %016llx, drawn with mesh %016llx (the look-ahead's state differed): skipped", memu_e->ms ? (unsigned long long)memu_e->ms->key : 0ull, (unsigned long long)sh[7]->key);
+            }
             sh[0] = memu_e->vs; sh[6] = sh[7] = NULL; mesh = 0;
         }
     } else {

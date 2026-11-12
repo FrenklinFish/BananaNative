@@ -32,11 +32,13 @@ class GameLanguage(unittest.TestCase):
         return [l.split('\t') for l in r.stdout.splitlines()]
 
     def test_phone_language(self):
-        self.assertEqual(self.run_on('- fr-FR', '- tr-TR', 'de fr-FR', '- zh-Hant-TW'), [
+        self.assertEqual(self.run_on('- fr-FR', '- tr-TR', 'de fr-FR', '- zh-Hant-TW', '- pl-PL', '- th-TH'), [
             ['DM_LANG=fr', "Phone's language · French"],
             ['-', "Phone's language · not a console language, so English (US)"],
             ['DM_LANG=de', 'German'],
-            ['DM_LANG=zh-Hant', "Phone's language · Chinese (Traditional)"]])
+            ['DM_LANG=zh-Hant', "Phone's language · Chinese (Traditional)"],
+            ['DM_LANG=pl', "Phone's language · Polish"],
+            ['DM_LANG=th', "Phone's language · Thai"]])
 
     def test_same_mapping_as_host(self):   # every tag t_oe.c checks maps to the same console code here
         pairs = re.findall(r'\{"([^"]+)", "([^"]+)"\}', T_OE.read_text(encoding='utf-8').split('static const char *const lang_in')[1].split('};')[0])
@@ -49,7 +51,7 @@ class GameLanguage(unittest.TestCase):
         codes = re.findall(r'"([^"]+)"', re.search(r'CODES = \{([^}]*)\}', src).group(1))
         table = re.findall(r'"([^"]+)"', re.search(r'k_lang_code\[\] = \{([^}]*)\}', (REPO / 'dm/host/hle_sdk16.c').read_text(encoding='utf-8')).group(1))
         self.assertEqual(sorted(set(codes) - set(table)), [])
-        self.assertEqual(len(codes), 16)
+        self.assertEqual(len(codes), 18)
 
 
 if __name__ == '__main__':

@@ -23,6 +23,9 @@ vka_memu_sh *vka_memu_of(struct vka_shader *s);                 // NULL: s canno
 struct vka_shader *vka_memu_cs_of(struct vka_shader *s, int gl); // its compute form, NULL = not made (logged)
 struct vka_shader *vka_memu_vs_of(struct vka_shader *s);         // its vertex shader (a mesh shader's), NULL = not made
 struct vka_shader *vka_memu_by_key(uint64_t key);                // a compute form or vertex shader by its key (the prewarm list), NULL = none
+// 0 when the generated vertex shader vs (vka_memu_vs_of) leaves an input of pixel shader fs unwritten, a pipeline Vulkan does not allow (VUID-RuntimeSpirv-OpEntryPoint-08743;
+// Qualcomm's driver answers VK_ERROR_UNKNOWN): no mesh draw pairs them, so a prewarm record of the pair is stale (vka_pso.c). 1 otherwise, or when it cannot tell
+int vka_memu_vs_feeds(struct vka_shader *vs, struct vka_shader *fs);
 // The arena of the submission being recorded (acquired at its first emulated draw: its control words cleared in cb), the records of a batch, the helper passes
 int vka_memu_arena(VkCommandBuffer cb, VkBuffer *buf, VkBuffer *ctl, uint32_t *cap_words);   // 0 = none (logged)
 void vka_memu_retire(uint64_t fence);                            // the arena used since the last call belongs to the submission of fence
