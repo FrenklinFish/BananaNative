@@ -878,7 +878,7 @@ static void *present_main(void *arg) {
         pq_item it = g_pq[g_pq_read % PQ]; g_pq_read++;
         pthread_mutex_unlock(&g_pmu);
         vka_img *gen[VKA_FG_MAX]; double hold = 0, out_period = 0;   // frame generation: the images shown before this frame, each for hold seconds
-        int ng = g_surf ? vka_fg_frame(it.t.serial, it.has_crop ? it.crop : NULL, it.period, it.fence, gen, &hold, &out_period) : 0;
+        int ng = g_surf ? vka_fg_frame(it.t.serial, it.has_crop ? it.crop : NULL, it.period, it.fence, (int)it.t.d.format, gen, &hold, &out_period) : 0;
         double game_period = it.period;
         g_fg_on = out_period > 0;
         if (out_period > 0) it.period = out_period;

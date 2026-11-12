@@ -588,9 +588,9 @@ void vka_present_init(void);
 // The overlay's counts (vka_fps.c): each image the present thread handed to the swapchain (shown), the game's own or a generated one; frame generation's state
 void vka_fps_note(int shown, int generated);
 void vka_fps_fg(int state, int mult);
-// Frame generation (vka_framegen.c; LSFG in lsfg/, GPL-3.0-or-later): for the game frame about to be presented (its window texture, crop, period and timeline value), the images
+// Frame generation (vka_framegen.c; LSFG in lsfg/, GPL-3.0-or-later): for the game frame about to be presented (its window texture, crop, period, timeline value and NVN format), the images
 // to present before it (gen, at most VKA_FG_MAX, the present takes its own references), how long each image of this frame should stay (hold, seconds; 0 = the game's period)
 // and the output period for the window's frame rate (0 = frame generation off). Present thread only
 enum { VKA_FG_MAX = 3 };
-int vka_fg_frame(uint64_t serial, const int *crop, double period, uint64_t fence, vka_img **gen, double *hold, double *out_period);
+int vka_fg_frame(uint64_t serial, const int *crop, double period, uint64_t fence, int format, vka_img **gen, double *hold, double *out_period);
 uint64_t vka_refresh_ns(void);   // vka_present.c: the panel's refresh period in ns from display timing, 0 when not known (present thread)

@@ -50,8 +50,8 @@ int nxhost_framegen_status(char *buf, int n) {
 }
 
 #ifndef NX_LSFG
-int vka_fg_frame(uint64_t serial, const int *crop, double period, uint64_t fence, vka_img **gen, double *hold, double *out_period) {
-    (void)serial; (void)crop; (void)period; (void)fence; (void)gen;
+int vka_fg_frame(uint64_t serial, const int *crop, double period, uint64_t fence, int format, vka_img **gen, double *hold, double *out_period) {
+    (void)serial; (void)crop; (void)period; (void)fence; (void)format; (void)gen;
     settings_init(); *hold = 0; *out_period = 0;
     if (atomic_load(&g_on) > 0) { atomic_store(&g_state, -1); reason("%s", "not in this build (built without NX_LSFG)"); vka_fps_fg(-1, 1); }
     return 0;
@@ -137,6 +137,26 @@ static vka_img *out_new(VkExtent2D e, int i, VkImageView *view) {
     return im;
 }
 
+static VkFormat raw_unorm_twin(VkFormat f) {   // as vka_present.c's
+    switch (f) {
+    case VK_FORMAT_R8G8B8A8_SRGB: return VK_FORMAT_R8G8B8A8_UNORM;
+    case VK_FORMAT_B8G8R8A8_SRGB: return VK_FORMAT_B8G8R8A8_UNORM;
+    case VK_FORMAT_A8B8G8R8_SRGB_PACK32: return VK_FORMAT_A8B8G8R8_UNORM_PACK32;
+    default: return f;
+    }
+}
+// The window texture's own format when it shares an image of another format (vka_tex.c same_shape; vka_present.c present_fmt presents it through a view in that format),
+// else VK_FORMAT_UNDEFINED. Fire Emblem Fortune's Weave's RGBA8 window textures can lie over its A2B10G10R10 target's image when that image is still alive at their first
+// use: a blit reads the image's format, the chain got the RGBA8 bits as 10:10:10:2, and every generated frame was blue/violet noise while the game's own frames were clean.
+// DM_VK_FG_OWNFMT=0 (live) blits in the image's format as before (A/B)
+static VkFormat own_fmt(const vka_img *im, int format) {
+    VkFormat own = raw_unorm_twin(im->f.vk); vka_fmt wf;
+    if (!format || !VKA_ENV("DM_VK_FG_OWNFMT", 1) || !vka_fmt_of(format, &wf)) return VK_FORMAT_UNDEFINED;
+    VkFormat w = raw_unorm_twin(wf.vk);
+    if (w == own || !(vkfl_has(&im->fl, im->f.vk, w) || vkfl_has(&im->fl, im->f.vk, wf.vk))) return VK_FORMAT_UNDEFINED;
+    return w;
+}
+
 static int rebuild(VkExtent2D e, int flow) {
     teardown();
     VkImage imgs[LSFG_MAX_GENERATIONS];
@@ -149,7 +169,7 @@ static int rebuild(VkExtent2D e, int flow) {
     return 1;
 }
 
-int vka_fg_frame(uint64_t serial, const int *crop, double period, uint64_t fence, vka_img **gen, double *hold, double *out_period) {
+int vka_fg_frame(uint64_t serial, const int *crop, double period, uint64_t fence, int format, vka_img **gen, double *hold, double *out_period) {
     settings_init();
     *hold = 0; *out_period = 0;
     int on = atomic_load(&g_on) > 0, mult = atomic_load(&g_mult), target = atomic_load(&g_target), flow = atomic_load(&g_flow);
@@ -181,6 +201,16 @@ int vka_fg_frame(uint64_t serial, const int *crop, double period, uint64_t fence
         VRED_ONCE("frame generation: window texture serial %llu (format %#x) cannot be copied into the chain: not generating", (unsigned long long)im->serial, im->d.format);
         vka_tex_drop(im); F.warm_streak = 0; atomic_store(&g_state, 2); vka_fps_fg(2, 1); return 0;
     }
+    // A window texture over an image of another format: copied bit for bit (both 32-bit formats, one sample) into the RGBA8 input (lsfg_chain.c LSFG_FORMAT), so the chain reads it in its own format.
+    // Any other format has no such copy into the input: no frame generated
+    VkFormat wv = own_fmt(im, format);
+    if (wv && (wv != VK_FORMAT_R8G8B8A8_UNORM || !(fp.optimalTilingFeatures & VK_FORMAT_FEATURE_TRANSFER_SRC_BIT) || !(im->usage & VK_IMAGE_USAGE_TRANSFER_SRC_BIT))) {
+        VRED_ONCE("frame generation: window texture serial %llu (NVN format %#x, VkFormat %d) shares an image of VkFormat %d (owner serial %llu) and cannot be copied into the chain in its own format: not generating",
+                  (unsigned long long)serial, format, wv, im->f.vk, (unsigned long long)im->serial);
+        vka_tex_drop(im); F.warm_streak = 0; atomic_store(&g_state, 2); vka_fps_fg(2, 1); return 0;
+    }
+    if (wv) { static int told; if (!told++) VLOG("frame generation: window texture serial %llu (NVN format %#x, VkFormat %d) shares an image of VkFormat %d (owner serial %llu): copied in its own format",
+                                                (unsigned long long)serial, format, wv, im->f.vk, (unsigned long long)im->serial); }
     VkExtent2D e = {(uint32_t)cw, (uint32_t)ch};
     if (!F.chain || F.ext.width != e.width || F.ext.height != e.height || F.flow != flow) {
         if (!rebuild(e, flow)) { vka_tex_drop(im); unavailable("%s", "the frame generation chain could not be made (see the [RED] lines)"); vka_fps_fg(-1, 1); return 0; }
@@ -224,8 +254,13 @@ int vka_fg_frame(uint64_t serial, const int *crop, double period, uint64_t fence
     VkCommandBufferBeginInfo bi = {VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO, .flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT};
     vk.vkBeginCommandBuffer(cb, &bi);
     vka_barrier(cb);   // the replay's writes to the window texture, and the presents still reading the outputs (earlier submissions)
-    VkImageBlit b = {{VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1}, {{cx, cy, 0}, {cx + cw, cy + ch, 1}}, {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1}, {{0, 0, 0}, {cw, ch, 1}}};
-    vk.vkCmdBlitImage(cb, im->img, VK_IMAGE_LAYOUT_GENERAL, lsfg_chain_input(F.chain, count), VK_IMAGE_LAYOUT_GENERAL, 1, &b, VK_FILTER_NEAREST);
+    if (wv) {   // the same rectangle as the blit (1:1, no flip), without the read in the image's format
+        VkImageCopy c = {{VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1}, {cx, cy, 0}, {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1}, {0, 0, 0}, {(uint32_t)cw, (uint32_t)ch, 1}};
+        vk.vkCmdCopyImage(cb, im->img, VK_IMAGE_LAYOUT_GENERAL, lsfg_chain_input(F.chain, count), VK_IMAGE_LAYOUT_GENERAL, 1, &c);
+    } else {
+        VkImageBlit b = {{VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1}, {{cx, cy, 0}, {cx + cw, cy + ch, 1}}, {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1}, {{0, 0, 0}, {cw, ch, 1}}};
+        vk.vkCmdBlitImage(cb, im->img, VK_IMAGE_LAYOUT_GENERAL, lsfg_chain_input(F.chain, count), VK_IMAGE_LAYOUT_GENERAL, 1, &b, VK_FILTER_NEAREST);
+    }
     if (warm) lsfg_chain_shared(F.chain, cb, count);
     for (size_t g = 0; g < ng; g++) lsfg_chain_generate(F.chain, cb, count, ng, g);
     vka_barrier(cb);   // the outputs for the presents after this
