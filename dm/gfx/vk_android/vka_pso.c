@@ -6,6 +6,7 @@
 // so the next start builds from it. Layouts follow dmsh_abi_vk.h: set 0 the per-draw records of every stage (push descriptors when they fit), set 1 the pools (vka_tex.c)
 #if defined(__ANDROID__)
 #include "vka.h"
+#include "vka_memu_abi.h"
 #include "vka_pwlist.h"
 #include "vka_psogate.h"
 #include "vk_prewarm_seed.h"   // the profile's seed list (dm/games/<id>/vk_prewarm.bin; dm/games/game.py seed): dm_vk_prewarm_seed, dm_vk_prewarm_seed_len (0: none)
@@ -61,7 +62,7 @@ static VkShaderStageFlags stage_bit(int vks) {
     return vks >= 0 && vks < 8 ? b[vks] : 0;
 }
 enum { MAXB = 6 * DMSH_VK_STAGE_BINDINGS };   // (task and mesh shaders take the tess control and vertex ranges: dmsh_abi_vk.h)
-typedef struct { uint32_t n; struct { uint16_t binding; uint8_t desc, pad; uint16_t count; uint16_t stages; } b[MAXB]; } lkey;
+typedef struct { uint32_t n, pc; struct { uint16_t binding; uint8_t desc, pad; uint16_t count; uint16_t stages; } b[MAXB]; } lkey;   // pc: the push constant's stages (a task / mesh shader's compute form, vka_memu.c)
 static kmap g_layouts = {.klen = sizeof(lkey)};
 static uint64_t g_nlayouts;
 
@@ -99,6 +100,11 @@ static int layout_slow(vka_shader *const sh[VKA_NSTAGE], int compute, vka_layout
             k.b[k.n].binding = b->binding; k.b[k.n].desc = b->desc; k.b[k.n].count = b->count ? b->count : 1; k.b[k.n].stages = (uint16_t)stage_bit(s->e->stage);
             ndesc += k.b[k.n].count; k.n++;
         }
+        if (s->memu && k.n + 2 <= MAXB) {   // a task / mesh shader drawn through compute (vka_memu.c): the arena, and for its compute form the records and the push constant
+            k.b[k.n].binding = VKA_MEMU_ARENA_BINDING; k.b[k.n].desc = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER; k.b[k.n].count = 1; k.b[k.n].stages = (uint16_t)stage_bit(s->e->stage); ndesc++; k.n++;
+            if (s->memu == 1) { k.b[k.n].binding = VKA_MEMU_REC_BINDING; k.b[k.n].desc = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER; k.b[k.n].count = 1; k.b[k.n].stages = (uint16_t)stage_bit(s->e->stage); ndesc++; k.n++;
+                                k.pc |= (uint32_t)stage_bit(s->e->stage); }
+        }
         if (s->gs_fx > 0 && k.n < MAXB) {   // the claim words of a geometry shader that writes memory (vka_spv_gs_claim)
             k.b[k.n].binding = VKA_GS_CLAIM_BINDING; k.b[k.n].desc = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER; k.b[k.n].count = 1; k.b[k.n].stages = (uint16_t)stage_bit(s->e->stage); ndesc++; k.n++;
         }
@@ -119,7 +125,8 @@ static int layout_slow(vka_shader *const sh[VKA_NSTAGE], int compute, vka_layout
     if (!r) {
         // set 1 the pool (bindless tables), set 2 the pool reads' bitmap when they are reported (vka_tex.c "Texture pool reads")
         VkDescriptorSetLayout sets[3] = {L->set0, vka_bindless_layout(), vka_pfb_layout()};
-        VkPipelineLayoutCreateInfo pi = {VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO, .setLayoutCount = !sets[1] ? 1 : sets[2] ? 3 : 2, .pSetLayouts = sets};
+        VkPushConstantRange pr = {(VkShaderStageFlags)k.pc, 0, VKA_MEMU_PUSH_BYTES};
+        VkPipelineLayoutCreateInfo pi = {VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO, .setLayoutCount = !sets[1] ? 1 : sets[2] ? 3 : 2, .pSetLayouts = sets, .pushConstantRangeCount = k.pc ? 1 : 0, .pPushConstantRanges = &pr};
         r = vk.vkCreatePipelineLayout(V.dev, &pi, NULL, &L->layout);
     }
     if (r) { static _Atomic int n; if (atomic_fetch_add(&n, 1) < 8) VRED("pipeline layout of %u bindings (%u descriptors): %d", k.n, ndesc, r); L->layout = VK_NULL_HANDLE; }
@@ -1077,6 +1084,12 @@ static uint64_t mem_avail_mb(void) {
     return kb >> 10;
 }
 static _Atomic uint64_t g_pw_memwait_ns, g_pw_heavywait_ns;
+// A record of a run that drew mesh draws through compute (vka_memu.c): a compute form or a vertex shader of a task / mesh shader, whose keys are no library keys
+static int pw_memu_rec(const pwrec *r) {
+    if (r->kind == VKA_PW_MESH) return 0;
+    for (int s = 0; s < (r->kind == VKA_PW_CS ? 1 : 5); s++) if (r->key[s] && vka_shader_memu_key(r->key[s])) return 1;
+    return 0;
+}
 static void *pw_main(void *a) {
     (void)a; pthread_setname_np(pthread_self(), "vk-prewarm"); vka_fp_host("vk-prewarm");
     setpriority(PRIO_PROCESS, 0, 10);   // this thread (Linux: per-thread nice), under the game's threads
@@ -1108,7 +1121,9 @@ static void *pw_main(void *a) {
         const uint8_t *kb = g_pw_load + offs[i] + sizeof r;
         vka_shader *sh[VKA_NSTAGE]; memset(sh, 0, sizeof sh); int bad = !vka_pw_rec_ok(&r, kb);
         if (bad) {}
+        else if (!V.memu && pw_memu_rec(&r)) continue;   // (mesh draws native here: a run through compute's compute forms and vertex pipelines are not made, the record kept)
         else if (r.kind == VKA_PW_CS) { if (!(sh[5] = vka_shader_by_key(r.key[0]))) bad = 1; }
+        else if (r.kind == VKA_PW_MESH && V.memu) continue;   // (mesh draws through compute: no mesh pipeline, the record kept; their compute forms and vertex pipelines have records of their own)
         else if (r.kind == VKA_PW_MESH) {   // the frame path's stages of a mesh draw (vka_draw.c): task 6, mesh 7, fragment 1
             if (!(sh[7] = vka_shader_by_key(r.key[0])) || !(sh[1] = vka_shader_by_key(r.key[1])) || (r.key[2] && !(sh[6] = vka_shader_by_key(r.key[2])))) bad = 1;
         }

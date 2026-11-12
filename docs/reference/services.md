@@ -361,6 +361,13 @@ Most service calls can be found before they crash, before the first boot or the 
 - **Fix:** `hle_hid.c` answers it. On Horizon a device is mounted when the npad's connected controller has the handle's style and an actuator on that side; the host reports it mounted when the channel has an output, as `GetVibrationDeviceInfo` reports the device.
 - **Found on:** [Super Mario Odyssey](../../dm/games/0100000000010000/README.md) 1.4.1, entering a Sand Kingdom pipe (`main+0x5d3150` asks for each handle of a controller whether any is mounted; GitHub issue #715). No other local game imports it.
 
+### Whether an Ounce vibration device is mounted
+
+- **Symptom:** with rumble on, `[RED] sf: the game connects to service hid itself, which the host does not serve`, then an abort with Result 0xe15 at `sdk+0x6c8e54` under `nn::hid::detail::IsOunceVibrationDeviceMounted` / `nn::hid::IsOunceVibrationDeviceMounted`. In Ocarina of Time, the game aborts as soon as a button is pressed to play the ocarina (e.g. learning Zelda's Lullaby). With rumble off the game never asks.
+- **Cause:** in SDK 22 (Switch 2 / Ounce), `nn::hid::IsOunceVibrationDeviceMounted` replaces `IsVibrationDeviceMounted`. Its internal helper in the SDK attempts to open the `hid` service via `sm` (`CreateHidServerProxy`), which `sm` refuses (0xe15) because the host provides `hid` via HLE. The SDK checks the result and aborts. When rumble is off, `GetVibrationDeviceHandles` returns 0 handles, so the game's check skips calling `IsOunceVibrationDeviceMounted`.
+- **Fix:** `hle_hid.c` takes over `_ZN2nn3hid29IsOunceVibrationDeviceMountedERKNS0_21VibrationDeviceHandleE` with `HLE_FORCE`. Like `IsVibrationDeviceMounted`, on Horizon a device is mounted when the npad's connected controller has the handle's style and an actuator on that side; the host reports it mounted when the channel has an output (`vib_targets`).
+- **Found on:** [The Legend of Zelda: Ocarina of Time](../../dm/games/0400486024DEC000/README.md) (update v131072, SDK 22.2.8), playing an ocarina note after learning Zelda's Lullaby on Android (Snapdragon 8 Elite, Turnip V39; report and player log).
+
 ### Vibration handles before a controller is reported
 
 - **Symptom:** `DM_RUMBLE_LOG=1` shows the game's startup handle request answered with none, then every vibration value sent to handle 0 and reaching no output for the whole session, although a controller with haptics (a DualSense on the Mac) is connected. A game that rumbles would stay silent.
@@ -630,6 +637,13 @@ Most service calls can be found before they crash, before the first boot or the 
 - **Fix:** the library init succeeds with nothing to set up, an accessor never initializes, and its async response is complete at once with no data (`hle_misc.c`); the accessor and response are stubbed whole because the SDK's destructor aborts unless `Finalize` succeeds. Also hooked: `ec::FinalizeForShopServiceAccessors`, the shop response's `Cancel` and `GetErrorCode`, and `ec::ShowShopSubscriptionDetails`.
 - **Found on:** [DRAGON QUEST XI S](../../dm/games/01006C300E9F0000/README.md) (SDK 7.3.2: the game then runs its opening movie at 30 fps); [DRAGON QUEST VII Reimagined](../../dm/games/0100A9D01C446000/README.md) (SDK 19.3.1: `FinalizeForShopServiceAccessors`, `Cancel`, `GetErrorCode`, `ShowShopSubscriptionDetails`, found by the import list).
 - **Note:** the shop's `Show…` pages are under [System applets opened by `Show…` calls](#system-applets-opened-by-show-calls).
+
+### Offline purchased-item notifications
+
+- **Symptom:** a purchase watcher crashes in `nn::ec::InitializePurchasedEvent` after account selection, before it can wait for a notification.
+- **Cause:** the guest SDK initializer uses an add-on-content service object that the offline host never opened.
+- **Fix:** the purchased-item queue is empty offline. Its notification is a persistent, unsignalled system event that guest threads can wait on. Popping either form of purchased-item info returns false without writing a record.
+- **Found on:** [Super Kirby Clash 1.0.1 (#987)](https://github.com/seedds/nxnative/issues/987), SDK 7.4.0; [Star Fox](../../dm/games/0400E88025B1A000/README.md), SDK 21.4.4.
 
 ### Parental controls and free communication
 
@@ -922,12 +936,26 @@ Most service calls can be found before they crash, before the first boot or the 
 - **Fix:** `nn::chat::Initialize` (ready, no chat), `IsChatting` (no) and `SetScreenSharingMode` (nobody to share with) are hooked (`hle_misc.c`), and `AttachToRoomInfoChangedEvent` (bound, never signalled), `SetSharingKey` and `ClearSharingKey` (nothing to share). Another GameChat call a game imports needs a hook of its own: unhooked, it reads the service object `Initialize` would have made (Mario Kart World 1.8.0: a null read at `sdk+0x6bc148` in `AttachToRoomInfoChangedEvent`). Every GameChat call Mario Kart World 1.8.0 imports is hooked now, as one state: no room (`GetRoomInfo`: no members), applets that close at once, and no camera. Its camera storage is set up at boot whatever the chat state, and each picture becomes a texture (an `nn::gs::NativeImageHandle` through `nvnNativeImage`; it aborts if one fails); the SDK's own `CalculateLocalCameraVideoBufferSize` aborted first (`sdk+0x6bf2c8`), because the taken-over `Initialize` never counts GameChat initialized. The host sizes the storage for its own layout (linear RGBA8, 256-byte rows, each picture 4 KiB aligned), keeps the pictures black in the game's buffer, makes the textures over them (`dm_chat_camera_image`, read by the native images of `hle_nvn.c`, from upstream's Fire Emblem Fortune's Weave work), and answers `RequestNext*CameraImage` with a sync handle that never signals (`DM_SYNC_NEVER`, which `nn::gs::TryWaitNativeSync` reads as not reached): no picture ever comes, so nothing shows.
 - **Found on:** Hyrule Warriors: Age of Imprisonment (upstream nxnative, d70ee900; its profile is not on this branch); [Mario Kart World](../../dm/games/0400C3F00006E000/README.md) 1.8.0 on the phone.
 
+### GameChat queries from the title screen (SDK 21)
+
+- **Symptom:** `CRASH sig=11 addr=0 pc=sdk+0x6be4d4` in `nn::chat::GetChattingUid()`, from the game's title screen code.
+- **Cause:** SDK 21 games ask the chat library who is chatting, for the room, the sharing key, the virtual camera, the members' audio levels and the camera streams; the SDK's versions read the service object `Initialize` would have made.
+- **Fix:** hooked as "no chat" (`hle_misc.c`): a zero Uid, `GetRoomInfo` fails (with `RES_FAIL`, the chat library's real result not being known), the sharing and virtual camera calls succeed and keep nothing, the camera streaming calls succeed and stream nothing, the next-image requests fail, no audio levels.
+- **Found on:** [Star Fox](../../dm/games/0400E88025B1A000/README.md): 33 `nn::chat` imports.
+
 ### The camera library's context and the graphics system check
 
 - **Symptom:** at boot, `game called nn::diag abort` at `sdk+0x46e8b8` in `nn::gs::sdk::CheckGraphicsSystemInitialized`; with that answered, an abort on Result `0x30af3` from `nn::camera::sdk::CreateCameraContext`.
 - **Cause:** a Switch 2 game can link the camera library into its own `main` and initialize it at boot whether or not a camera is there. `nn::camera::Initialize` first checks the sdk's graphics-system flag, which only `BootGraphicsSystem` sets, inside the driver's `nv::InitializeGraphics` that the host takes over. It then asks the sdk for a context, a session through the graphics server's user session, which the host does not have.
 - **Fix:** `CheckGraphicsSystemInitialized` is answered from the host's record of `nv::InitializeGraphics` (`dm/gfx/hle_nv.c`). `CreateCameraContext` hands out a host session (`hle_misc.c`, `dm_sf_host_session` in `hle_sf.c`) on which every request succeeds with zeroed output. This is a stub, not a camera: zeroed answers read as no camera (command 3 "Default" gives context 0). Open: the context is closed through `svcCloseHandle`, which ignores host session handles, so its slot stays taken (one context per boot so far).
 - **Found on:** [Mario Kart World](../../dm/games/0400C3F00006E000/README.md) 1.8.0 on the phone (`nn::camera::Initialize` at `main+0xcdebc0`).
+
+### The camera commands of SDK 21's own camera module
+
+- **Symptom:** with the camera session answering 0xdc4 to every command, Star Fox logs `This platform does not support the camera function.` (its `vwebcam.switch2.cpp:997`) and dereferences a null on the way out (`main+0xba54e4c`); with 0x7c4 to every command its module aborts in `Initialize` (subsdk3+0x1ef4) or `Finalize` (subsdk3+0x200c).
+- **Cause:** the game ships its own camera module (`subsdk3`, `nn::camera`) and sorts the results itself. `Initialize` sends command 3 with the device name `Default` and takes success or 0xdc4, the latter passed to the game as "no camera support", a path a console with a camera port never takes; `QueryDeviceConnection` (command 29, a DeviceRequest) reads 0x7c4 as `No camera device detected.`; `Finalize` sends command 4 and aborts on any failure; the connection event is command 21.
+- **Fix:** `camera_answer` (`hle_sf.c`) answers commands 3 and 4 with success, 21 with an event that never fires, and the others, 29 among them, with 0x7c4, so the game sees a console whose camera port has nothing plugged in. `nn::applet::BeginUsingCameraResource` / `EndUsingCameraResource` (the module takes the applet's camera resource) and `nn::camera::sdk::DestroyCameraContext` succeed too; the SDK's versions read service objects the host never made. The client also ends the session with an HIPC Close (message type 2), answered with the closed-session result 0xf601 (`hle_sf.c`); before that it logged `[RED] sf: camera: HIPC message type 2 not served`. Mario Kart World 1.8.0, whose reading of 0xdc4 the old answer followed, is not re-tested here.
+- **Found on:** [Star Fox](../../dm/games/0400E88025B1A000/README.md).
 
 ### Whether the language selection is limited
 

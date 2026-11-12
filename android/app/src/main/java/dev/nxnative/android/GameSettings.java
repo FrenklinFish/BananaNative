@@ -5,6 +5,7 @@ import android.text.InputType;
 import android.widget.EditText;
 import android.widget.LinearLayout;
 
+import java.io.File;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
@@ -36,6 +37,51 @@ final class GameSettings {
                     .toggle(a, Prefs.fullVegetation(a, id), (button, on) -> Prefs.fullVegetation(a, id, on));
             vegetation.value("Turn off to hide some grass and foliage and reduce GPU work. Applies at the next start.");
             Ui.add(box, vegetation.view, 0);
+        }
+        if (prof != null && !prof.options.isEmpty()) {
+            File packDir = g.packDir != null ? new File(g.packDir) : null;
+            java.util.Map<String, Ui.Setting> rowSettings = new java.util.LinkedHashMap<>();
+            boolean[] updating = new boolean[1];
+
+            Runnable updateRows = () -> {
+                updating[0] = true;
+                try {
+                    for (Profile.Option opt : prof.options) {
+                        Ui.Setting s = rowSettings.get(opt.env);
+                        if (s == null) continue;
+                        Profile.Option source = Profile.findImpliedBy(prof.options, opt, env -> Prefs.gameOption(a, id, env));
+                        boolean supported = opt.isSupported(packDir);
+                        String prepareNote = !supported ? " Needs Prepare again (tap ⋯ › Prepare again)." : "";
+                        String timing = opt.live ? " Applies from the next frame." : " Applies at the next start.";
+                        if (source != null) {
+                            s.toggle.setChecked(true);
+                            s.toggle.setEnabled(false);
+                            s.view.setAlpha(0.6f);
+                            s.value(opt.description + ". Turned on by " + source.label + "." + prepareNote + timing);
+                        } else {
+                            s.toggle.setChecked(Prefs.gameOption(a, id, opt.env));
+                            s.toggle.setEnabled(true);
+                            s.view.setAlpha(1.0f);
+                            s.value(opt.description + "." + prepareNote + timing);
+                        }
+                    }
+                } finally {
+                    updating[0] = false;
+                }
+            };
+
+            for (Profile.Option opt : prof.options) {
+                String emoji = opt.env.contains("RES") ? "📐" : opt.env.contains("POOL") ? "💾" : opt.env.contains("FPS") ? "⏱️" : "⚙️";
+                Ui.Setting setting = new Ui.Setting(a, emoji, opt.label, null)
+                        .toggle(a, Prefs.gameOption(a, id, opt.env), (button, checked) -> {
+                            if (updating[0]) return;
+                            Prefs.gameOption(a, id, opt.env, checked);
+                            updateRows.run();
+                        });
+                rowSettings.put(opt.env, setting);
+                Ui.add(box, setting.view, 0);
+            }
+            updateRows.run();
         }
         if (!Prefs.limited(id) && Prefs.ownRate(a, id)) {   // the host found no limiter it can hold for this game: choices would do nothing (the host's frame limiter holds a limited game)
             Ui.Setting fixed = new Ui.Setting(a, "⏱️", "Frame rate cap", null).value("This game picks its own frame rate");

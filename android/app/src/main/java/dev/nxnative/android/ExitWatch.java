@@ -7,6 +7,9 @@ import android.app.ApplicationExitInfo;
 import android.content.Context;
 import android.os.Handler;
 import android.os.Looper;
+import android.text.SpannableString;
+import android.text.Spanned;
+import android.text.style.RelativeSizeSpan;
 
 import java.io.ByteArrayOutputStream;
 import java.io.File;
@@ -278,7 +281,23 @@ final class ExitWatch {
                 AlertDialog.Builder b = new AlertDialog.Builder(a).setTitle(ExitNotice.TITLE).setMessage(ExitNotice.message(rec.get("name"), end.why, likely))
                         .setPositiveButton("OK", null);
                 if (log != null) b.setNeutralButton("Share log", (d, w) -> a.shareLog(log, dg != null && dg.isFile() ? dg : null));
-                if (likely != null && url != null) b.setNegativeButton("What it means", (d, w) -> a.openLink(url));
+                if (v != null && v.rule != null) {
+                    b.setNegativeButton("What it means", (d, w) -> {
+                        CharSequence msg = ExitNotice.meaningMessage(v.meaning, v.cause);
+                        if (v.cause != null && !v.cause.isEmpty() && v.meaning != null && !v.meaning.isEmpty()) {
+                            SpannableString ss = new SpannableString(msg);
+                            int start = v.meaning.length() + 2;
+                            if (start < ss.length()) {
+                                ss.setSpan(new RelativeSizeSpan(0.85f), start, ss.length(), Spanned.SPAN_EXCLUSIVE_EXCLUSIVE);
+                                msg = ss;
+                            }
+                        }
+                        AlertDialog.Builder mb = new AlertDialog.Builder(a).setTitle(ExitNotice.MEANING_TITLE).setMessage(msg)
+                                .setPositiveButton("OK", null);
+                        if (url != null) mb.setNegativeButton("More details", (d2, w2) -> a.openLink(url));
+                        showing = mb.show();
+                    });
+                }
                 showing = b.show();
             });
         }, "exit-digest").start();

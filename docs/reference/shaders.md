@@ -123,6 +123,13 @@ Finding, keying and translating shaders (`dm/gfx/tools/shader_split.py`, `dmsh_b
 - **Fix:** `shader_split.py` reads zip archives member by member in parallel ranges (`zip_jobs` / `zip_shaders`; `zipfile`), each member scanned like a loose file, whole GLSLC outputs included. `profile_guess.py` `shader_sources` asks for the run-time GLSLC capture when an NRO the game loads imports `glslcCompile` and a subsdk defines it (`glslc_capture`). Portal's map: 242 keys from the `.nvsb` files and 13 from the capture, 229 vertex and pixel pairs.
 - **Found on:** [Portal](../../dm/games/01007BB017812000/README.md). No other profile's RomFS has a zip archive holding shaders.
 
+### LZ4-chained zip members behind a VZIP preamble, and shader binaries of one stage
+
+- **Symptom:** a Switch 2 game's RomFS is one `data.zip` that does not start with a zip's local header, zipfile reads a member of it only to stop on `Bad CRC-32`, and the split finds no shader: every member is listed as stored, yet most are smaller on disk than their file size.
+- **Cause:** Star Fox's engine keeps the whole game in a zip of its own making (`vfs.zip.c`): an 18 MB `VZIP` index before the first member, and members the central directory calls stored (method 0) that are chains of 64 KB chunks, each a u32 length and an LZ4 block of that length compressed against the previous chunk as its dictionary (a chunk that would not shrink is stored raw); the CRC is the decoded data's. Its shaders are 2,828 members of a wrapper the engine calls `_vrender_shader_binary_t`: the GLSLC output magic, u32 code length, u32 control length, u32 0, a 64-bit hash, then the Ampere code area and the NVN2 control section, one stage each; `glslc_shaders` finds no section headers in it.
+- **Fix:** `zip_jobs` takes a `VZIP` file as a zip too, `zip_member` decodes a stored member whose size on disk differs from its file size through the LZ4 chain (`viper_zip_member`, with the CRC checked), and `scan_blob` reads the wrapper as a single-stage program (`viper_shader`, keys `#VIPER`, paired at draw time as GLSLC outputs are). The engine's `VIPR` resource containers are scanned for an embedded NDSR file (two of them wrap `ounce-nvn2-upper_left_ndsr.bin`, the upscaler networks, 40 shaders each): `ndsr_shaders` reads it from the magic on. `dm/tools/tests/test_split_viper.py` covers the zip and the wrapper with synthetic bytes.
+- **Found on:** [Star Fox](../../dm/games/0400E88025B1A000/README.md): 2,856 shaders, 1,483 vertex, 1,305 pixel and 68 compute, all in `data.zip`.
+
 ### GLSLC outputs in Criterion's Bundle 2 resources
 
 - **Symptom:** an NVN game's split finds a few dozen shaders (`main`'s and a loose file's) and the screen stays black but for the loading indicator, with `[RED] shader … is not in the shader map` and `program has no vertex shader`; the RomFS holds `.BNDL` files that start with `bnd2`.
@@ -489,7 +496,7 @@ Finding, keying and translating shaders (`dm/gfx/tools/shader_split.py`, `dmsh_b
     - Stages `DMSH_VK_STAGE_TS` / `_MS` (6 / 7), with bindings in the ranges of the tess control and vertex stages, and storage buffer tables at c0 `DMSH_C0_SSBO_TS` 0x670 / `_MS` 0x770.
     - The mesh programs' pixel shaders get `PerPrimitiveEXT` on those inputs (`vk_android_spv.py` `per_primitive_inputs`; Vulkan matches only equally decorated variables). This moves them to SPIR-V 1.4, with storage buffers as StorageBuffer blocks, and they are flagged `DMSH_VK_F_MESH_PRIM`.
   - Android host (`dm/gfx/vk_android`; an older host's `vka_shlib.c` refuses entries past `DMSH_VK_STAGE_CS`, so the whole library):
-    - `vka_shlib.c` takes stages up to `DMSH_VK_STAGE_MS`. `vka_dev.c` enables `VK_EXT_mesh_shader` with `meshShader` and `taskShader` only (`DM_VK_MESH=0` leaves it off) and logs its limits; a device with `meshShader` but no `taskShader` refuses only the task shaders. Without it `vka_shader.c` refuses task and mesh shaders and every `DMSH_VK_F_MESH_PRIM` entry (the build sets it on mesh shaders with per-primitive outputs too), so a device without mesh shading only skips those draws. It also refuses a workgroup larger than the device's.
+    - `vka_shlib.c` takes stages up to `DMSH_VK_STAGE_MS`. `vka_dev.c` enables `VK_EXT_mesh_shader` with `meshShader` and `taskShader` only (`DM_VK_MESH=0` leaves it off) and logs its limits; a device with `meshShader` but no `taskShader` refuses only the task shaders. Without it `vka_shader.c` refuses task and mesh shaders and every `DMSH_VK_F_MESH_PRIM` entry (the build sets it on mesh shaders with per-primitive outputs too), so a device without mesh shading only skipped those draws; they now go [through compute](rendering.md#mesh-draws-through-compute-android) there. It also refuses a workgroup larger than the device's.
     - NVN stages 6 (task) and 7 (mesh), `VKA_NSTAGE` 8: bind records, program lookup, `BindProgram` stage bits 0x40 / 0x80, the c0 storage buffer tables at 0x670 / 0x770.
     - `hle_nvn.c` records `nvnCommandBufferDrawMeshTasks(cmd, first, count)` as a draw with `NVN_PRIM_MESH` (Android only; the Mac host keeps the unimplemented stub). The replay takes the task and mesh shaders of one program: the fragment stage's when it has a mesh shader, else the one bound at the mesh bit. It builds a pipeline of task (optional), mesh and fragment with no vertex input or input assembly state and no topology, primitive restart or vertex input dynamic state, and draws `vkCmdDrawMeshTasksEXT(count, 1, 1)` through the command encoder. The next vertex draw sets topology and restart again.
     - Open: `first` != 0 is drawn from 0 with a red line (the translated shaders read the workgroup index with no base; switch2mac does the same). The indirect, 3D and multi-draw variants keep the unimplemented stub. Mesh pipelines are made whole on the frame path: no graphics pipeline libraries, not in the prewarm list (its records name five stages). One took 1,990 ms on the phone (task `6098504f5d12ea03`, mesh `1de24686294997d8`), a hitch at the title. The frame capture's interface hash (`vcap_iface`) covers six stages, not task and mesh.
@@ -908,6 +915,14 @@ Finding, keying and translating shaders (`dm/gfx/tools/shader_split.py`, `dmsh_b
 - **Found on:** [Splatoon Raiders](../../dm/games/0400380020056000/README.md): 18 `Hoian_UBER` vertex shaders, 5 of them used at boot (upstream's Mac measurements).
 - **Check:** `DMSH_TEST_XLATE=<translator> python3 dm/gfx/tests/test_dmsh_control_flow.py`.
 
+### An Ampere jump table loaded in a block split later
+
+- **Symptom:** `BRX with no target found in the c1 jump table`, although the shader's `LDC` of the table's base is on the only path to the BRX.
+- **Cause:** `Block.Split` gives the right half the left half's successors but leaves their predecessor lists naming the left half. `FindBrxTableAmpere` walks those lists back to the `LDC`, so when the block holding the `LDC` was split after its successors were linked (a later branch lands inside it), the walk from the BRX started in the left half, before the load, and met another write of the register or the program's start.
+- **Fix:** `Block.Split` points the moved successors' predecessor entries at the right half, for both decoders: the Maxwell decoder's walk from a BRX (`FindBrxTargetRange`) reads the same lists. No other code reads them except for their count.
+- **Found on:** [Pokémon Pokopia](../../dm/games/0400A3A01EE4C000/README.md): 16 pixel shaders (an `LDC c[0x1][R20+0x790]`, then a conditional BRA to the BRX).
+- **Check:** `DMSH_TEST_XLATE=<translator> python3 dm/gfx/tests/test_dmsh_control_flow.py` (`test_table_loaded_in_a_block_split_later`).
+
 ### Goto elimination forcing loops around a whole program
 
 - **Symptom:** `metal` runs for hours on a shader of about 100 MB of MSL, stuck in LICM, then the GPU compiler's connection breaks. Hundreds of forced one-pass loops nest around the program. The SPIR-V for Vulkan comes from the same structured program, so it would carry the same loops into the phone's driver compiler (not measured there).
@@ -952,6 +967,43 @@ Finding, keying and translating shaders (`dm/gfx/tools/shader_split.py`, `dmsh_b
 - **Fix:** `AHfma2` in `InstEmitAmpereAlu.cs`. The lane order comes from Eden-NS2's fix (checked there against Switch 2 footage), not from a shader that proves it here.
 - **Found on:** [Pokémon Pokopia](../../dm/games/0400A3A01EE4C000/README.md): 10,177 instructions in 7,590 programs. The fix made no visible difference in its tutorial area.
 - **Check:** `DMSH_TEST_XLATE=<translator> python3 dm/gfx/tests/test_dmsh_ampere_mem.py`.
+
+### TXD through a uniform register kept no handle
+
+- **Symptom:** `Failed to find handle source for bindless access` in the build's translator notes, for a shader with TXD through a uniform register (0xf6c). The MSL has no gradient sample, and what it read comes back 0.
+- **Cause:** a bindless read takes its handle as source 0. `ATex` adds it in every other form, but TXD has a branch of its own, which left it out. BindlessElimination then took the first coordinate for the handle, found no source for it and deleted the read.
+- **Fix:** the TXD branch adds the handle first, as the others do.
+- **Found on:** Yoshi and the Mysterious Book (`0400245021D2C000`): in 14,079 of its 133,154 shaders, none of them among the 1,519 the playtests asked for, so no route has shown it in a picture. Found by [PR 1261](https://github.com/seedds/nxnative/pull/1261); Star Fox (`0400E88025B1A000`) (281 pixel shaders, the characters' fur shells among them).
+- **Check:** `DMSH_TEST_XLATE=<translator> python3 dm/gfx/tests/test_dmsh_ampere_mem.py`.
+
+### Layer entry points with the point size passed by reference
+
+- **Symptom:** `no member named 'gl_PointSize' in 'main0l_out'` and `does not compile` in the build, which still exits 0. The shader keeps a library without layer entries, so a slice-writing geometry shader on it logs `has no layer entry points`.
+- **Cause:** Metal builds no pipeline for a vertex function that writes both the layer and a point size, so the layer's entry points lose the output. `dmsh_build.py` removed it with a regex over `out.gl_PointSize = …;`, but Unreal Engine 5.4's bodies are functions of their own, called as `_88(out.gl_Position, out.gl_PointSize)`, which that left behind.
+- **Fix:** `drop_point_size` removes the writes as before, and gives a vertex function that still passes the output by reference a local float instead (the same for `vs_layer` and `vs_layer_entry`).
+- **Found on:** Yoshi and the Mysterious Book (`0400245021D2C000`): 38 of the vertex shaders of the 1,519 its playtests asked for lacked layer entries. The first habitat's picture does not change, and it logged no `has no layer entry points` before or after. Found by [PR 1261](https://github.com/seedds/nxnative/pull/1261).
+- **Check:** `python3 dm/gfx/tests/test_dmsh_geometry.py PointSize`.
+
+### NVN2 compute's separate handles in c[0]
+
+- **Symptom:** `reflection conversion failed: B binding cp_t_cb196610_10280074Smplr has no resolved slot number` at load, then `the dispatched program has no compute shader`; the shader's image has no slot either (`cp_i_tcb_AA_`).
+- **Cause:** after the uniform and storage entries, NVN2 compute keeps four runs of 8-byte handles in `c[0]`: textures (control +0xb3), separate textures (+0xb4), separate samplers (+0xb5) and images (+0xb6). `AMapC0` knew textures and images, so everything past the textures landed in the image table and beyond. Star Fox's `1002069a331ceded` shows the order: 13 uniform entries, 4 textures, 32 separate textures, 13 separate samplers and 5 images make its 0x290 bytes (+0xba) exactly, and its handles fall on separate textures 22, 24 and 31, samplers 11 and 12 and image 4.
+- **Fix:** `dmsh_build.py` passes the two counts (job `nvn2_cs`) and `AMapC0` maps them to NVN's fixed tables, separate texture r to `c[2]` 0x168 + 8 r and separate sampler r to 0x568 + 8 r (chain change). A shader with neither maps as before. `test_dmsh_ampere_mem.py` covers the image past both.
+- **Found on:** Star Fox (`0400E88025B1A000`): one compute shader, dispatched in the prologue. Any NVN2 compute shader with separate handles reads them this way.
+
+### A handle pair ORed sampler word first
+
+- **Symptom:** `reflection conversion failed: B binding fp_t_cb2_170 has no resolved slot number` at load (the draw is skipped), the build summary counting the binding under *slot was not decoded*; or, once the read's other inputs are known, `Failed to find handle source for bindless access of type "texture2D"` and the read answers 0. `DMSH_BINDLESS_TRACE=1` on a `dmsh_xlate` job prints what a refused handle is made of.
+- **Cause:** the compiler ORs the separate texture word and the separate sampler word of c[2] in either order. The bindless elimination took the OR's first operand as the texture: with the sampler word first (`c[2][0x5c0] | c[2][0x248]`, word 0x170 of the separate sampler table at 0x568), the sampler's word was named as the texture, a slot the host cannot decode. Through a phi (the OR predicated, the bare sampler word on the other path) the bare word was a candidate too, so the read was refused.
+- **Fix:** `BindlessElimination.cs` orders a pair of c[2] words by the table they lie in: a word of the separate sampler table (`dmsh_abi.h` `DMSH_C2_SAMP`, 128 slots) is the sampler, the other the texture, in the plain OR and among a phi's candidates; a bare sampler word is no texture candidate (chain change).
+- **Found on:** Star Fox (`0400E88025B1A000`) (62 pixel shaders, 5 of them loaded at the prologue cinematic).
+
+### Ampere BMSK and the read of a covered pixel
+
+- **Symptom:** `Ampere instruction 21b at … is not implemented` (`…0405721b`) or `Ampere instruction 925 at 0x0 is not implemented` (`040e0200000e4000 …7925`) in the build.
+- **Cause:** 0x21b, beside SGXT's 0x21a, is BMSK: a mask of b bits from bit a. Star Fox's `58046f286de779e1` takes it from two bytes of a word, ANDs it with the value shifted by the same a and hands the result to an atomic, a bit field written into a word. 0x925 has no name in the tables at hand (the part of CuAssembler's sm_80 table read so far; Mesa's NAK encoder could not be fetched); what it reads comes from its two shaders, quad efficiency views. They rebuild its value at the quad's three other pixels through SHFL and FSWZADD and add the four: one indexes a 4-entry palette with the sum minus 1, so a shaded pixel's sum is at least 1, and the other draws 0.03125 + 0.15625 sum in red. So it is 1 for a covered pixel and 0 for a helper invocation.
+- **Fix:** `ABmsk` follows PTX's `bmsk` definition, its `.W` at bit 75 as SGXT's (only the clamping form has been seen). `APixelCovered` loads a new `IoVariable.HelperInvocation`, Metal's `simd_is_helper_thread()`, as an integer; any other form of 0x925 stays refused (chain change). `test_dmsh_ampere_mem.py` covers both.
+- **Found on:** Star Fox (`0400E88025B1A000`): 1 compute and 2 pixel shaders, none asked for in play so far, so neither instruction has run. Neither opcode is in the shaders of Donkey Kong Bananza, Splatoon Raiders, Mario Tennis Fever or Pokopia.
 
 ### Ampere instructions new in Pokémon Pokopia
 

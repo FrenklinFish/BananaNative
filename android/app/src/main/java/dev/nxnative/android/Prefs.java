@@ -112,6 +112,8 @@ final class Prefs {
      *  overran. A frame that runs long then plays a little slower instead of dropping to 30 (DM_FPS_HOLD60=1 at start, Native.hold60Set while it runs) */
     static boolean fullVegetation(Context c, String titleId) { return of(c).getBoolean(gameKey("full_vegetation", titleId), true); }
     static void fullVegetation(Context c, String titleId, boolean on) { of(c).edit().putBoolean(gameKey("full_vegetation", titleId), on).commit(); }
+    static boolean gameOption(Context c, String titleId, String env) { return of(c).getBoolean(gameKey("opt_" + env, titleId), false); }
+    static void gameOption(Context c, String titleId, String env, boolean on) { of(c).edit().putBoolean(gameKey("opt_" + env, titleId), on).commit(); }
     static boolean hold60(Context c, String titleId) { return of(c).getBoolean(gameKey("hold60", titleId), false); }
     static void hold60(Context c, String titleId, boolean on) { of(c).edit().putBoolean(gameKey("hold60", titleId), on).commit(); }
     static final String HOLD60_TEXT = "Off: the game drops to 30 fps when it cannot keep 60, as on the console. On: the game always runs its 60 fps mode and Banana Native does not hold frames, so it never drops to 30; the frame rate is less even and the game runs a little slower while under 60. Only with the 60 fps cap";
@@ -132,6 +134,10 @@ final class Prefs {
     static void resetGame(Context c, String titleId) {
         SharedPreferences.Editor e = of(c).edit();
         for (String k : GAME_SETTINGS) e.remove(gameKey(k, titleId));
+        Profile p = Profile.of(titleId);
+        if (p != null) {
+            for (Profile.Option opt : p.options) e.remove(gameKey("opt_" + opt.env, titleId));
+        }
         e.commit();
     }
 

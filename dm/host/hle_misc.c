@@ -51,6 +51,24 @@ HLE_FORCE_BIG("_ZN2nn3aoc16ListAddOnContentEPiii", "add-on content list: the own
 // The event object is created on demand by the nn::os side table (not signaled), the game waiting on it only times out / gets not-signaled
 HLE_FORCE("_ZN2nn3aoc31GetAddOnContentListChangedEventEPNS_2os11SystemEventE", "add-on content change event, out of scope; bound to a kernel event, never signalled (the game polls it with TryWait and aborts if it is uninitialized)", void, h_aoc_GetEv, void *ev) { hle_bind_system_event(ev, 0); }
 HLE_FORCE("_ZN2nn2ec24ShowShopAddOnContentListEv", "shop applet, out of scope; cut: no-op", void, h_ec_ShowShop, void) { DM_APPLET("shop"); LOG("ec::ShowShopAddOnContentList (cut)"); }
+// Super Kirby Clash and Star Fox wait on the purchased-item notification after account selection / boot. The guest SDK's initializer
+// uses an AOC service session which the offline host does not open. There are no purchases to enqueue: give every
+// watcher the same borrowed, unsignalled SystemEvent for the life of the process, including after reinitialization.
+static _Alignas(16) uint8_t purchase_event[0x80];
+static pthread_once_t purchase_event_once = PTHREAD_ONCE_INIT;
+static void bind_purchase_event(void) { hle_bind_system_event(purchase_event, 0); }
+HLE_FORCE("_ZN2nn2ec24InitializePurchasedEventEv", "offline purchased-item queue is empty", void, h_ec_InitPurchased, void) {}
+HLE_FORCE("_ZN2nn2ec27InitializeAllPurchasedEventEv", "offline purchased-item queue is empty for every application", void, h_ec_InitAllPurchased, void) {}
+HLE_FORCE("_ZN2nn2ec27InitializeAllPurchasedEventERKNS_13ApplicationIdE", "offline purchased-item queue is empty for this application", void, h_ec_InitAppPurchased, const void *app) { (void)app; }
+HLE_FORCE("_ZN2nn2ec33InitializePermanentPurchasedEventEv", "offline purchased-item queue is empty (permanent)", void, h_ec_InitPermPurchased, void) {}
+HLE_FORCE("_ZN2nn2ec22FinalizePurchasedEventEv", "offline purchased-item queue has no service session to close", void, h_ec_FinalizePurchased, void) {}
+HLE_FORCE("_ZN2nn2ec17GetPurchasedEventEv", "borrow the offline queue's unsignalled event", void *, h_ec_GetPurchased, void) {
+    pthread_once(&purchase_event_once, bind_purchase_event);
+    return purchase_event;
+}
+HLE_FORCE("_ZN2nn2ec20PopPurchasedItemInfoEPNS0_17PurchasedItemInfoE", "no offline purchases to pop", unsigned, h_ec_PopPurchased, void *out) { (void)out; return 0; }
+HLE_FORCE("_ZN2nn2ec20PopPurchasedItemInfoEPNS0_17PurchasedItemInfoERKNS_7account3UidE", "no user offline purchases to pop", unsigned, h_ec_PopPurchasedUid, void *out, const void *uid) { (void)out; (void)uid; return 0; }
+HLE_FORCE("_ZN2nn2ec20PopPurchasedItemInfoEPNS0_27PurchasedItemInfoForPrivateE", "no private offline purchases to pop", unsigned, h_ec_PopPurchasedPrivate, void *out) { (void)out; return 0; }
 // The other shop entry points (Engage's title menu item "DLC" calls ShowShopAddOnContentList(ApplicationId, UserHandle)): the original starts the shop applet through applet::CreateLibraryApplet,
 // the host has no applet proxy (oe initialization is a no-op), and the SDK reads through the null proxy and crashes (sdk+0x38660). All return void: as if the player closed the shop at once, the game goes back to its menu.
 HLE_FORCE("_ZN2nn2ec24ShowShopAddOnContentListENS_13ApplicationIdE", "shop applet, out of scope; cut: no-op", void, h_ec_AocList1, void) { DM_APPLET("shop"); LOG("ec::ShowShopAddOnContentList (cut): the host has no shop"); }
@@ -251,6 +269,20 @@ HLE_FORCE("_ZN2nn4chat22ShowCameraSharingGuideEv", "GameChat camera sharing guid
 HLE_FORCE("_ZN2nn4chat36ShowLocalCameraConfigurationVersion0ENS0_25CameraImageProcessingModeE", "GameChat camera settings applet: no camera, closes at once", uint32_t, h_chat_ShowCamCfg, int mode) { (void)mode; return 0; }
 HLE_FORCE("_ZN2nn4chat46BeginFullScreenWithLocalCameraAvailableSectionEb", "GameChat full-screen camera section: no camera", void, h_chat_FsBegin, unsigned on) { (void)on; }
 HLE_FORCE("_ZN2nn4chat44EndFullScreenWithLocalCameraAvailableSectionEv", "GameChat full-screen camera section: no camera", void, h_chat_FsEnd, void) {}
+typedef struct { uint64_t a, b; } chat_uid_t;   // nn::account::Uid, returned in two registers
+HLE_FORCE("_ZN2nn4chat14GetChattingUidEv", "GameChat: the chatting user; nobody (a zero Uid)", chat_uid_t, h_chat_ChattingUid, void) { return (chat_uid_t){0, 0}; }
+HLE_FORCE("_ZN2nn4chat28ShowLocalCameraConfigurationENS0_25CameraImageProcessingModeE", "GameChat camera configuration applet: not shown", Result, h_chat_ShowCamCfg2, int mode) { (void)mode; return RES_OK; }
+HLE_FORCE("_ZN2nn4chat44GetCameraImageProcessingModeForVirtualCameraEv", "GameChat camera image processing mode: the default", int, h_chat_CamMode, void) { return 0; }
+HLE_FORCE("_ZN2nn4chat22GetRealtimeAudioLevelsEPNS0_10AudioLevelEiPKNS_7account23NetworkServiceAccountIdEi", "GameChat members' audio levels: no members, none written", int, h_chat_AudioLevels,
+          void *levels, int n, const void *ids, int nids) { (void)levels; (void)n; (void)ids; (void)nids; return 0; }
+HLE_FORCE("_ZN2nn4chat23InitializeVirtualCameraEPNS0_17VirtualCameraTypeE", "GameChat virtual camera: nothing to show it to", Result, h_chat_VcamInit, void *cam) { (void)cam; return RES_OK; }
+HLE_FORCE("_ZN2nn4chat21FinalizeVirtualCameraEPNS0_17VirtualCameraTypeE", "GameChat virtual camera finalized", void, h_chat_VcamFini, void *cam) { (void)cam; }
+HLE_FORCE("_ZN2nn4chat19EnableVirtualCameraEPNS0_17VirtualCameraTypeE", "GameChat virtual camera enabled: nothing to show it to", Result, h_chat_VcamOn, void *cam) { (void)cam; return RES_OK; }
+HLE_FORCE("_ZN2nn4chat20DisableVirtualCameraEPNS0_17VirtualCameraTypeE", "GameChat virtual camera disabled", Result, h_chat_VcamOff, void *cam) { (void)cam; return RES_OK; }
+HLE_FORCE("_ZN2nn4chat43SetVirtualCameraContainPhotographedContentsEPNS0_17VirtualCameraTypeEb", "GameChat virtual camera flag: kept nowhere", void, h_chat_VcamPhoto, void *cam, unsigned on) { (void)cam; (void)on; }
+HLE_FORCE("_ZN2nn4chat34GetVirtualCameraNativeWindowHandleEPKNS0_17VirtualCameraTypeE", "GameChat virtual camera window: none", uint64_t, h_chat_VcamWindow, const void *cam) {
+    (void)cam; static int once; if (!once++) LOG("chat: GetVirtualCameraNativeWindowHandle: no window (0)"); return 0;
+}
 
 // Camera videos: no camera. Mario Kart World 1.8.0 sets up its local and remote camera storage at boot whatever the chat state (main+0xd32270, main+0xd31b20: 384 x 216, 3 pictures),
 // makes a texture of each picture (nn::gs::NativeImageHandle → nvnNativeImage → nvnTextureInitializeFromNativeImage) and aborts if one fails; the SDK's own CalculateLocal-
@@ -324,12 +356,3 @@ HLE_FORCE("_ZN2nn4chat27RequestNextLocalCameraImageEPNS_2gs16NativeSyncHandleEPN
           uint32_t, h_chat_LocalNext, void *sync, void *t, int i) { (void)t; (void)i; cam_never(sync); return 0; }
 HLE_FORCE("_ZN2nn4chat28RequestNextRemoteCameraImageEPNS_2gs16NativeSyncHandleEPNS0_21RemoteCameraVideoTypeEiS2_RKNS_7account23NetworkServiceAccountIdE", "GameChat camera picture: never comes (nobody streams)",
           uint32_t, h_chat_RemoteNext, void *sync, void *t, int i) { (void)t; (void)i; cam_never(sync); return 0; }
-
-// ---------- camera: the Switch 2's USB camera ----------
-// The camera library is the game's own (Mario Kart World 1.8.0 links it into main: nn::camera::Initialize at main+0xcdebc0, called at boot by its camera manager whatever the
-// chat state). It takes a context from the sdk (nn::camera::sdk::CreateCameraContext, a session through the graphics server's user session, which the host does not have: Result
-// 0x30af3, and the game aborts) and then talks HIPC on it with nn::sf::hipc::SendSyncRequest. The host hands out a session of its own (hle_sf.c): every request succeeds with zeroed
-// output, which reads as no camera (command 3 "Default" gives context 0)
-HLE_FORCE("_ZN2nn6camera3sdk19CreateCameraContextEPNS_5gsdrv18UniqueNativeHandleE", "a host session answered with zeroed output: no camera", uint32_t, h_cam_Context, uint32_t *out) {
-    *out = dm_sf_host_session("camera"); return RES_OK;
-}

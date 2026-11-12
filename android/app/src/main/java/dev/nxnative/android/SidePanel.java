@@ -449,6 +449,18 @@ final class SidePanel extends FrameLayout {
         }
 
         lsfgNow = Lsfg.rows(act, box, "", () -> { Lsfg.push(act); refresh(); });
+
+        Profile prof = Profile.of(game());
+        if (prof != null) {
+            for (Profile.Option opt : prof.options) {
+                if (!opt.live) continue;
+                android.widget.CheckBox cb = new android.widget.CheckBox(act);
+                cb.setText(opt.label);
+                cb.setChecked(Prefs.gameOption(act, game(), opt.env));
+                cb.setOnCheckedChangeListener((b, on) -> Prefs.gameOption(act, game(), opt.env, on));
+                box.addView(cb);
+            }
+        }
     }
 
     /** Display: the picture (Fit / Stretch, size, position) and the overlay's items */
@@ -619,6 +631,26 @@ final class SidePanel extends FrameLayout {
         if (!(act instanceof GameActivity)) return;
         GameActivity ga = (GameActivity) act;
         head("Next start");
+        Profile prof = Profile.of(game());
+        if (prof != null && !prof.options.isEmpty()) {
+            for (Profile.Option opt : prof.options) {
+                if (opt.live) continue;
+                android.widget.CheckBox cb = new android.widget.CheckBox(act);
+                cb.setText(opt.label);
+                Profile.Option source = Profile.findImpliedBy(prof.options, opt, env -> Prefs.gameOption(act, game(), env));
+                if (source != null) {
+                    cb.setChecked(true);
+                    cb.setEnabled(false);
+                } else {
+                    cb.setChecked(Prefs.gameOption(act, game(), opt.env));
+                    cb.setOnCheckedChangeListener((b, on) -> {
+                        Prefs.gameOption(act, game(), opt.env, on);
+                        if (opt.hasImplies()) build();
+                    });
+                }
+                box.addView(cb);
+            }
+        }
         String sum = PadMapUi.label(act, game());
         Button map = row(ID_MAP, "Button mapping", sum);
         map.setContentDescription("Button mapping: " + sum + ", applies at the next start");
