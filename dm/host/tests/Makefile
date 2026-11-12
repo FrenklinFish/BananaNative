@@ -303,6 +303,14 @@ FORCE:
 $(B):
 	mkdir -p $@
 .PHONY: run tsan
+# render_cfg (hle_render.c): the size arithmetic, the largest-buffer rule and the write path, with the test's own row
+$(B)/t_render_cfg: t_render_cfg.c ../hle_render.c ../render_cfg.h ../hle.h ../dm.h $(GAME_H) | $(B)
+	$(CLANG) -O1 -g -Wall -Wextra -Werror -Wno-unused-function -Wno-unused-parameter -fsanitize=undefined -I.. $(GINC) -o $@ t_render_cfg.c
+.PHONY: render-cfg
+run: render-cfg
+render-cfg: $(B)/t_render_cfg
+	$(B)/t_render_cfg main $(QUIET)
+	$(B)/t_render_cfg wrong $(QUIET)
 $(B)/t_resolution: t_resolution.c ../hle_fpslock.c ../hle.h ../dm.h $(GAME_H) | $(B)
 	clang -O1 -Wall -Werror -Wno-unused-function -fsanitize=undefined -I.. $(GINC) -o $@ t_resolution.c
 .PHONY: resolution

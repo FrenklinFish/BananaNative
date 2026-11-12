@@ -77,6 +77,64 @@ class SceneArg(unittest.TestCase):
             self.assertIn(msg, out, rows)
 
 
+RC = 'render_cfg\t0123456789abcdef0123456789abcdef\t0x223e0b0\t2\t16\t0x0\t0x8\t2048x1152/1024x576,1920x1080/960x540\toriginal=2048x1152\tmax_render=1280x720\tmin=720\n'
+RQ = 'render_quality\tquality=boost:2\tperformance=normal:1\n'
+
+
+class RenderCfg(unittest.TestCase):   # render_cfg + render_quality (hle_render.c): the header's rows, the row checks and the keys it excludes
+    def header_text(self, rows):
+        with tempfile.TemporaryDirectory() as d:
+            Path(d, ID).mkdir()
+            (Path(d, ID) / 'game.tsv').write_text(TSV + rows)
+            r = subprocess.run([sys.executable, str(GAME), 'header', ID, str(Path(d, ID) / 'game.h')], env={**os.environ, 'DM_GAMES_DIR': d}, capture_output=True, text=True)
+            self.assertEqual(r.returncode, 0, r.stderr)
+            return (Path(d, ID) / 'game.h').read_text()
+
+    def test_rows(self):
+        h = self.header_text(RC + RQ + 'android_window\toriginal\n')
+        self.assertIn('#define DM_GAME_RENDER_CFG {{"0123456789abcdef0123456789abcdef", 0x223e0b0, 2, 16, 0x0, 0x8, {{2048, 1152, 1024, 576}, {1920, 1080, 960, 540}}, 2048, 1152, 1280, 720, 720}}', h)
+        self.assertIn('#define DM_GAME_NRENDER_CFG 1', h)
+        self.assertIn('#define DM_GAME_RENDER_QUALITY {1, 2, 0, 1}', h)
+        self.assertIn('#define DM_GAME_RENDER_DEFAULT_OUT "original"', h)
+
+    def test_none(self):   # without the keys: no row, the default output 1920x1080
+        h = self.header_text('')
+        self.assertIn('#define DM_GAME_NRENDER_CFG 0', h)
+        self.assertIn('#define DM_GAME_RENDER_QUALITY {0, 0, 0, 0}', h)
+        self.assertIn('#define DM_GAME_RENDER_DEFAULT_OUT "1920x1080"', h)
+
+    def test_rejected_rows(self):
+        bad = [RC.replace('\t2\t16', '\t3\t16'),                  # 3 slots, 2 sizes
+               RC.replace('\t16\t', '\t12\t'),                    # stride not a multiple of 8
+               RC.replace('\t0x8\t', '\t0x4\t'),                  # fields overlap
+               RC.replace('min=720', 'min=700'),
+               RC.replace('\tmin=720', ''),
+               RC.replace('original=2048x1152', 'original=0x1152'),
+               RC.replace('/960x540', '/960'),
+               RC.replace('0123456789abcdef', 'xyz', 1)]
+        for rows in bad:
+            rc, out = header(rows + RQ)
+            self.assertNotEqual(rc, 0, rows)
+            self.assertIn(': render_cfg takes <main build ID (32 hex)>', out, rows)
+
+    def test_quality_row(self):
+        for rows in (RC, RC + RQ + RQ, RC + 'render_quality\tquality=boost:4\tperformance=normal:1\n', RC + 'render_quality\tquality=fast:2\tperformance=normal:1\n',
+                     RC + 'render_quality\tquality=boost:2\n', RC + 'render_quality\tquality=boost:2\tperformance=normal:1\tx=1\n'):
+            rc, out = header(rows)
+            self.assertNotEqual(rc, 0, rows)
+            self.assertIn(': render_cfg needs one render_quality row', out, rows)
+        rc, out = header(RQ)
+        self.assertNotEqual(rc, 0)
+        self.assertIn(': render_quality needs a render_cfg row', out)
+
+    def test_excluded_keys(self):
+        for k, row in (('graphics_scale', 'graphics_scale\t1920x1080\t0\thandheld\n'), ('window_fn', 'window_fn\t0123456789abcdef0123456789abcdef\t0x10\t0x20\t1920x1080\n'),
+                       ('res_levels', 'res_levels\t0123456789abcdef0123456789abcdef\t0x10\t4\t0x40:4\n')):
+            rc, out = header(RC + RQ + row)
+            self.assertNotEqual(rc, 0, k)
+            self.assertIn(f': render_cfg and {k} are two levers for one setting: keep one', out, k)
+
+
 class LowRam(unittest.TestCase):
     def macros(self, rows, tsv=TSV):
         with tempfile.TemporaryDirectory() as d:

@@ -248,6 +248,33 @@ def header(g):
             ls += [('0', 0)] * (12 - len(ls))
             rlv.append('{' + q(r[0]) + f', {r[1]}, {n}, {len(r) - 3}, ' + '{' + ', '.join(f'{{{o}, {ln}}}' for o, ln in ls) + '}}')
         if g.get('graphics_scale', ''): sys.exit(f'{g.id}: graphics_scale and res_levels are two levers for one setting: keep one')
+    # Render configurations the host rewrites (hle_render.c; README.md render_cfg): one row per main build, <main build ID> <slot table offset> <slots> <slot stride> <output field>
+    # <render field> <the game's own OWxOH/RWxRH per slot, comma-separated> original=<WxH> max_render=<WxH> min=<output height>; with one render_quality row,
+    # quality=<boost|normal>:<level> performance=<boost|normal>:<level> (the performance mode and the smallest largest-buffer level of each graphics quality)
+    rcf, rq = [], [0, 0, 0, 0]
+    if g.get('render_cfg', ''):
+        sz = lambda x: re.fullmatch(r'(\d{1,5})x(\d{1,5})', x)
+        for r in g.values('render_cfg'):
+            kv = dict(x.split('=', 1) for x in r[7:] if '=' in x)
+            ok = len(r) == 10 and re.fullmatch(r'[0-9a-f]{32}', r[0]) and all(re.fullmatch(r'0x[0-9a-fA-F]+', x) for x in (r[1], r[4], r[5])) and r[2].isdigit() and r[3].isdigit() \
+                and sorted(kv) == ['max_render', 'min', 'original'] and sz(kv['original']) and sz(kv['max_render']) and kv['min'] in ('480', '540', '720', '1080', '1440')
+            ents = [re.fullmatch(r'(\d{1,5})x(\d{1,5})/(\d{1,5})x(\d{1,5})', e) for e in r[6].split(',')] if ok else []
+            if not ok or not 1 <= int(r[2]) <= 8 or len(ents) != int(r[2]) or not all(ents) or int(r[3]) < 8 or int(r[3]) % 8 or abs(int(r[4], 0) - int(r[5], 0)) < 8 \
+                    or any(int(v) == 0 for e in ents for v in e.groups()) or any(int(v) == 0 for k in ('original', 'max_render') for v in sz(kv[k]).groups()):
+                sys.exit(f"{g.id}: render_cfg takes <main build ID (32 hex)> <slot table offset> <slots 1-8> <slot stride (a multiple of 8)> <output field> <render field (8 bytes apart at least)>"
+                         f" <OWxOH/RWxRH per slot, comma-separated> original=<WxH> max_render=<WxH> min=<480|540|720|1080|1440>: {r}")
+            ow, oh = map(int, sz(kv['original']).groups()); mw, mh = map(int, sz(kv['max_render']).groups())
+            rows_c = ', '.join('{' + ', '.join(e.groups()) + '}' for e in ents)
+            rcf.append('{' + q(r[0]) + f', {r[1]}, {r[2]}, {r[3]}, {r[4]}, {r[5]}, {{{rows_c}}}, {ow}, {oh}, {mw}, {mh}, {kv["min"]}' + '}')
+        for k in ('graphics_scale', 'window_fn', 'res_levels'):
+            if g.get(k, ''): sys.exit(f'{g.id}: render_cfg and {k} are two levers for one setting: keep one')
+        qr = g.values('render_quality')
+        words = dict(w.split('=', 1) for w in ' '.join(qr[0]).split() if '=' in w) if len(qr) == 1 else {}
+        m = [re.fullmatch(r'(boost|normal):([0-3])', words.get(k, '')) for k in ('quality', 'performance')]
+        if len(qr) != 1 or sorted(words) != ['performance', 'quality'] or len(' '.join(qr[0]).split()) != 2 or not all(m):
+            sys.exit(f'{g.id}: render_cfg needs one render_quality row: quality=<boost|normal>:<level 0-3> performance=<boost|normal>:<level 0-3>: {qr}')
+        rq = [int(m[0][1] == 'boost'), int(m[0][2]), int(m[1][1] == 'boost'), int(m[1][2])]
+    elif g.get('render_quality', ''): sys.exit(f'{g.id}: render_quality needs a render_cfg row')
     # Depth-only mesh prepass draws of mesh modules Qualcomm's driver draws wrong (vka_draw.c mesh_cut; a workaround, cause open: rendering.md "Depth-only mesh prepass
     # drawn as spikes on Qualcomm's driver"): one row per pair, <prepass mesh shader key> <colour pass mesh shader key> [<map>], 16 hex digits each. The map says where the
     # colour mesh module writes what the prepass mesh module writes: <prepass location>:<colour location>,... (locations 0-14; "-": none of them). The prepass is then
@@ -358,6 +385,8 @@ def header(g):
 
          '#define DM_GAME_FPS_STEPS {' + (', '.join(fst) or '{"", 0, 0, 0, 0, {0}}') + '}', f'#define DM_GAME_NFPS_STEPS {len(fst)}',
          f'#define DM_GAME_DRS_CTL {{{", ".join(drs) or "{\"\", 0, 0, 0, 0}"}}}', f'#define DM_GAME_NDRS_CTL {len(drs)}',
+         '#define DM_GAME_RENDER_CFG {' + (', '.join(rcf) or '{"", 0, 0, 0, 0, 0, {{0, 0, 0, 0}}, 0, 0, 0, 0, 0}') + '}', f'#define DM_GAME_NRENDER_CFG {len(rcf)}',
+         '#define DM_GAME_RENDER_QUALITY {' + ', '.join(map(str, rq)) + '}', f'#define DM_GAME_RENDER_DEFAULT_OUT {q(aw or "1920x1080")}',
          '#define DM_GAME_RES_LEVELS {' + (', '.join(rlv) or '{"", 0, 0, 0, {{0, 0}}}') + '}', f'#define DM_GAME_NRES_LEVELS {len(rlv)}',
          *([f'#define DM_GAME_NVN_API_MAJOR {api.split(".")[0]}', f'#define DM_GAME_NVN_API_MINOR {api.split(".")[1]}'] if g.get('device_api', '') else []),   # without the key: by the SDK version (hle_nvn.c nvn_api)
          '']

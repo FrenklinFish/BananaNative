@@ -43,13 +43,18 @@ av1_decoder	dav1d
 # foliage lit dark, dungeon at about 25 fps (GPU 36 ms); Turnip T30 and Gen8 V39 play the dungeon at 29-30 fps with characters correct; and README.md "Rendering
 # fixes": "the stock driver stays not recommended for play"
 recommend	driver.id=8,driver.version&0xffc00000=0x80000000,driver.version&0x3ff000<0x320000	driver=18
-# Android, Game resolution: the game picks its output from the display's largest buffer (hle_vi.c: 4K in console mode, the 1080p screen in handheld mode) and its render
-# preset from that, the graphics scale and the performance mode. Docked it renders 1024x576 and DLSS takes it to 2048x1152; handheld 960x540 to 1920x1080 (the crops
-# WindowCrop logs). It queries the largest buffer every frame and picks the preset again when it changes, so the in-game panel can switch it while the game runs.
-# One console row and one handheld row: the launcher offers them as Docked (1152p) and Handheld (1080p) (Profile.modes). Original without a row is the profile's op_mode, console
-graphics_scale	2048x1152	1	console
-graphics_scale	1920x1080	0	handheld
-# The default when the player has chosen none: 1920x1080, handheld (the launcher's own default, written out so one line changes it; original = docked)
+# Android, resolution: the game builds six render configurations (output size, render size its DLSS takes to the output, shadow and level-of-detail settings; slots main+0x223e0b0)
+# and picks one by the performance mode (Boost: the docked family, Normal: the handheld one), the graphics scale and the display's largest buffer, again on each notification 31.
+# The host writes the player's output (DM_WINDOW_SIZE) and render size (DM_RENDER_PCT: 33 / 50 / 59 / 67 % of it) into all six and answers the performance mode from the graphics
+# quality (DM_GFX_QUALITY: quality = Boost, the docked shadows and detail; performance = Normal, the handheld ones), and the largest buffer from the output (the game cuts an output
+# larger than that buffer), at least 2 (2560x1440) under quality and 1 (1920x1080) under performance (hle_render.c). The game's own sizes, C0 to C5: 2560x1440 / 1280x720 docked
+# and 2048x1152 / 1024x576 (today's Docked), 1706x960 / 853x480, 1920x1080 / 960x540 (Handheld), 1536x864 / 768x432, 1280x720 / 640x360. Render sizes above C0's 1280x720 are
+# scaled down to it until the 1008 MiB render target pool is measured larger (DM_RENDER_UNCAPPED=1 lifts it; DM_NVN_POOLS=1 logs the pools' high-water marks). Outputs from 720p up (min)
+render_cfg	db93b0125f4850601d61c3edde012f8e	0x223e0b0	6	16	0x0	0x8	2560x1440/1280x720,2048x1152/1024x576,1706x960/853x480,1920x1080/960x540,1536x864/768x432,1280x720/640x360	original=2048x1152	max_render=1280x720	min=720
+render_quality	quality=boost:2	performance=normal:1
+# The operation mode stays handheld whatever the setting: the game reads it only for its controller check and its sound mix
+op_mode	handheld
+# The default output when the player has chosen none: 1920x1080 (with the render scale's 50 % and performance: the game's own handheld configuration)
 android_window	1920x1080
 
 # ---- Variants (patches.py VARIANT_CUTS; Game settings > Aspect ratio) ----

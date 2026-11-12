@@ -691,8 +691,15 @@ static int levels_apply(module_t *m, unsigned cw, unsigned ch) {
     return 1;
 }
 
+// A main build with a render_cfg row takes DM_WINDOW_SIZE as the output of its render configurations instead (hle_render.c), at run time
+#include "render_cfg.h"
+static int render_cfg_row(const char *build) {
+    static const rcfg_row_t rows[] = DM_GAME_RENDER_CFG;
+    for (int i = 0; i < DM_GAME_NRENDER_CFG; i++) if (rows[i].build[0] && !strcmp(rows[i].build, build)) return 1;
+    return 0;
+}
 static void window_apply(module_t *m) {
-    if (strcmp(m->name, "main") || m->nro) return;
+    if (strcmp(m->name, "main") || m->nro || render_cfg_row(m->build_id)) return;
     const char *e = getenv("DM_WINDOW_SIZE");
     static const struct { const char *build; uint64_t wfn, hfn; unsigned w, h; } rows[] = DM_GAME_WINDOW_FN;
     int r = -1, own = !e || !*e || !strcmp(e, "original");
