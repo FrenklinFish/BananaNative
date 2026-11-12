@@ -33,6 +33,7 @@ final class Profile {
     boolean presentOnly;   // game.tsv fps_limit_present 1 (build.gradle presentOnlyOf): the frame limit only paces the presents, the game's own logic is not known to follow it (Prefs.presentOnly)
     int fpsLimit;   // game.tsv fps_limit (build.gradle fpsLimitOf): the host's frame limit by default, frames a second (0 = none); the launcher offers a frame limit for it (Prefs.limited)
     boolean drs;   // game.tsv has drs_ctl rows (build.gradle drsOf): the host can steer the game's dynamic resolution (Prefs.drsGame)
+    String skipLayers = "";   // game.tsv skip_layers (build.gradle skipLayersOf): pixel shader keys whose draws the Speedhack setting drops (Prefs.skipLayersGame), "" = not offered
     boolean dlss;   // game.tsv has dlss_standin rows (build.gradle dlssOf): the game's DLSS runs on the host's GSR2 stand-in, with its Upscaler modes and sliders (Prefs.dlssGame)
     boolean decoupled;   // game.tsv has fps_decouple rows (build.gradle decoupleOf): the game's speed follows its measured frame rate, so it gets a frame limit (Prefs.paced)
     String romfsChecks = "";   // game.tsv romfs_check rows (build.gradle romfsChecksOf): "<path>|<line>|<expected or main>", ';' between them (RomfsCheck)
@@ -313,6 +314,7 @@ final class Profile {
             p.steps = c.length > 18 && c[18].equals("1");
             p.vegetationDetail = c.length > 19 && c[19].equals("1");
             p.options = parseOptions(c.length > 20 ? c[20] : "");
+            p.skipLayers = c.length > 21 ? c[21] : "";
             out.add(p);
         }
         return Collections.unmodifiableList(out);

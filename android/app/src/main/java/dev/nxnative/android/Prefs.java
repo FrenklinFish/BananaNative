@@ -207,6 +207,12 @@ final class Prefs {
     /** Pause on return (per game, on by default): the game's screen coming back from the background shows it paused, suspended until a tap (GameActivity.onStart) */
     static boolean pauseOnReturn(Context c, String titleId) { return of(c).getBoolean(gameKey("pause_return", titleId), true); }
     static void pauseOnReturn(Context c, String titleId, boolean on) { of(c).edit().putBoolean(gameKey("pause_return", titleId), on).commit(); }
+    /** Game settings › Speedhack: Turn off hidden layers (experimental), for a game whose profile names such layers (game.tsv skip_layers): draws of those pixel shaders are
+     *  dropped (DM_VK_SKIP_FS). Off by default: the layers were judged hidden by eye in a few places only */
+    static boolean skipLayersGame(String titleId) { Profile p = Profile.of(titleId); return p != null && !p.skipLayers.isEmpty(); }
+    static String skipLayersKeys(String titleId) { Profile p = Profile.of(titleId); return p == null ? "" : p.skipLayers; }
+    static boolean skipLayers(Context c, String titleId) { return of(c).getBoolean(gameKey("vk_skip_layers", titleId), false); }
+    static void skipLayers(Context c, String titleId, boolean on) { of(c).edit().putBoolean(gameKey("vk_skip_layers", titleId), on).commit(); }
     /** Game settings › Instanced draws (DM_VK_INSTANCE): runs of draws that repeat one mesh drawn as one instanced draw. Off by default (a GPU loss on Adreno 830 with Turnip, open) */
     static boolean instancedDraws(Context c, String titleId) { return of(c).getBoolean(gameKey("vk_instance", titleId), false); }
     static void instancedDraws(Context c, String titleId, boolean on) { of(c).edit().putBoolean(gameKey("vk_instance", titleId), on).commit(); }

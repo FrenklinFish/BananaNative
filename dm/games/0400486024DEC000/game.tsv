@@ -41,6 +41,10 @@ shader_note	Ocarina of Time shaders
 # 2026-11-11 it was 30: Link's house ran 37-38 fps from cool and 27-32 once hot, the phone 23 C warmer over a run; at 30 every frame is 33.3 ms and it warms 12 C (README.md
 # "Profile"). The maintainer chose the game's own rate as the start; 30 is one tap away in the in-game panel
 fps_limit	60
+# Android: two pixel shaders whose draws later drawing covers (a sky-like layer: 6 draws of the first and 2 of the second cost 34 of 77 ms of GPU time at Link's house on an
+# Adreno 740 with Turnip). The launcher's Game settings offer "Speedhack: Turn off hidden layers (experimental)" for them (DM_VK_SKIP_FS), off by default: judged by eye in
+# Kokiri Forest and Link's house only
+skip_layers	5684f5e658eda176,47eb514f6d5e9faf
 # The frame step (patches.py) in whole vsyncs decided by the host, also with no limit (the launcher's 60): left to the game's own controller, the game kept interval 1 at 25 fps on the
 # phone (0.4 of real time; its controller's frame costs, framework +0x148 / +0x150, said 60 fits). The limit above caps the step (hle_fpslock.c dm_fps_step_fold): 30 fps = 2 vsyncs a frame
 fps_target	60

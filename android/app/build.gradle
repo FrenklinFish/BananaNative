@@ -130,7 +130,9 @@ def optionsOf = { String game ->
         [env, label, desc, mode, implies, needs].collect { it.replaceAll(/[\t\n\\"]/, ' ').replaceAll(/[;|]/, ',').trim() }.join('|')
     }.join(';')
 }
-def nxProfiles = nxGames.collect { g -> [g, nameOf(g).replaceAll(/[\t\n\\"]/, ' '), shaderTotalOf(g), shaderInputsOf(g), buildsOf(g), reqsOf(g), statusOf(g), deltaOf(g), stampOf(g), resolutionOf(g), romfsChecksOf(g), gpuTsOf(g), windowOf(g), decoupleOf(g), drsOf(g), fpsLimitOf(g), dlssOf(g), presentOnlyOf(g), stepsOf(g), tsvRows(g, 'mesh_vegetation_cut').isEmpty() ? '' : '1', optionsOf(g)].join('\\t') }.join('\\n')
+// The pixel shaders the game's Speedhack setting drops (game.tsv skip_layers: shader keys, comma separated), or empty. The launcher then offers the toggle (Prefs.skipLayersGame)
+def skipLayersOf = { String game -> tsvRows(game, 'skip_layers').with { rs -> rs.isEmpty() || rs[0].size() < 2 ? '' : rs[0][1].trim().replaceAll(/[^0-9a-fA-F,]/, '') } }
+def nxProfiles = nxGames.collect { g -> [g, nameOf(g).replaceAll(/[\t\n\\"]/, ' '), shaderTotalOf(g), shaderInputsOf(g), buildsOf(g), reqsOf(g), statusOf(g), deltaOf(g), stampOf(g), resolutionOf(g), romfsChecksOf(g), gpuTsOf(g), windowOf(g), decoupleOf(g), drsOf(g), fpsLimitOf(g), dlssOf(g), presentOnlyOf(g), stepsOf(g), tsvRows(g, 'mesh_vegetation_cut').isEmpty() ? '' : '1', optionsOf(g), skipLayersOf(g)].join('\\t') }.join('\\n')
 def lockOf = { String key -> def f = new File(repo, 'dm/gfx/tools/dmsh_chain.lock'); f.isFile() ? (f.readLines().find { it.startsWith(key + '\t') }?.split('\t')?.getAt(1) ?: 'unknown') : 'unknown' }
 
 android {
