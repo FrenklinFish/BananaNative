@@ -2,6 +2,7 @@
 // Only entry points that go to a service are hooked; library functions that only read and write the game's own buffers (prepo Add / Array / Struct, err ErrorResultVariant, friends getters, socket byte-order conversion) keep running in the SDK.
 // Return convention as in hle_friends.c: Result returns RES_FAIL ("saved / submitted" kinds return RES_OK so the game does not retry); bool returns false; events get a bound SystemEvent that never fires.
 #include "hle.h"
+#include "hle_coop.h"
 
 static _Alignas(16) uint8_t g_ev_ldn[0x100];
 
@@ -25,65 +26,71 @@ HLE_FORCE("_ZN2nn5prepo12AddSessionIdEPNS0_10PlayReportEPKc", "telemetry session
 HLE_FORCE("_ZN2nn5prepo27AddInternetConnectionStatusEPNS0_10PlayReportEPKcS4_S4_", "telemetry internet connection status: no service connection, nothing added, reports success", Result, h_prepo_AddNet, void *rep, const char *a, const char *b, const char *c) { (void)rep; (void)a; (void)b; (void)c; return RES_OK; }
 HLE_FORCE("_ZN2nn5prepo28RequestImmediateTransmissionEv", "telemetry immediate upload; nothing is sent, reports success", Result, h_prepo_Tx, void) { return RES_OK; }
 
-// ---------- ldn: local wireless. Initialization fails, state is always "none" ----------
-HLE_FORCE("_ZN2nn3ldn10InitializeEv", "local wireless (cut): initialization fails", Result, h_ldn_Init, void) { return RES_FAIL; }
-HLE_FORCE("_ZN2nn3ldn8FinalizeEv", "local wireless (cut)", void, h_ldn_Fini, void) {}
-HLE_FORCE("_ZN2nn3ldn8GetStateEv", "local wireless (cut): state 0 (none)", int, h_ldn_State, void) { return 0; }
-HLE_FORCE("_ZN2nn3ldn22AttachStateChangeEventEPNS_2os15SystemEventTypeE", "local wireless state event: bound, never fires", void, h_ldn_Attach, void *ev) { hle_bind_system_event(ev, 0); (void)g_ev_ldn; }
-HLE_FORCE("_ZN2nn3ldn11OpenStationEv", "local wireless (cut)", Result, h_ldn_OpenSta, void) { return RES_FAIL; }
-HLE_FORCE("_ZN2nn3ldn12CloseStationEv", "local wireless (cut)", Result, h_ldn_CloseSta, void) { return RES_FAIL; }
-HLE_FORCE("_ZN2nn3ldn15OpenAccessPointEv", "local wireless (cut)", Result, h_ldn_OpenAp, void) { return RES_FAIL; }
-HLE_FORCE("_ZN2nn3ldn16CloseAccessPointEv", "local wireless (cut)", Result, h_ldn_CloseAp, void) { return RES_FAIL; }
-HLE_FORCE("_ZN2nn3ldn10DisconnectEv", "local wireless (cut)", Result, h_ldn_Disc, void) { return RES_FAIL; }
-HLE_FORCE("_ZN2nn3ldn14DestroyNetworkEv", "local wireless (cut)", Result, h_ldn_Destroy, void) { return RES_FAIL; }
-HLE_FORCE("_ZN2nn3ldn4ScanEPNS0_11NetworkInfoEPiiRKNS0_10ScanFilterEi", "local wireless scan (cut): 0 found", Result, h_ldn_Scan, void *out, int *n, int max, const void *f, int ch) { (void)out; (void)max; (void)f; (void)ch; if (n) *n = 0; return RES_FAIL; }
+// ---------- ldn: local wireless. With a co-op node (DM_COOP set, hle_coop.c) the calls are the portable co-op module's; without, as before: initialization fails, state is always "none" ----------
+#define LDN_N coop_node *cn = dm_coop_node()
+HLE_FORCE("_ZN2nn3ldn10InitializeEv", "local wireless: the co-op module's (DM_COOP), else cut: initialization fails", Result, h_ldn_Init, void) { LDN_N; int64_t r_ = cn ? (int64_t)coop_ldn_initialize(cn) : (int64_t)(RES_FAIL); dm_coop_trace(__func__, r_); return r_; }
+HLE_FORCE("_ZN2nn3ldn8FinalizeEv", "local wireless: the co-op module's, else cut", void, h_ldn_Fini, void) { LDN_N; dm_coop_trace(__func__, 0); if (cn) coop_ldn_finalize(cn); dm_coop_set_event(NULL); }
+HLE_FORCE("_ZN2nn3ldn8GetStateEv", "local wireless: the co-op module's state, else 0 (none)", int, h_ldn_State, void) { LDN_N; int64_t r_ = cn ? (int64_t)coop_ldn_state(cn) : (int64_t)(0); dm_coop_trace(__func__, r_); return r_; }
+HLE_FORCE("_ZN2nn3ldn22AttachStateChangeEventEPNS_2os15SystemEventTypeE", "local wireless state event: bound; signalled by the co-op module's state changes, never otherwise", void, h_ldn_Attach, void *ev) { hle_bind_system_event(ev, 0); dm_coop_set_event(ev); (void)g_ev_ldn; dm_coop_trace(__func__, 0); }
+HLE_FORCE("_ZN2nn3ldn11OpenStationEv", "local wireless: the co-op module's, else cut", Result, h_ldn_OpenSta, void) { LDN_N; int64_t r_ = cn ? (int64_t)coop_ldn_open_station(cn) : (int64_t)(RES_FAIL); dm_coop_trace(__func__, r_); return r_; }
+HLE_FORCE("_ZN2nn3ldn12CloseStationEv", "local wireless: the co-op module's, else cut", Result, h_ldn_CloseSta, void) { LDN_N; int64_t r_ = cn ? (int64_t)coop_ldn_close_station(cn) : (int64_t)(RES_FAIL); dm_coop_trace(__func__, r_); return r_; }
+HLE_FORCE("_ZN2nn3ldn15OpenAccessPointEv", "local wireless: the co-op module's, else cut", Result, h_ldn_OpenAp, void) { LDN_N; int64_t r_ = cn ? (int64_t)coop_ldn_open_ap(cn) : (int64_t)(RES_FAIL); dm_coop_trace(__func__, r_); return r_; }
+HLE_FORCE("_ZN2nn3ldn16CloseAccessPointEv", "local wireless: the co-op module's, else cut", Result, h_ldn_CloseAp, void) { LDN_N; int64_t r_ = cn ? (int64_t)coop_ldn_close_ap(cn) : (int64_t)(RES_FAIL); dm_coop_trace(__func__, r_); return r_; }
+HLE_FORCE("_ZN2nn3ldn10DisconnectEv", "local wireless: the co-op module's, else cut", Result, h_ldn_Disc, void) { LDN_N; int64_t r_ = cn ? (int64_t)coop_ldn_disconnect(cn) : (int64_t)(RES_FAIL); dm_coop_trace(__func__, r_); return r_; }
+HLE_FORCE("_ZN2nn3ldn14DestroyNetworkEv", "local wireless: the co-op module's, else cut", Result, h_ldn_Destroy, void) { LDN_N; int64_t r_ = cn ? (int64_t)coop_ldn_destroy_network(cn) : (int64_t)(RES_FAIL); dm_coop_trace(__func__, r_); return r_; }
+HLE_FORCE("_ZN2nn3ldn4ScanEPNS0_11NetworkInfoEPiiRKNS0_10ScanFilterEi", "local wireless scan: the co-op module's, else cut: 0 found", Result, h_ldn_Scan, void *out, int *n, int max, const void *f, int ch) {
+    LDN_N; dm_coop_trace(__func__, cn ? 1 : 0); if (cn) return coop_ldn_scan(cn, out, n, max, f, ch); if (n) *n = 0; return RES_FAIL; }
 HLE_FORCE("_ZN2nn3ldn11ScanPrivateEPNS0_11NetworkInfoEPiiRKNS0_10ScanFilterEi", "local wireless scan (cut): 0 found", Result, h_ldn_ScanP, void *out, int *n, int max, const void *f, int ch) { (void)out; (void)max; (void)f; (void)ch; if (n) *n = 0; return RES_FAIL; }
-HLE_FORCE("_ZN2nn3ldn13CreateNetworkERKNS0_13NetworkConfigERKNS0_14SecurityConfigERKNS0_10UserConfigE", "local wireless (cut)", Result, h_ldn_Create,
-          const void *a, const void *b, const void *c) { (void)a; (void)b; (void)c; return RES_FAIL; }
+HLE_FORCE("_ZN2nn3ldn13CreateNetworkERKNS0_13NetworkConfigERKNS0_14SecurityConfigERKNS0_10UserConfigE", "local wireless: the co-op module's, else cut", Result, h_ldn_Create,
+          const void *a, const void *b, const void *c) { LDN_N; int64_t r_ = cn ? (int64_t)coop_ldn_create_network(cn, a, b, c) : (int64_t)(RES_FAIL); dm_coop_trace(__func__, r_); return r_; }
 HLE_FORCE("_ZN2nn3ldn20CreateNetworkPrivateERKNS0_13NetworkConfigERKNS0_14SecurityConfigERKNS0_17SecurityParameterERKNS0_10UserConfigEiPKNS0_12AddressEntryE", "local wireless (cut)",
           Result, h_ldn_CreateP, const void *a, const void *b, const void *c, const void *d, int n, const void *e) { (void)a; (void)b; (void)c; (void)d; (void)n; (void)e; return RES_FAIL; }
-HLE_FORCE("_ZN2nn3ldn7ConnectERKNS0_11NetworkInfoERKNS0_14SecurityConfigERKNS0_10UserConfigEiNS0_13ConnectOptionE", "local wireless (cut)", Result, h_ldn_Connect,
-          const void *a, const void *b, const void *c, int v, int o) { (void)a; (void)b; (void)c; (void)v; (void)o; return RES_FAIL; }
+HLE_FORCE("_ZN2nn3ldn7ConnectERKNS0_11NetworkInfoERKNS0_14SecurityConfigERKNS0_10UserConfigEiNS0_13ConnectOptionE", "local wireless: the co-op module's, else cut", Result, h_ldn_Connect,
+          const void *a, const void *b, const void *c, int v, int o) { LDN_N; int64_t r_ = cn ? (int64_t)coop_ldn_connect(cn, a, b, c, v, o) : (int64_t)(RES_FAIL); dm_coop_trace(__func__, r_); return r_; }
 HLE_FORCE("_ZN2nn3ldn14ConnectPrivateERKNS0_13NetworkConfigERKNS0_14SecurityConfigERKNS0_17SecurityParameterERKNS0_10UserConfigEiNS0_13ConnectOptionE", "local wireless (cut)",
           Result, h_ldn_ConnectP, const void *a, const void *b, const void *c, const void *d, int v, int o) { (void)a; (void)b; (void)c; (void)d; (void)v; (void)o; return RES_FAIL; }
-HLE_FORCE("_ZN2nn3ldn14GetNetworkInfoEPNS0_11NetworkInfoE", "local wireless (cut)", Result, h_ldn_NetInfo, void *o) { (void)o; return RES_FAIL; }
-HLE_FORCE("_ZN2nn3ldn14GetIpv4AddressEPNS0_11Ipv4AddressEPNS0_10SubnetMaskE", "local wireless (cut)", Result, h_ldn_Ip, uint32_t *a, uint32_t *m) { if (a) *a = 0; if (m) *m = 0; return RES_FAIL; }
-HLE_FORCE("_ZN2nn3ldn20GetSecurityParameterEPNS0_17SecurityParameterE", "local wireless (cut)", Result, h_ldn_SecPrm, void *o) { (void)o; return RES_FAIL; }
-HLE_FORCE("_ZN2nn3ldn16SetAdvertiseDataEPKvm", "local wireless (cut)", Result, h_ldn_Adv, const void *d, uint64_t n) { (void)d; (void)n; return RES_FAIL; }
-HLE_FORCE("_ZN2nn3ldn19GetDisconnectReasonEv", "local wireless (cut): 0", int, h_ldn_DiscReason, void) { return 0; }
-HLE_FORCE("_ZN2nn3ldn20AddAcceptFilterEntryENS0_10MacAddressE", "local wireless (cut)", Result, h_ldn_Filter, uint64_t mac) { (void)mac; return RES_FAIL; }
-HLE_FORCE("_ZN2nn3ldn22SetStationAcceptPolicyENS0_12AcceptPolicyE", "local wireless (cut)", Result, h_ldn_Policy, int p) { (void)p; return RES_FAIL; }
-HLE_FORCE("_ZN2nn3ldn6RejectENS0_11Ipv4AddressE", "local wireless (cut)", Result, h_ldn_Reject, uint32_t a) { (void)a; return RES_FAIL; }
-HLE_FORCE("_ZN2nn3ldn16GetNetworkConfigEPNS0_13NetworkConfigE", "local wireless (cut)", Result, h_ldn_NetCfg, void *o) { (void)o; return RES_FAIL; }
+HLE_FORCE("_ZN2nn3ldn14GetNetworkInfoEPNS0_11NetworkInfoE", "local wireless: the co-op module's, else cut", Result, h_ldn_NetInfo, void *o) { LDN_N; int64_t r_ = cn ? (int64_t)coop_ldn_network_info(cn, o) : (int64_t)(RES_FAIL); dm_coop_trace(__func__, r_); return r_; }
+HLE_FORCE("_ZN2nn3ldn14GetIpv4AddressEPNS0_11Ipv4AddressEPNS0_10SubnetMaskE", "local wireless: the co-op module's, else cut", Result, h_ldn_Ip, uint32_t *a, uint32_t *m) {
+    LDN_N; if (cn) return coop_ldn_ipv4(cn, a, m); if (a) *a = 0; if (m) *m = 0; return RES_FAIL; }
+HLE_FORCE("_ZN2nn3ldn20GetSecurityParameterEPNS0_17SecurityParameterE", "local wireless: the co-op module's, else cut", Result, h_ldn_SecPrm, void *o) { LDN_N; int64_t r_ = cn ? (int64_t)coop_ldn_security_parameter(cn, o) : (int64_t)(RES_FAIL); dm_coop_trace(__func__, r_); return r_; }
+HLE_FORCE("_ZN2nn3ldn16SetAdvertiseDataEPKvm", "local wireless: the co-op module's, else cut", Result, h_ldn_Adv, const void *d, uint64_t n) { LDN_N; int64_t r_ = cn ? (int64_t)coop_ldn_set_advertise(cn, d, n) : (int64_t)(RES_FAIL); dm_coop_trace(__func__, r_); return r_; }
+HLE_FORCE("_ZN2nn3ldn19GetDisconnectReasonEv", "local wireless: the co-op module's, else 0", int, h_ldn_DiscReason, void) { LDN_N; int64_t r_ = cn ? (int64_t)coop_ldn_disconnect_reason(cn) : (int64_t)(0); dm_coop_trace(__func__, r_); return r_; }
+HLE_FORCE("_ZN2nn3ldn20AddAcceptFilterEntryENS0_10MacAddressE", "local wireless (cut; the co-op module accepts every station)", Result, h_ldn_Filter, uint64_t mac) { (void)mac; return RES_FAIL; }
+HLE_FORCE("_ZN2nn3ldn22SetStationAcceptPolicyENS0_12AcceptPolicyE", "local wireless: the co-op module's, else cut", Result, h_ldn_Policy, int p) { LDN_N; int64_t r_ = cn ? (int64_t)coop_ldn_set_accept_policy(cn, p) : (int64_t)(RES_FAIL); dm_coop_trace(__func__, r_); return r_; }
+HLE_FORCE("_ZN2nn3ldn6RejectENS0_11Ipv4AddressE", "local wireless: the co-op module's, else cut", Result, h_ldn_Reject, uint32_t a) { LDN_N; int64_t r_ = cn ? (int64_t)coop_ldn_reject(cn, a) : (int64_t)(RES_FAIL); dm_coop_trace(__func__, r_); return r_; }
+HLE_FORCE("_ZN2nn3ldn16GetNetworkConfigEPNS0_13NetworkConfigE", "local wireless: the co-op module's, else cut", Result, h_ldn_NetCfg, void *o) { LDN_N; int64_t r_ = cn ? (int64_t)coop_ldn_network_config(cn, o) : (int64_t)(RES_FAIL); dm_coop_trace(__func__, r_); return r_; }
 
 // ---------- socket: offline. Initialization succeeds (the network library's global init depends on it), every later operation fails with errno = ENETDOWN ----------
 enum { SK_ENETDOWN = 50, SK_EAI_FAIL = 4 };
+// With a co-op node GetLastErrno reads the shared BSD error. Offline keeps the
+// legacy thread-error behavior (including eventfds) exactly as before.
+static int sk_plain_fail(void) { if (dm_coop_node()) dm_sk_seterr(SK_ENETDOWN); return -1; }
 HLE_FORCE("_ZN2nn6socket10InitializeEPvmmi", "connects to the bsd socket service; offline, creates no session (cut)", Result, h_sk_Init4, void *mem, uint64_t sz, uint64_t alloc, int conc) { (void)mem; (void)sz; (void)alloc; (void)conc; return RES_OK; }
 HLE_FORCE("_ZN2nn6socket8FinalizeEv", "pairs with Initialize (cut)", Result, h_sk_Fini, void) { return RES_OK; }
-HLE_FORCE("_ZN2nn6socket12GetLastErrnoEv", "offline: ENETDOWN", int, h_sk_Errno, void) { return SK_ENETDOWN; }
-HLE_FORCE("_ZN2nn6socket6SocketEiii", "offline (cut): -1", int, h_sk_Socket3i, int a, int b, int c) { (void)a; (void)b; (void)c; return -1; }
-HLE_FORCE("_ZN2nn6socket8ShutdownEii", "offline (cut)", int, h_sk_Shutdown, int s, int h) { (void)s; (void)h; return -1; }
-HLE_FORCE("_ZN2nn6socket4BindEiPK8sockaddrj", "offline (cut)", int, h_sk_Bind, int s, const void *a, unsigned n) { (void)s; (void)a; (void)n; return -1; }
+HLE_FORCE("_ZN2nn6socket12GetLastErrnoEv", "offline: ENETDOWN", int, h_sk_Errno, void) { return dm_coop_node() ? dm_sk_geterr() : SK_ENETDOWN; }
+HLE_FORCE("_ZN2nn6socket6SocketEiii", "offline (cut): -1", int, h_sk_Socket3i, int a, int b, int c) { coop_node *cn = dm_coop_node(); if (cn) return dm_coop_ret(coop_vnet_socket(cn, a, b, c)); return sk_plain_fail(); }
+HLE_FORCE("_ZN2nn6socket8ShutdownEii", "offline (cut)", int, h_sk_Shutdown, int s, int h) { (void)h; if (dm_coop_vfd(s)) return 0; return sk_plain_fail(); }
+HLE_FORCE("_ZN2nn6socket4BindEiPK8sockaddrj", "offline (cut)", int, h_sk_Bind, int s, const void *a, unsigned n) { if (dm_coop_vfd(s)) return dm_coop_ret(coop_vnet_bind(dm_coop_node(), s, a, n)); return sk_plain_fail(); }
 int dm_sk_poll(void *fds, uint64_t n, int ms);   // hle_net.c: nothing to wait on → the timeout passes, 0; else -1
 int dm_sk_select(int nfds, const uint64_t *r, const uint64_t *w, const uint64_t *e, const int64_t *tv);
 HLE_FORCE("_ZN2nn6socket4PollEP6pollfdmi", "offline: waits out the timeout when there is nothing to wait on, else fails", int, h_sk_Poll, void *p, uint64_t n, int t) { return dm_sk_poll(p, n, t); }
 // SDK 4's Select with plain fd_set / timeval (Dark Souls Remastered)
 HLE_FORCE("_ZN2nn6socket6SelectEiP6fd_setS2_S2_P7timeval", "offline: waits out the timeout when there is nothing to wait on, else fails", int, h_sk_Select2, int n, void *r, void *w, void *e, void *t) { return dm_sk_select(n, r, w, e, t); }
-HLE_FORCE("_ZN2nn6socket6SendToEiPKvmiPK8sockaddrj", "offline (cut)", long, h_sk_SendTo, int s, const void *b, unsigned long n, int f, const void *a, unsigned al) { (void)s; (void)b; (void)n; (void)f; (void)a; (void)al; return -1; }
-HLE_FORCE("_ZN2nn6socket6SendToEiPKvmNS0_7MsgFlagEPKNS0_8SockAddrEj", "offline (cut)", long, h_sk_SendTo2, int s, const void *b, unsigned long n, int f, const void *a, unsigned al) { (void)s; (void)b; (void)n; (void)f; (void)a; (void)al; return -1; }
-HLE_FORCE("_ZN2nn6socket8RecvFromEiPvmiP8sockaddrPj", "offline (cut)", long, h_sk_RecvFrom2, int s, void *b, unsigned long n, int f, void *a, unsigned *al) { (void)s; (void)b; (void)n; (void)f; (void)a; (void)al; return -1; }
+HLE_FORCE("_ZN2nn6socket6SendToEiPKvmiPK8sockaddrj", "offline (cut)", long, h_sk_SendTo, int s, const void *b, unsigned long n, int f, const void *a, unsigned al) { if (dm_coop_vfd(s)) return dm_coop_ret(coop_vnet_sendto(dm_coop_node(), s, b, n, f, a, al)); return sk_plain_fail(); }
+HLE_FORCE("_ZN2nn6socket6SendToEiPKvmNS0_7MsgFlagEPKNS0_8SockAddrEj", "offline (cut)", long, h_sk_SendTo2, int s, const void *b, unsigned long n, int f, const void *a, unsigned al) { if (dm_coop_vfd(s)) return dm_coop_ret(coop_vnet_sendto(dm_coop_node(), s, b, n, f, a, al)); return sk_plain_fail(); }
+HLE_FORCE("_ZN2nn6socket8RecvFromEiPvmiP8sockaddrPj", "offline (cut)", long, h_sk_RecvFrom2, int s, void *b, unsigned long n, int f, void *a, unsigned *al) { if (dm_coop_vfd(s)) return dm_coop_ret(coop_vnet_recvfrom(dm_coop_node(), s, b, n, f, a, al)); return sk_plain_fail(); }
 HLE_FORCE("_ZN2nn6socket11GetAddrInfoEPKcS2_PK8addrinfoPPS3_", "name resolution (cut): EAI_FAIL", int, h_sk_Gai2, const char *h, const char *s, const void *hint, void **res) { (void)h; (void)s; (void)hint; if (res) *res = NULL; return SK_EAI_FAIL; }
 HLE_FORCE("_ZN2nn6socket12FreeAddrInfoEP8addrinfo", "pairs with GetAddrInfo (cut)", void, h_sk_FreeAi2, void *ai) { (void)ai; }
 HLE_FORCE("_ZN2nn6socket11GAIStrErrorENS0_7AiErrnoE", "resolver error text", const char *, h_sk_GaiStr, int e) { (void)e; return "network unavailable"; }
 // SDK 11's overloads with plain sockaddr / int arguments (Big Brain Academy: Brain vs. Brain, through Pia)
-HLE_FORCE("_ZN2nn6socket7ConnectEiPK8sockaddrj", "offline (cut)", int, h_sk_Connect2, int s, const void *a, unsigned n) { (void)s; (void)a; (void)n; return -1; }
-HLE_FORCE("_ZN2nn6socket6AcceptEiP8sockaddrPj", "offline (cut)", int, h_sk_Accept2, int s, void *a, unsigned *n) { (void)s; (void)a; (void)n; return -1; }
-HLE_FORCE("_ZN2nn6socket11GetSockNameEiP8sockaddrPj", "offline (cut)", int, h_sk_GetSockName2, int s, void *a, unsigned *n) { (void)s; (void)a; (void)n; return -1; }
-HLE_FORCE("_ZN2nn6socket10GetSockOptEiiiPvPj", "offline (cut)", int, h_sk_GetSockOpt2, int s, int l, int o, void *v, unsigned *n) { (void)s; (void)l; (void)o; (void)v; (void)n; return -1; }
-HLE_FORCE("_ZN2nn6socket10SetSockOptEiiiPKvj", "offline (cut)", int, h_sk_SetSockOpt2, int s, int l, int o, const void *v, unsigned n) { (void)s; (void)l; (void)o; (void)v; (void)n; return -1; }
-HLE_FORCE("_ZN2nn6socket5FcntlEiiz", "offline (cut)", int, h_sk_Fcntl2, int s, int c) { (void)s; (void)c; return -1; }
-HLE_FORCE("_ZN2nn6socket4RecvEiPvmi", "offline (cut)", long, h_sk_Recv2, int s, void *b, unsigned long n, int f) { (void)s; (void)b; (void)n; (void)f; return -1; }
-HLE_FORCE("_ZN2nn6socket4SendEiPKvmi", "offline (cut)", long, h_sk_Send2, int s, const void *b, unsigned long n, int f) { (void)s; (void)b; (void)n; (void)f; return -1; }
+HLE_FORCE("_ZN2nn6socket7ConnectEiPK8sockaddrj", "offline (cut)", int, h_sk_Connect2, int s, const void *a, unsigned n) { (void)s; (void)a; (void)n; return sk_plain_fail(); }
+HLE_FORCE("_ZN2nn6socket6AcceptEiP8sockaddrPj", "offline (cut)", int, h_sk_Accept2, int s, void *a, unsigned *n) { (void)s; (void)a; (void)n; return sk_plain_fail(); }
+HLE_FORCE("_ZN2nn6socket11GetSockNameEiP8sockaddrPj", "offline (cut)", int, h_sk_GetSockName2, int s, void *a, unsigned *n) { if (dm_coop_vfd(s)) return dm_coop_ret(coop_vnet_getsockname(dm_coop_node(), s, a, n)); return sk_plain_fail(); }
+HLE_FORCE("_ZN2nn6socket10GetSockOptEiiiPvPj", "offline (cut)", int, h_sk_GetSockOpt2, int s, int l, int o, void *v, unsigned *n) { if (dm_coop_vfd(s)) return dm_coop_ret(coop_vnet_getsockopt(dm_coop_node(), s, l, o, v, n)); return sk_plain_fail(); }
+HLE_FORCE("_ZN2nn6socket10SetSockOptEiiiPKvj", "offline (cut)", int, h_sk_SetSockOpt2, int s, int l, int o, const void *v, unsigned n) { if (dm_coop_vfd(s)) return dm_coop_ret(coop_vnet_setsockopt(dm_coop_node(), s, l, o, v, n)); return sk_plain_fail(); }
+HLE_FORCE("_ZN2nn6socket5FcntlEiiz", "offline (cut)", int, h_sk_Fcntl2, int s, int c, long a) { if (dm_coop_vfd(s)) return dm_coop_ret(coop_vnet_fcntl(dm_coop_node(), s, c, (int)a)); return sk_plain_fail(); }
+HLE_FORCE("_ZN2nn6socket4RecvEiPvmi", "offline (cut)", long, h_sk_Recv2, int s, void *b, unsigned long n, int f) { if (dm_coop_vfd(s)) return dm_coop_ret(coop_vnet_recvfrom(dm_coop_node(), s, b, n, f, NULL, NULL)); return sk_plain_fail(); }
+HLE_FORCE("_ZN2nn6socket4SendEiPKvmi", "offline (cut)", long, h_sk_Send2, int s, const void *b, unsigned long n, int f) { if (dm_coop_vfd(s)) return dm_coop_ret(coop_vnet_sendto(dm_coop_node(), s, b, n, f, NULL, 0)); return sk_plain_fail(); }
 
 // ---------- irsensor: the Joy-Con IR camera (Big Brain Academy: Brain vs. Brain's input layer makes one per controller). The host has none: every camera is unconnected,
 // processors cannot run and report no states. The default-config getters and MakeRect only fill the game's structs and keep running in the SDK ----------
