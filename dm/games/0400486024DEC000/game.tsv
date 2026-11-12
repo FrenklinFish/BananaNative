@@ -101,6 +101,8 @@ scene_scale	480p	0.4166667	fixed	Fixed 0.4167
 scene_scale	360p	0.3125	fixed	Fixed 0.3125
 # agl wraps its clears in render conditions on Donkey Kong Bananza and Splatoon Raiders; the same library here
 render_cond	on
+# Qualcomm Vulkan: keep consecutive counted depth queries in separate render passes.
+occlusion_split_pass	on
 pool_skip_retired	on
 tex_release	2
 gpu_timestamps	segment
