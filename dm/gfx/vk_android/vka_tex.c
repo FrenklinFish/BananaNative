@@ -1614,7 +1614,7 @@ int vka_low_ram(void) {
     static _Atomic int on = -1;
     int r = atomic_load(&on);
     if (r >= 0) return r;
-    int has = DM_GAME_LOW_RAM_PLACE_PART_MB || DM_GAME_LOW_RAM_IMG_CACHE_MAX_MB, force = VKA_ENV("DM_VK_LOW_RAM", -1);
+    int has = DM_GAME_LOW_RAM_PLACE_PART_MB || DM_GAME_LOW_RAM_IMG_CACHE_MAX_MB || DM_GAME_LOW_RAM_APP_POOL_MB, force = VKA_ENV("DM_VK_LOW_RAM", -1);
     uint64_t total = 0;
     if (has) {
         int fd = open("/proc/meminfo", O_RDONLY | O_CLOEXEC);
@@ -1623,12 +1623,14 @@ int vka_low_ram(void) {
     r = vklr_applies(has, total, force);
     int exp = -1;
     if (atomic_compare_exchange_strong(&on, &exp, r) && has)
-        VLOG("low-RAM profile keys %s: MemTotal %.0f MiB%s (placed parts from %d MiB, image cache at most %d MiB; DM_VK_LOW_RAM=0 / 1 overrides)", r ? "apply" : "do not apply",
+        VLOG("low-RAM profile keys %s: MemTotal %.0f MiB%s (placed parts from %d MiB, image cache at most %d MiB, reported memory total %d MiB; DM_VK_LOW_RAM=0 / 1 overrides)", r ? "apply" : "do not apply",
              total / 1048576.0, force >= 0 ? (force ? ", DM_VK_LOW_RAM=1" : ", DM_VK_LOW_RAM=0") : total && total <= VKLR_MEM_TOTAL_MAX ? ", 12 GiB or less" : ", over 12 GiB",
-             DM_GAME_LOW_RAM_PLACE_PART_MB, DM_GAME_LOW_RAM_IMG_CACHE_MAX_MB);
+             DM_GAME_LOW_RAM_PLACE_PART_MB, DM_GAME_LOW_RAM_IMG_CACHE_MAX_MB, DM_GAME_LOW_RAM_APP_POOL_MB);
     return atomic_load(&on);
 }
 int vka_low_ram_place_part_mb(void) { return DM_GAME_LOW_RAM_PLACE_PART_MB && vka_low_ram() ? DM_GAME_LOW_RAM_PLACE_PART_MB : 0; }
+// Read by hle_svc.c at the SDK's start, before the Vulkan device: vka_low_ram needs only /proc/meminfo, the switches (vka_ctl.c, getenv until the control thread sets one) and LOG
+int vka_low_ram_app_pool_mb(void) { return DM_GAME_LOW_RAM_APP_POOL_MB && vka_low_ram() ? DM_GAME_LOW_RAM_APP_POOL_MB : 0; }
 static void img_limit_update(uint64_t cur_frame) {   // caller holds g_tmu
     if (g_img_lim && cur_frame < g_lim_frame + (g_psi_pressed ? 15 : 60)) return;
     g_lim_frame = cur_frame;

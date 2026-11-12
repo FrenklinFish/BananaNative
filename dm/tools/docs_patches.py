@@ -121,6 +121,8 @@ SWITCH_BINDING = [
      'why': "less placed memory where RAM is short; a size for every game once the part size's cost is measured on the other games"}),
     ('low_ram_img_cache_max_mb', '', {'what': "a ceiling on the texture cache's limit on a device of 12 GB or less", 'now': 'game', 'goal': 'game', 'purpose': 'memory',
      'why': "the most image memory the game's scenes need, measured on the game; the measured limit still acts below it"}),
+    ('low_ram_app_pool_mb', '', {'what': 'a smaller memory total reported to the game on a device of 12 GB or less, the pool unchanged', 'now': 'game', 'goal': 'game', 'purpose': 'memory',
+     'why': "the total the game's SDK sizes its cache of freed pages from, measured on the game; the pool and the map limit stay the profile's"}),
     ('tex_soft', '', {'what': 'large block-compressed textures kept without their finest level', 'now': 'game', 'goal': 'game', 'purpose': 'memory',
      'why': 'a loss of detail chosen for a game that does not fit a device otherwise'}),
     ('occlusion_split_pass', 'on', {'what': 'split Qualcomm depth passes after counted occlusion queries', 'now': 'game', 'goal': 'host', 'purpose': 'rendering',

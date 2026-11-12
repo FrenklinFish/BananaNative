@@ -74,6 +74,11 @@ sys_resource	0x4000000
 # (with DM_VK_PLACE_PART_MB=256 and DM_VK_IMG_LIMIT_MB=1024, the same values). DM_VK_LOW_RAM=0 turns both off, =1 applies them on any device
 low_ram_place_part_mb	256
 low_ram_img_cache_max_mb	1024
+# Android, the same devices: GetInfo TotalMemorySize reports 5632 MiB instead of app_pool's 9216; the pool, the map limit and SetHeapSize stay app_pool (hle_svc.c
+# reported_total). The game's SDK sizes its cache of freed pages from the total it reads at startup: on the Thor, after the long title sequence and a Continue into a battle,
+# the alias region held about 4.65 GB against 5.54-6.26 GB at 9216, at 30 fps, and the game was stopped by the low-memory killer in 0 of 4 runs against 3 of 3 at 9216.
+# A run that reported 4096 MiB mapped up to 4.28 GB past it with no failure
+low_ram_app_pool_mb	5632
 
 # ---- Shader split (shader_split.py) ----
 shader_groups	/Shaders/=shader /Effect/=effect /Layout/=layout

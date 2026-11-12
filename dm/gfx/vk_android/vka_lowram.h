@@ -1,4 +1,4 @@
-// A profile's low-RAM keys (dm/games/README.md low_ram_place_part_mb, low_ram_img_cache_max_mb): defaults the Vulkan replay takes only on a device of 12 GB or less, for a
+// A profile's low-RAM keys (dm/games/README.md low_ram_place_part_mb, low_ram_img_cache_max_mb, low_ram_app_pool_mb): defaults the Vulkan replay takes only on a device of 12 GB or less, for a
 // profile that sets them. One predicate for both (vka_tex.c vka_low_ram): the profile sets one of the keys and MemTotal is at most 12 GiB, the class vka_texlimit.h's
 // reserve uses. DM_VK_LOW_RAM=0 turns them off and =1 applies them on any device (an A/B; a profile without the keys still gets nothing). They sit beside the texture cache's
 // limit (vka_texlimit.h), not in it: the image cache's key is a ceiling on the limit that rule measures, applied after it (vklr_ceiling), so the rule's RAM, budget and memory
@@ -23,4 +23,5 @@ static inline uint64_t vklr_ceiling(uint64_t limit, uint64_t ceiling) { return c
 
 int vka_low_ram(void);                 // the predicate, decided once (vka_tex.c)
 int vka_low_ram_place_part_mb(void);   // the profile's low_ram_place_part_mb where the keys apply, else 0
+int vka_low_ram_app_pool_mb(void);     // the profile's low_ram_app_pool_mb where the keys apply, else 0 (hle_svc.c app_pool: read at the SDK's start, before Vulkan)
 #endif

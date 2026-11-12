@@ -25,6 +25,8 @@ int main(void) {
     CHECK(vklr_applies(1, 15433 * MIB, 1), "=1 on a 16 GB device");
     CHECK(vklr_applies(1, 0, 1), "=1 with MemTotal not known");
     CHECK(!vklr_applies(0, 8 * GIB, 1), "=1 for a profile without the keys");
+    // A profile with only low_ram_app_pool_mb has the keys (vka_tex.c vka_low_ram: has counts all three); the same predicate decides it (hle_svc.c app_pool)
+    CHECK(vklr_applies(1, 11265 * MIB, -1) && !vklr_applies(1, 15433 * MIB, -1) && vklr_applies(1, 15433 * MIB, 1), "the application pool key on 11 GiB, 16 GB, 16 GB with =1");
     // The ceiling
     CHECK(vklr_ceiling(4300 * MIB, 1024 * MIB) == 1024 * MIB, "a measured limit above the ceiling");
     CHECK(vklr_ceiling(700 * MIB, 1024 * MIB) == 700 * MIB, "a measured limit below it (memory pressure) stays");

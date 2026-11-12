@@ -522,6 +522,19 @@ static void read_mapped_race(void) {
     memset(buf, 1, sizeof buf); assert(dm_guest_read_mapped(buf, a, 8 * P) == 8);
     for (size_t i = 0; i < 8 * P; ++i) assert(buf[i] == 0);
 }
+// A reported total below the pool (hle_svc.c reported_total: low_ram_app_pool_mb, DM_APP_POOL_MB): GetInfo's totals report it, the map limit stays the pool's, so a map past
+// it succeeds; a memory read whose used memory, reported as is, comes within 64 MiB of it lifts it to the pool for the session. The profile's pool is small here, so any read lifts
+static void reported_lower(void) {
+    const size_t half = DM_GAME_APP_POOL / 2, past = half - DM_GAME_MEM_USED + P;
+    assert(reported_total() == DM_GAME_APP_POOL);                                 // no key, no switch: the pool
+    g_rep_total = half;
+    assert(!pages(1, alias, past));                                              // past the reported total: not refused
+    assert(g_rep_total == half);
+    uint64_t used = info(I_UsedNonSys);                                          // the read past the total: lifted
+    assert(used == half + P && g_rep_total == DM_GAME_APP_POOL);
+    assert(info(I_TotalMem) == DM_GAME_APP_POOL && info(I_TotalNonSys) == DM_GAME_APP_POOL && info(I_UsedMem) == used);
+    assert(!pages(0, alias, g_alias_cap) && !g_alias_mapped);
+}
 int main(int argc, char **argv) {
     if (argc == 2 && !strcmp(argv[1], "--heap-probe")) {
         mem_init();
@@ -537,6 +550,7 @@ int main(int argc, char **argv) {
     lazy_commit(); alias_lifecycle(); ownership(); module_sources(); module_back_patch(); failures(); release_fallback(); concurrency(); fragmented_queries();
     guest_helper(); read_mapped_race();
     if (!DM_GAME_MEM_MAP_LIMIT) metadata_limit();
+    else reported_lower();
 #ifdef TEST_REAL_DIRTY
     dirty_integration();
 #endif

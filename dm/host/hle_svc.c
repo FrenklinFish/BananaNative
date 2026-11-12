@@ -89,6 +89,33 @@ static void mem_init(void) {
 // Previously 3 GB was reported here and SetHeapSize never failed: the heap was about 150 MB smaller than on the real device, at the run entry peak the main heap had only about 18 MB left, and under high local load a timing shift made a 128 KB request return null,
 // which the guest writes to without a null check (CRASH main+0x1b36138, re-verified after merge with inv_tap).
 #define APP_POOL DM_GAME_APP_POOL   // game profile app_pool (Mario 0xCD500000)
+// The total GetInfo TotalMemorySize / TotalNonSystemMemorySize report: the pool, or a smaller value where the profile's low_ram_app_pool_mb applies (Android, its low-RAM
+// keys, vka_lowram.h) or DM_APP_POOL_MB=<MiB> is set (a test value, any device). The SDK sizes its cache of freed pages from the total it reads at startup, so a smaller
+// total keeps that cache small. Only the report changes: SetHeapSize and the map limit keep the pool, so no map is refused below it, and used memory is reported as is.
+// A memory read whose used memory comes within 64 MiB of the reported total lifts it to the pool for the session (one line). hle_nvn.c's sparse-pool rule keeps app_pool
+#if defined(__ANDROID__)   // the Vulkan replay's (vka_tex.c), when it is linked in
+__attribute__((weak)) int vka_low_ram_app_pool_mb(void);
+#define LOW_RAM_APP_POOL_MB() (&vka_low_ram_app_pool_mb ? vka_low_ram_app_pool_mb() : 0)
+#else   // Mach-O has no undefined weak reference without -U at link time: the Mac host and the unit tests report the pool
+#define LOW_RAM_APP_POOL_MB() 0
+#endif
+#ifndef DM_GAME_LOW_RAM_APP_POOL_MB   // a hand-written test profile
+#define DM_GAME_LOW_RAM_APP_POOL_MB 0
+#endif
+#define REP_LIFT_MARGIN (UINT64_C(64) << 20)
+static _Atomic uint64_t g_rep_total;   // 0 until the first read
+static uint64_t reported_total(void) {
+    uint64_t t = atomic_load(&g_rep_total);
+    if (t) return t;
+    const char *e = getenv("DM_APP_POOL_MB"); long long mb = e && *e ? atoll(e) : 0;
+    int lr = mb > 0 ? 0 : LOW_RAM_APP_POOL_MB();
+    uint64_t low = mb > 0 ? (uint64_t)mb << 20 : (uint64_t)lr << 20, exp = 0;
+    t = low && low < APP_POOL ? low : APP_POOL;
+    if (atomic_compare_exchange_strong(&g_rep_total, &exp, t) && (mb > 0 || DM_GAME_LOW_RAM_APP_POOL_MB))   // a profile without the key and no switch: no line
+        LOG("[mem] reported total %.2f GB, application pool %.2f GB (%s)", t / 1073741824.0, APP_POOL / 1073741824.0,
+            mb > 0 ? "DM_APP_POOL_MB" : lr > 0 ? "the profile's low_ram_app_pool_mb: the low-RAM keys apply" : "the low-RAM keys do not apply");
+    return atomic_load(&g_rep_total);
+}
 static size_t image_bytes(void) { size_t n = 0; for (int i = 0; i < g_nmod; i++) if (!g_mod[i].nro) n += g_mod[i].size;   // an NRO lives in memory the game allocated (its image and bss buffers)
     return (n + 0x1fffff) & ~(size_t)0x1fffff; }
 // Giant bss (modules with the patch area before the base, patch_nso.py FAR): the image bytes beyond the file part. Used memory was reported as "heap + 64 MB", where the 64 MB covers ordinary modules' code and data (Mario's two modules are about 74 MB together,
@@ -740,7 +767,9 @@ uint64_t svc_dispatch(int num, uint64_t *regs, uint64_t orig_addr) {
         // the SDK maps pages that are already mapped and unmaps ranges larger than what it mapped (Engage unmaps 0x1000000 and then 0x103f000 at the same address), so counting requested sizes went negative
         { int64_t d = unmapped_bits ? unmap_d : alias_pages(off, size, commit) * 4096, before = atomic_fetch_add(&g_alias_mapped, d), after = before + d;
           pthread_mutex_unlock(&g_map_lock);
-          if (before >> 28 != after >> 28) LOG("[mem] alias region mapped %.2f GB (application pool %.2f GB)", after / 1073741824.0, APP_POOL / 1073741824.0); }
+          if (before >> 28 != after >> 28) { uint64_t rt = reported_total(); char t[48] = "";
+              if (rt != APP_POOL) snprintf(t, sizeof t, ", reported total %.2f GB", rt / 1073741824.0);
+              LOG("[mem] alias region mapped %.2f GB (application pool %.2f GB%s)", after / 1073741824.0, APP_POOL / 1073741824.0, t); } }
         regs[0] = 0; return 0;
     }
     case 0x26: {  // Break(reason, ptr, size): SDK fatal abort
@@ -766,12 +795,21 @@ uint64_t svc_dispatch(int num, uint64_t *regs, uint64_t orig_addr) {
         case I_HeapAddr:  v = (uint64_t)g_heap;  break;   case I_HeapSize:  v = g_heap_cap;  break;
         case I_AslrAddr:  v = (uint64_t)g_as;    break;   case I_AslrSize:  v = g_reserve;   break;
         case I_StackAddr: v = (uint64_t)g_stack; break;   case I_StackSize: v = g_stack_cap; break;
-        case I_TotalMem: case I_TotalNonSys: v = APP_POOL; break;
-        case I_UsedMem:  case I_UsedNonSys:  pthread_mutex_lock(&g_map_lock);
-                                             v = g_heap_cur + DM_GAME_MEM_USED + big_bss_bytes();   // profile mem_used, 64 MB unless the game needs more (see mem_used in dm/games/README.md)
-                                             // with mem_map_limit, the pages mapped in the alias region count too, as on Horizon (the limit in MapPhysicalMemory is the pool less this)
-                                             if (DM_GAME_MEM_MAP_LIMIT) v += (uint64_t)atomic_load(&g_alias_mapped);
-                                             pthread_mutex_unlock(&g_map_lock); break;
+        case I_TotalMem: case I_TotalNonSys: case I_UsedMem: case I_UsedNonSys: {
+            pthread_mutex_lock(&g_map_lock);
+            uint64_t used = g_heap_cur + DM_GAME_MEM_USED + big_bss_bytes();   // profile mem_used, 64 MB unless the game needs more (see mem_used in dm/games/README.md)
+            // with mem_map_limit, the pages mapped in the alias region count too, as on Horizon (the limit in MapPhysicalMemory is the pool less this)
+            if (DM_GAME_MEM_MAP_LIMIT) used += (uint64_t)atomic_load(&g_alias_mapped);
+            // a reported total below the pool (reported_total, above): used memory is the true value; within 64 MiB of that total, the total is lifted to the pool for the session
+            uint64_t rt = reported_total();
+            if (rt < APP_POOL && used + REP_LIFT_MARGIN > rt) {
+                atomic_store(&g_rep_total, APP_POOL);
+                LOG("[mem] reported total lifted %.2f -> %.2f GB: Used %.2f GB; trigger GetInfo id %llu", rt / 1073741824.0, APP_POOL / 1073741824.0,
+                    used / 1073741824.0, (unsigned long long)id);
+            }
+            v = id == I_TotalMem || id == I_TotalNonSys ? reported_total() : used;
+            pthread_mutex_unlock(&g_map_lock); break;
+        }
         // the system resource the NPDM declares (profile sys_resource; 32 MB without the key). The SDK's IsVirtualAddressMemoryEnabled is "total != 0": Big Brain Academy's nninitStartup
         // asks StandardAllocator for 60 GB of virtual address memory when it is, and sets a heap only when it is not (its NPDM declares none)
         case I_SysResTotal: v = DM_GAME_SYS_RESOURCE; break; case I_SysResUsed: v = DM_GAME_SYS_RESOURCE ? 0x400000 : 0; break;
