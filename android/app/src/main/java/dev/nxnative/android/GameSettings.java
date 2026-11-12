@@ -238,6 +238,8 @@ final class GameSettings {
             updateRows.run();
         }
 
+        if (LinkPlay.has(id))
+            options.add(new Ui.Setting(a, "🔗", "Link Play", v -> LinkPlay.dialog(a, g, again)).value(LinkPlay.label(a, id)).chevron(a));
         options.add(new Ui.Setting(a, "🌐", "Game language", v -> language(a, g, again)).value(GameLanguage.label(Prefs.gameLang(a, id), phoneTag())).chevron(a));   // not a tester's knob: with the game's options, never folded
 
         // ---- Controls ----

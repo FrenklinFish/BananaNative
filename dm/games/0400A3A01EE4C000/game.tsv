@@ -11,6 +11,8 @@ name	Pokemon Pokopia
 ipa	PokemonPokopia.ipa
 app_category	public.app-category.simulation-games
 pad_layout	full
+# The Android launcher offers joining a PC host; Link Play is off until the player configures it.
+link_play	1
 
 # ---- Versions ----
 # v655360 is the update's title version; a dump has no control data to name a display version
