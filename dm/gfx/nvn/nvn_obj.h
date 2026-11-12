@@ -188,6 +188,8 @@ typedef struct { uint64_t src; const tex_t *tex; view_t view; uint8_t has_view; 
 // A host-only bit in flags: DM_COPY_RESOLVE = this is a Downsample (multisample resolve), recorded as a texture copy so everything else treats it as one (reads the source, writes the destination)
 #define DM_COPY_RESOLVE 0x40000000
 typedef struct { const tex_t *src, *dst; view_t sv, dv; uint8_t has_sv, has_dv; NVNcopyRegion sr, dr; int32_t flags; } p_copy_t2t;   // Reused for T2B: src stores the destination buffer address
+// FSR 3.1's inputs for one DLSS evaluation (vka_exec.c dlss_eval, mode 4 -> vka_fsr3.c): the colour and output rectangles as a copy's, then depth, motion vectors, jitter, their scale, the reset
+typedef struct { p_copy_t2t c; const tex_t *depth, *motion; float jitter[2], mv[2]; uint32_t reset; } p_dlss_t2t;
 typedef struct { const tex_t *tex; view_t view; uint8_t has_view, is_uint; NVNcopyRegion r; int32_t mask; union { float f[4]; uint32_t u[4]; } c; } p_clear_tex;
 typedef struct { int64_t stride; int image; } p_copy_stride;   // image: SetCopyImageStride (bytes per layer / depth slice) instead of SetCopyRowStride
 // NVN2's DLSS evaluation: the parameters at the time of the call, each texture snapped after the record (hle_nvn.c "NVN2's DLSS"; vka_exec.c dlss_eval)

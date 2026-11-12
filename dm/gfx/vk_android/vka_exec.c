@@ -1040,7 +1040,7 @@ static void copy_t2t(const p_copy_t2t *c) {
 }
 
 // NVN2's DLSS (OP_DLSS, hle_nvn.c "NVN2's DLSS"): the network has no Vulkan counterpart, so the replay writes the output texture itself, so the game's post chain reads a
-// picture (Fire Emblem Fortune's Weave's 3D was black with the evaluation dropped). DM_VK_DLSS (live) picks how: 3 = Snapdragon GSR2 3-pass (the default), 2 = FSR 1 with
+// picture (Fire Emblem Fortune's Weave's 3D was black with the evaluation dropped). DM_VK_DLSS (live) picks how: 4 = FSR 3.1 (vka_fsr3.c), 3 = Snapdragon GSR2 3-pass (the default), 2 = FSR 1 with
 // the jitter taken out, both in vka_dlss.c; 1 = a bilinear blit of the input subrectangle to the output size (also what 2 and 3 fall back to); 0 leaves the output unwritten (A/B)
 static void dlss_eval(const p_dlss *o) {
     static uint64_t n;
@@ -1067,6 +1067,14 @@ static void dlss_eval(const p_dlss *o) {
         if (dx + ow > (int)d->w) ow = (int)d->w - dx;
         if (dy + oh > (int)d->h) oh = (int)d->h - dy;
         if (iw <= 0 || ih <= 0 || ow <= 0 || oh <= 0) return;
+    }
+    if (mode == 4) {   // FSR 3.1 (vka_fsr3.c): its inputs as a copy record's rectangles; FSR 1 / bilinear when it cannot run
+        p_dlss_t2t f = {0};
+        f.c.src = ct; f.c.dst = ot; f.c.sr = (NVNcopyRegion){sx, sy, 0, iw, ih, 1}; f.c.dr = (NVNcopyRegion){dx, dy, 0, ow, oh, 1};
+        f.depth = o->tex[DLSS_DEPTH]; f.motion = o->tex[DLSS_MOTION]; memcpy(f.jitter, o->jitter, sizeof f.jitter); memcpy(f.mv, o->mv, sizeof f.mv); f.reset = o->reset;
+        vka_img *z = f.depth ? vka_tex_get(f.depth, g_cb) : NULL, *m = f.motion ? vka_tex_get(f.motion, g_cb) : NULL;
+        if (!o->base[DLSS_DEPTH][0] && !o->base[DLSS_DEPTH][1] && !o->base[DLSS_MOTION][0] && !o->base[DLSS_MOTION][1] && vka_dlss_fsr3(g_cb, s, d, z, m, &f)) { vka_img_written(d); g_stat_ops++; return; }
+        mode = 2;
     }
     if (mode >= 2 && vka_dlss_run(g_cb, o, mode, s, sl, sx, sy, iw, ih, d, dl, dx, dy, ow, oh)) { vka_img_written(d); g_stat_ops++; return; }
     if ((s->f.kind && s->f.kind < 3) || s->f.kind != d->f.kind || s->f.bw > 1 || s->samples > 1) {

@@ -81,7 +81,9 @@ The Vulkan replay's stand-in for NVN2's DLSS (`dm/gfx/vk_android/vka_dlss.c`) ru
 (GSR2) 3-pass shaders, adapted to compute passes in [`dm/gfx/vk_android/gsr2`](../dm/gfx/vk_android/gsr2/LICENSE) and compiled into the host (`gsr2/vka_gsr2_spv.h`):
 Copyright (c) 2023-2024, Qualcomm Innovation Center, Inc. All rights reserved, under the BSD-3-Clause license, whose full text, conditions and disclaimer are in
 [`dm/gfx/vk_android/gsr2/LICENSE`](../dm/gfx/vk_android/gsr2/LICENSE) and apply to the shaders in source and binary form. Its FSR 1 mode uses AMD's FidelityFX FSR 1
-headers (MIT, [dm/third_party/fidelityfx-fsr1](../dm/third_party/fidelityfx-fsr1/LICENSE.txt)), as the present's FSR 1 does.
+headers (MIT, [dm/third_party/fidelityfx-fsr1](../dm/third_party/fidelityfx-fsr1/LICENSE.txt)), as the present's FSR 1 does. Its FSR 3.1 mode (`vka_fsr3.c`) runs AMD FidelityFX
+Super Resolution 3.1's upscaler passes from the FidelityFX SDK 1.1.4, compiled to SPIR-V (`dm/gfx/vk_android/fsr3/*.h`): Copyright (c) Advanced Micro Devices, Inc., under the MIT
+license in [dm/third_party/fidelityfx-fsr3](../dm/third_party/fidelityfx-fsr3/LICENSE.txt).
 
 `Lossless.dll` belongs to Lossless Scaling (proprietary, sold separately). It is never in this repository or in an APK: the user supplies their own copy, which the
 launcher finds on the phone or lets the user pick, and copies into the app's private files.

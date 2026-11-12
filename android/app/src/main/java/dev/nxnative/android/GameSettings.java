@@ -38,6 +38,11 @@ final class GameSettings {
             vegetation.value("Turn off to hide some grass and foliage and reduce GPU work. Applies at the next start.");
             Ui.add(box, vegetation.view, 0);
         }
+        if (Prefs.skipLayersGame(id)) {   // a game whose profile names layers the picture covers anyway (game.tsv skip_layers)
+            Ui.Setting hid = new Ui.Setting(a, "🚀", "Speedhack: Turn off hidden layers (experimental)", null).toggle(a, Prefs.skipLayers(a, id), (b, on) -> Prefs.skipLayers(a, id, on));
+            hid.value("Skips layers that later drawing covers (much faster where they are drawn). Turn it off if something looks missing");
+            Ui.add(box, hid.view, 0);
+        }
         if (prof != null && !prof.options.isEmpty()) {
             File packDir = g.packDir != null ? new File(g.packDir) : null;
             java.util.Map<String, Ui.Setting> rowSettings = new java.util.LinkedHashMap<>();

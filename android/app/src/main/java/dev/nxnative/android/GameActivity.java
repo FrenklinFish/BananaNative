@@ -78,6 +78,8 @@ public final class GameActivity extends Activity implements SurfaceHolder.Callba
     private InputManager inputManager;
     private AudioManager audio;
     private AudioFocusRequest focus;
+    private final AudioFocus focusState = new AudioFocus();
+    private boolean requestFocus() { boolean g = audio.requestAudioFocus(focus) == AudioManager.AUDIOFOCUS_REQUEST_GRANTED; focusState.requested(g); return g; }
     private AudioDeviceCallback route;
     private boolean routeReady;
 
@@ -450,6 +452,7 @@ public final class GameActivity extends Activity implements SurfaceHolder.Callba
         if (xb == 2) env.add("DM_PAD_LABELLED=2");
         if (Prefs.instancedDraws(this, id)) env.add("DM_VK_INSTANCE=1");   // Game settings › Instanced draws
         if (Prefs.classicPasses(this, id)) env.add("DM_VK_CLASSIC_RP=1");   // Game settings › Classic render passes
+        if (Prefs.skipLayersGame(id) && Prefs.skipLayers(this, id)) env.add("DM_VK_SKIP_FS=" + Prefs.skipLayersKeys(id));   // Game settings › Speedhack: Turn off hidden layers
         env.add("DM_VK_PSO_ASYNC=" + (Prefs.psoAsync(this, id) ? 2 : 0));   // Game settings › Background pipelines (an env.txt line of the player's comes later and wins)
         if (Prefs.ramSaver(this, id)) { env.add("DM_MEM_FILEBACK=1"); env.add("DM_MEM_FILEBACK_KINDS=shader,texture"); }   // Game settings › RAM saver: texture pools in a file in TMPDIR, the cache folder (vka_mem.c "File-backed pools"); lines of env.txt or the game's own come later and win
         String padMap = Prefs.padMap(this, id);   // Button mapping (Game settings, Settings): wins over the label swap's A/B for the buttons it names
@@ -974,11 +977,10 @@ public final class GameActivity extends Activity implements SurfaceHolder.Callba
         audio = (AudioManager) getSystemService(Context.AUDIO_SERVICE);
         focus = new AudioFocusRequest.Builder(AudioManager.AUDIOFOCUS_GAIN)
                 .setAudioAttributes(new AudioAttributes.Builder().setUsage(AudioAttributes.USAGE_GAME).setContentType(AudioAttributes.CONTENT_TYPE_UNKNOWN).build())
-                .setOnAudioFocusChangeListener(f -> Native.audioInterrupt(f == AudioManager.AUDIOFOCUS_LOSS || f == AudioManager.AUDIOFOCUS_LOSS_TRANSIENT
-                        || f == AudioManager.AUDIOFOCUS_LOSS_TRANSIENT_CAN_DUCK), ui)
+                .setOnAudioFocusChangeListener(f -> Native.audioInterrupt(focusState.changed(f)), ui)
                 .build();
         // Granted at once calls no listener: an interruption the screen that went saw (a call while in the background) is over for this one
-        if (audio.requestAudioFocus(focus) == AudioManager.AUDIOFOCUS_REQUEST_GRANTED) Native.audioInterrupt(false);
+        if (requestFocus()) Native.audioInterrupt(false);
         else Native.note("audio focus not granted at start");
         // The callback first reports the devices already there: only later changes reopen the streams
         route = new AudioDeviceCallback() {
@@ -1099,6 +1101,11 @@ public final class GameActivity extends Activity implements SurfaceHolder.Callba
         }
         stopped = false;
         hostInBackground = false;
+        // Another app took the audio focus for good while the game was away (AudioFocus): no gain would come, and the game stayed silent. Asked for again here
+        if (audio != null && focus != null && focusState.askAgain()) {
+            if (requestFocus()) { Native.note("audio focus asked for again on the return: granted"); Native.audioInterrupt(false); }
+            else Native.note("audio focus asked for again on the return: refused");
+        }
         Native.lifecycle(2);
     }
     @Override protected void onResume() {

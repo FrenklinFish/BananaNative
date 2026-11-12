@@ -7,7 +7,8 @@ import java.util.List;
  * The pure part of the Upscaler row for games with game.tsv dlss_standin (Prefs.dlssGame; GameUpscaler keeps it per game, StepSlider draws the sliders,
  * dm/gfx/vk_android/vka_dlss.c and vka_present.c read the lines live). Such a game's DLSS runs on vka's stand-in, so its Upscaler row picks the stand-in (DM_VK_DLSS:
  * GSR 2, FSR 1 or bilinear, per game as dlss_mode); under GSR 2, Motion clarity (DM_VK_GSR2_CLARITY c0..c4: steadier on the left, less ghosting on the right) and Temporal
- * sharpness (DM_VK_DLSS_SHARP, 0..30 in steps of 5, default 15; under FSR 1 the same lever as "FSR sharpness").
+ * sharpness (DM_VK_DLSS_SHARP, 0..30 in steps of 5, default 15; under FSR 1 the same lever as "FSR sharpness", under FSR 3.1 as "Sharpness": DM_VK_FSR3_SHARP = step / 30,
+ * so the default 15 is RCAS strength 0.5; still characters' outlines shimmer less than at 0.8, see vka_fsr3.c).
  *
  * The rule, for these games only:
  * <pre>
@@ -15,6 +16,7 @@ import java.util.List;
  *   0 GSR 2 (smooth images); unset or unknown     3
  *   1 FSR 1 (sharp, fast)                         2
  *   2 Bilinear (fastest, softest)                 1
+ *   3 FSR 3.1 (sharp, steady)                     4      (vka_fsr3.c; its RCAS, DM_VK_FSR3_SHARP, from the sharpness slider)
  *
  *   stored ndsr_choice2 (GameUpscaler.MODES,      the present's scaling of the window to the screen
  *   the game's own, else the main screen's)       DM_VK_FSR   DM_VK_PRESENT_NEAREST
@@ -42,14 +44,14 @@ final class DlssTune {
     static String[] sharpNames() { String[] n = new String[SHARPS.length]; for (int i = 0; i < n.length; i++) n[i] = sharpName(i); return n; }
     static int clamp(int v, int n, int dflt) { return v >= 0 && v < n ? v : dflt; }
 
-    /** The Upscaler row: the stand-in's modes in the order shown, and each one's DM_VK_DLSS (3 GSR2 3-pass, 2 FSR 1 with the jitter taken out, 1 bilinear) */
-    static final String[] MODE_NAMES = {"GSR 2 (smooth images)", "FSR 1 (sharp, fast)", "Bilinear (fastest, softest)"};
-    static final int[] MODE_DLSS = {3, 2, 1};
-    static final int MODE_DEFAULT = 0, MODE_GSR2 = 0, MODE_FSR1 = 1;
-    /** Which sliders the mode shows: GSR 2 both, FSR 1 the sharpness alone (its RCAS), bilinear none */
+    /** The Upscaler row: the stand-in's modes in the order shown, and each one's DM_VK_DLSS (3 GSR2 3-pass, 2 FSR 1 with the jitter taken out, 1 bilinear, 4 FSR 3.1) */
+    static final String[] MODE_NAMES = {"GSR 2 (smooth images)", "FSR 1 (sharp, fast)", "Bilinear (fastest, softest)", "FSR 3.1 (sharp, steady)"};
+    static final int[] MODE_DLSS = {3, 2, 1, 4};
+    static final int MODE_DEFAULT = 0, MODE_GSR2 = 0, MODE_FSR1 = 1, MODE_FSR3 = 3;
+    /** Which sliders the mode shows: GSR 2 both, FSR 1 and FSR 3.1 the sharpness alone (their RCAS), bilinear none */
     static boolean showsClarity(int mode) { return clamp(mode, MODE_NAMES.length, MODE_DEFAULT) == MODE_GSR2; }
-    static boolean showsSharp(int mode) { int m = clamp(mode, MODE_NAMES.length, MODE_DEFAULT); return m == MODE_GSR2 || m == MODE_FSR1; }
-    static String sharpTitle(int mode) { return clamp(mode, MODE_NAMES.length, MODE_DEFAULT) == MODE_FSR1 ? "FSR sharpness" : "Temporal sharpness"; }
+    static boolean showsSharp(int mode) { int m = clamp(mode, MODE_NAMES.length, MODE_DEFAULT); return m == MODE_GSR2 || m == MODE_FSR1 || m == MODE_FSR3; }
+    static String sharpTitle(int mode) { int m = clamp(mode, MODE_NAMES.length, MODE_DEFAULT); return m == MODE_FSR1 ? "FSR sharpness" : m == MODE_FSR3 ? "Sharpness" : "Temporal sharpness"; }
 
     /** The present's scaling for a stored ndsr_choice2 (the table above): FSR 1, bilinear or nearest */
     static final int PRESENT_FSR = 0, PRESENT_BILINEAR = 1, PRESENT_NEAREST = 2;
@@ -77,8 +79,10 @@ final class DlssTune {
         l.add("DM_VK_PRESENT_NEAREST=" + (p == PRESENT_NEAREST ? 1 : 0));
         return l;
     }
-    /** The host's lines for a clarity step and a sharpness index */
+    /** The host's lines for a clarity step and a sharpness index (FSR 3.1's RCAS strength is the step / 30: 0, 0.17, 0.33, 0.5, 0.67, 0.83, 1) */
     static List<String> lines(int clarity, int sharpIndex) {
-        return Arrays.asList("DM_VK_GSR2_CLARITY=" + clamp(clarity, CLARITY_NAMES.length, CLARITY_DEFAULT), "DM_VK_DLSS_SHARP=" + SHARPS[clamp(sharpIndex, SHARPS.length, SHARP_DEFAULT)]);
+        int sh = SHARPS[clamp(sharpIndex, SHARPS.length, SHARP_DEFAULT)];
+        return Arrays.asList("DM_VK_GSR2_CLARITY=" + clamp(clarity, CLARITY_NAMES.length, CLARITY_DEFAULT), "DM_VK_DLSS_SHARP=" + sh,
+                             "DM_VK_FSR3_SHARP=" + String.format(java.util.Locale.ROOT, "%.2f", sh / 30f));
     }
 }

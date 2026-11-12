@@ -33,6 +33,7 @@ final class Profile {
     boolean presentOnly;   // game.tsv fps_limit_present 1 (build.gradle presentOnlyOf): the frame limit only paces the presents, the game's own logic is not known to follow it (Prefs.presentOnly)
     int fpsLimit;   // game.tsv fps_limit (build.gradle fpsLimitOf): the host's frame limit by default, frames a second (0 = none); the launcher offers a frame limit for it (Prefs.limited)
     boolean drs;   // game.tsv has drs_ctl rows (build.gradle drsOf): the host can steer the game's dynamic resolution (Prefs.drsGame)
+    String skipLayers = "";   // game.tsv skip_layers (build.gradle skipLayersOf): pixel shader keys whose draws the Speedhack setting drops (Prefs.skipLayersGame), "" = not offered
     String variants = "";   // game.tsv variant rows (build.gradle variantsOf): "<name>=<label>", ',' between them; a native 4:3 mod is "43=4:3" (Game settings › Aspect ratio)
 
     /** The variant whose label is w:h (a native aspect mod: "43" for "4:3"), or null when the profile has none */
@@ -320,7 +321,8 @@ final class Profile {
             p.steps = c.length > 18 && c[18].equals("1");
             p.vegetationDetail = c.length > 19 && c[19].equals("1");
             p.options = parseOptions(c.length > 20 ? c[20] : "");
-            p.variants = c.length > 21 ? c[21] : "";
+            p.skipLayers = c.length > 21 ? c[21] : "";
+            p.variants = c.length > 22 ? c[22] : "";
             out.add(p);
         }
         return Collections.unmodifiableList(out);
