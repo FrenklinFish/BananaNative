@@ -37,5 +37,4 @@ A new version of the app may come with new shaders. What happens depends on what
   computer can be made again there and imported instead.
 
 The app's in-app updates (Settings › **Check for updates**) download new versions from the project's
-releases only: [GitHub](https://github.com/moceure/BananaNative/releases) or the mirror on
-[git.eden-emu.dev](https://git.eden-emu.dev/moceure/BananaNative/releases), whichever has the newest one.
+releases only: [git.eden-emu.dev](https://git.eden-emu.dev/moceure/BananaNative/releases).

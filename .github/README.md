@@ -16,14 +16,18 @@ graphics to Vulkan. It is an Android port of [nxnative](https://github.com/seedd
 | Game | Version | Status | Notes |
 |---|---|---|---|
 | Donkey Kong Bananza (`040074A01BF12000`) | update 458752 | Supported | 30 fps |
+| Fire Emblem Fortune's Weave (`04007EF01F8AE000`) | update 131072 | Supported | 30 fps; native 4:3 option; on Adreno 740 pick Turnip |
 | Mario Kart World (`0400C3F00006E000`) | 1.8.0 | Supported | a phone cooler is recommended |
 | Pokémon Pokopia (`0400A3A01EE4C000`) | update 655360 (Ver. 2.0.1) | Supported | about 60 fps |
-| The Legend of Zelda: Ocarina of Time (`0400486024DEC000`) | 2.0 | Experimental | plays, with visual glitches (too bright, mesh foliage missing); system driver only |
+| The Legend of Zelda: Ocarina of Time (`0400486024DEC000`) | 2.0 | Experimental | plays on the system driver and Turnip, full foliage; about 30 fps in Kokiri Forest, 50 indoors |
+| Star Fox (`0400E88025B1A000`) | update 131072 | Experimental | boots and reaches its first scenes on both drivers; not tested further |
 | Splatoon Raiders (`0400380020056000`) | update 65536 | Experimental | boots and runs, but not playable yet (very low frame rate) |
 
 The app tells you if your dump is another version. Splatoon Raiders is not playable yet: it boots and runs at a very low
-frame rate, and ships so that people can test it and help. Ocarina of Time: only version 2.0 is tested; the first starts are slow
-(minutes of loading, then low fps and black frames) until the GPU driver's pipeline cache fills. [Experimental games](../docs/guides/experimental-games.md) has their known problems and how to help.
+frame rate, and ships so that people can test it and help. Star Fox is new and little tested. Ocarina of Time: only version 2.0 is
+tested; the first starts are slow (minutes of loading, then low fps and black frames) until the GPU driver's pipeline cache fills.
+Games with a recommendation for your phone show it at the top of their ⋯ page: one tap applies it. Game language follows the
+phone (Polish and Thai too, where the game has them) or can be set per game. [Experimental games](../docs/guides/experimental-games.md) has their known problems and how to help.
 
 ## What you need
 
@@ -39,7 +43,7 @@ frame rate, and ships so that people can test it and help. Ocarina of Time: only
 Each game is prepared once into a **pack** (its code rewritten for Android, its shaders translated for Vulkan). A
 computer does this much faster than the phone.
 
-First install the APK from [Releases](https://github.com/moceure/BananaNative/releases) (or the mirror on [git.eden-emu.dev](https://git.eden-emu.dev/moceure/BananaNative/releases)) and allow **All files access**.
+First install the APK from [Releases](https://git.eden-emu.dev/moceure/BananaNative/releases) and allow **All files access**. Later versions come through the app's own updater.
 
 **PC (Windows) or Mac** ([guide](../docs/guides/pc-mac-packing.md)). Mac: tested. Windows: new and not yet tested on a
 real PC — please report how it goes.
@@ -59,13 +63,12 @@ only rewrite code when its key changes (a few minutes). A computer is recommende
 ## Problems
 
 - Settings › **Readiness check** says what your phone is missing and fixes most items.
-- A game's ⋯ button › **Share log** shares its log.
-- Open an [issue](https://github.com/moceure/BananaNative/issues/new/choose) with the form; questions go to
-  [Discussions](https://github.com/moceure/BananaNative/discussions). More: [Troubleshooting](../docs/guides/troubleshooting.md).
+- A game's ⋯ button › **Storage** › **Share log** shares its log.
+- Open an [issue](https://git.eden-emu.dev/moceure/BananaNative/issues/new/choose) with the form; questions are welcome there too. More: [Troubleshooting](../docs/guides/troubleshooting.md).
 
 > [!IMPORTANT]
-> The official places for Banana Native are this GitHub repository and its mirror on
-> [git.eden-emu.dev](https://git.eden-emu.dev/moceure/BananaNative): download the APK only from their releases. Nobody
+> The official place for Banana Native is [git.eden-emu.dev/moceure/BananaNative](https://git.eden-emu.dev/moceure/BananaNative) (the GitHub repository
+> is not available at the moment): download the APK only from its releases. Nobody
 > from the project will ask you for money, keys or game files.
 
 ## Guides
@@ -93,7 +96,7 @@ only rewrite code when its key changes (a few minutes). A computer is recommende
 Each game's note says what is known and what is open ([games table](../dm/games/README.md#games)); working on the code:
 [docs/agents](../docs/agents/README.md), [android/README.md](../android/README.md). The experimental games need the
 most help: see the issues marked
-[help wanted](https://github.com/moceure/BananaNative/issues?q=is%3Aissue+is%3Aopen+label%3A%22help+wanted%22).
+[help wanted](https://git.eden-emu.dev/moceure/BananaNative/issues?state=open&labels=help+wanted).
 
 ## Licence and credits
 

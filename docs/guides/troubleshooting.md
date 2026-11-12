@@ -15,7 +15,7 @@ When a game would not start, the app says so before it starts, with the reason.
 
 Each game start writes a log. To send it:
 
-- the game's ⋯ button › **Share log**: that game's newest log, or
+- the game's ⋯ button › **Storage** › **Share log**: that game's newest log, or
 - Settings › **Share log**: the newest log of any game.
 
 ## Common problems
@@ -31,7 +31,7 @@ Each game start writes a log. To send it:
 
 ## Opening an issue
 
-Open an [issue](https://github.com/moceure/BananaNative/issues/new/choose) with the form. It asks for:
+Open an [issue](https://git.eden-emu.dev/moceure/BananaNative/issues/new/choose) with the form. It asks for:
 
 - what happened, and what you did just before;
 - the phone, its chip and RAM, and the Android version;
@@ -41,5 +41,5 @@ Open an [issue](https://github.com/moceure/BananaNative/issues/new/choose) with 
 - the log (**Share log**).
 
 Screenshots or a short video help for a wrong picture. Questions and "it runs on my phone" reports go to
-[Discussions](https://github.com/moceure/BananaNative/discussions). Please don't attach, offer or link game files, keys
+[issues](https://git.eden-emu.dev/moceure/BananaNative/issues). Please don't attach, offer or link game files, keys
 or firmware.

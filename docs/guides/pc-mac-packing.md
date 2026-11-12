@@ -6,7 +6,7 @@ the game's **pack**. A computer does this much faster than the phone: a Mac prep
 
 ## 1. Get the packer
 
-Get this repository from GitHub (clone it, or download it). The packer is in its `scripts` folder:
+Get this repository from [git.eden-emu.dev](https://git.eden-emu.dev/moceure/BananaNative) (clone it, or download it). The packer is in its `scripts` folder:
 
 - **Windows:** `scripts\bananative.bat`. New and not yet tested on a real PC — please report how it goes.
 - **Mac:** `scripts/bananative.command`. Tested.

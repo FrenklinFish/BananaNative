@@ -26,7 +26,7 @@ This guide sets up a game with the phone alone. A Windows PC or a Mac prepares a
 ## Steps
 
 1. **Copy your dump** to the phone, for example to `Switch2/DonkeyKongBananza`.
-2. **Install the app.** Download the APK from [Releases](https://github.com/moceure/BananaNative/releases) and
+2. **Install the app.** Download the APK from [Releases](https://git.eden-emu.dev/moceure/BananaNative/releases) and
    install it. Open **Banana Native**.
 3. **Allow file access.** The **Allow file access** card has an **Allow** button: it opens Android's settings, where
    you turn on **All files access** for Banana Native, then come back. (You can also skip it: a `.nup` file is then
@@ -46,6 +46,6 @@ A computer is recommended for Mario Kart World (`0400C3F00006E000`).
 
 - Settings (the gear at the top of Home) holds the defaults for every game: **Overlay**, **On-screen controls**,
   **Resolution**, **Frame rate cap**, **Frame generation**, **Button mapping** and more. A game's own settings
-  (its ⋯ button › **Game settings**) override them.
+  (its ⋯ button: the **Performance** and **Game** tabs) override them.
 - Back up your saves now and then: [Saves](saves.md).
 - Something wrong: [Troubleshooting](troubleshooting.md).

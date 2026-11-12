@@ -6,8 +6,8 @@ Unofficial and experimental, tested on one phone. Not affiliated with Nintendo, 
 [nx2android](https://github.com/shirai91/nx2android): please don't send them bug reports about this. Banana Native is
 its own codebase, ported from [nxnative](https://github.com/seedds/nxnative), and not a fork of nx2android; a few shader
 translator fixes are adapted from nx2android (MIT), credited in [NOTICE](../../android/NOTICE.md). Most of the code was
-written with an AI coding assistant (Claude) and tested by hand. Releases are only published on the project's GitHub
-page.
+written with an AI coding assistant (Claude) and tested by hand. Releases are only published on the project's page on
+[git.eden-emu.dev](https://git.eden-emu.dev/moceure/BananaNative/releases).
 
 ## What it contains, and what it needs
 
@@ -25,11 +25,10 @@ page.
 
 ## The only official place
 
-**The [GitHub repository](https://github.com/moceure/BananaNative) is the only official place for Banana Native.** The
+**[git.eden-emu.dev/moceure/BananaNative](https://git.eden-emu.dev/moceure/BananaNative) is the official place for Banana Native** (the GitHub repository is not available at the moment). The
 project has no Discord server, subreddit, Telegram group, X / social media account or website, and nobody speaks for it
-anywhere else. Download the APK only from [Releases](https://github.com/moceure/BananaNative/releases): a copy from
+anywhere else. Download the APK only from [Releases](https://git.eden-emu.dev/moceure/BananaNative/releases): a copy from
 anywhere else may be modified or malicious. Nobody connected to the project will ask you for money, keys, game files or
-account details. To reach the developer, use [issues](https://github.com/moceure/BananaNative/issues) or
-[Discussions](https://github.com/moceure/BananaNative/discussions).
+account details. To reach the developer, use [issues](https://git.eden-emu.dev/moceure/BananaNative/issues).
 
 Licence and credits: [README](../../README.md#licence-and-credits).
