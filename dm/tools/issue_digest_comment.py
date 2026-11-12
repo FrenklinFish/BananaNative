@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
 """The automatic log analysis on a player's issue: scripts/issue_digest.py's digest of every log in the issue, posted as one comment that later runs edit.
 
-    python3 dm/tools/issue_digest_comment.py <issue number> [--dry-run]
+    python3 dm/tools/issue_digest_comment.py <issue number> ... [--open] [--dry-run]
 
-Run by .forgejo/workflows/issue-digest.yml when an issue is opened or edited or gets a comment; --dry-run prints the comment instead (no token needed).
+Run by .forgejo/workflows/issue-digest.yml when an issue is opened or edited or gets a comment, and with --open (every open issue) when the workflow is
+run by hand (Actions › issue-digest › Run workflow); --dry-run prints the comment instead (no token needed).
 The comment carries BOT_MARK; issue_digest.py leaves such comments out, and a run edits the one it made before (found by the mark and the token's user)
 instead of adding another, and does nothing when the text would not change. An issue without a log gets no comment (an earlier one stays).
 Each digest is log_digest.py's, redacted as it is (home and app folders shortened, key-like lines dropped). The text is cut to fit Forgejo's limit.
@@ -163,39 +164,59 @@ def own_comment(n, token):
         page += 1
 
 
-def main(argv=None):
-    ap = argparse.ArgumentParser(description='Post the automatic log analysis on a Forgejo issue.')
-    ap.add_argument('issue', type=int)
-    ap.add_argument('--dry-run', action='store_true', help='print the comment, write nothing')
-    a = ap.parse_args(argv)
+def open_issues():
+    """Numbers of the open issues (not pull requests), oldest first"""
+    out, page = [], 1
+    while True:
+        batch = I.api(f'issues?state=open&type=issues&page={page}&limit=50')
+        out += [i['number'] for i in batch if not i.get('pull_request')]
+        if len(batch) < 50: return sorted(out)
+        page += 1
+
+
+def one(n, dry_run):
+    """Digest one issue and post or update its comment; the exit code"""
     try:
-        iss = I.api(f'issues/{a.issue}')
-        if iss.get('pull_request'): print(f'issue_digest_comment: #{a.issue} is a pull request: nothing to do'); return 0
-        data = json.loads(I.report(a.issue, as_json=True))
+        iss = I.api(f'issues/{n}')
+        if iss.get('pull_request'): print(f'issue_digest_comment: #{n} is a pull request: nothing to do'); return 0
+        data = json.loads(I.report(n, as_json=True))
     except (OSError, ValueError, KeyError) as e:
-        print(f'issue_digest_comment: issue {a.issue}: {e}', file=sys.stderr); return 2
-    text = body(a.issue, data)
-    if a.dry_run:
-        sys.stdout.write(text if text else f'(issue #{a.issue} has no log: no comment)\n'); return 0
-    if not text: print(f'issue_digest_comment: #{a.issue} has no log: no comment'); return 0
+        print(f'issue_digest_comment: issue {n}: {e}', file=sys.stderr); return 2
+    text = body(n, data)
+    if dry_run:
+        sys.stdout.write(text if text else f'(issue #{n} has no log: no comment)\n'); return 0
+    if not text: print(f'issue_digest_comment: #{n} has no log: no comment'); return 0
     token = os.environ.get('FORGEJO_TOKEN')
     if not token: print('issue_digest_comment: FORGEJO_TOKEN is not set', file=sys.stderr); return 2
     repo = f'repos/{I.REPO}'
     try:
-        old = own_comment(a.issue, token)
+        old = own_comment(n, token)
         if old and old.get('body', '').strip() == text.strip():
-            print(f'issue_digest_comment: #{a.issue}: comment {old["id"]} is current'); return 0
+            print(f'issue_digest_comment: #{n}: comment {old["id"]} is current'); return 0
         if old:
             try:
                 call('PATCH', f'{repo}/issues/comments/{old["id"]}', token, {'body': text})
-                print(f'issue_digest_comment: #{a.issue}: comment {old["id"]} updated'); return 0
+                print(f'issue_digest_comment: #{n}: comment {old["id"]} updated'); return 0
             except urllib.error.HTTPError as e:
                 if e.code not in (403, 404): raise
-        c = call('POST', f'{repo}/issues/{a.issue}/comments', token, {'body': text})
-        print(f'issue_digest_comment: #{a.issue}: comment {c["id"]} posted')
+        c = call('POST', f'{repo}/issues/{n}/comments', token, {'body': text})
+        print(f'issue_digest_comment: #{n}: comment {c["id"]} posted')
     except (OSError, ValueError, KeyError) as e:
-        print(f'issue_digest_comment: #{a.issue}: {e}', file=sys.stderr); return 2
+        print(f'issue_digest_comment: #{n}: {e}', file=sys.stderr); return 2
     return 0
+
+
+def main(argv=None):
+    ap = argparse.ArgumentParser(description='Post the automatic log analysis on Forgejo issues.')
+    ap.add_argument('issue', type=int, nargs='*', help='issue numbers')
+    ap.add_argument('--open', action='store_true', help='every open issue (the manual run of the workflow): issues without a log are skipped')
+    ap.add_argument('--dry-run', action='store_true', help='print the comment, write nothing')
+    a = ap.parse_args(argv)
+    try: issues = a.issue + ([n for n in open_issues() if n not in a.issue] if a.open else [])
+    except (OSError, ValueError, KeyError) as e:
+        print(f'issue_digest_comment: the open issues cannot be read: {e}', file=sys.stderr); return 2
+    if not issues: ap.error('give issue numbers or --open')
+    return max(one(n, a.dry_run) for n in issues)
 
 
 if __name__ == '__main__':

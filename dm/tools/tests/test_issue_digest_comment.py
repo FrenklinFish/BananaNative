@@ -80,6 +80,24 @@ class Body(unittest.TestCase):
         self.assertEqual(b.count('[… cut to fit the comment]'), 2)
 
 
+class Main(unittest.TestCase):
+    def test_open_adds_open_issues_once(self):
+        done = []
+        with unittest.mock.patch.object(C, 'open_issues', lambda: [3, 5, 9]), unittest.mock.patch.object(C, 'one', lambda n, dry: done.append(n) or 0):
+            self.assertEqual(C.main(['5', '--open', '--dry-run']), 0)
+        self.assertEqual(done, [5, 3, 9])
+
+    def test_worst_exit_code(self):
+        with unittest.mock.patch.object(C, 'one', lambda n, dry: 2 if n == 4 else 0):
+            self.assertEqual(C.main(['1', '4', '6']), 2)
+
+    def test_open_issues_pages_and_skips_pulls(self):
+        pages = {1: [{'number': i} for i in range(50, 0, -1)], 2: [{'number': 70}, {'number': 71, 'pull_request': {'merged': False}}]}
+        with unittest.mock.patch.object(I, 'api', lambda path: pages[int(path.split('page=')[1].split('&')[0])]):
+            got = C.open_issues()
+        self.assertEqual(got[:2], [1, 2]); self.assertEqual(got[-1], 70); self.assertEqual(len(got), 51)
+
+
 class Comments(unittest.TestCase):
     def test_bot_comment_left_out(self):
         page = [{'id': 1, 'body': 'hi'}, {'id': 2, 'body': I.BOT_MARK + '\n  L1: [dm] [RED] x'}]

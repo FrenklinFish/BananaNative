@@ -1,5 +1,7 @@
 # Automatic log analysis on players' issues: when an issue is opened or edited or gets a comment, dm/tools/issue_digest_comment.py digests every log in it
 # (scripts/issue_digest.py, dm/tools/log_digest.py) and posts the result as one comment, which later runs edit. An issue without a log gets no comment.
+# Run by hand (Actions › issue-digest › Run workflow) it does every open issue, or the issue numbers given: for issues from before it ran, or after a
+# change to the digest (comments whose text would not change are left alone).
 # Forgejo runs only .forgejo/workflows when the folder exists, so the GitHub workflows in .github/workflows do not run on Forgejo.
 # Needs: Actions on for the repository, a runner with the `docker` label, and the secret ISSUE_DIGEST_TOKEN (a token of the account that should post,
 # scope write:issue) or, without it, the run's own token. The logs are untrusted input: the job reads them as text only, with no other secret.
@@ -10,6 +12,12 @@ on:
     types: [opened, edited, reopened]
   issue_comment:
     types: [created, edited]
+  workflow_dispatch:
+    inputs:
+      issues:
+        description: 'open (every open issue) or issue numbers separated by spaces'
+        required: true
+        default: 'open'
 
 permissions:
   issues: write
@@ -28,7 +36,7 @@ jobs:
     runs-on: docker
     container:
       image: node:20-bookworm   # python3 is in the image; the tools need nothing outside its standard library
-    timeout-minutes: 10
+    timeout-minutes: 60   # a hand run over every open issue takes longer than one issue
     steps:
       - uses: https://code.forgejo.org/actions/checkout@v4
         with:
@@ -49,6 +57,12 @@ jobs:
           BN_FORGEJO: ${{ github.server_url }}
           BN_FORGEJO_REPO: ${{ github.repository }}
           ISSUE: ${{ github.event.issue.number }}
+          ISSUES: ${{ inputs.issues }}
         run: |
           export BN_ISSUES_DIR="$(mktemp -d)"
-          python3 dm/tools/issue_digest_comment.py "$ISSUE"
+          if [ -n "$ISSUE" ]; then python3 dm/tools/issue_digest_comment.py "$ISSUE"
+          elif [ "$ISSUES" = open ]; then python3 dm/tools/issue_digest_comment.py --open
+          else
+            case "$ISSUES" in *[!0-9\ ]*|'') echo "issues: give 'open' or numbers"; exit 2;; esac
+            python3 dm/tools/issue_digest_comment.py $ISSUES
+          fi
