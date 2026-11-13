@@ -2,16 +2,24 @@
 
 ## Dump folder
 
-- The input is a dump folder of the game, made from your own console: its files already extracted, in this layout ([`scripts/pack_dump.py`](../../scripts/pack_dump.py) lists it):
+- The input is a dump folder of the game, made from your own console: its files already extracted, in the console's layout ([`scripts/pack_dump.py`](../../scripts/pack_dump.py) lists it). It has one folder for each content meta record the console keeps (application, patch, add-on, data patch), with each content at its program index, as OunceCake serves it:
 
   ```
   <dump folder>/
-    base/exefs/              main.npdm, main, sdk, rtld, subsdk* (NSO modules)
-    base/romfs/              the base game's RomFS tree
-    updates/<version>/exefs/ an update's code modules (optional; <version> is the title version in decimal, 458752 = 0x70000)
-    updates/<version>/romfs/ the update's RomFS: the whole patched tree the game sees, not a patch
-    dlc/<DLC title ID>/<n>/romfs/   add-on content (optional; the DLC title ID in hex)
+    base/program/0/exefs/    main.npdm, main, sdk, rtld, subsdk* (NSO modules)
+    base/program/0/romfs/    the base game's RomFS tree
+    updates/<version>/program/0/exefs/   an update's code modules (optional; <version> is the title version in decimal, 458752 = 0x70000)
+    updates/<version>/program/0/romfs/   the update's RomFS: the whole patched tree the game sees, not a patch
+    updates/<version>/program/0/control/ (and meta/) other contents of the record; not read
+    updates/<version>/program/1/         a Switch 2 Edition's second program: not read
+    dlc/<DLC title ID>/<version>/base/program/0/romfs/                     add-on content (optional; the DLC title ID in hex)
+    dlc/<DLC title ID>/<version>/updates/<patch version>/program/0/romfs/  its data patch: the add-on with the patch applied
   ```
+
+  - Program 0 is the game (`pack_dump.package_root`, the launcher's `DumpLayout.root`). A Switch 2 Edition's `program/1/` is another program (its own `0400…` title), which no profile of the program-0 title runs. When a program and a data content share an index, OunceCake puts them in `program/<index>/program/` and `.../data/`.
+  - Of an add-on, the newest data patch's RomFS is used, else the base's: like an update's, it is the patched tree. Of several add-on versions, the highest is used, as the console keeps one installed (`pack_dump.dlc_romfs`).
+  - Each package's content meta record (`program/<index>/meta/*.cnmt`, read by [`dm/tools/cnmt.py`](../../dm/tools/cnmt.py); the Switch 2 writes switchbrew's Switch 1 layout) is checked when the dump has one: an add-on folder's record is that add-on, and its data patch's record names it (`DataId`) and is the one it names (`DataPatchId`). `pack_android.py` prints a `[RED]` line when the game version it packs is below an add-on's `RequiredApplicationVersion` (`pack_dump.dlc_required_version`).
+  - The flattened layout is read too: program 0's folders in the version folder (`base/exefs/`, `updates/<version>/romfs/`) and an add-on's RomFS as `dlc/<DLC title ID>/<version>/romfs/`. NSP-Box and nxnative take only that one. [`scripts/dump_layout.py`](../../scripts/dump_layout.py) moves a flattened dump into the console's layout (a rename each, logged; `--undo` puts them back).
 
 - A `.nup` file (one file holding base, updates and add-ons, [android/NUP.md](../../android/NUP.md)) stands for such a folder on Android and in `pack_dump.py`.
 - The title ID is the program ID in `main.npdm`. A dump has no control data: no `control.nacp` or `icon.jpg`, so the app name comes from the profile (or `--app-name`) and the app has no icon.

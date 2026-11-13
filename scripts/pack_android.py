@@ -613,6 +613,9 @@ def main():
         except SystemExit: raise Error(f'no profile dm/games/{app:016X}: the Android pack needs one (build_ipa_from_nsp.py makes a provisional one)') from None
         ver = a.version if a.version is not None else max(vers, default=0)
         if ver and ver not in vers: raise Error(f'no updates/{ver} (have: {", ".join(map(str, sorted(vers))) or "none"})')
+        for tid, p in sorted(dlc.items()):   # the add-on's content meta record: the game version it needs (pack_dump.dlc_required_version)
+            if (need := pack_dump.dlc_required_version(p)) > ver:
+                print(f'[RED] DLC {tid:016X} needs game version {need} or later (its content meta record); this pack is version {ver}: the game may not use it', flush=True)
         vdir = pack_dump.version_dir(folder, vers, ver)
         exe, romfs = pack_dump.version_part(folder, vers, ver, 'exefs'), pack_dump.version_part(folder, vers, ver, 'romfs')   # its own, else the base's
         if not (exe / 'main.npdm').is_file() or not romfs.is_dir(): raise Error(f'{vdir}: no exefs/main.npdm and romfs (neither its own nor the base\'s)')

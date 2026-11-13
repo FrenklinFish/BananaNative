@@ -163,6 +163,19 @@ public final class GameListJvmTest {
         File one = new File(root, "one-version");
         version(one, FIX2, 11, true);
         check(DumpLayout.find(one).error.contains("one version's folder") && !Pack.isDump(one), "one-version folder: " + DumpLayout.find(one).error);
+        // OunceCake's unflattened layout: each version's package at program/0/ (code-in-update's case); a Switch 2 Edition's program/1 is not read
+        File ounce = new File(root, "ouncecake");
+        version(new File(ounce, "base/program/0"), FIX2, 10, true);
+        version(new File(ounce, "updates/65537/program/0"), FIX2, 11, false);
+        version(new File(ounce, "updates/65537/program/1"), "0400000000AC0001", 13, true);
+        DumpLayout.Found of = DumpLayout.find(ounce);
+        check(Pack.isDump(ounce) && Pack.titleIdOf(ounce).equals(FIX2) && DumpLayout.versions(ounce).equals(List.of(0L, 65537L)), "ouncecake: a dump " + DumpLayout.versions(ounce));
+        check(of.error == null && of.version == 65537 && of.buildIds.get("main").startsWith(id(11)), "ouncecake: the build in program/0: " + of.error);
+        check(DumpLayout.path(ounce, 65537, "exefs/main").endsWith("updates/65537/program/0/exefs/main".replace('/', File.separatorChar)), "ouncecake: its code " + DumpLayout.path(ounce, 65537, "exefs/main"));
+        check(DumpLayout.path(ounce, 65537, "romfs").endsWith("base/program/0/romfs".replace('/', File.separatorChar)), "ouncecake: the base's RomFS " + DumpLayout.path(ounce, 65537, "romfs"));
+        Pack op = pack(new File(run, "pack-ouncecake"), FIX2, "65537", "main=" + id(11), "sdk=" + id(3));
+        check(BuildCheck.build(op, ounce).ok(), "ouncecake: its pack fits");
+        check(op.romfs(ounce) != null && op.romfs(ounce).getPath().endsWith("base/program/0/romfs".replace('/', File.separatorChar)), "ouncecake: the RomFS without pack.tsv's " + op.romfs(ounce));
     }
 
     /**

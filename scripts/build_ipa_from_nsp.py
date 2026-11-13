@@ -867,7 +867,7 @@ def scan_dump(dump, want=None):   # what a dump folder holds: (title ID, {'base'
     try: app, vers, dlc = pack_dump.scan(dump)
     except pack_dump.Error as e: raise BuildError(str(e)) from e
     if want is not None and want != app: raise BuildError(f'no game {want:016X} (--title-id / TITLE_ID) in {dump}, which holds {app:016X}')
-    return app, {'base': dump / 'base', 'updates': sorted(vers.items()), 'dlc': [(tid, None, roms) for tid, roms in dlc.items()], 'dump': True}
+    return app, {'base': pack_dump.base_dir(dump), 'updates': sorted(vers.items()), 'dlc': [(tid, None, roms) for tid, roms in dlc.items()], 'dump': True}
 
 
 def extract_dump(ex, name, src, app):   # one version of a dump folder (src: base/ or updates/<version>/) → extract/<version>/ExeFS + RomFS.img; the code modules and the image are kept while unchanged

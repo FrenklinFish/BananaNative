@@ -215,12 +215,9 @@ final class Pack {
 
     /** The game folder's main.npdm: a dump's (base/exefs, else the newest update's: an update-only dump) or one version's files' (exefs/). null when it is none of these */
     static File npdmOf(File game) {
-        for (String p : new String[] {"base/exefs/main.npdm", "exefs/main.npdm"}) {
-            File f = new File(game, p);
-            if (f.isFile()) return f;
-        }
+        for (File f : new File[] {new File(DumpLayout.root(new File(game, "base")), "exefs/main.npdm"), new File(game, "exefs/main.npdm")}) if (f.isFile()) return f;
         long v = DumpLayout.newest(game);   // an update-only dump: the newest update's (an update's NPDM carries the base's program ID)
-        File f = v > 0 ? new File(game, "updates/" + v + "/exefs/main.npdm") : null;
+        File f = v > 0 ? new File(DumpLayout.dir(game, v), "exefs/main.npdm") : null;
         return f != null && f.isFile() ? f : null;
     }
 
@@ -246,11 +243,11 @@ final class Pack {
         File[] ups = new File(game, "updates").listFiles(File::isDirectory);
         File best = null;
         if (ups != null) for (File u : ups) {
-            if (!u.getName().matches("\\d+") || !new File(u, "romfs").isDirectory()) continue;
+            if (!u.getName().matches("\\d+") || !new File(DumpLayout.root(u), "romfs").isDirectory()) continue;
             if (best == null || Long.parseLong(u.getName()) > Long.parseLong(best.getName())) best = u;
         }
-        if (best != null) return new File(best, "romfs");
-        f = new File(game, "base/romfs");   // an update without a RomFS of its own: the base's (DumpLayout)
+        if (best != null) return new File(DumpLayout.root(best), "romfs");
+        f = new File(DumpLayout.root(new File(game, "base")), "romfs");   // an update without a RomFS of its own: the base's (DumpLayout)
         return f.isDirectory() ? f : null;
     }
 
