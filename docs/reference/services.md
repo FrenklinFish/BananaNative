@@ -649,7 +649,7 @@ Most service calls can be found before they crash, before the first boot or the 
 
 - **Symptom:** abort in `nn::sm::Initialize` under `nn::pctl::IsFreeCommunicationAvailable` (Engage, entering its first battle map).
 - **Cause:** the SDK connects to the parental-control service through `sm`.
-- **Fix:** the host answers it like the other free-communication calls: not available (`hle_misc.c`). `pctl::CheckFreeCommunicationPermission`: never.
+- **Fix:** the host answers it like the other free-communication calls: not available by default (`hle_misc.c`). `pctl::CheckFreeCommunicationPermission` is refused unless an [opt-in co-op node](#opt-in-ldn-sessions-and-virtual-udp-sockets) exists.
 - **Found on:** [Fire Emblem Engage](../../dm/games/0100A6301214E000/README.md); [DRAGON QUEST XI S](../../dm/games/01006C300E9F0000/README.md) (`CheckFreeCommunicationPermission`).
 - **Note:** `pctl::CheckStereoVisionPermission` is under [Applet resource user ID, launch parameters and VR mode](#applet-resource-user-id-launch-parameters-and-vr-mode).
 
@@ -658,6 +658,17 @@ Most service calls can be found before they crash, before the first boot or the 
 - **Symptom:** play report calls met entering the save select (3D World); undefined `nn::ldn::` / `nn::socket::` imports with no hook, found from the import list before they were met (Big Brain Academy).
 - **Fix:** hooked (`hle_net.c`, `hle_offline.c`): the `nifm` IP queries with SDK 10's `socket::InAddr` / `in_addr` mangling; `prepo::AddSessionId` / `AddInternetConnectionStatus`; `ldn::GetNetworkConfig`; SDK 11's socket overloads with plain `sockaddr` / `int` arguments (`Connect`, `Accept`, `GetSockName`, `Get` / `SetSockOpt`, `Fcntl`, `Recv`, `Send`).
 - **Found on:** [Super Mario 3D World + Bowser's Fury](../../dm/games/010028600EBDA000/README.md) (SDK 10: `nifm`, `prepo`); [Big Brain Academy: Brain vs. Brain](../../dm/games/0100620012D6E000/README.md) (SDK 11.4.3: LDN, sockets).
+
+### Opt-in LDN sessions and virtual UDP sockets
+
+- **Symptom:** a game cannot open a local-wireless session or exchange datagrams with a compatible host while `nn::ldn` and `nn::socket` receive the host's offline answers.
+- **Cause:** the platform's local-wireless service and its BSD datagram sockets need a shared session transport; allowing parental-control communication alone does not provide one.
+- **Fix:** the optional portable co-op module connects `nn::ldn` state, session and event calls with virtual UDP BSD descriptors (`hle_coop.c`, `hle_offline.c`, `hle_net.c`). Only an explicitly enabled, valid `DM_COOP` creates a node. Unset, empty, `off` or `0` leaves the existing offline answers, including `ENETDOWN`; a build without the module also stays offline. Configuration is read once per process, so restart the game to apply changes. This is local wireless over IP, not general Internet access, and the host has no title-ID gate.
+- **Settings:** `DM_COOP=auto[:<port>]`, `join:<IPv4>[:<port>]` or `host:<port>` selects the protocol role. The Android launcher exposes only joining on profiles that opt in. `DM_COOP_INTERNET=1` permits non-LAN endpoints, including Tailscale; a joining peer also needs `DM_COOP_ROOM`. The module authenticates with the room code but does not encrypt game traffic. See the [game instructions and verification limits](../../dm/games/0400A3A01EE4C000/README.md#link-play-on-android) before using a mode.
+- **Compatibility:** peers check the game build and gameplay-mod fingerprint during discovery and joining. Mismatched hosts are filtered and joins are refused; the [Pokopia instructions](../../dm/games/0400A3A01EE4C000/README.md#joining-a-pc-host) describe the vanilla PC settings needed by the Android adapter.
+- **Existing descriptors:** mixed `Poll` and `Select` serve both the virtual sockets (from descriptor `0x100`) and host eventfds; eventfd-only and empty waits retain their offline behavior. State-event bindings retain their event lifetime so a delayed co-op callback cannot signal an event object reused after destruction. Free-communication permission is granted only while a co-op node exists (`hle_misc.c`).
+- **Dependency:** Android host CMake takes `NX_COOP_VENDOR_DIR`; no `coop.h` builds with `NX_COOP_VENDOR=0`, while a header with a missing required source file fails configuration. The module is pinned and supplied separately; the [Pokopia note](../../dm/games/0400A3A01EE4C000/README.md#optional-module-and-provenance) records the tested source. Its diagnostic logs can expose addresses, room codes and node IDs; redact them before sharing.
+- **Found on:** [Pokémon Pokopia](../../dm/games/0400A3A01EE4C000/README.md#link-play-on-android) (update 655360): earlier Android-to-PC joins over Wi-Fi and Tailscale; on `android` base `0bac816c` (2026-11-12), the Fold 7 on Turnip joined a Recompia 0.10.3 PC host over LAN with room authentication. Movement in both directions, normal visitor return home and subsequent host session shutdown were verified. Reconnection and current-source WAN/Tailscale traversal were not retested.
 
 ### Network requests stay on hold before they settle
 
