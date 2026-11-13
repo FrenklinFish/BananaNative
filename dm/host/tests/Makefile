@@ -507,3 +507,9 @@ net-coop: $(B)/t_net_coop
 	$(B)/t_net_coop invalid
 	$(B)/t_net_coop enabled
 	$(B)/t_net_coop select-race
+
+# The default run covers the seam that needs no module; the module's own targets only where its directory exists
+run: net-eventfd
+ifneq ($(wildcard $(COOP_DIR)/coop.h),)
+run: net-coop
+endif

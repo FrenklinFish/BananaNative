@@ -2,6 +2,7 @@
 // A framework step count row of the tests' own (hle_fpslock.c fps_steps rows; the profile's are DM_GAME_FPS_STEPS): the framework at [[main+0x100000]+8], mode +0x210, count +0x214
 #define DM_FPS_STEPS_ROWS {{"5eb5eb5eb5eb5eb5eb5eb5eb5eb5eb5e", 0x100000, 0x210, 0x214, 1, {0x8}}}
 #define DM_FPS_NSTEPS_ROWS 1
+#define DM_TEST_PIN 1   // sead_pin runs on the Mac here, so the start-up path of the pin is tested, not only sead_pin_wanted
 #include "../hle_fpslock.c"
 #include <assert.h>
 #include <math.h>
@@ -16,7 +17,8 @@ static int writes;
 void dm_guest_write_prepare(void *p, size_t n) { (void)p; assert(n == 4 || n == 8); writes++; }
 static void (*g_sead_gate)(uint64_t *, int);
 void gate_obs_set(int id, void (*fn)(uint64_t *, int)) { if (id == OBS_SEAD_RATE) g_sead_gate = fn; }
-int gate_obs_present(int id) { (void)id; return 0; }
+static int g_gate_present;
+int gate_obs_present(int id) { (void)id; return g_gate_present; }
 
 // adrp / add of a module offset into register r, at word i of the text (module offsets: the text at 0)
 static void cvar(const char *name, uint64_t off) { strcpy(g_mod[0].ue_cvar[g_mod[0].n_ue_cvar].name, name); g_mod[0].ue_cvar[g_mod[0].n_ue_cvar++].off = off; }
@@ -80,7 +82,7 @@ static void check(int which) {
         frostbite(base, object);
         *(float *)(object + 0x34) = 30; *(int32_t *)(object + 0x38) = 30;
         if (which == 16) *(uint64_t *)(object + 8) = 0;   // the cache word holds something else
-    } else if (which >= 17 && which <= 19) {   // Donkey Kong Bananza's dynamic interval controller: [main+0x26cc208] app, [app] framework, [framework+0x218] controller, its floor at +0, its maximum at +4
+    } else if (which >= 17 && which <= 21) {   // Donkey Kong Bananza's dynamic interval controller: [main+0x26cc208] app, [app] framework, [framework+0x218] controller, its floor at +0, its maximum at +4
         strcpy(g_mod[0].build_id, "e25c90c1c136638885659fd55bf8a03b");
         uint8_t *app = object + 0x100, *fw = object + 0x200, *ctl = object + 0x400;
         *(uintptr_t *)(base + 0x26cc208) = (uintptr_t)app; *(uintptr_t *)app = (uintptr_t)fw; *(uintptr_t *)(fw + 0x218) = which == 19 ? 0 : (uintptr_t)ctl;   // 19: the controller made later
@@ -93,6 +95,7 @@ static void check(int which) {
     }
     if (which == 17) setenv("DM_FPS_TARGET", "30", 1);
     if (which == 18) setenv("DM_FPS_TARGET", "0", 1);
+    if (which >= 20) { setenv("DM_FPS_TARGET", "0", 1); setenv("DM_FPS_DECOUPLE", "0", 1); setenv("DM_PRESENT_INTERVAL", "display", 1); setenv("DM_FPS_LIMIT", which == 20 ? "60" : "30", 1); g_gate_present = 0; }   // #207's start: Full game speed off, the host's tick, a pack without the gate
     if (which == 19) setenv("DM_FPS_TARGET", "15", 1);   // a saved cap the controller cannot hold (4 vsyncs, its maximum 3)
     int engine = which != 3 && which != 12 && which < 17;   // 17-19: a floor does not fix the rate, so presentation keeps the game's interval   // a limiter the host writes: any but another build's main (3) and a main the rewriter found no Unreal variable in (12)
     if (which & 1) assert(dm_fps_lock_engine() == engine);   // the graphics layer's present cap may ask before the first present (the acquire)
@@ -144,6 +147,14 @@ static void check(int which) {
         assert(sync[0] == 1 && writes == 0);   // the game's own at start: nothing written, nothing to restore
         dm_fps_target_set(30, "test"); dm_fps_lock_tick(); assert(sync[0] == 2 && writes == 1);
         dm_fps_target_set(60, "test"); dm_fps_lock_tick(); assert(sync[0] == 1 && writes == 2);
+    } else if (which == 20) {   // the pin from the floor row when the pack has no OBS_SEAD_RATE gate: interval 1 held at start, decoupling off, the limit at 60
+        assert(writes == 1 && sync[0] == 1 && sync[1] == 1);
+        sync[1] = 3; dm_fps_lock_tick(); assert(sync[1] == 1);   // the game raises its longest again: held at every frame
+        dm_fps_target_set(30, "test"); sync[1] = 3; dm_fps_lock_tick(); assert(sync[1] == 3);   // a cap: free
+        dm_fps_target_set(0, "test"); dm_fps_lock_tick(); assert(sync[1] == 1);
+        g_gate_present = 1; sync[1] = 3; dm_fps_lock_tick(); assert(sync[1] == 3);   // the gate present: it holds the pin, not the tick
+    } else if (which == 21) {   // a 30 fps limit with decoupling off: the game's own 60 / interval, free
+        assert(writes == 0 && sync[1] == 3);
     } else if (which == 19) {
         uint8_t *fw = object + 0x200;
         assert(writes == 0 && dm_fps_target() == 15);   // no controller yet: its maximum is unknown, the cap waits
@@ -199,6 +210,17 @@ static void sead_rate_check(void) {
     atomic_fetch_add(&g_presents, 1); sead_rate_gate(r, P, at(2.15)); assert(r[8] == 40);   // 20 fps at interval 2: 40 / 2
     nxhost_fps_decouple_set(0); r[8] = 60; atomic_fetch_add(&g_presents, 1); sead_rate_gate(r, P, at(2.20)); assert(r[8] == 60 && !g_sr.last.tv_sec);
     unsetenv("DM_FPS_DECOUPLE");
+    // The pin (#207): on the host's tick with no cap, the longest interval is held at 1 with decoupling off as well as on (off released it in 0.2.9: 2x speed phases at interval 2);
+    // a cap leaves it free; a frame limit below 60 leaves it free only with decoupling off (on, the measured rate is the step)
+    int t0 = atomic_load(&g_target), l0 = atomic_load(&g_fps_limit);
+    setenv("DM_PRESENT_INTERVAL", "display", 1); g_sead_display = -1; atomic_store(&g_target, 0); atomic_store(&g_fps_limit, 0);
+    assert(sead_pin_wanted(0) && sead_pin_wanted(1));   // display, no cap, no limit: held, decoupling off or on
+    atomic_store(&g_fps_limit, 60); assert(sead_pin_wanted(0) && sead_pin_wanted(1));
+    atomic_store(&g_fps_limit, 30); assert(!sead_pin_wanted(0) && sead_pin_wanted(1));   // a 30 fps host, decoupling off: the game's own 60 / interval at its longer interval
+    atomic_store(&g_fps_limit, 0); atomic_store(&g_target, 30); assert(!sead_pin_wanted(0) && !sead_pin_wanted(1));   // a cap: the cap's interval is the step
+    atomic_store(&g_target, 0);
+    setenv("DM_PRESENT_INTERVAL", "game", 1); g_sead_display = -1; assert(!sead_pin_wanted(0) && !sead_pin_wanted(1));   // the game's interval paces the presents: free
+    unsetenv("DM_PRESENT_INTERVAL"); g_sead_display = -1; atomic_store(&g_target, t0); atomic_store(&g_fps_limit, l0);
 }
 
 // The frame limit on a main with a frame step (Ocarina of Time's profile: fps_target 60, fps_limit 30): the limit becomes the step's cap in whole vsyncs (dm_fps_step_fold)
@@ -266,7 +288,7 @@ int main(void) {
     sead_rate_check();
     { pid_t p = fork(); assert(p >= 0); if (!p) { step_check(); _exit(0); } int status; assert(waitpid(p, &status, 0) == p); assert(WIFEXITED(status) && WEXITSTATUS(status) == 0); }
     // Each process starts the production one-time initialization with a fresh build and target.
-    for (int i = 0; i < 20; i++) {
+    for (int i = 0; i < 22; i++) {
         pid_t p = fork(); assert(p >= 0);
         if (!p) { check(i); _exit(0); }
         int status; assert(waitpid(p, &status, 0) == p); assert(WIFEXITED(status) && WEXITSTATUS(status) == 0);

@@ -297,6 +297,14 @@ def nxDigest = tasks.register('nxDigestAssets', Sync) {
 android.sourceSets.main.assets.srcDir(layout.buildDirectory.dir('generated/nxdigest/assets'))
 tasks.named('preBuild') { dependsOn nxDigest }
 
+// The shared-font stand-in (GameFonts.java, dm/third_party/fonts): Noto Sans Regular, subset, with its licence, copied at every build into the APK's assets/fonts/
+def nxFontAssets = tasks.register('nxFontAssets', Sync) {
+    from(new File(repo, 'dm/third_party/fonts')) { include 'NotoSans-Regular-subset.ttf', 'OFL.txt' }
+    into layout.buildDirectory.dir('generated/nxfonts/assets/fonts')
+}
+android.sourceSets.main.assets.srcDir(layout.buildDirectory.dir('generated/nxfonts/assets'))
+tasks.named('preBuild') { dependsOn nxFontAssets }
+
 // ./gradlew apk → out/nxnative-android.apk (-PnxPlay=true: nxnative-android-play.apk; -PnxApp=<suffix>: nxnative-android-<suffix>.apk)
 tasks.register('apk', Copy) {
     dependsOn 'assembleRelease'

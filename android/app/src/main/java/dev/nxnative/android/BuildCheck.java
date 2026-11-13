@@ -86,7 +86,7 @@ final class BuildCheck {
         /** Its bytes into the hash */
         void hash(MessageDigest h) throws IOException {
             if (error != null) throw new IOException(error);
-            if (nup != null) { h.update(nup.read(node, -1)); return; }
+            if (nup != null) { nup.hashTo(node, h); return; }   // streamed: a whole module in the heap per card was Forgejo #214
             try (InputStream in = new FileInputStream(file)) {
                 byte[] buf = new byte[1 << 16];
                 int k;
@@ -238,7 +238,7 @@ final class BuildCheck {
             if (!m.exists()) return null;
             String id = nsoBuildId(m.head(0x60), m.label);
             return titleId.toUpperCase(Locale.ROOT) + ":" + version + ":" + id.substring(0, 32);
-        } catch (IOException | RuntimeException e) {
+        } catch (IOException | RuntimeException | OutOfMemoryError e) {   // an OutOfMemoryError: the key cannot be told now (Forgejo #214), the card is kept
             return null;
         }
     }

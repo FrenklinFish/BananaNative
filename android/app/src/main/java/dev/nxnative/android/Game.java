@@ -140,7 +140,13 @@ final class Game implements GameList.View {
      */
     static boolean collapse(Context c) {
         List<Game> before = load(c);
-        List<Game> after = GameList.collapse(before, Game::key, Game::ready);
+        List<Game> after;
+        try {
+            after = GameList.collapse(before, Game::key, Game::ready);
+        } catch (OutOfMemoryError e) {   // never the app's end: the list stays as it is, the next start tries again (Forgejo #214)
+            android.util.Log.w("nxnative", "Home: duplicate merge skipped, out of memory: " + e.getMessage());
+            return false;
+        }
         if (after.size() == before.size()) return false;
         synchronized (Game.class) {
             List<Game> now = load(c);
@@ -169,7 +175,7 @@ final class Game implements GameList.View {
             if (!BuildCheck.build(p, new File(g.gameDir)).ok()) return false;
             File pd = new File(g.packDir);
             return Pack.libraryProblem(pd, g.titleId) == null || Pack.playableLibrary(pd, g.titleId) != null || Pack.legacyLibrary(pd, g.titleId) != null;
-        } catch (IOException | RuntimeException e) {
+        } catch (IOException | RuntimeException | OutOfMemoryError e) {
             return false;
         }
     }

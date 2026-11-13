@@ -429,10 +429,20 @@ final class Nup {
                 r.read(f.extentOffset, out, 0, n);
                 if (max >= 0) return out;
             } else {
+                if (max >= 0) {   // a head (an NSO's build ID, 0x60 bytes of a module of tens of MiB): only the extent's first pieces, not the whole compressed file (Forgejo #214, second path)
+                    for (long take = Math.min(f.extentSize, HEAD_EXTENT); ; take = Math.min(f.extentSize, take * 4)) {
+                        byte[] z = new byte[(int) take];
+                        r.read(f.extentOffset, z, 0, z.length);
+                        try {
+                            return Zstd.decode(z, 0, z.length, max);
+                        } catch (IOException e) {
+                            if (take >= f.extentSize || e.getMessage() == null || !e.getMessage().contains("past the end")) throw e;
+                        }
+                    }
+                }
                 byte[] z = new byte[(int) f.extentSize];
                 r.read(f.extentOffset, z, 0, z.length);
                 out = Zstd.decode(z, 0, z.length, max);
-                if (max >= 0) return out;
                 if (out.length != f.size) throw new IOException(f.name + ": decompressed to " + out.length + " bytes, the TOC says " + f.size);
             }
         } catch (IOException e) {
@@ -440,6 +450,51 @@ final class Nup {
         }
         if (!Arrays.equals(sha256().digest(out), f.sha256)) throw new IOException(file.getName() + ": " + f.name + " does not match its SHA-256: the file is damaged");
         return out;
+    }
+
+    /** How much of a zstd extent {@link #read} takes first for a head (it takes four times more while the blocks reach past it) */
+    static final long HEAD_EXTENT = 256L << 10;
+
+    /** The largest zstd window {@link #hashTo} keeps in memory; a frame with a larger one (a single-segment frame's window is its whole file) is read whole */
+    static final long STREAM_WINDOW = 32L << 20;
+
+    /**
+     * A file's bytes into h (and checked against its SHA-256), like {@code h.update(read(f, -1))} without holding the content: a raw file in 1 MiB pieces, a zstd
+     * file through a window of the frame's own size (Zstd.decodeTo). The compressed extent is still read whole (the decoder indexes it); only the content, the
+     * big part, is not kept. A frame with a window above STREAM_WINDOW falls back to read.
+     */
+    void hashTo(Node f, MessageDigest h) throws IOException {
+        if (f.dir) throw new IOException(f.name + " is a directory");
+        if (f.size == 0) return;
+        MessageDigest own = sha256();
+        long[] n = {0};
+        Zstd.Sink sink = (b, off, len) -> { own.update(b, off, len); h.update(b, off, len); n[0] += len; };
+        try (Source r = source(file)) {
+            if (f.codec == 0) {
+                if (f.extentSize != f.size) throw new IOException(f.name + ": a raw extent of another size than the file");
+                byte[] buf = new byte[1 << 20];
+                for (long at = 0; at < f.size; at += buf.length) {
+                    int k = (int) Math.min(buf.length, f.size - at);
+                    r.read(f.extentOffset + at, buf, 0, k);
+                    sink.accept(buf, 0, k);
+                }
+            } else {
+                if (f.extentSize > Integer.MAX_VALUE - 16) throw new IOException(f.name + " is too large to read into memory");
+                byte[] z = new byte[(int) f.extentSize];
+                r.read(f.extentOffset, z, 0, z.length);
+                try {
+                    Zstd.decodeTo(z, 0, z.length, STREAM_WINDOW, sink);
+                } catch (IOException e) {
+                    if (n[0] != 0 || e.getMessage() == null || !e.getMessage().contains(Zstd.WINDOW_TOO_LARGE)) throw e;
+                    h.update(read(f, -1));   // nothing was given out yet: the whole-file way (the SHA-256 is checked in it)
+                    return;
+                }
+                if (n[0] != f.size) throw new IOException(f.name + ": decompressed to " + n[0] + " bytes, the TOC says " + f.size);
+            }
+        } catch (IOException e) {
+            throw new IOException(file.getName() + ": " + f.name + ": " + e.getMessage(), e);
+        }
+        if (!Arrays.equals(own.digest(), f.sha256)) throw new IOException(file.getName() + ": " + f.name + " does not match its SHA-256: the file is damaged");
     }
 
     // ---- Little-endian fields ----

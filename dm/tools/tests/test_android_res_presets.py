@@ -60,7 +60,7 @@ class Wiring(unittest.TestCase):
     def test_from_column(self):
         """Profile column 26 (build.gradle presetFromOf): the earlier ids map to the presets that replaced them"""
         g = GRADLE.read_text(encoding='utf-8')
-        self.assertIn('presetFromOf(g)].join', g)
+        self.assertRegex(g, r'presetFromOf\(g\)(?:, *\w+Of\(g\))*\]\.join')   # the 26th column, however many columns follow it
         self.assertIn('p.presetFrom = c.length > 26 ? c[26] : "";', (SRC / 'Profile.java').read_text(encoding='utf-8'))
         self.assertEqual([c[1:3] for c in rows('0400486024DEC000', 'res_preset_from')], [['balanced', 'medium'], ['max-performance', 'performance']])
         scene_res.res_presets(game.load('0400486024DEC000'))   # refuses a row naming a preset that is not there

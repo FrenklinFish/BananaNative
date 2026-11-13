@@ -650,6 +650,11 @@ public final class GameActivity extends Activity implements SurfaceHolder.Callba
                     "HOME=" + files, "TMPDIR=" + getCacheDir(), "DM_BUILD_COMMIT=" + BuildConfig.NX_COMMIT,
                     "DM_CTL=" + new File(files, "ctl.txt"), "NX_EXIT_RECORD=" + ExitWatch.record(this)));   // live control lines (android/TESTING.md "Live control", android/tools/nxctl.sh); DM_CTL= in env.txt turns it off
             env.add(0, "NX_BUILD_TAG=" + Prefs.buildTag(this) + " \u00b7 signer " + Prefs.signerId(this));   // nxlaunch.c writes it as the log's first line; the signer says which key signed the APK (Signer)
+            try (java.io.InputStream fin = getAssets().open(GameFonts.ASSET)) {   // the shared-font stand-in (dm/third_party/fonts): the host serves it instead of the phone's own fonts; a DM_FONT_DIR line of the user's comes later and wins
+                File fontDir = new File(getFilesDir(), "fonts");
+                GameFonts.place(fontDir, GameFonts.STANDARD, fin.readAllBytes());
+                env.add(GameFonts.envLine(fontDir));
+            } catch (IOException e) { unknownNotes.add("[nxlaunch] the shared font stand-in is not placed (" + e.getMessage() + "): the host uses the phone's own fonts"); }
             String gpuNote = settingsEnv(id, env);
             // The 3D scene (Game settings › Resolution, ResPresets; Advanced › 3D scene, SceneRes): the chosen RomFS overlay in the pack, made by the pack step from the player's files,
             // or the chosen game arguments (scene_arg); a DM_ROMFS_OVERLAY or DM_GAME_ARGS_ADD line of the user's comes later and wins

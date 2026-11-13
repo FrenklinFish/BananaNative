@@ -101,8 +101,9 @@ scene_scale	480p	0.4166667	fixed	Fixed 0.4167
 scene_scale	360p	0.3125	fixed	Fixed 0.3125
 # agl wraps its clears in render conditions on Donkey Kong Bananza and Splatoon Raiders; the same library here
 render_cond	on
-# Qualcomm Vulkan: keep consecutive counted depth queries in separate render passes.
-occlusion_split_pass	on
+# Qualcomm Vulkan: keep consecutive counted depth queries in separate render passes. Off by default since 2026-11-13: on an Adreno 840
+# (Qualcomm 0x8034a02c) it cost 88 ms instead of 36-38 ms of GPU time a frame (5 fps instead of 25); opt in with DM_VK_OQ_SPLIT_PASS=1 (README, cave geometry).
+occlusion_split_pass	off
 pool_skip_retired	on
 tex_release	2
 gpu_timestamps	segment
@@ -188,3 +189,4 @@ mesh_vegetation_cut	839241636fce850a	4c7d6be5a7717c8d
 option	DM_OOT_MAX_RESOLUTION	Max resolution	Keeps the 3D scene at full size: sharper, more GPU work. Best with Resolution › Quality	restart	implies=DM_OOT_TEXTURE_POOL_X2	needs=OOT_PATCHES
 option	DM_OOT_TEXTURE_POOL_X2	Texture pool ×2	Twice the game's starting graphics memory. Max resolution needs it	restart	needs=OOT_PATCHES
 option	DM_OOT_FPS_UNLOCK	Unlocked frame rate	Game logic follows real time, so speed holds when fps changes. Does not raise fps	restart	needs=OOT_PATCHES
+option	DM_VK_OQ_SPLIT_PASS	Keep cave walls (Qualcomm)	Fixes walls and rocks that vanish on Death Mountain Trail with Qualcomm's driver. Costs GPU time on some phones, try it if you see holes. No effect on Turnip	restart

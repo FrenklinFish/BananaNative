@@ -89,7 +89,7 @@ The address accepts IPv4 with an optional port; the default is 47600. The specia
 
 These choices override global `env.txt` values for this supported profile, including stale co-op values when Off or an invalid saved connection is selected. Explicit per-game environment lines and the test app's `env-<title ID>.txt` are applied afterwards and can override the choice. Check those overrides if the game's behavior differs from the row. Profiles without `link_play 1` receive no Link Play environment overrides.
 
-Use distinct host and visitor save identities, with Link Play already unlocked in both saves: a copied identity may be rejected, and an early tutorial save cannot use the terminal yet. Keep existing saves intact. The room code authenticates the session; this module does not encrypt its game traffic. Tailscale is an optional way to reach the host, not a discovery mode. The dependency's diagnostics can contain peer addresses, room codes and node IDs, so remove these before sharing logs.
+Use distinct host and visitor save identities, with Link Play already unlocked in both saves: a copied identity may be rejected, and an early tutorial save cannot use the terminal yet. Keep existing saves intact. Internet mode proves the room code and tags messages but does not encrypt the game traffic, so anyone on the network path can read it. The room code authenticates the session; this module does not encrypt its game traffic. Tailscale is an optional way to reach the host, not a discovery mode. The dependency's diagnostics can contain peer addresses, room codes and node IDs, so remove these before sharing logs.
 
 ### What has been checked
 

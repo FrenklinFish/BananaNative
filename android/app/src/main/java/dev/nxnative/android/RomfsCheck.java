@@ -64,7 +64,7 @@ final class RomfsCheck {
             if (p == null) throw new IOException(romfs + ": no such package");
             Nup.Node x = nup.lookup(p, (r.sub.isEmpty() ? "romfs" : r.sub) + "/" + path);
             if (x == null || x.dir) throw new IOException(romfs + "/" + path + " is not there");
-            b = nup.read(x, -1);
+            b = nup.read(x, 1 << 20);   // a text file's first lines; not a whole big file
         } else {
             File f = new File(romfs, path);
             if (!f.isFile()) throw new IOException(f + " is not there");

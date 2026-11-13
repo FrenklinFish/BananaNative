@@ -23,11 +23,11 @@ public final class BuildConfig {
 class OptionTsv(unittest.TestCase):
     def test_oot_options_in_game_tsv(self):
         rows = [line.split('\t') for line in OOT_TSV.read_text(encoding='utf-8').splitlines() if line.startswith('option\t')]
-        self.assertEqual(len(rows), 3, f'OoT must declare 3 options: {rows}')
+        self.assertEqual(len(rows), 4, f'OoT must declare 4 options: {rows}')
         envs = [r[1].strip() for r in rows]
-        self.assertEqual(envs, ['DM_OOT_MAX_RESOLUTION', 'DM_OOT_TEXTURE_POOL_X2', 'DM_OOT_FPS_UNLOCK'])
+        self.assertEqual(envs, ['DM_OOT_MAX_RESOLUTION', 'DM_OOT_TEXTURE_POOL_X2', 'DM_OOT_FPS_UNLOCK', 'DM_VK_OQ_SPLIT_PASS'])
         labels = [r[2].strip() for r in rows]
-        self.assertEqual(labels, ['Max resolution', 'Texture pool ×2', 'Unlocked frame rate'])
+        self.assertEqual(labels, ['Max resolution', 'Texture pool ×2', 'Unlocked frame rate', 'Keep cave walls (Qualcomm)'])
         # Check attributes
         max_res_attrs = [tok for col in rows[0][4:] for tok in col.split()]
         self.assertIn('restart', max_res_attrs)

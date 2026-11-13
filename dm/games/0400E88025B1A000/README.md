@@ -64,6 +64,7 @@ The GPU is already past its budget at 768x432, so the higher choices cost frame 
 
 ## Found on this game
 
+- [Shared fonts depend on the phone's fonts (one Roboto for six types)](../../../docs/reference/services.md#shared-fonts-depend-on-the-phones-fonts-one-roboto-for-six-types): issue #223; the APK's Noto Sans is now `standard.ttf`, per-type order in the host. Phone check open.
 - SDK 21 socket initialization and overloads, and socket poll with nothing to wait on.
 - SDK 21's `OutputStream` on a virtual output device, and SDK 21's hardware Opus decoder manager (`InitializeHardwareOpusDecoderManager`, etc. in `hle_codec.c`).
 - `nn::chat`: `GetChattingUid`, VirtualCamera family, `GetRealtimeAudioLevels`, `ShowLocalCameraConfiguration`, `GetCameraImageProcessingModeForVirtualCamera`.

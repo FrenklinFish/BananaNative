@@ -69,11 +69,12 @@ final class PackCheck {
     // ---- The rewriter's key (slow: off the main thread) ----
 
     private static final Map<String, Boolean> codeCache = new HashMap<>();
+    private static final Object CODE_LOCK = new Object();
     private static Map<String, byte[]> tools;   // the rewriter's files from the APK's tools.zip, by repository path
 
     /**
      * True when every module's &lt;module&gt;.android.key in the pack is the key this APK's rewriter makes from the folder's module, false when one differs,
-     * null when it cannot be told (no tools in this APK, or no key file). Cached by the files' sizes and times.
+     * null when it cannot be told (no tools in this APK, or no key file). Cached by the files' sizes and times, in memory and across launches (Verdict, stored per pack with the APK's install time; only true or false).
      */
     static Boolean code(Context c, Pack p, File game) {
         String[] mods = p.modules;
@@ -94,9 +95,32 @@ final class PackCheck {
         synchronized (codeCache) {
             if (codeCache.containsKey(id.toString())) return codeCache.get(id.toString());
         }
-        Boolean r = codeNow(c, p, game);
+        // The verdict of an earlier launch for the same files and the same APK: no decode at all (a normal start). Unknown (null) is never stored; a store that cannot
+        // be read is no store (Forgejo #214: the check ran again at every start, and a crash in it kept the app from starting)
+        String apk = apkStamp(c);
+        String stamp = Verdict.stamp(id.toString(), apk);
+        String slot = Verdict.stamp(p.dir.getPath() + "|" + game.getPath(), "slot").substring(0, 24);
+        Boolean stored = apk == null ? null : Verdict.read(k -> Prefs.open(c, "packcheck").getString(k, null), slot, stamp);
+        if (stored != null) { synchronized (codeCache) { codeCache.put(id.toString(), stored); } return stored; }
+        // One check at a time: every game card checks on its own thread, and each hashes whole modules (streamed, but a ~33 MiB compressed extent and the zstd window
+        // are in the heap per check). An out-of-memory is "cannot judge" (null), not a crash: a last net for a heap too small even for one streamed module, not the fix
+        // (the fix is Nup.hashTo, which keeps no whole module); it is not cached or stored, so a later launch tries again
+        Boolean r;
+        synchronized (CODE_LOCK) {
+            synchronized (codeCache) { if (codeCache.containsKey(id.toString())) return codeCache.get(id.toString()); }   // another card made it while this one waited
+            try { r = codeNow(c, p, game); } catch (OutOfMemoryError e) { android.util.Log.w("nxnative", p.titleId + ": the code check ran out of memory; its result is left unknown"); return null; }
+        }
+        if (apk != null) Verdict.keep((k, v) -> Prefs.open(c, "packcheck").edit().putString(k, v).commit(), slot, stamp, r);
         synchronized (codeCache) { codeCache.put(id.toString(), r); }
         return r;
+    }
+
+    /** What changes with the APK (its rewriter and tools): its version and install/update time */
+    private static String apkStamp(Context c) {
+        try {
+            android.content.pm.PackageInfo i = c.getPackageManager().getPackageInfo(c.getPackageName(), 0);
+            return i.versionName + ":" + i.lastUpdateTime;
+        } catch (Exception e) { return null; }   // unknown APK: nothing is read from or kept in the store
     }
 
     private static Boolean codeNow(Context c, Pack p, File game) {

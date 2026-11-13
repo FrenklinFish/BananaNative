@@ -262,7 +262,7 @@ static uint8_t *nup_z_disk(int fd, const nup_z *z, int *bad, char *why, size_t w
     int t = mkstemp(path); if (t < 0) { LOG("[RED] fs NUP: no temporary file in %s (errno %d): a %llu MiB compressed file is decompressed into memory", td && *td ? td : "/tmp", errno, (unsigned long long)(z->size >> 20)); return NULL; }
     unlink(path);
     enum { CH = 8 << 20 };
-    uint8_t *in = malloc(CH), *outb = malloc(CH); ZSTD_DStream *ds = ZSTD_createDStream(); uint64_t done = 0, rd = 0; int e = 0;
+    uint8_t *in = malloc(CH), *outb = malloc(CH); ZSTD_DStream *ds = ZSTD_createDStream(); uint64_t done = 0, rd = 0; int e = 0; size_t last = 0;
     if (!in || !outb || !ds) e = ENOMEM;
     while (!e && rd < z->stored) {
         size_t n = z->stored - rd < CH ? (size_t)(z->stored - rd) : CH;
@@ -272,7 +272,7 @@ static uint8_t *nup_z_disk(int fd, const nup_z *z, int *bad, char *why, size_t w
         // Until this chunk is consumed, and at the extent's end until the decoder has given out all it holds (a full output buffer may leave decoded bytes inside it)
         for (int more = 1; !e && more;) {
             ZSTD_outBuffer ob = {outb, CH, 0};
-            size_t r = ZSTD_decompressStream(ds, &ob, &ib);
+            size_t r = ZSTD_decompressStream(ds, &ob, &ib); last = r;
             if (ZSTD_isError(r)) { LOG("[RED] fs NUP: streaming zstd refused a %llu MiB file (%s): decompressed into memory", (unsigned long long)(z->size >> 20), ZSTD_getErrorName(r)); e = EIO; break; }   // (e.g. a frame window beyond the streaming limit: the one-shot decoder has none)
             more = ib.pos < ib.size || (rd == z->stored && r != 0 && ob.pos == ob.size);
             if (done + ob.pos > z->size) { snprintf(why, wn, "zstd: the frame is longer than the file's %llu bytes", (unsigned long long)z->size); e = EIO; *bad = 1; break; }
@@ -280,7 +280,7 @@ static uint8_t *nup_z_disk(int fd, const nup_z *z, int *bad, char *why, size_t w
             done += ob.pos;
         }
     }
-    if (!e && done != z->size) { snprintf(why, wn, "zstd: short frame (%llu of %llu bytes)", (unsigned long long)done, (unsigned long long)z->size); e = EIO; *bad = 1; }
+    if (!e && done != z->size) { snprintf(why, wn, "zstd: short frame (%llu of %llu bytes; %llu of %llu stored bytes read, the decoder %s)", (unsigned long long)done, (unsigned long long)z->size, (unsigned long long)rd, (unsigned long long)z->stored, last ? "still wanted input: the extent is cut short" : "ended its frame there"); e = EIO; *bad = 1; }
     free(in); free(outb); if (ds) ZSTD_freeDStream(ds);
     void *p = MAP_FAILED;
     if (!e) p = mmap(NULL, z->size ? (size_t)z->size : 1, PROT_READ, MAP_SHARED, t, 0);

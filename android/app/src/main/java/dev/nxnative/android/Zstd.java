@@ -5,7 +5,7 @@ import java.util.Arrays;
 
 /**
  * A small Zstandard frame decoder (RFC 8878), pure Java, for the files of a .nup (Nup: codec 1 is one zstd frame per file with its content size). The launcher
- * reads only small things from a .nup this way (NPDMs, NSO headers for the build IDs, the modules for the rewriter's key), so it decodes into memory and favours
+ * reads only small things from a .nup this way (NPDMs, NSO headers for the build IDs, the modules for the rewriter's key), so it decodes into memory (decode) or, for a hash of a big module, through a sliding window into a sink (decodeTo), and favours
  * being short and checked over speed. No dictionaries (a .nup has none). {@code max} stops after the block that reaches that many bytes: an NSO's header needs
  * only the frame's first block. No Android classes: the JVM test runs it on the Mac.
  */
@@ -25,6 +25,22 @@ final class Zstd {
         Frame f = new Frame(src, off, len);
         return f.run(max);
     }
+
+    /** Where {@link #decodeTo} puts the content, in order, in pieces */
+    interface Sink { void accept(byte[] b, int off, int n) throws IOException; }
+
+    /**
+     * Decodes the frame in src[off, off+len) into sink without keeping the content: memory is the frame's window (plus two blocks), not its size. A frame whose
+     * window is larger than maxWindow (a single-segment frame's window is its whole content) is refused with an IOException before any output
+     * ({@link #WINDOW_TOO_LARGE}); the caller then reads it whole (decode). Returns the content's size.
+     */
+    static long decodeTo(byte[] src, int off, int len, long maxWindow, Sink sink) throws IOException {
+        Frame f = new Frame(src, off, len);
+        if (f.window > maxWindow) throw bad(WINDOW_TOO_LARGE + " (" + f.window + " bytes)");
+        return f.runTo(sink);
+    }
+
+    static final String WINDOW_TOO_LARGE = "window too large to stream";
 
     private static IOException bad(String why) { return new IOException("zstd: " + why); }
 
@@ -256,6 +272,9 @@ final class Zstd {
         int pos;
         final long fcs;
         final boolean checksum;
+        long window;        // the bytes a match may reach back (RFC 8878 3.1.1.1.2); a single-segment frame's is its content size
+        Sink sink;          // streaming (runTo): out holds the window and the newest blocks, the rest has gone to the sink
+        long done;          // bytes already given to the sink
         byte[] out;
         int op;
         Huf huf;
@@ -275,7 +294,8 @@ final class Zstd {
             boolean single = (fhd & 0x20) != 0;
             if ((fhd & 0x08) != 0) throw bad("reserved bit set");
             checksum = (fhd & 0x04) != 0;
-            if (!single) pos++;   // window descriptor: the whole output is kept, so the window does not matter
+            long wd = 0;
+            if (!single) { wd = src[pos++] & 0xff; }   // window descriptor: exponent in the top 5 bits, mantissa in the low 3
             int dictSize = dictFlag == 0 ? 0 : dictFlag == 1 ? 1 : dictFlag == 2 ? 2 : 4;
             long dict = 0;
             for (int i = 0; i < dictSize; i++) dict |= (src[pos + i] & 0xffL) << (8 * i);
@@ -287,6 +307,21 @@ final class Zstd {
             pos += fcsSize;
             if (pos > end) throw bad("frame header past the end");
             fcs = fcsSize == 0 ? -1 : fcsSize == 2 ? v + 256 : v;
+            if (single) window = fcs;
+            else { long base = 1L << (10 + (wd >> 3)); window = base + base / 8 * (wd & 7); }
+        }
+
+        /** The same loop as run, for a sink: the buffer is window + 2 blocks, filled, then all but the last window bytes go out and the window slides to the front */
+        long runTo(Sink s) throws IOException {
+            sink = s;
+            long cap = Math.min(window, fcs >= 0 ? fcs : window) + 2L * BLOCK_MAX;
+            if (cap > Integer.MAX_VALUE - 16) throw bad(WINDOW_TOO_LARGE);
+            out = new byte[(int) cap];
+            body(-1);
+            sink.accept(out, 0, op);
+            done += op;
+            if (fcs >= 0 && done != fcs) throw bad("content is " + done + " bytes, the header says " + fcs);
+            return done;
         }
 
         byte[] run(long max) throws IOException {
@@ -295,6 +330,10 @@ final class Zstd {
             if (want < 0) want = 1 << 20;
             if (want > Integer.MAX_VALUE - 16) throw bad("content too large to read into memory");
             out = new byte[(int) want];
+            return body(max);
+        }
+
+        private byte[] body(long max) throws IOException {
             while (true) {
                 if (pos + 3 > end) throw bad("block header past the end");
                 int h = (src[pos] & 0xff) | (src[pos + 1] & 0xff) << 8 | (src[pos + 2] & 0xff) << 16;
@@ -321,12 +360,23 @@ final class Zstd {
                 if (last) break;
                 if (max >= 0 && op >= max) return Arrays.copyOf(out, op);
             }
+            if (sink != null) return null;
             if (fcs >= 0 && op != fcs) throw bad("content is " + op + " bytes, the header says " + fcs);
             return op == out.length ? out : Arrays.copyOf(out, op);
         }
 
         private void room(int n) throws IOException {
             if ((long) op + n <= out.length) return;
+            if (sink != null) {   // out is full: the part older than the window goes out, the window moves to the front (a match then never reaches before out[0])
+                int keep = (int) Math.min(op, window);
+                sink.accept(out, 0, op - keep);
+                done += op - keep;
+                System.arraycopy(out, op - keep, out, 0, keep);
+                op = keep;
+                if (fcs >= 0 && done + op + n > fcs) throw bad("content larger than the header says");
+                if ((long) op + n > out.length) throw bad("a block larger than the buffer");
+                return;
+            }
             if (fcs >= 0 && (long) op + n > fcs) throw bad("content larger than the header says");
             long size = Math.max((long) out.length * 2, (long) op + n);
             if (fcs >= 0) size = Math.min(size, fcs);

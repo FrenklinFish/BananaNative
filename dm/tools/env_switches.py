@@ -3,7 +3,10 @@
 the classes are).
   env_switches.py           write the table: a new switch gets a row with a guessed class and no meaning, a switch nothing reads any more loses its row
   env_switches.py --check   exit 1 when the table does not list exactly the switches the sources read, or a row has no meaning or an unknown class
-Either prints the names the docs quote that nothing reads (a removed switch a doc may still describe as working)."""
+Either prints the names the docs quote that nothing reads (a removed switch a doc may still describe as working).
+Switches read by vendored third-party code (dm/third_party is not scanned) are listed in dm/tools/env_switches_vendored.tsv (name, module directory under dm/third_party). Such a
+switch counts as read by the module. When the module's directory is present its sources are scanned too, and a listed switch the module does not read loses its row like any other;
+while the module is not vendored yet the list is trusted."""
 from pathlib import Path
 import re
 import subprocess
@@ -11,6 +14,7 @@ import sys
 
 REPO = Path(__file__).resolve().parents[2]
 TABLE = REPO / 'docs/env_switches.tsv'
+VENDORED = REPO / 'dm/tools/env_switches_vendored.tsv'   # name<TAB>module: switches read by dm/third_party/<module>
 HEAD = 'name\tclass\tmeaning\n'
 CLASSES = ('player', 'path', 'switch', 'diagnostic', 'test')
 CODE = ('.c', '.m', '.h', '.inc', '.swift', '.py', '.sh', '.S')
@@ -48,6 +52,28 @@ def scan():
     return reads, docs
 
 
+def vendored():
+    """{switch: module} from VENDORED; the module's own sources are checked when its directory exists"""
+    out = {}
+    if VENDORED.exists():
+        for l in VENDORED.read_text().split('\n'):
+            f = l.split('\t')
+            if len(f) == 2 and f[0].startswith(('DM_', 'DMSH_VK_')): out[f[0]] = f[1]
+    return out
+
+
+def vendored_reads(reads):
+    """add the listed switches to reads, as read by their module (checked against its sources when present)"""
+    for n, mod in vendored().items():
+        d = REPO / 'dm/third_party' / mod
+        if d.is_dir():
+            found = set()
+            for f in d.rglob('*'):
+                if f.is_file() and f.suffix in CODE: found |= set(re.findall(READ, f.read_text(errors='replace')))
+            if n not in found: continue
+        reads.setdefault(n, set()).add('dm/third_party/' + mod)
+
+
 def guess(name, files, player):   # a new row's class, for whoever writes its meaning to correct
     if name in player: return 'player'
     if all('/tests/' in f for f in files): return 'test'
@@ -58,6 +84,7 @@ def guess(name, files, player):   # a new row's class, for whoever writes its me
 def rows():
     """(table text, rows without a meaning or with an unknown class, names the docs quote that nothing reads)"""
     reads, docs = scan()
+    vendored_reads(reads)
     player = {l.split('\t')[0] for l in (REPO / 'dm/games/settings.tsv').read_text().split('\n') if l.startswith('DM_')}
     kept = {}
     if TABLE.exists():
