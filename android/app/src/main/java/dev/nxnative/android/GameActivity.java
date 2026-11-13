@@ -663,6 +663,10 @@ public final class GameActivity extends Activity implements SurfaceHolder.Callba
                 GameFonts.place(fontDir, GameFonts.STANDARD, fin.readAllBytes());
                 env.add(GameFonts.envLine(fontDir));
             } catch (IOException e) { unknownNotes.add("[nxlaunch] the shared font stand-in is not placed (" + e.getMessage() + "): the host uses the phone's own fonts"); }
+            try (java.io.InputStream fin = getAssets().open(GameFonts.EXT_ASSET)) {   // the button icons in game text (shared-font type 5: hle_sdk16.c), in the same folder; without it they draw as '?'
+                GameFonts.place(new File(getFilesDir(), "fonts"), GameFonts.EXT, fin.readAllBytes());
+            } catch (java.io.FileNotFoundException e) {   // an APK built without fontTools: the host's [YELLOW] line says so
+            } catch (IOException e) { unknownNotes.add("[nxlaunch] the button-icon font is not placed (" + e.getMessage() + "): button icons in game text draw as '?'"); }
             String gpuNote = settingsEnv(id, env);
             // The 3D scene (Game settings › Resolution, ResPresets; Advanced › 3D scene, SceneRes): the chosen RomFS overlay in the pack, made by the pack step from the player's files,
             // or the chosen game arguments (scene_arg); a DM_ROMFS_OVERLAY or DM_GAME_ARGS_ADD line of the user's comes later and wins

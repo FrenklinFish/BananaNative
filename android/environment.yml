@@ -8,6 +8,7 @@ dependencies:
   - python=3.14
   - spirv-tools
   - dotnet-runtime>=10,<11
+  - fonttools   # dm/tools/make_ext_font.py: the button-icon font the APK build puts in the app (android/app/build.gradle nxExtFont)
   - pip
   - pip:
       - capstone>=5,<6

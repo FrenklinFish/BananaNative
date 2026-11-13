@@ -143,7 +143,7 @@ static pthread_mutex_t font_mu = PTHREAD_MUTEX_INITIALIZER;
 static font_t type_f[6];   // what each type is served (the same mapping for types that resolved to one file); resolved at the first query of the type, once
 static unsigned char type_done[6];
 // The order for a type: 0 standard: DM_SHARED_FONT, DM_FONT_DIR/standard.ttf, the system's. 1-4: DM_SHARED_FONT (the player's one font for all of them), else DM_FONT_DIR/cjk_*.ttf, the phone's plain-TTF CJK fonts,
-//   then the standard font. 5: DM_SHARED_FONT_EXT, DM_FONT_DIR/nintendo_ext.ttf, then the standard font (no stand-in for the button icons exists yet: they draw as the notdef box). Called with font_mu held
+//   then the standard font. 5: DM_SHARED_FONT_EXT, DM_FONT_DIR/nintendo_ext.ttf, then the standard font (which has no button icons: they draw as the notdef box; make_ext_font.py makes the stand-in the apps ship). Called with font_mu held
 static font_t font_resolve(int t) {
     if (type_done[t]) return type_f[t];
     type_done[t] = 1;

@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 # Generate a stand-in for the "Nintendo extension" shared font (nintendo_ext.ttf): controller-button icons at the original private-use code points (A/B/X/Y, L/R/ZL/ZR/SL/SR, +/−, D-pad, stick direction arrows).
-# The host has no original system fonts; button icons in game text (e.g. Mario's GameMsg/Key.msbt: U+E0E0 = A button) render as "?" when the glyph is missing. Letters come from macOS's Arial Rounded Bold, knocked out of a solid plate.
+# The host has no original system fonts; button icons in game text (e.g. Mario's GameMsg/Key.msbt: U+E0E0 = A button) render as "?" when the glyph is missing. Letters come from macOS's Arial Rounded Bold
+# (else the repository's Noto Sans: LETTER_FONTS), knocked out of a solid plate. The iOS app, the Mac app and the Android APK ship the result.
 # Usage: make_ext_font.py out.ttf [letter-font.ttf]; needs fontTools (pip install fonttools)
 import math, sys
 from fontTools.ttLib import TTFont
@@ -126,6 +127,17 @@ def build(out, letter_font):
     fb.setupPost(); fb.save(out)
     print('%s: %d glyphs, %d code points' % (out, len(order), len(cmap)))
 
+# The letters' font when none is given: macOS's Arial Rounded Bold, else the repository's Noto Sans (dm/third_party/fonts, SIL OFL), which the Android APK's build
+# (android/app/build.gradle nxExtFont) always passes, so that no system font's glyphs end up in a shipped file
+LETTER_FONTS = ['/System/Library/Fonts/Supplemental/Arial Rounded Bold.ttf',
+                __import__('os').path.join(__import__('os').path.dirname(__file__), '..', 'third_party', 'fonts', 'NotoSans-Regular-subset.ttf')]
+
+def letter_font():
+    import os
+    for p in LETTER_FONTS:
+        if os.path.isfile(p): return p
+    sys.exit('make_ext_font.py: no letter font found (%s): give one as the second argument' % ', '.join(LETTER_FONTS))
+
 if __name__ == '__main__':
     if len(sys.argv) < 2: sys.exit(__doc__ or 'usage: make_ext_font.py out.ttf [letter-font.ttf]')
-    build(sys.argv[1], sys.argv[2] if len(sys.argv) > 2 else '/System/Library/Fonts/Supplemental/Arial Rounded Bold.ttf')
+    build(sys.argv[1], sys.argv[2] if len(sys.argv) > 2 else letter_font())
