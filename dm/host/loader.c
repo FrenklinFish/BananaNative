@@ -590,6 +590,12 @@ void loader_hash_log(void) {
     }
 }
 
+// The render target pool's size (profile key rt_pool, rt_pool.h; rt_pool_apply below): render_cfg's max_render while a larger pool is written (hle_render.c), and the largest
+// size's, which the next start can pick (hle_render.c: a change while the game runs that needs more)
+static int g_rtp_raised, g_rtp_top; static unsigned g_rtp_w, g_rtp_h, g_rtp_tw, g_rtp_th;
+int dm_rt_pool_max_render(unsigned *w, unsigned *h) { if (!g_rtp_raised) return 0; *w = g_rtp_w; *h = g_rtp_h; return 1; }
+int dm_rt_pool_top(unsigned *w, unsigned *h) { if (!g_rtp_top) return 0; *w = g_rtp_tw; *h = g_rtp_th; return 1; }
+
 #if PLAT_IOS
 // iOS does not allow code loaded at run time to execute, and Apple allows an executable only one segment with execute permission (ITMS-90999): the image is compiled into this executable by dm/ios/tools/gen_embed.py --
 // the two code blocks (original text, patch area) are sections in __TEXT, and W (the rest of ro + data + bss) is a separate RW segment. The three blocks are not adjacent in the file; here one contiguous address range is reserved,
@@ -691,8 +697,15 @@ static int levels_apply(module_t *m, unsigned cw, unsigned ch) {
     return 1;
 }
 
+// A main build with a render_cfg row takes DM_WINDOW_SIZE as the output of its render configurations instead (hle_render.c), at run time
+#include "render_cfg.h"
+static int render_cfg_row(const char *build) {
+    static const rcfg_row_t rows[] = DM_GAME_RENDER_CFG;
+    for (int i = 0; i < DM_GAME_NRENDER_CFG; i++) if (rows[i].build[0] && !strcmp(rows[i].build, build)) return 1;
+    return 0;
+}
 static void window_apply(module_t *m) {
-    if (strcmp(m->name, "main") || m->nro) return;
+    if (strcmp(m->name, "main") || m->nro || render_cfg_row(m->build_id)) return;
     const char *e = getenv("DM_WINDOW_SIZE");
     static const struct { const char *build; uint64_t wfn, hfn; unsigned w, h; } rows[] = DM_GAME_WINDOW_FN;
     int r = -1, own = !e || !*e || !strcmp(e, "original");
@@ -722,6 +735,61 @@ static void window_apply(module_t *m) {
     for (int i = 0; i < 2; i++) *(uint32_t *)(m->base + fn[i]) = 0x52800000u | (v[i] << 5);   // movz w0,#v (the old cut's bytes: 1920 = 00f08052, 1080 = 00878052)
     LOG("window: %ux%u (%s; main+%#llx / +%#llx; the game's own %ux%u, the pack's %ux%u)", w, h, own ? "the game's own" : "DM_WINDOW_SIZE",
         (unsigned long long)fn[0], (unsigned long long)fn[1], rows[r].w, rows[r].h, was[0], was[1]);
+}
+
+// The render target pool (profile key rt_pool, rt_pool.h): a game that makes its render target pool from one movz in its text gets the size the setting the run starts with
+// needs (DM_WINDOW_SIZE and DM_RENDER_PCT, read as hle_render.c reads them: render_cfg.h rcfg_setting): the game's own while the render size fits render_cfg's max_render and
+// the output is below the row's out_h, else the smallest larger size whose max_render holds the render size (rtp_need). A device of more than 12 GB of RAM (vka_low_ram() 0:
+// the same predicate as the low-RAM keys, inverted) gets at least the first larger size; DM_RT_POOL_MB=<MiB> sets it on any device (0: the game's own). Written here, while the
+// text is still writable (map_image, before the seal), and only when the module's build is the row's and the word is the row's; otherwise one [RED] line and the game's own
+// size. render_cfg's max_render takes the written size's only when it was written (dm_rt_pool_max_render). Not on iOS (the text is signed code there)
+#include "rt_pool.h"
+__attribute__((weak)) int vka_low_ram(void);
+static void rt_pool_apply(module_t *m) {
+    static const rtpool_row_t rows[] = DM_GAME_RT_POOL;
+    if (m->nro) return;
+    int r = -1, other = -1;
+    for (int i = 0; i < DM_GAME_NRT_POOL; i++) if (rows[i].build[0] && !strcmp(rows[i].module, m->name)) { if (!strcmp(rows[i].build, m->build_id)) r = i; else other = i; }
+    if (r < 0) {
+        if (other >= 0) LOG("[RED] [res] render-target pool: the profile's rt_pool row is for %s build %s, not %s: the game's own size", m->name, rows[other].build, m->build_id);
+        return;
+    }
+    const rtpool_row_t *row = &rows[r];
+    static const rcfg_row_t rc[] = DM_GAME_RENDER_CFG;
+    const rcfg_row_t *cfg = NULL;
+    for (int i = 0; i < DM_GAME_NRENDER_CFG; i++) if (rc[i].build[0] && !strcmp(rc[i].build, m->build_id)) cfg = &rc[i];
+    unsigned cw = cfg ? cfg->max_w : 0, ch = cfg ? cfg->max_h : 0, ow = 0, oh = 0, rw = 0, rh = 0; int pct = 50, need = -1;
+    if (cfg) {   // game.py makes an rt_pool row need a render_cfg row of the same build
+        rcfg_setting(cfg, getenv("DM_WINDOW_SIZE"), DM_GAME_RENDER_DEFAULT_OUT, getenv("DM_RENDER_PCT"), &ow, &oh, &pct);
+        rcfg_render(ow, oh, pct, 0, 0, &rw, &rh);
+        need = rtp_need(row, cw, ch, oh, rw, rh);
+    }
+    const char *e = getenv("DM_RT_POOL_MB");
+    long env = rtp_env_mb(e);
+    if (env == -2) LOG("[RED] [res] DM_RT_POOL_MB=%s: must be 0 (the game's own) or %u to %u MiB; the setting and the device decide", e, RTP_MIN_MB, RTP_MAX_MB);
+    int why, low = &vka_low_ram ? vka_low_ram() : -1;
+    unsigned mb = rtp_choose(row, low, env, need, &why);
+    char whyb[160];
+    if (why == 0) snprintf(whyb, sizeof whyb, "DM_RT_POOL_MB");
+    else if (why == 2) snprintf(whyb, sizeof whyb, "more than 12 GB of RAM");
+    else snprintf(whyb, sizeof whyb, "%s output %ux%u, render %ux%u (%d %%)%s", why == 1 ? "the setting needs it:" : "the setting:", ow, oh, rw, rh, pct,
+                  why == 3 ? low > 0 ? ", a device of 12 GB or less" : low < 0 ? ", no low-RAM predicate on this host" : "" : "");
+    if (row->off + 4 > m->text_end || (row->off & 3)) {
+        LOG("[RED] [res] render-target pool: %s+%#llx is outside %s's text: the game's own %u MiB, max_render %ux%u", m->name, (unsigned long long)row->off, m->name, row->base_mb, cw, ch);
+        return;
+    }
+    uint32_t was; int st = rtp_apply((uint32_t *)(m->base + row->off), row, mb, &was);
+    if (st < 0) {
+        LOG("[RED] [res] render-target pool: %s+%#llx is %08x, not the profile's %08x (%u MiB): nothing written, the game's own size, max_render %ux%u", m->name,
+            (unsigned long long)row->off, was, row->word, row->base_mb, cw, ch);
+        return;
+    }
+    g_rtp_raised = rtp_cap(row, st, mb, &g_rtp_w, &g_rtp_h);
+    if (row->nt && env < 0) { g_rtp_top = 1; g_rtp_tw = row->max_w[row->nt - 1]; g_rtp_th = row->max_h[row->nt - 1]; }   // the next start picks by the setting too
+    char wr[48];
+    if (st) snprintf(wr, sizeof wr, "%08x -> %08x", was, rtp_encode(row->word, mb)); else snprintf(wr, sizeof wr, "%08x kept", was);
+    LOG("[res] render-target pool %u MiB (%s%s; %s+%#llx %s): max_render %ux%u%s", mb, whyb, st ? "" : ", the game's own size", m->name, (unsigned long long)row->off, wr,
+        g_rtp_raised ? g_rtp_w : cw, g_rtp_raised ? g_rtp_h : ch, g_rtp_raised ? " (rt_pool's)" : st ? " (render_cfg's: below rt_pool's sizes)" : " (render_cfg's)");
 }
 
 // Switch 2 SDKs (Ounce) compile with APIBKey (pacibsp / autibsp / retab) and APGAKey (pacga), both process-wide on Linux arm64, except in
@@ -802,7 +870,7 @@ static void map_image(module_t *m, const char *dir) {
         if (a == MAP_FAILED) die("%s mmap %#llx", m->name, (unsigned long long)(pre + m->size));
         m->base = a + pre;
         memcpy(m->base, raw, fl); memcpy(a, raw + fl, sz - bl - fl); if (bl) memcpy(m->base + m->back_off, raw + sz - bl, bl);
-        free(raw); install_key_page(m); window_apply(m); fiber_pac_apply(m); pac_patch_text(m);
+        free(raw); install_key_page(m); window_apply(m); fiber_pac_apply(m); pac_patch_text(m); rt_pool_apply(m);
         if (bl && mprotect(m->base + m->back_off, bl, PROT_READ | PROT_EXEC)) die("%s mprotect back patch", m->name);
         uint64_t rx = (m->text_end + 0x3FFF) & ~0x3FFFull;
         if (mprotect(m->base, rx, PROT_READ | PROT_EXEC)) die("%s mprotect text", m->name);
@@ -813,7 +881,7 @@ static void map_image(module_t *m, const char *dir) {
     m->size = (sz + 0x3FFF) & ~0x3FFFull;
     m->base = mmap(NULL, m->size, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANON, -1, 0);
     if (m->base == MAP_FAILED) die("%s mmap", m->name);
-    memcpy(m->base, raw, sz); free(raw); install_key_page(m); window_apply(m); fiber_pac_apply(m); pac_patch_text(m);
+    memcpy(m->base, raw, sz); free(raw); install_key_page(m); window_apply(m); fiber_pac_apply(m); pac_patch_text(m); rt_pool_apply(m);
     uint64_t rx = (m->text_end + 0x3FFF) & ~0x3FFFull;
     if (mprotect(m->base, rx, PROT_READ | PROT_EXEC)) die("%s mprotect text", m->name);
     uint64_t po = m->patch_off & ~0x3FFFull;

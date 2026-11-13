@@ -22,6 +22,7 @@
 #include "../nvn/nvn_dirty.h"
 #include "vka_place.h"
 #include "vka_gmem.h"
+#include "vka_lowram.h"
 #include "../../host/dm.h"
 #include <errno.h>
 #include <stddef.h>
@@ -775,7 +776,17 @@ static pthread_mutex_t g_pmu = PTHREAD_MUTEX_INITIALIZER; static pthread_cond_t 
 static _Atomic int g_nlazy; static uint64_t g_lazy_bytes, g_pool_id;   // pools not (wholly) placed yet and their bytes not placed (g_lazy_bytes, g_pool_id under g_pmu)
 static _Atomic uint64_t g_lzgen = 1;   // bumped when a pool not placed yet comes (mtl_pool_add): mtl_pool_need's per-thread record of ranges with nothing left to place holds while it stands
 static int lazy_on(void) { static int v = -1; if (v < 0) { v = VKA_ENV("DM_VK_PLACE_LAZY", 1) != 0; if (!v) VLOG("DM_VK_PLACE_LAZY=0: every memory pool is placed when it is made"); } return v; }
-static uint64_t part_min(void) { static int64_t v = -1; if (v < 0) { v = (int64_t)VKA_ENV("DM_VK_PLACE_PART_MB", 1024) << 20; if (v < 0) v = 0; if (!v) VLOG("DM_VK_PLACE_PART_MB=0: every memory pool is placed whole"); } return (uint64_t)v; }
+// The default is 1024, or the profile's low_ram_place_part_mb on a low-RAM device (vka_lowram.h)
+static uint64_t part_min(void) {
+    static int64_t v = -1;
+    if (v < 0) {
+        int lr = vka_low_ram_place_part_mb();
+        v = (int64_t)VKA_ENV("DM_VK_PLACE_PART_MB", lr ? lr : 1024) << 20; if (v < 0) v = 0;
+        if (!v) VLOG("DM_VK_PLACE_PART_MB=0: every memory pool is placed whole");
+        else if (lr && v == (int64_t)lr << 20) VLOG("memory pools of %d MiB or more are placed by parts (the profile's low_ram_place_part_mb on a low-RAM device)", lr);
+    }
+    return (uint64_t)v;
+}
 static uint64_t part_gran(void) {
     static int64_t v = -1;
     if (v < 0) { int64_t m = VKA_ENV("DM_VK_PLACE_GRANULE_MB", 16); if (m < 1) m = 1; v = m << 20; uintptr_t al = pg_align(); v = (v + (int64_t)al - 1) & ~(int64_t)(al - 1); }

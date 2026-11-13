@@ -245,7 +245,9 @@ NVN(nvnDeviceFinalizeCommandHandle, void, NVNdevice *d, NVNcommandHandle h) { (v
 // buffer-address queries, the bytes of it that physical mappings of virtual pools reach, and at the log the bytes that are not zero (4 KiB pages). Logged at presents 1, 60
 // and 300, grouped by flags, then the largest pools. Coverage is what was ever covered (a finalized buffer or texture, an unmapped range keep their bits). Off: nothing is kept
 enum { PC_SHIFT = 16 };
-typedef struct { const pool_t *p; const uint8_t *mem; uint64_t size; uint32_t flags, naddr, nbuf, ntex, nmap; uint8_t *bb, *tb, *mb; } pcen;
+// hwm: the high-water mark, the largest end (offset + size) of a buffer or texture placed in the pool; logged when it has grown by 1 MiB or more since the last line or crosses
+// 50, 75 or 90 % of the pool (hwm_log: the mark last logged), and a [RED] line for one placed outside the pool
+typedef struct { const pool_t *p; const uint8_t *mem; uint64_t size; uint32_t flags, naddr, nbuf, ntex, nmap; uint8_t *bb, *tb, *mb; uint64_t hwm, hwm_log; } pcen;
 static pcen *g_pc; static int g_npc, g_cpc, g_pc_on = -1;
 static pthread_mutex_t g_pc_mu = PTHREAD_MUTEX_INITIALIZER;
 static int pc_on(void) { if (g_pc_on < 0) g_pc_on = getenv("DM_NVN_POOLS") != NULL; return g_pc_on; }
@@ -256,7 +258,7 @@ static void pc_add(const pool_t *p) {
     pthread_mutex_lock(&g_pc_mu);
     if (g_npc == g_cpc && !(g_pc = realloc(g_pc, (size_t)(g_cpc = g_cpc ? 2 * g_cpc : 256) * sizeof *g_pc))) die("pool census allocation failed");
     for (int i = 0; i < g_npc; i++) if (g_pc[i].p == p) { free(g_pc[i].bb); free(g_pc[i].tb); free(g_pc[i].mb); g_pc[i--] = g_pc[--g_npc]; }   // initialized again without a Finalize
-    pcen c = {p, p->mem, p->size, (uint32_t)p->flags, 0, 0, 0, 0, calloc(nb, 1), calloc(nb, 1), calloc(nb, 1)};
+    pcen c = {p, p->mem, p->size, (uint32_t)p->flags, 0, 0, 0, 0, calloc(nb, 1), calloc(nb, 1), calloc(nb, 1), 0, 0};
     if (!c.bb || !c.tb || !c.mb) die("pool census allocation failed");
     g_pc[g_npc++] = c;
     pthread_mutex_unlock(&g_pc_mu);
@@ -272,10 +274,29 @@ static void pc_mark(uint8_t *bm, uint64_t size, int64_t off, uint64_t n) {
     uint64_t e = n > size - (uint64_t)off ? size : (uint64_t)off + n;
     for (uint64_t b = (uint64_t)off >> PC_SHIFT; b <= (e - 1) >> PC_SHIFT; b++) bm[b >> 3] |= (uint8_t)(1u << (b & 7));
 }
+// The share of the pool a mark reaches: 0 below 50 %, 1 from 50 %, 2 from 75 %, 3 from 90 %
+static int pc_band(uint64_t m, uint64_t size) { return m * 10 >= size * 9 ? 3 : m * 4 >= size * 3 ? 2 : m * 2 >= size ? 1 : 0; }
 static void pc_use(const pool_t *p, int kind, int64_t off, uint64_t n) {   // kind: 'b' buffer, 't' texture, 'a' address query, 'm' mapped into a virtual pool
     if (!pc_on() || !p) return;
     pthread_mutex_lock(&g_pc_mu);
     pcen *c = pc_find(p);
+    if (c && (kind == 'b' || kind == 't')) {
+        static int nout;
+        if ((off < 0 || (uint64_t)off > c->size || n > c->size - (uint64_t)off) && nout < 16) {
+            nout++; LOG("[RED] [nvn] pool %p+%#llx: a %s at %s%#llx+%#llx lies outside the pool", (const void *)c->mem, (unsigned long long)c->size, kind == 't' ? "texture" : "buffer",
+                        off < 0 ? "-" : "", (unsigned long long)(off < 0 ? -(uint64_t)off : (uint64_t)off), (unsigned long long)n);
+        }
+        if (off >= 0 && (uint64_t)off + n > c->hwm) {
+            c->hwm = (uint64_t)off + n;
+            int band = pc_band(c->hwm, c->size), crossed = band > pc_band(c->hwm_log, c->size);
+            if (crossed || c->hwm - c->hwm_log >= 1048576) {
+                c->hwm_log = c->hwm;
+                LOG("[nvn] pool %p+%#llx high-water %#llx (%.1f MiB free%s) by a %s at %#llx+%#llx", (const void *)c->mem, (unsigned long long)c->size, (unsigned long long)c->hwm,
+                    c->hwm < c->size ? (c->size - c->hwm) / 1048576.0 : 0.0, !crossed ? "" : band == 3 ? ", past 90 %" : band == 2 ? ", past 75 %" : ", past 50 %",
+                    kind == 't' ? "texture" : "buffer", (unsigned long long)off, (unsigned long long)n);
+            }
+        }
+    }
     if (c) switch (kind) {
         case 'b': c->nbuf++; pc_mark(c->bb, c->size, off, n); break;
         case 't': c->ntex++; pc_mark(c->tb, c->size, off, n); break;
@@ -329,9 +350,9 @@ static void pc_log(uint64_t present) {
             g[k].buf / 1048576.0, g[k].tex / 1048576.0, g[k].map / 1048576.0, g[k].none / 1048576.0, g[k].nz / 1048576.0, (unsigned long long)g[k].naddr);
     for (int t = 0; t < g_npc && t < NTOP; t++) {
         const pcen *c = &g_pc[ix[t]];
-        LOG("[nvn]   pool %p+%#llx flags %#05x: %u buffers %.1f MiB, %u textures %.1f MiB, %u mappings %.1f MiB, none %.1f MiB, not zero %.1f MiB, %u address queries", (const void *)c->mem,
-            (unsigned long long)c->size, c->flags, c->nbuf, pc_cover(c, c->bb, 0) / 1048576.0, c->ntex, pc_cover(c, c->tb, 0) / 1048576.0, c->nmap,
-            pc_cover(c, c->mb, 0) / 1048576.0, pc_cover(c, NULL, 1) / 1048576.0, nz[ix[t]] / 1048576.0, c->naddr);
+        LOG("[nvn]   pool %p+%#llx flags %#05x: %u buffers %.1f MiB, %u textures %.1f MiB, %u mappings %.1f MiB, none %.1f MiB, not zero %.1f MiB, %u address queries, high-water %#llx",
+            (const void *)c->mem, (unsigned long long)c->size, c->flags, c->nbuf, pc_cover(c, c->bb, 0) / 1048576.0, c->ntex, pc_cover(c, c->tb, 0) / 1048576.0, c->nmap,
+            pc_cover(c, c->mb, 0) / 1048576.0, pc_cover(c, NULL, 1) / 1048576.0, nz[ix[t]] / 1048576.0, c->naddr, (unsigned long long)c->hwm);
     }
     free(nz); free(ix);
     pthread_mutex_unlock(&g_pc_mu);

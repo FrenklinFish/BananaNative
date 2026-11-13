@@ -173,6 +173,14 @@ def header(g):
     if oqs not in ('on', 'off'): sys.exit(f'{g.id}: occlusion_split_pass must be on or off: {oqs}')
     av1 = g.get('av1_decoder', 'hardware')   # Android: AV1 movies on the phone's hardware decoder (MediaCodec, the default) or dav1d frame-parallel (hle_movie_av1.c mav1_send)
     if av1 not in ('hardware', 'dav1d'): sys.exit(f'{g.id}: av1_decoder must be hardware or dav1d: {av1}')
+    # Android, devices of 12 GB or less (MemTotal up to 12 GiB; vka_lowram.h): defaults the Vulkan replay takes there only, for a profile that sets them. 0 = not set
+    lpp = g.get('low_ram_place_part_mb', '0')   # memory pools of at least this many MiB placed by parts (vka_mem.c part_min; the default elsewhere 1024, DM_VK_PLACE_PART_MB overrides)
+    if not lpp.isdigit() or int(lpp) and not 16 <= int(lpp) <= 65536: sys.exit(f'{g.id}: low_ram_place_part_mb must be 0 (not set) or 16 to 65536 MiB: {lpp}')
+    lic = g.get('low_ram_img_cache_max_mb', '0')   # a ceiling on the texture cache's measured limit, MiB (vka_tex.c img_limit_update; DM_VK_IMG_LIMIT_MB replaces both)
+    if not lic.isdigit() or int(lic) and not 512 <= int(lic) <= 65536: sys.exit(f'{g.id}: low_ram_img_cache_max_mb must be 0 (not set) or 512 to 65536 MiB: {lic}')
+    lap = g.get('low_ram_app_pool_mb', '0')   # the total GetInfo reports, MiB, below the profile's app_pool, which stays the pool (hle_svc.c reported_total; DM_APP_POOL_MB overrides)
+    if not lap.isdigit() or int(lap) and not 1024 <= int(lap) < g.int('app_pool') >> 20:
+        sys.exit(f"{g.id}: low_ram_app_pool_mb must be 0 (not set) or 1024 MiB to below the profile's app_pool ({g.int('app_pool') >> 20} MiB): {lap}")
     vcr = g.get('vconv_range', 'off')   # vertex attributes converted on the CPU only over the vertices each draw reads (nvn_mtl.m vc_draw_range): on / off
     if vcr not in ('on', 'off'): sys.exit(f'{g.id}: vconv_range must be on or off: {vcr}')
     mml = g.get('mem_map_limit', 'on')   # MapPhysicalMemory refused beyond the application pool, as on Horizon (hle_svc.c): on / off
@@ -240,6 +248,63 @@ def header(g):
             ls += [('0', 0)] * (12 - len(ls))
             rlv.append('{' + q(r[0]) + f', {r[1]}, {n}, {len(r) - 3}, ' + '{' + ', '.join(f'{{{o}, {ln}}}' for o, ln in ls) + '}}')
         if g.get('graphics_scale', ''): sys.exit(f'{g.id}: graphics_scale and res_levels are two levers for one setting: keep one')
+    # Render configurations the host rewrites (hle_render.c; README.md render_cfg): one row per main build, <main build ID> <slot table offset> <slots> <slot stride> <output field>
+    # <render field> <the game's own OWxOH/RWxRH per slot, comma-separated> original=<WxH> max_render=<WxH> min=<output height>; with one render_quality row,
+    # quality=<boost|normal>:<level> performance=<boost|normal>:<level> (the performance mode and the smallest largest-buffer level of each graphics quality)
+    rcf, rq = [], [0, 0, 0, 0]
+    if g.get('render_cfg', ''):
+        sz = lambda x: re.fullmatch(r'(\d{1,5})x(\d{1,5})', x)
+        for r in g.values('render_cfg'):
+            kv = dict(x.split('=', 1) for x in r[7:] if '=' in x)
+            ok = len(r) == 10 and re.fullmatch(r'[0-9a-f]{32}', r[0]) and all(re.fullmatch(r'0x[0-9a-fA-F]+', x) for x in (r[1], r[4], r[5])) and r[2].isdigit() and r[3].isdigit() \
+                and sorted(kv) == ['max_render', 'min', 'original'] and sz(kv['original']) and sz(kv['max_render']) and kv['min'] in ('480', '540', '720', '1080', '1440')
+            ents = [re.fullmatch(r'(\d{1,5})x(\d{1,5})/(\d{1,5})x(\d{1,5})', e) for e in r[6].split(',')] if ok else []
+            if not ok or not 1 <= int(r[2]) <= 8 or len(ents) != int(r[2]) or not all(ents) or int(r[3]) < 8 or int(r[3]) % 8 or abs(int(r[4], 0) - int(r[5], 0)) < 8 \
+                    or any(int(v) == 0 for e in ents for v in e.groups()) or any(int(v) == 0 for k in ('original', 'max_render') for v in sz(kv[k]).groups()):
+                sys.exit(f"{g.id}: render_cfg takes <main build ID (32 hex)> <slot table offset> <slots 1-8> <slot stride (a multiple of 8)> <output field> <render field (8 bytes apart at least)>"
+                         f" <OWxOH/RWxRH per slot, comma-separated> original=<WxH> max_render=<WxH> min=<480|540|720|1080|1440>: {r}")
+            ow, oh = map(int, sz(kv['original']).groups()); mw, mh = map(int, sz(kv['max_render']).groups())
+            rows_c = ', '.join('{' + ', '.join(e.groups()) + '}' for e in ents)
+            rcf.append('{' + q(r[0]) + f', {r[1]}, {r[2]}, {r[3]}, {r[4]}, {r[5]}, {{{rows_c}}}, {ow}, {oh}, {mw}, {mh}, {kv["min"]}' + '}')
+        for k in ('graphics_scale', 'window_fn', 'res_levels'):
+            if g.get(k, ''): sys.exit(f'{g.id}: render_cfg and {k} are two levers for one setting: keep one')
+        qr = g.values('render_quality')
+        words = dict(w.split('=', 1) for w in ' '.join(qr[0]).split() if '=' in w) if len(qr) == 1 else {}
+        m = [re.fullmatch(r'(boost|normal):([0-3])', words.get(k, '')) for k in ('quality', 'performance')]
+        if len(qr) != 1 or sorted(words) != ['performance', 'quality'] or len(' '.join(qr[0]).split()) != 2 or not all(m):
+            sys.exit(f'{g.id}: render_cfg needs one render_quality row: quality=<boost|normal>:<level 0-3> performance=<boost|normal>:<level 0-3>: {qr}')
+        rq = [int(m[0][1] == 'boost'), int(m[0][2]), int(m[1][1] == 'boost'), int(m[1][2])]
+    elif g.get('render_quality', ''): sys.exit(f'{g.id}: render_quality needs a render_cfg row')
+    # A render target pool the loader sizes (loader.c rt_pool_apply, dm/host/rt_pool.h; README.md rt_pool): <build ID> <module> <word offset> <the word there, 8 hex: movz w, lsl #16
+    # of the game's own MiB << 4> <the game's own MiB> then 1-4 larger sizes, ascending, each <MiB>=<WxH> (render_cfg's max_render while at least that size is written), and
+    # optionally out_h=<lines> (an output that tall or taller takes at least the first larger size). Needs a render_cfg row of the same main build (the setting that picks the
+    # size, the cap it raises) and a low-RAM key (the device gate: vka_low_ram)
+    rtp = []
+    for r in (g.values('rt_pool') if g.get('rt_pool', '') else []):
+        tiers = [re.fullmatch(r'(\d{1,4})=(\d{1,5})x(\d{1,5})', x) for x in r[5:] if not x.startswith('out_h=')]
+        outh = [x[6:] for x in r[5:] if x.startswith('out_h=')]
+        ok = len(r) >= 6 and re.fullmatch(r'[0-9a-f]{32}', r[0]) and r[1] in mods and re.fullmatch(r'0x[0-9a-fA-F]+', r[2]) and re.fullmatch(r'[0-9a-f]{8}', r[3]) \
+            and r[4].isdigit() and 1 <= len(tiers) <= 4 and all(tiers) and len(outh) <= 1 and all(x.isdigit() and 0 < int(x) <= 4320 for x in outh) \
+            and all(not x.startswith('out_h=') for x in r[5:5 + len(tiers)])
+        if ok:
+            w, base, off = int(r[3], 16), int(r[4]), int(r[2], 0)
+            mbs = [int(t[1]) for t in tiers]; ws = [int(t[2]) for t in tiers]; hs = [int(t[3]) for t in tiers]
+            ok = (w & 0xFFE00000) == 0x52A00000 and (w >> 5) & 0xFFFF == base << 4 and 16 <= base < mbs[0] and all(a < b for a, b in zip(mbs, mbs[1:])) and mbs[-1] <= 4095 \
+                and off % 4 == 0 and all(ws) and all(hs) and all(a <= b and c <= d for a, b, c, d in zip(ws, ws[1:], hs, hs[1:]))
+        if not ok:
+            sys.exit(f"{g.id}: rt_pool takes <build ID (32 hex)> <module> <word offset (a multiple of 4)> <the word there (8 hex): movz w, #<the game's own MiB << 4>, lsl #16>"
+                     f" <the game's own MiB> <MiB>=<max_render WxH> (1 to 4, the MiB ascending up to 4095, the sizes not shrinking) [out_h=<lines>]: {r}")
+        rc = [x for x in g.values('render_cfg') if x and x[0] == r[0]]
+        if r[1] != 'main' or len(rc) != 1:
+            sys.exit(f'{g.id}: rt_pool needs a render_cfg row of the same main build (the setting that picks the size, the max_render it raises): {r}')
+        cm = dict(x.split('=', 1) for x in rc[0][7:] if '=' in x).get('max_render', '0x0').split('x')
+        if ws[0] < int(cm[0]) or hs[0] < int(cm[1]):
+            sys.exit(f"{g.id}: rt_pool max_render must be at least render_cfg's {'x'.join(cm)}: {r}")
+        if not (int(lpp) or int(lic) or int(lap)):
+            sys.exit(f"{g.id}: rt_pool needs a low-RAM key (low_ram_place_part_mb, low_ram_img_cache_max_mb or low_ram_app_pool_mb), the device gate: a device of 12 GB or less gets a larger pool only when the starting setting needs it, a larger device at least the first larger size")
+        if any(x.startswith('{' + q(r[0]) + ', ' + q(r[1]) + ',') for x in rtp): sys.exit(f'{g.id}: rt_pool: one row per build and module: {r}')
+        arr = lambda v: '{' + ', '.join(map(str, v)) + '}'
+        rtp.append('{' + q(r[0]) + f', {q(r[1])}, {r[2]}, 0x{r[3]}u, {base}, {len(mbs)}, {arr(mbs)}, {arr(ws)}, {arr(hs)}, {outh[0] if outh else 0}' + '}')
     # Depth-only mesh prepass draws of mesh modules Qualcomm's driver draws wrong (vka_draw.c mesh_cut; a workaround, cause open: rendering.md "Depth-only mesh prepass
     # drawn as spikes on Qualcomm's driver"): one row per pair, <prepass mesh shader key> <colour pass mesh shader key> [<map>], 16 hex digits each. The map says where the
     # colour mesh module writes what the prepass mesh module writes: <prepass location>:<colour location>,... (locations 0-14; "-": none of them). The prepass is then
@@ -340,6 +405,7 @@ def header(g):
          f'#define DM_GAME_DRAW_BARRIERS_GAME {int(dbr == "game")}',
          f'#define DM_GAME_VCONV_RANGE {int(vcr == "on")}',
          f'#define DM_GAME_AV1_DAV1D {int(av1 == "dav1d")}',
+         f'#define DM_GAME_LOW_RAM_PLACE_PART_MB {int(lpp)}', f'#define DM_GAME_LOW_RAM_IMG_CACHE_MAX_MB {int(lic)}', f'#define DM_GAME_LOW_RAM_APP_POOL_MB {int(lap)}',
          f'#define DM_GAME_ROMFS_SUBST {q(rsub)}',
          f'#define DM_GAME_WINDOW_FN {{{", ".join(wfn) or "{\"\", 0, 0, 0, 0}"}}}', f'#define DM_GAME_NWINDOW_FN {len(wfn)}',
          '#define DM_GAME_SUBGROUP_ONE_LANE {' + (', '.join(sol) or '0') + '}', f'#define DM_GAME_NSUBGROUP_ONE_LANE {len(sol)}',
@@ -349,6 +415,9 @@ def header(g):
 
          '#define DM_GAME_FPS_STEPS {' + (', '.join(fst) or '{"", 0, 0, 0, 0, {0}}') + '}', f'#define DM_GAME_NFPS_STEPS {len(fst)}',
          f'#define DM_GAME_DRS_CTL {{{", ".join(drs) or "{\"\", 0, 0, 0, 0}"}}}', f'#define DM_GAME_NDRS_CTL {len(drs)}',
+         '#define DM_GAME_RENDER_CFG {' + (', '.join(rcf) or '{"", 0, 0, 0, 0, 0, {{0, 0, 0, 0}}, 0, 0, 0, 0, 0}') + '}', f'#define DM_GAME_NRENDER_CFG {len(rcf)}',
+         '#define DM_GAME_RENDER_QUALITY {' + ', '.join(map(str, rq)) + '}', f'#define DM_GAME_RENDER_DEFAULT_OUT {q(aw or "1920x1080")}',
+         '#define DM_GAME_RT_POOL {' + (', '.join(rtp) or '{"", "", 0, 0, 0, 0, {0}, {0}, {0}, 0}') + '}', f'#define DM_GAME_NRT_POOL {len(rtp)}',
          '#define DM_GAME_RES_LEVELS {' + (', '.join(rlv) or '{"", 0, 0, 0, {{0, 0}}}') + '}', f'#define DM_GAME_NRES_LEVELS {len(rlv)}',
          *([f'#define DM_GAME_NVN_API_MAJOR {api.split(".")[0]}', f'#define DM_GAME_NVN_API_MINOR {api.split(".")[1]}'] if g.get('device_api', '') else []),   # without the key: by the SDK version (hle_nvn.c nvn_api)
          '']

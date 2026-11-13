@@ -96,7 +96,7 @@ class Rows(unittest.TestCase):
         for g in game.all_games(): recommend.column(g)   # raises on a bad row
 
     def test_fire_emblem(self):
-        self.assertEqual(recommend.column(game.load(FE)), 'driver.id=8,driver.version&0xffc00000=0x80000000,driver.version&0x3ff000<0x320000|driver=18')
+        self.assertEqual(recommend.column(game.load(FE)), 'driver.id=8,driver.version&0xffc00000=0x80000000,driver.version&0x3ff000<0x320000|driver=18;any|upscaler=fsr3')
 
     def test_refusals(self):
         g = game.load('0400486024DEC000')   # Ocarina of Time: presets, options, vegetation, skip_layers, a frame step

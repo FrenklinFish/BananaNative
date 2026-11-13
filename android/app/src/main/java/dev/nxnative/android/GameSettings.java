@@ -141,6 +141,7 @@ final class GameSettings {
             if (!SceneRes.presets(prof).isEmpty())   // a profile with scene_scale rows but no presets: the 3D scene below the window by the game's own palette (SceneRes)
                 picture.add(prepared(new Ui.Setting(a, "🎬", "3D scene", v -> scene(a, g, again)), sceneValue(a, g, SceneRes.presets(prof))).chevron(a));
         }
+        if (prof != null && prof.renderCfg()) renderRows(a, g, prof, picture, again);   // Resolution, Upscaling quality, Graphics quality instead of Resolution (a render_cfg row)
         if (simple) {   // the Upscaler stays as stored (GameActivity reads the preference); only testers change it for a game with Resolution presets
         } else if (Prefs.dlssGame(id)) {   // a game on the DLSS stand-in (game.tsv dlss_standin): its Upscaler is the stand-in (GSR2's sliders under GSR 2, the sharpness under FSR 1)
             int dm = GameUpscaler.dlssMode(a, id);
@@ -413,6 +414,40 @@ final class GameSettings {
         if (d == null) d = "System driver";
         String n = GpuGl.name();
         return n != null ? n + " · " + d : d;
+    }
+
+    /** The title ID whose last pick here needs another render target pool than the setting before it (Profile.renderRestartNote): the next drawing of its sheet shows the line once */
+    private static String renderNoteFor;
+
+    /**
+     * Resolution, Upscaling quality and Graphics quality of a game whose profile has a render_cfg row: three rows, each opening its radio choices as Display does, labels from the
+     * string resources (RenderLabels), in the Picture section. A pick stores all three (Prefs.render) for the next start. One line, "This change will apply on game restart.", leads the
+     * section's line under its card only right after a pick that needs another render target pool size than the stored setting did
+     */
+    private static void renderRows(MainActivity a, Game g, Profile p, Section s, Runnable again) {
+        String id = g.titleId;
+        Profile.Render cur = Prefs.render(a, p, id);
+        RenderLabels l = new RenderLabels(a);
+        String[] outs = p.renderOutputs(), outLabels = new String[outs.length], pctLabels = new String[Profile.RENDER_PCTS.length];
+        for (int i = 0; i < outs.length; i++) outLabels[i] = l.out(p, outs[i]);
+        for (int i = 0; i < pctLabels.length; i++) pctLabels[i] = l.pct(Profile.RENDER_PCTS[i]);
+        java.util.function.Consumer<Profile.Render> pick = r -> {
+            renderNoteFor = p.renderRestartNote(r, null, cur, Prefs.lowRam(a)) ? id : null;
+            Prefs.render(a, id, r);
+            again.run();
+        };
+        s.add(new Ui.Setting(a, "🖼️", l.resTitle, v -> radio(a, l.resTitle + " · " + g.name, outLabels, Arrays.asList(outs).indexOf(cur.out),
+                w -> pick.accept(new Profile.Render(outs[w], cur.pct, cur.quality)))).value(l.out(p, cur.out)).chevron(a));
+        int pi = Math.max(0, indexOfPct(cur.pct));
+        s.add(new Ui.Setting(a, "🔍", l.upscaleTitle, v -> radio(a, l.upscaleTitle + " · " + g.name, pctLabels, pi,
+                w -> pick.accept(new Profile.Render(cur.out, Profile.RENDER_PCTS[w], cur.quality)))).value(pctLabels[pi]).chevron(a));
+        s.add(new Ui.Setting(a, "✨", l.gfxTitle, v -> radio(a, l.gfxTitle + " · " + g.name, l.gfx, cur.quality ? 0 : 1,
+                w -> pick.accept(new Profile.Render(cur.out, cur.pct, w == 0)))).value(l.gfx[cur.quality ? 0 : 1]).chevron(a));
+        if (id.equals(renderNoteFor)) { s.info = s.info == null ? l.restartNote : l.restartNote + " " + s.info; renderNoteFor = null; }   // first in the line under the card
+    }
+    static int indexOfPct(int pct) { for (int i = 0; i < Profile.RENDER_PCTS.length; i++) if (Profile.RENDER_PCTS[i] == pct) return i; return -1; }
+    private static void radio(MainActivity a, String title, String[] labels, int checked, java.util.function.IntConsumer picked) {
+        new AlertDialog.Builder(a).setTitle(title).setSingleChoiceItems(labels, checked, (x, w) -> { x.dismiss(); picked.accept(w); }).setNegativeButton("Cancel", null).show();
     }
 
     static String windowLabel(MainActivity a, String id) {

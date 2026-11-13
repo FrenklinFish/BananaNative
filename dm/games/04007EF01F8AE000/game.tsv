@@ -43,13 +43,32 @@ av1_decoder	dav1d
 # foliage lit dark, dungeon at about 25 fps (GPU 36 ms); Turnip T30 and Gen8 V39 play the dungeon at 29-30 fps with characters correct; and README.md "Rendering
 # fixes": "the stock driver stays not recommended for play"
 recommend	driver.id=8,driver.version&0xffc00000=0x80000000,driver.version&0x3ff000<0x320000	driver=18
-# Android, Game resolution: the game picks its output from the display's largest buffer (hle_vi.c: 4K in console mode, the 1080p screen in handheld mode) and its render
-# preset from that, the graphics scale and the performance mode. Docked it renders 1024x576 and DLSS takes it to 2048x1152; handheld 960x540 to 1920x1080 (the crops
-# WindowCrop logs). It queries the largest buffer every frame and picks the preset again when it changes, so the in-game panel can switch it while the game runs.
-# One console row and one handheld row: the launcher offers them as Docked (1152p) and Handheld (1080p) (Profile.modes). Original without a row is the profile's op_mode, console
-graphics_scale	2048x1152	1	console
-graphics_scale	1920x1080	0	handheld
-# The default when the player has chosen none: 1920x1080, handheld (the launcher's own default, written out so one line changes it; original = docked)
+# Every phone: FSR 3.1 as the Upscaler (the DLSS stand-in's DM_VK_DLSS=4). README.md "DLSS on a stand-in", per #151: finer detail than GSR 2 (c2) and about 30-40 % less
+# unexplained flicker in camera pans and dashes, still edges equal at the default sharpness 0.5; the cost about 2 ms more GPU on Turnip, about 34 against 26 ms on an older
+# stock driver (#151), about 3 ms more on the Pad 3's stock 512.800. It runs on Turnip and on Qualcomm's own driver, switches live, is clean with frame generation where GSR 2 is.
+# A driver row sets only the driver, so this row and the one above apply independently; a player's own Upscaler choice is kept
+recommend	any	upscaler=fsr3
+# Android, resolution: the game builds six render configurations (output size, render size its DLSS takes to the output, shadow and level-of-detail settings; slots main+0x223e0b0)
+# and picks one by the performance mode (Boost: the docked family, Normal: the handheld one), the graphics scale and the display's largest buffer, again on each notification 31.
+# The host writes the player's output (DM_WINDOW_SIZE) and render size (DM_RENDER_PCT: 33 / 50 / 59 / 67 / 100 % of it) into all six and answers the performance mode from the graphics
+# quality (DM_GFX_QUALITY: quality = Boost, the docked shadows and detail; performance = Normal, the handheld ones), and the largest buffer from the output (the game cuts an output
+# larger than that buffer), at least 2 (2560x1440) under quality and 1 (1920x1080) under performance (hle_render.c). The game's own sizes, C0 to C5: 2560x1440 / 1280x720 docked
+# and 2048x1152 / 1024x576 (today's Docked), 1706x960 / 853x480, 1920x1080 / 960x540 (Handheld), 1536x864 / 768x432, 1280x720 / 640x360. Render sizes above C0's 1280x720 are
+# scaled down to it while the game's own 1008 MiB render target pool is in use (rt_pool below sizes the pool for the setting; DM_RENDER_UNCAPPED=1 lifts the cap; DM_NVN_POOLS=1
+# logs the pools' high-water marks). Outputs from 720p up (min)
+render_cfg	db93b0125f4850601d61c3edde012f8e	0x223e0b0	6	16	0x0	0x8	2560x1440/1280x720,2048x1152/1024x576,1706x960/853x480,1920x1080/960x540,1536x864/768x432,1280x720/640x360	original=2048x1152	max_render=1280x720	min=720
+render_quality	quality=boost:2	performance=normal:1
+# Android: the render target pool the game makes at main+0x646f88 (movz w9, #0x3f00, lsl #16: 1008 MiB, CPU_NO_ACCESS | GPU_CACHED | COMPRESSIBLE; its allocator's range
+# follows the size it records) is sized at load for the setting the game starts with (loader.c rt_pool_apply): the game's own 1008 MiB while the render size is at most 1280x720
+# and the output below 1440 lines; 1536 MiB, and render sizes up to 1920x1080, for a 1440 output or a larger render size; 2048 MiB, and up to 2560x1440, for a render size above
+# 1920x1080 (1440p or 1152p at 100 %). A device of more than 12 GB (the low-RAM keys below do not apply) gets 1536 MiB at least. The loader writes the word before the text is
+# sealed, after checking the build and the word. Its pages stay lazy on Android (render targets have their own Vulkan memory). Pool high-water marks in light scenes: 1002.9 MiB
+# of 1008 at 2560x1440 / 1706x960 quality, 71.7-73.6 % of 1536 at that setting with the larger pool; about 720 MiB at 1080p 100 %. A change in the in-game panel that needs a
+# larger pool is clamped to this start's size until the next start. DM_RT_POOL_MB=<MiB> sets the size on any device (0: the game's own)
+rt_pool	db93b0125f4850601d61c3edde012f8e	main	0x646f88	52a7e009	1008	1536=1920x1080	2048=2560x1440	out_h=1440
+# The operation mode stays handheld whatever the setting: the game reads it only for its controller check and its sound mix
+op_mode	handheld
+# The default output when the player has chosen none: 1920x1080 (with the render scale's 50 % and performance: the game's own handheld configuration)
 android_window	1920x1080
 
 # ---- Variants (patches.py VARIANT_CUTS; Game settings > Aspect ratio) ----
@@ -69,6 +88,16 @@ mem_alias	0x400000000
 mem_stack	0x10000000
 app_pool	0x240000000
 sys_resource	0x4000000
+# Android, devices of 12 GB or less only (MemTotal up to 12 GiB, the AYN Thor's 11 GiB): memory pools of 256 MiB or more placed by parts, and the texture cache at most
+# 1024 MiB on top of the limit it measures. On the Thor (Adreno 740, Turnip) the placed memory went from 887 to 553 MiB, and the cache held at 1024 MiB with 6 prunes at 30 fps
+# (with DM_VK_PLACE_PART_MB=256 and DM_VK_IMG_LIMIT_MB=1024, the same values). DM_VK_LOW_RAM=0 turns both off, =1 applies them on any device
+low_ram_place_part_mb	256
+low_ram_img_cache_max_mb	1024
+# Android, the same devices: GetInfo TotalMemorySize reports 5632 MiB instead of app_pool's 9216; the pool, the map limit and SetHeapSize stay app_pool (hle_svc.c
+# reported_total). The game's SDK sizes its cache of freed pages from the total it reads at startup: on the Thor, after the long title sequence and a Continue into a battle,
+# the alias region held about 4.65 GB against 5.54-6.26 GB at 9216, at 30 fps, and the game was stopped by the low-memory killer in 0 of 4 runs against 3 of 3 at 9216.
+# A run that reported 4096 MiB mapped up to 4.28 GB past it with no failure
+low_ram_app_pool_mb	5632
 
 # ---- Shader split (shader_split.py) ----
 shader_groups	/Shaders/=shader /Effect/=effect /Layout/=layout

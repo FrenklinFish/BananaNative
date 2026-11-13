@@ -21,6 +21,7 @@
 #include "vka_zshare.h"
 #include "vka_gml.h"
 #include "vka_texlimit.h"
+#include "vka_lowram.h"
 #include "vka_spvpatch.h"
 #include "game_profile.h"
 #include "vka_texown.h"
@@ -1608,6 +1609,28 @@ static void img_evict_locked(vka_img *im) {
 static uint64_t g_img_lim, g_lim_frame, g_prune_dry;
 static int g_psi_pressed;   // memory pressure past VKTL_PSI_HOLD at the last update: measured every 15 frames instead of 60
 static uint64_t meminfo_kb(const char *buf, const char *key) { const char *p = strstr(buf, key); return p ? strtoull(p + strlen(key), NULL, 10) : 0; }
+// The profile's low-RAM keys (vka_lowram.h): decided once, from MemTotal, which does not change. One line says whether they apply, for a profile that sets them
+int vka_low_ram(void) {
+    static _Atomic int on = -1;
+    int r = atomic_load(&on);
+    if (r >= 0) return r;
+    int has = DM_GAME_LOW_RAM_PLACE_PART_MB || DM_GAME_LOW_RAM_IMG_CACHE_MAX_MB || DM_GAME_LOW_RAM_APP_POOL_MB, force = VKA_ENV("DM_VK_LOW_RAM", -1);
+    uint64_t total = 0;
+    if (has) {
+        int fd = open("/proc/meminfo", O_RDONLY | O_CLOEXEC);
+        if (fd >= 0) { char buf[2048]; ssize_t n = read(fd, buf, sizeof buf - 1); close(fd); if (n > 0) { buf[n] = 0; total = meminfo_kb(buf, "MemTotal:") << 10; } }
+    }
+    r = vklr_applies(has, total, force);
+    int exp = -1;
+    if (atomic_compare_exchange_strong(&on, &exp, r) && has)
+        VLOG("low-RAM profile keys %s: MemTotal %.0f MiB%s (placed parts from %d MiB, image cache at most %d MiB, reported memory total %d MiB; DM_VK_LOW_RAM=0 / 1 overrides)", r ? "apply" : "do not apply",
+             total / 1048576.0, force >= 0 ? (force ? ", DM_VK_LOW_RAM=1" : ", DM_VK_LOW_RAM=0") : total && total <= VKLR_MEM_TOTAL_MAX ? ", 12 GiB or less" : ", over 12 GiB",
+             DM_GAME_LOW_RAM_PLACE_PART_MB, DM_GAME_LOW_RAM_IMG_CACHE_MAX_MB, DM_GAME_LOW_RAM_APP_POOL_MB);
+    return atomic_load(&on);
+}
+int vka_low_ram_place_part_mb(void) { return DM_GAME_LOW_RAM_PLACE_PART_MB && vka_low_ram() ? DM_GAME_LOW_RAM_PLACE_PART_MB : 0; }
+// Read by hle_svc.c at the SDK's start, before the Vulkan device: vka_low_ram needs only /proc/meminfo, the switches (vka_ctl.c, getenv until the control thread sets one) and LOG
+int vka_low_ram_app_pool_mb(void) { return DM_GAME_LOW_RAM_APP_POOL_MB && vka_low_ram() ? DM_GAME_LOW_RAM_APP_POOL_MB : 0; }
 static void img_limit_update(uint64_t cur_frame) {   // caller holds g_tmu
     if (g_img_lim && cur_frame < g_lim_frame + (g_psi_pressed ? 15 : 60)) return;
     g_lim_frame = cur_frame;
@@ -1635,6 +1658,9 @@ static void img_limit_update(uint64_t cur_frame) {   // caller holds g_tmu
         }
     }
     uint64_t lim = env > 0 ? (uint64_t)env << 20 : vktl_limit(&in), old = g_img_lim;
+    // The profile's low-RAM ceiling (low_ram_img_cache_max_mb, vka_lowram.h): on top of the measured limit, which still acts below it; DM_VK_IMG_LIMIT_MB replaces both
+    uint64_t measured = lim, ceil_mb = env <= 0 && DM_GAME_LOW_RAM_IMG_CACHE_MAX_MB && vka_low_ram() ? DM_GAME_LOW_RAM_IMG_CACHE_MAX_MB : 0;
+    lim = vklr_ceiling(lim, ceil_mb << 20);
     int pressed = env <= 0 && in.psi_some10 >= VKTL_PSI_HOLD;
     if (pressed != g_psi_pressed) {
         static _Atomic int np;
@@ -1647,6 +1673,8 @@ static void img_limit_update(uint64_t cur_frame) {   // caller holds g_tmu
     static _Atomic int nl;
     if ((!old || d >= 512 * VKTL_MIB) && atomic_fetch_add(&nl, 1) < 16) {
         if (env > 0) VLOG("image cache limit %llu MiB (DM_VK_IMG_LIMIT_MB; images %.0f MiB)", (unsigned long long)(lim >> 20), imgs / 1048576.0);
+        else if (lim < measured) VLOG("image cache limit %llu MiB: the profile's ceiling on a low-RAM device (low_ram_img_cache_max_mb; measured %llu MiB): images %.0f MiB, MemTotal %.0f MiB, MemAvailable %.0f MiB",
+                                      (unsigned long long)(lim >> 20), (unsigned long long)(measured >> 20), imgs / 1048576.0, in.mem_total / 1048576.0, in.mem_avail / 1048576.0);
         else VLOG("image cache limit %llu MiB: images %.0f MiB, MemTotal %.0f MiB, MemAvailable %.0f MiB (reserve %.0f), image heap %.0f MiB, budget %.0f MiB, usage %.0f MiB%s",
                   (unsigned long long)(lim >> 20), imgs / 1048576.0, in.mem_total / 1048576.0, in.mem_avail / 1048576.0, vktl_reserve(in.mem_total) / 1048576.0,
                   in.heap_size / 1048576.0, in.heap_budget / 1048576.0, in.heap_usage / 1048576.0, V.mem_budget ? "" : " (no VK_EXT_memory_budget)");

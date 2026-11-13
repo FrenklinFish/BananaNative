@@ -87,8 +87,16 @@ def stampOf = { String game -> def f = new File(repo, "dm/games/$game/vk_delta.t
     deltaCurrent(game, ls) ? ls.findAll { it ==~ /stamp\t[0-9a-f]{12}\t[0-9a-f]{64}\t[0-9a-f]{64}/ }.collect { it.split('\t').drop(1).join(':') }.join(';') : '' }
 // and last what Game resolution sets for it (Profile.resolutionEnv): "window" with window_fn or res_levels rows (DM_WINDOW_SIZE: the window, or a cap on a dynamic
 // resolution), "scale:<choice>=<scale>/<console|handheld>,…" with graphics_scale rows (DM_GRAPHICS_SCALE and DM_OPMODE), empty when it has none (the launcher then offers no
-// Game resolution for it)
-def resolutionOf = { String game -> !tsvRows(game, 'window_fn').isEmpty() || !tsvRows(game, 'res_levels').isEmpty() ? 'window' : tsvRows(game, 'graphics_scale').with { rs -> rs.isEmpty() ? '' : 'scale:' + rs.collect { c -> "${c[1].trim()}=${c[2].trim()}/${c[3].trim()}" }.join(',') } }
+// Game resolution for it). A game with a render_cfg row gets "render:<min output height>:<original WxH>:<render_cfg max_render WxH>:<rt_pool's own MiB>:<MiB=WxH>/…:<out_h>"
+// instead (the rt_pool fields empty without that row): the Resolution, Upscaling quality and Graphics quality rows (Profile.renderCfg; DM_WINDOW_SIZE, DM_RENDER_PCT, DM_GFX_QUALITY)
+def renderOf = { String game ->
+    def rc = tsvRows(game, 'render_cfg'); if (rc.isEmpty()) return ''
+    def kv = rc[0].drop(8).findAll { it.contains('=') }.collectEntries { def p = it.trim().split('=', 2); [(p[0]): p[1]] }
+    def rp = tsvRows(game, 'rt_pool').collect { r -> r.collect { it.trim() } }
+    def pool = rp.isEmpty() ? '::' : rp[0][5] + ':' + rp[0].drop(6).findAll { it ==~ /\d+=\d+x\d+/ }.join('/') + ':' + (rp[0].find { it.startsWith('out_h=') }?.substring(6) ?: '0')
+    "render:${kv['min'] ?: '720'}:${kv['original'] ?: ''}:${kv['max_render'] ?: ''}:${pool}"
+}
+def resolutionOf = { String game -> !renderOf(game).isEmpty() ? renderOf(game) : !tsvRows(game, 'window_fn').isEmpty() || !tsvRows(game, 'res_levels').isEmpty() ? 'window' : tsvRows(game, 'graphics_scale').with { rs -> rs.isEmpty() ? '' : 'scale:' + rs.collect { c -> "${c[1].trim()}=${c[2].trim()}/${c[3].trim()}" }.join(',') } }
 // The RomFS checks (game.tsv romfs_check rows, as "<path>|<line>|<expected or main>", ';' between them: Profile.romfsChecks, RomfsCheck.java)
 def romfsChecksOf = { String game -> tsvRows(game, 'romfs_check').findAll { it.size() >= 4 }.collect { c -> [c[1].trim(), c[2].trim(), c[3].trim().replaceAll(/[\\"]/, ' ')].join('|') }.join(';') }
 // The profile's GPU timestamp mode (game.tsv gpu_timestamps: segment or submission, the host's default when it has no row): Game settings › GPU timing names it as "Game default"

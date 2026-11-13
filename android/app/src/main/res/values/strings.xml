@@ -1,3 +1,27 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
+    <!-- Resolution, Upscaling quality and Graphics quality (a game whose profile has a render_cfg row: Game settings and the in-game panel; Profile.renderOutLabel,
+         Profile.renderPctLabel, Profile.renderRestartNote) -->
+    <string name="render_res_title">Resolution</string>
+    <string name="render_upscale_title">Upscaling quality</string>
+    <string name="render_gfx_title">Graphics quality</string>
+    <!-- a size's label from its height; the game's original size; the suffix of a size above the original and of Native -->
+    <string name="render_res_height">%1$dp</string>
+    <string name="render_res_original">%1$dp (original docked)</string>
+    <string name="render_heavy">%1$s (heavy)</string>
+    <!-- in the order of Profile.RENDER_PCTS: 100, 67, 59, 50, 33 % -->
+    <string-array name="render_upscale">
+        <item>Native</item>
+        <item>Quality</item>
+        <item>Balanced</item>
+        <item>Performance</item>
+        <item>Ultra performance</item>
+    </string-array>
+    <!-- quality, then performance -->
+    <string-array name="render_gfx">
+        <item>Quality</item>
+        <item>Performance</item>
+    </string-array>
+    <!-- shown only when a pick needs another render target pool size than the running game loaded (in Game settings: than the setting stored before the pick) -->
+    <string name="render_restart_note">This change will apply on game restart.</string>
 </resources>

@@ -13,6 +13,7 @@ from pathlib import Path
 REPO = Path(__file__).resolve().parents[3]
 SRC = REPO / 'android/app/src/main/java/dev/nxnative/android'
 TEST = REPO / 'android/app/src/jvmtest/java/dev/nxnative/android/LauncherJvmTest.java'
+RES = REPO / 'android/app/src/main/res/values/strings.xml'   # the labels LauncherJvmTest checks (Profile.renderOutLabel)
 PLAT = REPO / 'dm/host/plat/plat_android.c'
 STUB = '''package dev.nxnative.android;
 public final class BuildConfig {
@@ -119,7 +120,7 @@ class LauncherJvm(unittest.TestCase):
         cls.tmp.cleanup()
 
     def java(self, *args, **kw):
-        return subprocess.run(['java', '-cp', str(self.classes), 'dev.nxnative.android.LauncherJvmTest', *map(str, args)], capture_output=True, text=True, **kw)
+        return subprocess.run(['java', '-Dnx.res=' + str(RES), '-cp', str(self.classes), 'dev.nxnative.android.LauncherJvmTest', *map(str, args)], capture_output=True, text=True, **kw)
 
     def test_saves_and_profiles(self):
         with tempfile.TemporaryDirectory() as d:
