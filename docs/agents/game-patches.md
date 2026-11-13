@@ -81,6 +81,7 @@ Every patch bound tighter than it could be: the open gaps, then the blocked, kep
 | `build` → `game` | Max Resolution: optional full-scale dynamic resolution path | rendering | blocked: one full build ID and branch verified | judgement | 1 | [The Legend of Zelda: Ocarina of Time](../../dm/games/0400486024DEC000/README.md) | the title has its own dynamic resolution controller and full-scale branch |
 | `build` → `game` | movie player: the plain player instead of the NDVE-enhanced one | frame rate | blocked: one build on hand; the faster tensor path is translator work (docs/reference/shaders.md, Ampere HMMA through simdgroup_matrix, Open) | judgement | 1 | [The Legend of Zelda: Ocarina of Time](../../dm/games/0400486024DEC000/README.md) | a workaround: the tensor network costs 47.5 ms of GPU a movie frame; a function fingerprint could carry it over updates, and once the translator keeps LDSM / MOVM / HMMA chains in matrices the cut can go |
 | `build` → `game` | Ocarina of Time camera and 2D layer aspect callback in main v131072 | rendering | blocked: one build on hand; the projection reads are plain sead code a function fingerprint could find | judgement | 1 | [The Legend of Zelda: Ocarina of Time](../../dm/games/0400486024DEC000/README.md) | the callback reads sead's PerspectiveProjection fields, the same in every title of this engine, but its eight gates (five cameras, the HUD canvas, the movie viewport and the save picture) are fixed addresses of this build |
+| `build` → `game` | Pokopia camera aspect hooks in main v2.0.1 | rendering | blocked: future game builds require exact offset and original-word validation | checked: main 76a489f3bd3642fa5e18bd83d32c98ba (Fold 7 observation, 2026-11-11) | 1 | [Pokemon Pokopia](../../dm/games/0400A3A01EE4C000/README.md) | camera layout/offsets are specific to this exact game build |
 | `build` → `game` | Texture Pool x2: optional larger initial graphics allocation | memory | blocked: one full build ID and allocator call verified | judgement | 1 | [The Legend of Zelda: Ocarina of Time](../../dm/games/0400486024DEC000/README.md) | the allocator is in the game and full-scale rendering can exhaust the original pool |
 | `build` → unreviewed | Fire Emblem Fortune's Weave native 4:3 variant (VARIANT_CUTS['43']: camera aspect and ui2d pane rules) | rendering | unreviewed | judgement | 1 | [Fire Emblem Fortune's Weave](../../dm/games/04007EF01F8AE000/README.md) | an opt-in variant (Game settings › Aspect ratio) of about 230 words in code caves of this main; each ui2d rule names panes of this build's layouts |
 
@@ -107,6 +108,7 @@ Every patch bound tighter than it could be: the open gaps, then the blocked, kep
 | [NieR:Automata The End of YoRHa Edition (010056B015FE8000)](#nierautomata-the-end-of-yorha-edition-010056b015fe8000) | 8 | 0 | 0 | 0 | 1 | `build` → `game` ×2 |
 | [NieR:Automata The End of YoRHa Edition (0100B8E016F76000)](#nierautomata-the-end-of-yorha-edition-0100b8e016f76000) | 8 | 0 | 0 | 0 | 1 | `build` → `game` ×2 |
 | [Paper Mario: The Thousand-Year Door](#paper-mario-the-thousand-year-door) | 1 | 0 | 1 | 0 | 0 | `build` → `game` |
+| [Pokemon Pokopia](#pokemon-pokopia) | 0 | 3 | 0 | 0 | 1 | `build` → `game` |
 | [Pokémon Brilliant Diamond](#pokémon-brilliant-diamond) | 0 | 0 | 0 | 0 | 1 | `build` → `engine` |
 | [Subnautica](#subnautica) | 1 | 0 | 0 | 0 | 0 | `build` → `game` |
 | [Subnautica: Below Zero](#subnautica-below-zero) | 1 | 0 | 0 | 0 | 0 | `build` → `game` |
@@ -480,6 +482,18 @@ Every patch bound tighter than it could be: the open gaps, then the blocked, kep
 - **1.0.1 `main`** `0effe4af…` ([patches.py:5](../../dm/games/0100ECD018EBE000/patches.py#L5))
   - cut `+0x2e77a4`: frame step floor in 60 Hz vsyncs: mov w9,#2 → mov w9,#1 (the game steps by the vsyncs that passed, down to one)
   - frame step `+0x2e77f8`: frame step: the base clock steps by the host's vsyncs (state page target fps; 0 = the game's measured step)
+
+### Pokemon Pokopia
+
+[Pokemon Pokopia](../../dm/games/0400A3A01EE4C000/README.md), `0400A3A01EE4C000`, [patches.py](../../dm/games/0400A3A01EE4C000/patches.py).
+
+- **`build` → `game`**, rendering, blocked: future game builds require exact offset and original-word validation, checked: main 76a489f3bd3642fa5e18bd83d32c98ba (Fold 7 observation, 2026-11-11): Pokopia camera aspect hooks in main v2.0.1. Camera layout/offsets are specific to this exact game build
+
+- **v655360 `main`** `76a489f3…` ([patches.py:8](../../dm/games/0400A3A01EE4C000/patches.py#L8))
+  - gate 28 at `+0x8cc128`: scene camera enters render view; x20 camera
+  - gate 29 at `+0x1f12130`: projection builder entry; x0 camera
+  - gate 30 at `+0x1f12354`: perspective projection exit; x19 camera
+  - host [pkp_aspect.c:58](../../dm/host/android/pkp_aspect.c#L58): build check
 
 ### Pokémon Brilliant Diamond
 

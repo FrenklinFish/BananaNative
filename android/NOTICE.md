@@ -99,4 +99,9 @@ thanks to their authors. Each download keeps its own licence: Mesa's Turnip driv
 The camera, HUD, movie and save picture sites (the UI, movie and matrix sites are Ivan0xFF's, the save picture and the narrow-screen HUD Hookshot's own) and the idea of replacing the 16:9 ratio where the projection is read come from Jbuck7's GameBanana mod 737495 (Ocarina of Time 1.1.1 ultrawide), carried to the
 NX2navi patch list `patches-v111.txt` by Ivan0xFF (MIT) and to [`nx2/oot_wide.py`](https://github.com/NotRexed/Hookshot) of Hookshot by NotRexed (GPL-3.0). The Android file re-expresses
 them as host callbacks on rewriter gates and adds the vertical field-of-view correction for pictures narrower than 16:9. It lives under `dm/host/android/` so the Mac and iPhone builds do not include it.
-
+**The optional Pokopia world-camera correction is GPL-3.0-or-later.**
+[`dm/host/android/pkp_aspect.c`](../dm/host/android/pkp_aspect.c) adapts the camera/FOV handling in
+[`runtime/games/pkp/render/pkp_aspect.cpp`](https://github.com/Dittobyte/Recompia/blob/75dae2f2ccdada74e6b8ba12ea7de30560a84221/runtime/games/pkp/render/pkp_aspect.cpp)
+from Recompia revision `75dae2f2ccdada74e6b8ba12ea7de30560a84221`, whose file carries `SPDX-License-Identifier: GPL-3.0-or-later`.
+The Android adaptation keeps the game's original aspect field and corrects its completed projection. The GPL implementation lives under
+`dm/host/android/` so the Mac and iPhone host builds do not include it; the MIT files retain their own license.
