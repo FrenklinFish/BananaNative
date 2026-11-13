@@ -289,7 +289,10 @@ final class Ui {
      * to edge, targetSdk 35), at a readable width centered on a wide window, with a cream scrim under the status bar so scrolled cards never run under the clock.
      * Returns the column to fill.
      */
-    static LinearLayout page(Activity a, FrameLayout frame, int maxWidthDp) {
+    static LinearLayout page(Activity a, FrameLayout frame, int maxWidthDp) { return page(a, frame, maxWidthDp, false); }
+
+    /** The same; with a bar below the page (ReleasePage's Update / Later), which takes the navigation bar's inset itself: the page keeps a plain 16 dp under its last row */
+    static LinearLayout page(Activity a, FrameLayout frame, int maxWidthDp, boolean barBelow) {
         // Edge to edge on every Android: from Android 15 targetSdk 35 makes it so, but before it the window keeps its content clear of the bars itself and
         // consumes the insets, so the listener below never ran and the column had no gutter and no width limit (cards from edge to edge on Android 13)
         a.getWindow().setDecorFitsSystemWindows(false);
@@ -309,7 +312,7 @@ final class Ui {
             int w = a.getResources().getDisplayMetrics().widthPixels;
             int gutter = dp(a, a.getResources().getConfiguration().screenWidthDp < 360 ? 16 : 20);
             int side = Math.max(gutter, (w - i.left - i.right - dp(a, maxWidthDp)) / 2);
-            v.setPadding(side + i.left, i.top + dp(a, 8), side + i.right, i.bottom + dp(a, 24));
+            v.setPadding(side + i.left, i.top + dp(a, 8), side + i.right, barBelow ? dp(a, 16) : i.bottom + dp(a, 24));
             scrim.getLayoutParams().height = i.top;
             scrim.requestLayout();
             return in;

@@ -19,6 +19,17 @@ class Wiring(unittest.TestCase):
         self.assertGreaterEqual(t.count('fitOrientation();'), 2)   # onCreate and onConfigurationChanged (a fold)
         self.assertIn('android:screenOrientation="sensorLandscape"', (REPO / 'android/app/src/main/AndroidManifest.xml').read_text())   # phones keep it
 
+    def test_screen_shape_and_rotation_wiring(self):
+        a = (JAVA / 'GameActivity.java').read_text()
+        self.assertIn('ScreenShape.CHOICE.equals(aspect)', a)   # Aspect ratio > Screen shape passes the window's shape
+        self.assertIn('ScreenShape.ratio(', a)
+        self.assertIn('Prefs.rotationAuto(this)', a)   # Settings > Screen rotation: Automatic drops the orientation request
+        gs = (JAVA / 'GameSettings.java').read_text()
+        self.assertIn('ScreenShape.CHOICE', gs)
+        self.assertIn('Screen shape', gs)
+        self.assertIn('"Screen rotation"', (JAVA / 'MainActivity.java').read_text())
+        self.assertIn('defY()', (JAVA / 'TouchControls.java').read_text())   # a portrait window puts the picture at the top
+
     def test_overlay_uses_insets(self):
         t = (JAVA / 'GameActivity.java').read_text()
         self.assertIn('RoundedCorner.POSITION_TOP_RIGHT', t)
@@ -38,6 +49,15 @@ class ScreenFitJvm(unittest.TestCase):
             self.assertEqual(r.stdout.strip(), 'ok')
 
     def test_orientation(self): self.run_jvm('GameOrientation.java', 'GameOrientationJvmTest.java', 'GameOrientationJvmTest')
+    def test_screen_shape(self):
+        with tempfile.TemporaryDirectory() as d:
+            c = subprocess.run(['javac', '-Xlint:all', '-Werror', '-encoding', 'UTF-8', '-d', d, str(JAVA / 'ScreenShape.java'), str(JAVA / 'GameOrientation.java'),
+                                str(TESTS / 'ScreenShapeJvmTest.java')], capture_output=True, text=True)
+            self.assertEqual(c.returncode, 0, c.stderr)
+            r = subprocess.run(['java', '-cp', d, 'dev.nxnative.android.ScreenShapeJvmTest'], capture_output=True, text=True)
+            self.assertEqual(r.returncode, 0, r.stderr)
+            self.assertEqual(r.stdout.strip(), 'ok')
+
     def test_overlay_inset(self): self.run_jvm('OverlayInset.java', 'OverlayInsetJvmTest.java', 'OverlayInsetJvmTest')
 
 

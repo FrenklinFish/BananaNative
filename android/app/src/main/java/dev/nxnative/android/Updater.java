@@ -55,7 +55,7 @@ import javax.net.ssl.HttpsURLConnection;
  * at once, with short timeouts (UpdateCheck.SOURCES: GitHub's releases API for moceure/BananaNative, the list, not /releases/latest: every release is a
  * pre-release, which /latest skips; then the same releases on git.eden-emu.dev's Forgejo API), each list through a URL with a fresh cache-busting query
  * parameter and Cache-Control: no-cache, so no shared cache in front of a host can answer with an old list (releases(Source)). A source that fails is left out (a log line); when a release in
- * any answer is newer than this app (UpdateCheck.pickAll: the highest version) a popup offers Update or Later. Update downloads the release's own APK through its
+ * any answer is newer than this app (UpdateCheck.pickAll: the highest version) a full page (ReleasePage: the notes with their pictures, a bar with Update and Later) offers the update. Update downloads the release's own APK through its
  * browser_download_url (only on that source's own hosts; the source counts the download) into the cache, checks its size and, when the API gives a digest, its
  * SHA-256, and installs it with PackageInstaller (limited to this package; Android itself refuses an update signed with another certificate); Android asks the player to confirm, and first to allow installs from this app when that is off. A check that fails says nothing (a log line).
  * <p>
@@ -227,7 +227,7 @@ final class Updater {
 
     private static boolean gone(Activity a) { return a.isFinishing() || a.isDestroyed(); }
 
-    /** Home's start (MainActivity.onCreate, once per process): old downloads go, then the check; a newer release opens the popup */
+    /** Home's start (MainActivity.onCreate, once per process): old downloads go, then the check; a newer release opens the release page */
     static void onStart(Activity a) {
         if (checkedThisStart) return;
         checkedThisStart = true;
@@ -250,7 +250,7 @@ final class Updater {
         }, "nx-update-check").start();
     }
 
-    /** Settings › Updates › Check for updates: the popup when a newer release exists, else "You're up to date" */
+    /** Settings › Updates › Check for updates: the release page when a newer release exists, else "You're up to date" */
     static void checkNow(Activity a) {
         if (!available(a)) {
             msg(a, "Updates", "Only the release app (dev.bananative.android) checks for updates. A test app checks when update.txt in its files folder names repo= or url=.");
@@ -278,35 +278,8 @@ final class Updater {
 
     private static void msg(Activity a, String title, String msg) { new AlertDialog.Builder(a).setTitle(title).setMessage(msg).setPositiveButton("OK", null).show(); }
 
-    /** The popup: version, the release notes (styled, scrolling when long), size; Update, Later */
-    static void popup(Activity a, UpdateCheck.Update u) {
-        int p = Ui.dp(a, 20);
-        LinearLayout box = new LinearLayout(a);
-        box.setOrientation(LinearLayout.VERTICAL);
-        box.setPadding(p, Ui.dp(a, 4), p, Ui.dp(a, 8));
-        box.addView(Ui.body(a, "Version " + UpdateCheck.text(u.version) + " is available (you have " + version(a) + ")."));
-        CharSequence notes = styled(a, ReleaseNotes.parse(u.release.body));
-        if (notes.length() > 0) {
-            TextView t = Ui.text(a, notes, 14, R.color.bn_text, 400);
-            t.setLineSpacing(Ui.dp(a, 2), 1f);
-            t.setMovementMethod(android.text.method.LinkMovementMethod.getInstance());   // links open in the browser
-            t.setFocusable(false);   // else the dialog focuses it and the notes open scrolled to their end
-            int max = a.getResources().getDisplayMetrics().heightPixels * 45 / 100;   // the notes scroll within this; the version, size and buttons stay in view
-            ScrollView sv = new ScrollView(a) {
-                @Override protected void onMeasure(int w, int h) { super.onMeasure(w, MeasureSpec.makeMeasureSpec(max, MeasureSpec.AT_MOST)); }
-            };
-            sv.setBackground(Ui.round(Ui.col(a, R.color.bn_tint), Ui.dp(a, 12), 0, 0));
-            sv.setPadding(Ui.dp(a, 12), Ui.dp(a, 8), Ui.dp(a, 12), Ui.dp(a, 8));
-            sv.setClipToPadding(false);
-            sv.addView(t);
-            Ui.add(box, sv, 12);
-        }
-        Ui.add(box, Ui.small(a, u.apk.name + " · " + UpdateCheck.mb(u.apk.size) + " · from " + u.release.source.name), 10);
-        new AlertDialog.Builder(a).setTitle("Update available").setView(box)
-                .setPositiveButton("Update", (d, w) -> download(a, u))
-                .setNegativeButton("Later", null)
-                .show();
-    }
+    /** The release page (ReleasePage): version, the release notes with their pictures, size; Later, Update */
+    static void popup(Activity a, UpdateCheck.Update u) { ReleasePage.show(a, u, version(a), () -> download(a, u)); }
 
     /** ReleaseNotes' blocks as styled text: headings bold and larger, bullets and numbers indented by their level, code monospace, links as their text */
     static CharSequence styled(Context c, List<ReleaseNotes.Block> blocks) {
@@ -316,6 +289,7 @@ final class Updater {
         int bullet = Ui.col(c, R.color.bn_text_2), codeBg = Ui.col(c, R.color.bn_card_stroke);
         ReleaseNotes.Kind prev = null;
         for (ReleaseNotes.Block x : blocks) {
+            if (x.kind == ReleaseNotes.Kind.IMAGE) continue;   // pictures are ReleasePage's
             boolean item = x.kind == ReleaseNotes.Kind.BULLET || x.kind == ReleaseNotes.Kind.NUMBER;
             boolean prevItem = prev == ReleaseNotes.Kind.BULLET || prev == ReleaseNotes.Kind.NUMBER;
             if (b.length() > 0 && !(item && prevItem)) b.append("\n");   // a blank line between paragraphs, none between a list's items

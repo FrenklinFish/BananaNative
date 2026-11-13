@@ -402,6 +402,7 @@ public final class GameActivity extends Activity implements SurfaceHolder.Callba
     /** The DM_ switches this build reads (BuildConfig.NX_ENV_SWITCHES, from docs/env_switches.tsv) */
     static final java.util.Set<String> KNOWN_SWITCHES = new java.util.HashSet<>(java.util.Arrays.asList(BuildConfig.NX_ENV_SWITCHES.split(" ")));
     private final List<String> unknownNotes = new ArrayList<>();
+    private String shapeNote;   // Aspect ratio › Screen shape: the window it read and the shape passed, for the log
     private int readinessEnv;   // the lines the readiness check ran with (readinessHold), for the log
 
     /** Where a user line with this key came from, for the [RED] line: the last of env.txt, the game's settings, env-<id>.txt that has it */
@@ -462,6 +463,13 @@ public final class GameActivity extends Activity implements SurfaceHolder.Callba
         if (variant != null) {   // Game settings › Aspect ratio: the pack's native-aspect modules (<pack>/<variant>/, loader.c) and the picture shown at that aspect
             env.add("DM_PATCH_VARIANT=" + variant);
             env.add("DM_VK_PICTURE_ASPECT=" + aspect);
+        } else if (aspect != null && Profile.of(id) != null && Arrays.asList(Profile.of(id).cameraAspects.split(",")).contains(aspect)) {   // a shape the host's camera patch follows (game.tsv aspect rows): the picture at that shape, no variant
+            env.add("DM_VK_PICTURE_ASPECT=" + aspect);
+        } else if (ScreenShape.CHOICE.equals(aspect) && Profile.of(id) != null && !Profile.of(id).cameraAspects.isEmpty()) {   // Screen shape: the window's own shape (ScreenShape), read now, once; a 16:9-ish window passes nothing
+            android.graphics.Rect b = getWindowManager().getCurrentWindowMetrics().getBounds();
+            String shape = ScreenShape.ratio(b.width(), b.height(), orientationFixed());
+            if (shape != null) env.add("DM_VK_PICTURE_ASPECT=" + shape);
+            shapeNote = ("[nxlaunch] aspect ratio: screen shape, window " + b.width() + "x" + b.height() + (orientationFixed() ? " (landscape)" : "") + (shape == null ? ": about 16:9, nothing passed" : " -> " + shape));
         }
         int picSize = Prefs.pictureSize(this, id);   // the in-game panel's Picture size; 100 (the default) is not passed
         if (picSize < PictureFit.SIZE_MAX) env.add("DM_VK_PICTURE_SIZE=" + picSize);
@@ -738,6 +746,7 @@ public final class GameActivity extends Activity implements SurfaceHolder.Callba
             Native.note(gpuNote + " (picked in the launcher; a DM_VK_DRIVER line in env.txt wins, the host's [vk] driver line says which ran)");
             Native.note(Recommend.logLine(Prefs.recStates(this, id)));   // each recommended setting with its value and source (yours / recommended / default); env.txt lines come later and win
             if (resNote != null) Native.note(resNote);
+            if (shapeNote != null) Native.note(shapeNote);
             if (sceneNote != null) Native.note(sceneNote);
             input = Native.hasInput();
             started = true;
@@ -1108,10 +1117,13 @@ public final class GameActivity extends Activity implements SurfaceHolder.Callba
      * is already resizable (targetSdk 35), and these only change which part of the display the system gives a window that asks for an orientation, not the request
      */
     private void fitOrientation() {
-        android.graphics.Rect b = getWindowManager().getMaximumWindowMetrics().getBounds();
-        int want = GameOrientation.fixedLandscape(b.width(), b.height(), getResources().getDisplayMetrics().density)
-                ? android.content.pm.ActivityInfo.SCREEN_ORIENTATION_SENSOR_LANDSCAPE : android.content.pm.ActivityInfo.SCREEN_ORIENTATION_UNSPECIFIED;
+        int want = orientationFixed() ? android.content.pm.ActivityInfo.SCREEN_ORIENTATION_SENSOR_LANDSCAPE : android.content.pm.ActivityInfo.SCREEN_ORIENTATION_UNSPECIFIED;
         if (getRequestedOrientation() != want) setRequestedOrientation(want);
+    }
+    /** Whether the window asks for landscape (GameOrientation): Settings › Screen rotation Landscape, on a phone; Automatic asks for nothing */
+    private boolean orientationFixed() {
+        android.graphics.Rect b = getWindowManager().getMaximumWindowMetrics().getBounds();
+        return GameOrientation.fixedLandscape(b.width(), b.height(), getResources().getDisplayMetrics().density, Prefs.rotationAuto(this));
     }
 
     /** Full screen: the status and navigation bars (and the swipe handle) are hidden, a swipe from the edge shows them for a moment; the picture also runs under a display cutout */

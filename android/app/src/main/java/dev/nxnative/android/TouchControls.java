@@ -182,6 +182,9 @@ final class TouchControls extends View {
         return u > dm.density * 0.6f && u < dm.density * 1.6f ? u : dm.density;
     }
 
+    /** Where the picture sits in the free space by default: the middle; in a portrait window (Settings › Screen rotation: Automatic) the top, so the controls have the free area below it */
+    private float defY() { return getHeight() > getWidth() ? 0f : 0.5f; }
+
     private void layout(int w, int h) {
         if (w <= 0 || h <= 0) return;
         float dp = TypedValue.applyDimension(TypedValue.COMPLEX_UNIT_DIP, 1, getResources().getDisplayMetrics()), u = unit();
@@ -283,7 +286,7 @@ final class TouchControls extends View {
 
     private boolean custom() {
         for (int g = 0; g < GROUPS; g++) if (gdx[g] != 0 || gdy[g] != 0 || gsc[g] != 1) return true;
-        return placeX != 0.5f || placeY != 0.5f;
+        return placeX != 0.5f || placeY != defY();
     }
 
     private void load() {
@@ -293,8 +296,8 @@ final class TouchControls extends View {
             try { gdx[g] = Float.parseFloat(v[0]); gdy[g] = Float.parseFloat(v[1]); gsc[g] = Float.parseFloat(v[2]); }
             catch (RuntimeException e) { gdx[g] = 0; gdy[g] = 0; gsc[g] = 1; }
         }
-        String[] v = prefs().getString("picture@" + prof, "0.5 0.5").split(" ");
-        try { placeX = Float.parseFloat(v[0]); placeY = Float.parseFloat(v[1]); } catch (RuntimeException e) { placeX = placeY = 0.5f; }
+        String[] v = prefs().getString("picture@" + prof, "0.5 " + defY()).split(" ");
+        try { placeX = Float.parseFloat(v[0]); placeY = Float.parseFloat(v[1]); } catch (RuntimeException e) { placeX = 0.5f; placeY = defY(); }
     }
 
     private void saveLayout() {
@@ -337,7 +340,7 @@ final class TouchControls extends View {
     }
 
     private void resetLayout() {
-        Arrays.fill(gdx, 0); Arrays.fill(gdy, 0); Arrays.fill(gsc, 1); placeX = placeY = 0.5f;
+        Arrays.fill(gdx, 0); Arrays.fill(gdy, 0); Arrays.fill(gsc, 1); placeX = 0.5f; placeY = defY();
         relayout(); saveLayout();
     }
 

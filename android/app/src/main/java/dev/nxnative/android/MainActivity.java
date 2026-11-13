@@ -130,6 +130,7 @@ public final class MainActivity extends Activity {
 
     @SuppressWarnings("deprecation")
     @Override public void onBackPressed() {
+        if (ReleasePage.back(this)) return;   // the release page over Home
         if (settingsPage || settingsGame != null) page(false);
         else super.onBackPressed();
     }
@@ -201,6 +202,12 @@ public final class MainActivity extends Activity {
                 .setNegativeButton("Cancel", null).show());
         touch.value(touchLabel(TouchControls.mode(this)));
         play.addView(touch.view);
+        Ui.Setting rot = new Ui.Setting(this, "🔄", "Screen rotation", null).chevron(this);
+        rot.view.setOnClickListener(v -> new AlertDialog.Builder(this).setTitle("Screen rotation")
+                .setSingleChoiceItems(Prefs.ROTATION_NAMES, Prefs.rotationAuto(this) ? 1 : 0, (d, w) -> { Prefs.rotationAuto(this, w == 1); rot.value(rotationLabel(w == 1)); d.dismiss(); })
+                .setNegativeButton("Cancel", null).show());
+        rot.value(rotationLabel(Prefs.rotationAuto(this)));
+        play.addView(rot.view);
         play.addView(new Ui.Setting(this, "🔘", "Show / hide button", null).toggle(this, TouchControls.toggleButton(this), (b, on) -> TouchControls.toggleButton(this, on))
                 .value("The small button at the top centre that hides the on-screen controls").view);
         // How a controller opens the in-game panel (PadPanel); the panel opens by touch with a swipe in from the right edge or Back
@@ -328,6 +335,7 @@ public final class MainActivity extends Activity {
         if ((settingsPage || settingsGame != null) && (i.hasExtra("game") || i.hasExtra("add_game") || i.hasExtra("ondevice_dump") || i.hasExtra("ondevice_pause"))) page(false);   // these act on Home's cards
         Ondevice.fromIntent(this, i);   // --es ondevice_dump <dump folder> [--ez ondevice_start true] (Ondevice)
         GpuDriver.fromIntent(this, i);   // --es gpu_driver_zip <zip> / --es gpu_driver <name | system>
+        if (!BuildConfig.NX_LIVE && i.getBooleanExtra("release_page_sample", false)) Updater.popup(this, ReleasePage.sample(this));   // test builds: --ez release_page_sample true shows the release page with a sample body
         PackUi.fromIntent(this, i);   // test app: --es pack_title <id> --es pack_export <folder> | --es pack_import <zip or folder>
         String fg = i.getStringExtra("frontend_game");   // FrontendLaunch: a game it could not start at once
         if (fg != null) { fromFrontend(new File(fg)); return; }
@@ -1374,6 +1382,7 @@ public final class MainActivity extends Activity {
         return PadPanel.OPEN_NAMES[v] + ". By touch: swipe in from the right edge, or Back";
     }
     private static String touchLabel(int m) { return m == TouchControls.MODE_AUTO ? "Auto: hidden while a controller is connected" : TouchControls.MODE_NAMES[m]; }
+    private static String rotationLabel(boolean auto) { return auto ? "Automatic: the game follows the phone's rotation, portrait too" : "Landscape: the game window stays horizontal on a phone"; }
     /** A default's choice in Settings (no "Default" entry: this is the default) */
     private void pick(String title, String[] items, int cur, java.util.function.IntConsumer set) {
         new AlertDialog.Builder(this).setTitle(title).setSingleChoiceItems(items, cur, (d, w) -> { set.accept(w); refreshSettings(); d.dismiss(); }).setNegativeButton("Cancel", null).show();

@@ -773,21 +773,28 @@ final class GameSettings {
         List<String> out = new ArrayList<>();
         if (p == null) return out;
         for (String v : p.variants.split(",")) { int eq = v.indexOf('='); if (eq > 0 && v.substring(eq + 1).matches("[0-9]+:[0-9]+")) out.add(v.substring(eq + 1)); }
+        for (String v : p.cameraAspects.split(",")) if (v.matches("[0-9]+:[0-9]+") && !out.contains(v)) out.add(v);   // the host follows these with the game's 3D cameras (no module variant)
+        if (!p.cameraAspects.isEmpty()) out.add(ScreenShape.CHOICE);   // last: the window's own shape, for a game that follows any shape
         return out;
     }
 
     static String aspectLabel(android.content.Context a, String id) {
         String l = Prefs.aspect(a, id);
-        return l == null || !aspects(Profile.of(id)).contains(l) ? "16:9 (as shipped)" : l + " (native)";
+        Profile p = Profile.of(id);
+        if (ScreenShape.CHOICE.equals(l) && aspects(p).contains(l)) return "Screen shape";
+        return l == null || !aspects(p).contains(l) ? "16:9 (as shipped)" : l + (p.aspectVariant(l) != null ? " (native)" : " (3D view)");
     }
 
     /** Aspect ratio: as shipped, or a native aspect mod (the pack holds both, so it takes effect at the next start without Prepare); 4:3 shows the picture at 4:3, filling a
-     *  4:3 screen and with side bars on a wider one (Display › Stretch still fills the screen) */
+     *  4:3 screen and with side bars on a wider one (Display › Stretch still fills the screen). Screen shape (a game whose cameras follow any shape) is the game window's own
+     *  shape, taken at the start (ScreenShape), so the picture fills the screen */
     private static void aspect(MainActivity a, Game g, Runnable done) {
         List<String> as = aspects(Profile.of(g.titleId));
         String[] labels = new String[as.size() + 1];
         labels[0] = "16:9 (as shipped)";
-        for (int k = 0; k < as.size(); k++) labels[k + 1] = as.get(k) + " (native: cameras and menus laid out for " + as.get(k) + ")";
+        for (int k = 0; k < as.size(); k++) labels[k + 1] = ScreenShape.CHOICE.equals(as.get(k)) ? "Screen shape (the picture fills the window; applies at the next start)"
+                    : as.get(k) + (Profile.of(g.titleId).aspectVariant(as.get(k)) != null ? " (native: cameras and menus laid out for " + as.get(k) + ")"
+                    : " (3D view follows it; HUD and menus keep their 16:9 layout)");
         String cur = Prefs.aspect(a, g.titleId);
         int checked = cur == null ? 0 : Math.max(0, as.indexOf(cur) + 1);
         new AlertDialog.Builder(a).setTitle("Aspect ratio · " + g.name).setSingleChoiceItems(labels, checked, (x, w) -> {

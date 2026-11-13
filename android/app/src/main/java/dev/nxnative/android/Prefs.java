@@ -78,6 +78,10 @@ final class Prefs {
     static void padMap(Context c, String titleId, String spec) { put(c, gameKey("pad_map", titleId), spec); }
 
     /** Game settings › Display (per game): false = Fit (keep aspect, letterboxed; the default), true = Stretch to screen (DM_VK_STRETCH=1: the picture fills the display) */
+    /** Settings › Screen rotation: false = Landscape (the default: the game window is locked to landscape on a phone), true = Automatic (no orientation request, the window follows the display, portrait too) */
+    static final String[] ROTATION_NAMES = {"Landscape", "Automatic"};
+    static boolean rotationAuto(Context c) { return of(c).getBoolean("rotation_auto", false); }
+    static void rotationAuto(Context c, boolean on) { of(c).edit().putBoolean("rotation_auto", on).commit(); }
     static final String[] DISPLAY_NAMES = {"Fit (keep aspect)", "Stretch to screen"};
     static boolean stretch(Context c, String titleId) { return of(c).getBoolean(gameKey("stretch", titleId), false); }
     static void stretch(Context c, String titleId, boolean on) { of(c).edit().putBoolean(gameKey("stretch", titleId), on).commit(); }

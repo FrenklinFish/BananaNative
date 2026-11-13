@@ -94,3 +94,9 @@ taps it, from the public GitHub release pages of [MrPurple666/purple-turnip](htt
 [Weab-chan/freedreno_turnip-CI](https://github.com/Weab-chan/freedreno_turnip-CI), [crueter/GameHub-8Elite-Drivers](https://github.com/crueter/GameHub-8Elite-Drivers)
 and [StevenMXZ/Adreno-Tools-Drivers](https://github.com/StevenMXZ/Adreno-Tools-Drivers);
 thanks to their authors. Each download keeps its own licence: Mesa's Turnip driver is MIT-licensed, Qualcomm's Adreno driver binaries are proprietary.
+
+**The optional Ocarina of Time camera and 2D layer aspect (`dm/host/android/oot_wide.c`, with the eight gates in `dm/games/0400486024DEC000/patches.py`) is GPL-3.0-or-later.**
+The camera, HUD, movie and save picture sites (the UI, movie and matrix sites are Ivan0xFF's, the save picture and the narrow-screen HUD Hookshot's own) and the idea of replacing the 16:9 ratio where the projection is read come from Jbuck7's GameBanana mod 737495 (Ocarina of Time 1.1.1 ultrawide), carried to the
+NX2navi patch list `patches-v111.txt` by Ivan0xFF (MIT) and to [`nx2/oot_wide.py`](https://github.com/NotRexed/Hookshot) of Hookshot by NotRexed (GPL-3.0). The Android file re-expresses
+them as host callbacks on rewriter gates and adds the vertical field-of-view correction for pictures narrower than 16:9. It lives under `dm/host/android/` so the Mac and iPhone builds do not include it.
+

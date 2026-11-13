@@ -68,6 +68,9 @@ def payoff(gap):   # the Gaps order: open gaps, then blocked, kept and unreviewe
 
 # The host's build-keyed rows: (table, the start of the row's label ('' = any), main build ('' = any), entry); the first that fits classifies a row
 HOST_BINDING = [
+    ('', '', 'e0f3ccfaf50065ae4ea01eb5aeb13b1a', {'what': 'Ocarina of Time camera and 2D layer aspect callback in main v131072', 'now': 'build', 'goal': 'game', 'purpose': 'rendering',
+     'why': "the callback reads sead's PerspectiveProjection fields, the same in every title of this engine, but its eight gates (five cameras, the HUD canvas, the movie viewport and the save picture) are fixed addresses of this build",
+     'blocked': 'one build on hand; the projection reads are plain sead code a function fingerprint could find'}),
     ('k_locks', 'Unity', '', {'what': "Unity's Application.targetFrameRate at a fixed address", 'now': 'build', 'goal': 'engine', 'purpose': 'frame rate',
      'why': 'an IL2CPP player registers the setter by its icall name, so the field can be found in any Unity game; whether to raise it stays the profile\'s'}),
     ('k_locks', 'RE Engine', '', {'what': "RE Engine's frame limit at a fixed pointer", 'now': 'build', 'goal': 'engine', 'purpose': 'frame rate',

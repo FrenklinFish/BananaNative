@@ -21,7 +21,7 @@ final class AdbControl {
             "game", "add_game", "pack", "save", "run", "no_pause",
             "ondevice_dump", "ondevice_start", "ondevice_pause", "ondevice_go_on", "ondevice_pack", "show_when_locked",
             "gpu_driver_zip", "gpu_driver",
-            "pack_title", "pack_game", "pack_export", "pack_import"));
+            "pack_title", "pack_game", "pack_export", "pack_import", "release_page_sample"));
 
     /** Whether control commands are taken: always in a test build, in a play or release build only with the setting on */
     static boolean allowed(boolean playBuild, boolean settingOn) { return !playBuild || settingOn; }

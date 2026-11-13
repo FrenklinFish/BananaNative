@@ -116,6 +116,24 @@ final class UpdateCheck {
         return h != null && s.assetHosts.contains(h.toLowerCase(Locale.ROOT));
     }
 
+    /** The hosts besides the source's asset hosts that a GitHub release body's pictures come from (attachments redirect to the first two) */
+    static final List<String> GITHUB_IMAGE_HOSTS = Arrays.asList("private-user-images.githubusercontent.com", "user-images.githubusercontent.com", "raw.githubusercontent.com");
+
+    /**
+     * Whether a picture of a release body may be fetched from url (also checked for every redirect): https, no other port, no user part, and a host of the
+     * source's own (its asset hosts) or, for GitHub, one of GITHUB_IMAGE_HOSTS. A body is written by whoever may publish a release, but the page never sends
+     * a request to a host the release check does not already trust.
+     */
+    static boolean allowedImage(String url, Source s) {
+        if (allowedAsset(url, s)) return true;
+        if (url == null || s == null || !s.assetHosts.contains(GITHUB_HOST)) return false;
+        URI u;
+        try { u = new URI(url); } catch (URISyntaxException e) { return false; }
+        if (!"https".equals(u.getScheme()) || u.getRawUserInfo() != null || (u.getPort() != -1 && u.getPort() != 443)) return false;
+        String h = u.getHost();
+        return h != null && GITHUB_IMAGE_HOSTS.contains(h.toLowerCase(Locale.ROOT));
+    }
+
     /** The update the popup offers: the release, its version and its APK */
     static final class Update {
         final Release release; final int[] version; final Asset apk; final String sha256;   // sha256: lower-case hex, null when the asset has no digest

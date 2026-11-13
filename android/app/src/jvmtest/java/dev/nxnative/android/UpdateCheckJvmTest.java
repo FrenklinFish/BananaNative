@@ -33,6 +33,11 @@ public final class UpdateCheckJvmTest {
         for (ReleaseNotes.Block x : ReleaseNotes.parse(m)) for (ReleaseNotes.Span sp : x.spans) b.append(sp.style).append(':').append(x.text, sp.start, sp.end).append(sp.url != null ? "->" + sp.url : "").append(';');
         return b.toString();
     }
+    static String images(String m) {
+        StringBuilder b = new StringBuilder();
+        for (ReleaseNotes.Block x : ReleaseNotes.parse(m)) if (x.kind == ReleaseNotes.Kind.IMAGE) b.append(b.length() > 0 ? ";" : "").append(x.url).append('|').append(x.text);
+        return b.toString();
+    }
     static String kinds(String m) {
         StringBuilder b = new StringBuilder();
         for (ReleaseNotes.Block x : ReleaseNotes.parse(m)) b.append(x.kind).append(x.level).append(' ');
@@ -61,7 +66,20 @@ public final class UpdateCheckJvmTest {
         eq("*not italic* [x]", md("\\*not italic\\* \\[x\\]"), "escapes");
         eq("Setup: frontend guide.", md("Setup: [frontend guide](https://github.com/a/b/blob/v0.1.1/x.md)."), "link text");
         eq("LINK:guide->https://a.b/c;", spans("[guide](https://a.b/c \"title\")"), "link title goes");
-        eq("before after", md("before ![shot](https://a.b/c.png)after"), "image left out");
+        eq("before after\n[image: shot]", md("before ![shot](https://a.b/c.png)after"), "an image after its block");
+        eq("PARAGRAPH0 IMAGE0", kinds("before ![shot](https://a.b/c.png)after"), "image block kinds");
+        eq("https://a.b/c.png|shot", images("![shot](https://a.b/c.png)"), "image url and alt");
+        eq("IMAGE0", kinds("![shot](https://a.b/c.png)"), "an image alone has no empty paragraph");
+        eq("https://a.b/c.png|", images("![](https://a.b/c.png)"), "no alt");
+        eq("https://a.b/c.png|a b", images("![a **b**](https://a.b/c.png \"title\")"), "alt text plain, title goes");
+        eq("https://a.b/x.png|one;https://a.b/y.png|two", images("![one](https://a.b/x.png) text ![two](https://a.b/y.png)"), "two images in order");
+        eq("", images("![x](http://a.b/c.png) ![y](/rel.png) ![z](javascript:alert(1)) ![w](file:///x.png)"), "only https images");
+        eq("https://a.b/c.png|shot", images("<img src=\"https://a.b/c.png\" alt=\"shot\">"), "HTML img");
+        eq("https://a.b/c.png?x=1&y=2|", images("<img width='300' src='https://a.b/c.png?x=1&amp;y=2'/>"), "HTML img, single quotes, entity, no alt");
+        eq("", images("<img alt=\"no source\">"), "HTML img without a src");
+        eq("IMAGE0", kinds("[![shot](https://a.b/c.png)](https://a.b/page)"), "an image inside a link");
+        eq("BULLET0 IMAGE0 BULLET0", kinds("- one ![p](https://a.b/c.png)\n- two"), "an image after its list item");
+        eq("HEADING2 PARAGRAPH0 IMAGE0 PARAGRAPH0", kinds("## H\ntext\n\n![p](https://a.b/c.png)\n\nmore"), "an image between paragraphs");
         eq("a\nb", md("a\n<!-- hidden\nlines -->\nb"), "HTML comment left out");
         eq("a", md("a <!-- unclosed"), "unclosed comment left out");
         eq("a\nb", md("a\n\n---\n\nb"), "rule left out");
@@ -252,6 +270,24 @@ public final class UpdateCheckJvmTest {
 
         // release notes (ReleaseNotes)
         notes();
+
+        // the hosts a release body's pictures may come from
+        UpdateCheck.Source ighub = UpdateCheck.github("a/b"), iforge = UpdateCheck.forgejo("a/b");
+        eq(true, UpdateCheck.allowedImage("https://github.com/user-attachments/assets/1234", ighub), "GitHub attachment");
+        eq(true, UpdateCheck.allowedImage("https://private-user-images.githubusercontent.com/1/x.png?jwt=abc", ighub), "GitHub private image host");
+        eq(true, UpdateCheck.allowedImage("https://raw.githubusercontent.com/a/b/main/x.png", ighub), "GitHub raw");
+        eq(true, UpdateCheck.allowedImage("https://objects.githubusercontent.com/x", ighub), "GitHub storage");
+        eq(false, UpdateCheck.allowedImage("https://raw.githubusercontent.com/a/b/main/x.png", iforge), "GitHub raw is not Forgejo's");
+        eq(true, UpdateCheck.allowedImage("https://git.eden-emu.dev/attachments/uuid", iforge), "Forgejo attachment");
+        eq(false, UpdateCheck.allowedImage("https://git.eden-emu.dev/attachments/uuid", ighub), "Forgejo host is not GitHub's");
+        eq(false, UpdateCheck.allowedImage("http://github.com/x.png", ighub), "no cleartext");
+        eq(false, UpdateCheck.allowedImage("https://example.org/x.png", ighub), "another host");
+        eq(false, UpdateCheck.allowedImage("https://github.com.evil.org/x.png", ighub), "a host that only starts with an allowed one");
+        eq(false, UpdateCheck.allowedImage("https://user@raw.githubusercontent.com/x.png", ighub), "no user part");
+        eq(false, UpdateCheck.allowedImage("https://raw.githubusercontent.com:8443/x.png", ighub), "no other port");
+        eq(false, UpdateCheck.allowedImage("ftp://github.com/x.png", ighub), "no other scheme");
+        eq(false, UpdateCheck.allowedImage(null, ighub), "null url");
+        eq(false, UpdateCheck.allowedImage("https://github.com/x.png", null), "null source");
         eq("117.7 MB", UpdateCheck.mb(123456789), "size text");
 
         System.out.println("ok " + n);

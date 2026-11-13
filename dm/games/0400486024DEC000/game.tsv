@@ -99,6 +99,12 @@ scene_scale	720p-min	0.6133	floor	At least 0.6133 (dynamic)
 scene_scale	540p	0.46875	fixed	Fixed 0.46875
 scene_scale	480p	0.4166667	fixed	Fixed 0.4167
 scene_scale	360p	0.3125	fixed	Fixed 0.3125
+# Game settings > Aspect ratio (dm/games/README.md "Aspect ratio without a variant"): the picture shapes the 3D cameras follow (dm/host/android/oot_wide.c, patches.py OBS rows). The picture
+# is fitted at that shape (DM_VK_PICTURE_ASPECT) and the cameras take the same ratio; 16:9 stays the default. HUD, menus and movies keep their 16:9 layout (README.md "Aspect ratio")
+aspect	21:9
+aspect	4:3
+aspect	10:9
+aspect	1:1
 # agl wraps its clears in render conditions on Donkey Kong Bananza and Splatoon Raiders; the same library here
 render_cond	on
 # Qualcomm Vulkan: keep consecutive counted depth queries in separate render passes. Off by default since 2026-11-13: on an Adreno 840

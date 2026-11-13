@@ -7,14 +7,18 @@ import java.util.regex.Pattern;
 
 /**
  * A release's notes (its GitHub body, Markdown) as blocks of plain text with style ranges, plain Java (no Android; checked on the JVM by
- * dm/tools/tests/test_android_update.py with UpdateCheckJvmTest). Updater turns them into styled text for the update popup. The subset GitHub release notes
- * use: headings (#, ##, ###), paragraphs (lines joined, a blank line between), bullet (- * +) and numbered (1. 1)) lists with their nesting, **bold** / __bold__,
- * *italic* / _italic_, `code`, links [text](url) (their text), backslash escapes; HTML comments, images and rules (---) are left out.
+ * dm/tools/tests/test_android_update.py with UpdateCheckJvmTest). ReleasePage turns them into styled text and pictures for the release page. The subset GitHub
+ * release notes use: headings (#, ##, ###), paragraphs (lines joined, a blank line between), bullet (- * +) and numbered (1. 1)) lists with their nesting,
+ * **bold** / __bold__, *italic* / _italic_, `code`, links [text](url) (their text), backslash escapes; HTML comments and rules (---) are left out.
+ * <p>
+ * Images, Markdown ![alt](https://...) and the HTML &lt;img src="https://..." alt="..."&gt; some bodies use, become IMAGE blocks (url, alt in text) placed after the
+ * block that held them, so a picture shows below its surrounding text. Only https URLs are kept; a relative or other link is dropped. Whether a host may be
+ * fetched is not decided here (UpdateCheck.allowedImage, ReleaseImages).
  */
 final class ReleaseNotes {
     private ReleaseNotes() {}
 
-    enum Kind { HEADING, PARAGRAPH, BULLET, NUMBER }
+    enum Kind { HEADING, PARAGRAPH, BULLET, NUMBER, IMAGE }
     enum Style { BOLD, ITALIC, CODE, LINK }
 
     /** A style over text[start, end); url for LINK */
@@ -24,16 +28,20 @@ final class ReleaseNotes {
         @Override public String toString() { return style + "[" + start + "," + end + ")" + (url != null ? url : ""); }
     }
 
-    /** One block: level is the heading's level (1-6), or a list item's depth (0 = top level); label is a numbered item's "1." */
+    /** One block: level is the heading's level (1-6), or a list item's depth (0 = top level); label is a numbered item's "1."; an IMAGE has its https url (text is its alt) */
     static final class Block {
-        final Kind kind; final int level; final String label, text; final List<Span> spans;
-        Block(Kind kind, int level, String label, String text, List<Span> spans) { this.kind = kind; this.level = level; this.label = label; this.text = text; this.spans = spans; }
+        final Kind kind; final int level; final String label, text, url; final List<Span> spans;
+        Block(Kind kind, int level, String label, String text, List<Span> spans) { this(kind, level, label, text, spans, null); }
+        Block(Kind kind, int level, String label, String text, List<Span> spans, String url) {
+            this.kind = kind; this.level = level; this.label = label; this.text = text; this.spans = spans; this.url = url;
+        }
     }
 
     private static final int MAX = 20000;   // a body longer than this is cut (GitHub allows 125,000 characters)
     private static final Pattern HEADING = Pattern.compile("(#{1,6})\\s+(.*?)\\s*#*\\s*");
     private static final Pattern BULLET = Pattern.compile("(\\s*)[-*+]\\s+(.*)");
     private static final Pattern NUMBER = Pattern.compile("(\\s*)(\\d{1,9})([.)])\\s+(.*)");
+    private static final Pattern IMG_TAG = Pattern.compile("(?is)<img\\b[^>]*>");
     private static final Pattern RULE = Pattern.compile("\\s*([-*_])(\\s*\\1){2,}\\s*");
 
     static List<Block> parse(String md) {
@@ -41,6 +49,7 @@ final class ReleaseNotes {
         if (md == null) return out;
         String s = md.length() > MAX ? md.substring(0, MAX) : md;
         s = s.replace("\r\n", "\n").replace('\r', '\n').replaceAll("(?s)<!--.*?(-->|$)", "");
+        s = htmlImages(s);
         Kind kind = null; int level = 0; String label = null; StringBuilder text = null;
         for (String line : s.split("\n", -1)) {
             Matcher m;
@@ -66,6 +75,25 @@ final class ReleaseNotes {
         return out;
     }
 
+    /** HTML &lt;img src="u" alt="a"&gt; tags as Markdown images (a tag without a src is dropped); the rest of the HTML stays as text */
+    private static String htmlImages(String s) {
+        Matcher m = IMG_TAG.matcher(s);
+        StringBuilder b = new StringBuilder();
+        while (m.find()) {
+            String tag = m.group(), src = attr(tag, "src"), alt = attr(tag, "alt");
+            m.appendReplacement(b, Matcher.quoteReplacement(src == null ? "" : "![" + (alt == null ? "" : alt.replaceAll("[\\[\\]\n]", " ")) + "](" + src.replace(")", "%29").replace(" ", "%20") + ")"));
+        }
+        m.appendTail(b);
+        return b.toString();
+    }
+
+    private static String attr(String tag, String name) {
+        Matcher m = Pattern.compile("(?is)\\b" + name + "\\s*=\\s*(?:\"([^\"]*)\"|'([^']*)'|([^\\s>]+))").matcher(tag);
+        if (!m.find()) return null;
+        String v = m.group(1) != null ? m.group(1) : m.group(2) != null ? m.group(2) : m.group(3);
+        return v.trim().replace("&amp;", "&").replace("&quot;", "\"");
+    }
+
     private static int indent(String line) { int k = 0; while (k < line.length() && line.charAt(k) == ' ') k++; return k; }
 
     /** Two spaces (or a tab) a level, as GitHub nests lists */
@@ -75,14 +103,19 @@ final class ReleaseNotes {
         if (kind == null || md == null) return;
         StringBuilder t = new StringBuilder();
         List<Span> spans = new ArrayList<>();
-        inline(md.toString().trim(), t, spans);
+        List<String[]> images = new ArrayList<>();
+        inline(md.toString().trim(), t, spans, images);
         String text = t.toString().trim();
-        if (text.isEmpty() && kind != Kind.BULLET && kind != Kind.NUMBER) return;   // a paragraph that was only an image or a comment
-        out.add(new Block(kind, level, label, text, spans));
+        boolean item = kind == Kind.BULLET || kind == Kind.NUMBER;
+        if (!text.isEmpty() || item && images.isEmpty()) out.add(new Block(kind, level, label, text, spans));   // a paragraph that was only an image has no text block; an empty item stays unless it held a picture
+        for (String[] im : images) out.add(new Block(Kind.IMAGE, 0, null, im[1], new ArrayList<>(), im[0]));
     }
 
     /** Inline Markdown of s appended to t as plain text, its styles to spans (positions in t) */
-    static void inline(String s, StringBuilder t, List<Span> spans) {
+    static void inline(String s, StringBuilder t, List<Span> spans) { inline(s, t, spans, new ArrayList<>()); }
+
+    /** The same; the images met go to images as { https url, alt } in order (other links are dropped) */
+    private static void inline(String s, StringBuilder t, List<Span> spans, List<String[]> images) {
         int i = 0, n = s.length();
         while (i < n) {
             char c = s.charAt(i);
@@ -98,15 +131,25 @@ final class ReleaseNotes {
                 }
                 t.append(s, i, i + run); i += run; continue;
             }
-            if (c == '!' && i + 1 < n && s.charAt(i + 1) == '[') {   // an image: left out
+            if (c == '!' && i + 1 < n && s.charAt(i + 1) == '[') {   // an image: kept for after this block
                 int[] l = link(s, i + 1);
-                if (l != null) { i = l[3]; continue; }
+                if (l != null) {
+                    String url = s.substring(l[1], l[2]).trim();
+                    if (url.startsWith("<") && url.endsWith(">") && url.length() > 2) url = url.substring(1, url.length() - 1);
+                    if (url.startsWith("https://") && url.length() > 8) {
+                        StringBuilder alt = new StringBuilder();
+                        inline(s.substring(i + 2, l[0]), alt, new ArrayList<>(), new ArrayList<>());
+                        images.add(new String[] {url, alt.toString().trim()});
+                    }
+                    i = l[3];
+                    continue;
+                }
             }
             if (c == '[') {
                 int[] l = link(s, i);
                 if (l != null) {
                     int st = t.length();
-                    inline(s.substring(i + 1, l[0]), t, spans);
+                    inline(s.substring(i + 1, l[0]), t, spans, images);
                     spans.add(new Span(Style.LINK, st, t.length(), s.substring(l[1], l[2]).trim()));
                     i = l[3];
                     continue;
@@ -116,7 +159,7 @@ final class ReleaseNotes {
                 int close = closing(s, i + 2, String.valueOf(c) + c);
                 if (close > i + 2) {
                     int st = t.length();
-                    inline(s.substring(i + 2, close), t, spans);
+                    inline(s.substring(i + 2, close), t, spans, images);
                     spans.add(new Span(Style.BOLD, st, t.length(), null));
                     i = close + 2;
                     continue;
@@ -126,7 +169,7 @@ final class ReleaseNotes {
                 int close = closing(s, i + 1, String.valueOf(c));
                 if (close > i + 1) {
                     int st = t.length();
-                    inline(s.substring(i + 1, close), t, spans);
+                    inline(s.substring(i + 1, close), t, spans, images);
                     spans.add(new Span(Style.ITALIC, st, t.length(), null));
                     i = close + 1;
                     continue;
@@ -181,11 +224,12 @@ final class ReleaseNotes {
         return null;
     }
 
-    /** The notes as plain text (for logs and tests): headings and paragraphs, "• " or "1. " before list items, two spaces a level */
+    /** The notes as plain text (for logs and tests): headings and paragraphs, "• " or "1. " before list items, two spaces a level, "[image: alt]" for a picture */
     static String plain(List<Block> bs) {
         StringBuilder b = new StringBuilder();
         for (Block x : bs) {
             if (b.length() > 0) b.append('\n');
+            if (x.kind == Kind.IMAGE) { b.append("[image: ").append(x.text).append(']'); continue; }
             if (x.kind == Kind.BULLET || x.kind == Kind.NUMBER) b.append("  ".repeat(x.level)).append(x.kind == Kind.BULLET ? "• " : x.label + " ");
             b.append(x.text);
         }

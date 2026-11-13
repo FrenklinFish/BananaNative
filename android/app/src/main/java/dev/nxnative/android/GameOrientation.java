@@ -17,6 +17,9 @@ final class GameOrientation {
     // upright would give the game a portrait window with a small picture
     static final float NEAR_SQUARE = 1.25f;
 
+    /** The same with Settings › Screen rotation: Automatic (automatic = true) never fixes the orientation, so the window follows the display (portrait too) */
+    static boolean fixedLandscape(int widthPx, int heightPx, float density, boolean automatic) { return !automatic && fixedLandscape(widthPx, heightPx, density); }
+
     /** True = keep the manifest's sensorLandscape; false = no orientation request (the window fills the display). widthPx x heightPx: the display area, density: px per dp */
     static boolean fixedLandscape(int widthPx, int heightPx, float density) {
         if (widthPx <= 0 || heightPx <= 0 || density <= 0) return true;

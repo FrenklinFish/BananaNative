@@ -39,6 +39,7 @@ final class Profile {
     String skipLayers = "";   // game.tsv skip_layers (build.gradle skipLayersOf): pixel shader keys whose draws the Speedhack setting drops (Prefs.skipLayersGame), "" = not offered
     String presetFrom = "";   // game.tsv res_preset_from rows (build.gradle presetFromOf): "<old id>=<id>", ';' between them; a stored Resolution that the profile no longer has takes the id it maps to (ResPresets.mapStored)
     boolean linkPlay;   // game.tsv link_play 1: offer the opt-in phone-to-PC join settings (LinkPlay); absent means no row.
+    String cameraAspects = "";   // game.tsv aspect rows (build.gradle aspectsOf): "21:9,4:3", ',' between them; picture shapes the host's own 3D camera patch follows, with no module variant (Game settings › Aspect ratio)
     String variants = "";   // game.tsv variant rows (build.gradle variantsOf): "<name>=<label>", ',' between them; a native 4:3 mod is "43=4:3" (Game settings › Aspect ratio)
 
     /** The variant whose label is w:h (a native aspect mod: "43" for "4:3"), or null when the profile has none */
@@ -343,6 +344,7 @@ final class Profile {
             p.variants = c.length > 25 ? c[25] : "";
             p.presetFrom = c.length > 26 ? c[26] : "";
             p.linkPlay = c.length > 27 && c[27].equals("1");
+            p.cameraAspects = c.length > 28 ? c[28] : "";
             out.add(p);
         }
         return Collections.unmodifiableList(out);

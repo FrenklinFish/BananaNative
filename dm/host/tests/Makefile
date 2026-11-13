@@ -34,6 +34,7 @@ run: $(B)/t_language $(B)/t_motion $(B)/t_heap_size $(B)/t_touch $(B)/t_gesture 
 	$(B)/t_audio_spsc
 	$(B)/t_audio_stats
 	$(B)/t_fpslock
+	$(B)/t_oot_wide
 	$(B)/t_uecvar
 	$(B)/t_audren_work
 	$(B)/t_audren_layout
@@ -513,3 +514,7 @@ run: net-eventfd
 ifneq ($(wildcard $(COOP_DIR)/coop.h),)
 run: net-coop
 endif
+
+run: $(B)/t_oot_wide
+$(B)/t_oot_wide: t_oot_wide.c ../android/oot_wide.c ../hle.h ../dm.h $(GAME_H) | $(B)
+	$(CLANG) -O1 -g -Wno-unused-function -I.. $(GINC) -o $@ t_oot_wide.c -lm -pthread

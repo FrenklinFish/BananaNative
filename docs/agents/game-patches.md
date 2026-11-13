@@ -74,11 +74,13 @@ Every patch bound tighter than it could be: the open gaps, then the blocked, kep
 | `build` → `game` | 60 fps frame step and render scale | frame rate | blocked: frame-step stubs have no function-matched form yet | judgement | 1 | [The Legend of Zelda: Tears of the Kingdom](../../dm/games/0100F2C0115B6000/README.md) | the game's own timing object |
 | `build` → `game` | 60 fps frame step and render scale (ksys::VFR) | frame rate | blocked: frame-step stubs have no function-matched form yet | judgement | 1 | [The Legend of Zelda: Breath of the Wild](../../dm/games/01007EF00011E000/README.md) | the game's own frame code; the frame-step state page is general |
 | `build` → `game` | 60 fps frame step: the KIDS frame task and frame-rate block | frame rate | blocked: frame-step stubs have no function-matched form yet | judgement | 1 | [Hyrule Warriors: Age of Calamity](../../dm/games/01002B00111A2000/README.md) | the game's own frame code; only the host's frame-step state page is shared. Fire Emblem: Three Houses and Taiko Risshiden V DX run on KTGL too, with other frame code |
+| `build` → `game` | camera aspect: the 3D cameras follow the picture shape (Game settings > Aspect ratio) | rendering | blocked: one build on hand; the projection reads are plain sead code and could be found by function fingerprint | judgement | 1 | [The Legend of Zelda: Ocarina of Time](../../dm/games/0400486024DEC000/README.md) | sead::PerspectiveProjection is the same in every title of this engine, but the five read sites are fixed addresses of this build |
 | `build` → `game` | FPS Unlock: optional elapsed-time update step | frame rate | blocked: one full build ID and update hook verified | judgement | 1 | [The Legend of Zelda: Ocarina of Time](../../dm/games/0400486024DEC000/README.md) | the game update derives a fractional step from its integer frame rate |
 | `build` → `game` | frame step floor 2 → 1 vsync, and its frame step | frame rate | blocked: frame-step stubs have no function-matched form yet | judgement | 1 | [Paper Mario: The Thousand-Year Door](../../dm/games/0100ECD018EBE000/README.md) | the game's own clock floor and step |
 | `build` → `game` | frame step: the frame-rate controller's interval and fps from the host | frame rate | blocked: frame-step stubs have no function-matched form yet | judgement | 1 | [The Legend of Zelda: Ocarina of Time](../../dm/games/0400486024DEC000/README.md) | the game's own 30 fps mode (interval 2), chosen by the host's step so presentation and game time agree |
 | `build` → `game` | Max Resolution: optional full-scale dynamic resolution path | rendering | blocked: one full build ID and branch verified | judgement | 1 | [The Legend of Zelda: Ocarina of Time](../../dm/games/0400486024DEC000/README.md) | the title has its own dynamic resolution controller and full-scale branch |
 | `build` → `game` | movie player: the plain player instead of the NDVE-enhanced one | frame rate | blocked: one build on hand; the faster tensor path is translator work (docs/reference/shaders.md, Ampere HMMA through simdgroup_matrix, Open) | judgement | 1 | [The Legend of Zelda: Ocarina of Time](../../dm/games/0400486024DEC000/README.md) | a workaround: the tensor network costs 47.5 ms of GPU a movie frame; a function fingerprint could carry it over updates, and once the translator keeps LDSM / MOVM / HMMA chains in matrices the cut can go |
+| `build` → `game` | Ocarina of Time camera and 2D layer aspect callback in main v131072 | rendering | blocked: one build on hand; the projection reads are plain sead code a function fingerprint could find | judgement | 1 | [The Legend of Zelda: Ocarina of Time](../../dm/games/0400486024DEC000/README.md) | the callback reads sead's PerspectiveProjection fields, the same in every title of this engine, but its eight gates (five cameras, the HUD canvas, the movie viewport and the save picture) are fixed addresses of this build |
 | `build` → `game` | Texture Pool x2: optional larger initial graphics allocation | memory | blocked: one full build ID and allocator call verified | judgement | 1 | [The Legend of Zelda: Ocarina of Time](../../dm/games/0400486024DEC000/README.md) | the allocator is in the game and full-scale rendering can exhaust the original pool |
 | `build` → unreviewed | Fire Emblem Fortune's Weave native 4:3 variant (VARIANT_CUTS['43']: camera aspect and ui2d pane rules) | rendering | unreviewed | judgement | 1 | [Fire Emblem Fortune's Weave](../../dm/games/04007EF01F8AE000/README.md) | an opt-in variant (Game settings › Aspect ratio) of about 230 words in code caves of this main; each ui2d rule names panes of this build's layouts |
 
@@ -112,7 +114,7 @@ Every patch bound tighter than it could be: the open gaps, then the blocked, kep
 | [Taiko Risshiden V DX](#taiko-risshiden-v-dx) | 1 | 0 | 0 | 2 | 0 | `game` |
 | [The Legend of Zelda: Breath of the Wild](#the-legend-of-zelda-breath-of-the-wild) | 7 | 0 | 5 | 0 | 0 | `build` → `game` ×2 |
 | [The Legend of Zelda: Link's Awakening](#the-legend-of-zelda-links-awakening) | 1 | 0 | 0 | 0 | 0 | `build` → `game` |
-| [The Legend of Zelda: Ocarina of Time](#the-legend-of-zelda-ocarina-of-time) | 1 | 0 | 4 | 0 | 0 | `build` → `game` ×5 |
+| [The Legend of Zelda: Ocarina of Time](#the-legend-of-zelda-ocarina-of-time) | 1 | 8 | 4 | 0 | 1 | `build` → `game` ×7 |
 | [The Legend of Zelda: Tears of the Kingdom](#the-legend-of-zelda-tears-of-the-kingdom) | 0 | 0 | 9 | 0 | 0 | `build` → `game` |
 | [Xenoblade Chronicles 3](#xenoblade-chronicles-3) | 6 | 0 | 0 | 0 | 0 | `build` → `game` |
 
@@ -572,18 +574,29 @@ Every patch bound tighter than it could be: the open gaps, then the blocked, kep
 
 [The Legend of Zelda: Ocarina of Time](../../dm/games/0400486024DEC000/README.md), `0400486024DEC000`, [patches.py](../../dm/games/0400486024DEC000/patches.py).
 
+- **`build` → `game`**, rendering, blocked: one build on hand; the projection reads are plain sead code and could be found by function fingerprint, judgement: camera aspect: the 3D cameras follow the picture shape (Game settings > Aspect ratio). Sead::PerspectiveProjection is the same in every title of this engine, but the five read sites are fixed addresses of this build
 - **`build` → `game`**, rendering, blocked: one full build ID and branch verified, judgement: Max Resolution: optional full-scale dynamic resolution path. The title has its own dynamic resolution controller and full-scale branch
 - **`build` → `game`**, memory, blocked: one full build ID and allocator call verified, judgement: Texture Pool x2: optional larger initial graphics allocation. The allocator is in the game and full-scale rendering can exhaust the original pool
 - **`build` → `game`**, frame rate, blocked: one full build ID and update hook verified, judgement: FPS Unlock: optional elapsed-time update step. The game update derives a fractional step from its integer frame rate
 - **`build` → `game`**, frame rate, blocked: frame-step stubs have no function-matched form yet, judgement: frame step: the frame-rate controller's interval and fps from the host. The game's own 30 fps mode (interval 2), chosen by the host's step so presentation and game time agree
 - **`build` → `game`**, frame rate, blocked: one build on hand; the faster tensor path is translator work (docs/reference/shaders.md, Ampere HMMA through simdgroup_matrix, Open), judgement: movie player: the plain player instead of the NDVE-enhanced one. A workaround: the tensor network costs 47.5 ms of GPU a movie frame; a function fingerprint could carry it over updates, and once the translator keeps LDSM / MOVM / HMMA chains in matrices the cut can go
+- **`build` → `game`**, rendering, blocked: one build on hand; the projection reads are plain sead code a function fingerprint could find, judgement: Ocarina of Time camera and 2D layer aspect callback in main v131072. The callback reads sead's PerspectiveProjection fields, the same in every title of this engine, but its eight gates (five cameras, the HUD canvas, the movie viewport and the save picture) are fixed addresses of this build
 
 - **v131072 `main`** `e0f3ccfa…` ([patches.py:9](../../dm/games/0400486024DEC000/patches.py#L9))
   - cut `+0x3b5f524`: movie player: cbz w8 → b main+0x3b5f548 (the plain player, without the NDVE tensor network)
+  - gate 5151 at `+0x4c5340`: camera update, after it stored the camera aspect at +0xb0 (ldr x8,[x8]); x20 the projection
+  - gate 31 at `+0x3485cc0`: sead PerspectiveProjection matrix update (ldp s0,s1,[x0,#0xac]); x0 the projection
+  - gate 5407 at `+0x4f1e8`: inlined projection update (ldp s0,s3,[x21,#0xac]); x21 the projection
+  - gate 31 at `+0x23b9a8`: inlined projection update (ldp s0,s3,[x0,#0xac]); x0 the projection
+  - gate 543 at `+0x33b82c`: inlined projection update (ldp s0,s1,[x2,#0xac]); x2 the projection
+  - gate 8223 at `+0x774368`: UI canvas matrix product (ldp q1,q4,[x2], the projection rows; x0 the canvas, x2 pointed at a scaled copy for the full-screen UI projection)
+  - gate 23839 at `+0x3b5c758`: movie layer draw, after its viewport struct at x29-0x28 is built (ldp x9,x8,[x19,#0x18]); the viewport pulled into the middle 16:9
+  - gate 24607 at `+0x284824`: save picture: the viewport helper's SetViewport call (ldr x8,[x8]; x1..x4 = x, y, w, h); the middle 16:9 fills the texture
   - frame step `+0x6e6cc4`: FPS Unlock: optional fractional update step from the host guest clock
   - frame step `+0x805bd0`: Max Resolution: optional full-scale branch of the dynamic resolution controller
   - frame step `+0xc2a36c`: Texture Pool x2: optional doubling of the initial graphics allocation
   - frame step `+0x3b4f074`: frame step: the frame-rate controller's interval and fps follow the host's vsyncs (state page target fps; 0 = the game's own choice)
+  - host [oot_wide.c:43](../../dm/host/android/oot_wide.c#L43): build check
 
 ### The Legend of Zelda: Tears of the Kingdom
 

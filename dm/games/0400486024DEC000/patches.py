@@ -11,6 +11,26 @@ CUTS = {
   ],
 }
 
+# v131072 main: the 3D cameras and the 2D layer follow the picture's shape (Game settings > Aspect ratio; dm/host/android/oot_wide.c, GPL-3.0-or-later). Eight observation gates (five camera sites, then the HUD, movie and save picture sites), each on an
+# instruction that reads a sead::PerspectiveProjection's half-angle tangent (+0xac) and aspect (+0xb0) or has just written them, the gate number's upper bits naming the register that
+# holds the projection. The callback rewrites the projection in place (aspect; for a narrower picture also fovy, sin, cos and tan, so the horizontal reach stays) before the read, and
+# does nothing unless the launcher set DM_VK_PICTURE_ASPECT to a shape other than 16:9. Every original word is position independent and checked by the rewriter. Offsets and the
+# idea: Hookshot nx2/oot_wide.py (GPL-3.0, NotRexed), after NX2navi patches-v111.txt (Ivan0xFF, MIT) and Jbuck7's GameBanana mod 737495; same game build (main e0f3ccfa...)
+_OOT_WIDE = 31   # OBS_OOT_WIDE in dm/host/dm.h
+OBS = {
+  'e0f3ccfaf50065ae4ea01eb5aeb13b1a': [
+    (0x4c5340, _OOT_WIDE | 20 << 8, 'f9400108', 'camera update, after it stored the camera aspect at +0xb0 (ldr x8,[x8]); x20 the projection'),
+    (0x3485cc0, _OOT_WIDE | 0 << 8, '2d558400', 'sead PerspectiveProjection matrix update (ldp s0,s1,[x0,#0xac]); x0 the projection'),
+    (0x4f1e8, _OOT_WIDE | 21 << 8, '2d558ea0', 'inlined projection update (ldp s0,s3,[x21,#0xac]); x21 the projection'),
+    (0x23b9a8, _OOT_WIDE | 0 << 8, '2d558c00', 'inlined projection update (ldp s0,s3,[x0,#0xac]); x0 the projection'),
+    (0x33b82c, _OOT_WIDE | 2 << 8, '2d558440', 'inlined projection update (ldp s0,s1,[x2,#0xac]); x2 the projection'),
+    # the 2D layer, kind in the parameter's bits from 5 up (1 HUD, 2 movie, 3 save picture): kept in the middle 16:9 of a picture of another shape
+    (0x774368, _OOT_WIDE | 1 << 13, 'ad401041', 'UI canvas matrix product (ldp q1,q4,[x2], the projection rows; x0 the canvas, x2 pointed at a scaled copy for the full-screen UI projection)'),
+    (0x3b5c758, _OOT_WIDE | (2 << 5 | 29) << 8, 'a941a269', 'movie layer draw, after its viewport struct at x29-0x28 is built (ldp x9,x8,[x19,#0x18]); the viewport pulled into the middle 16:9'),
+    (0x284824, _OOT_WIDE | 3 << 13, 'f9400108', 'save picture: the viewport helper\'s SetViewport call (ldr x8,[x8]; x1..x4 = x, y, w, h); the middle 16:9 fills the texture'),
+  ],
+}
+
 from nso_asm import ADRP, B
 
 def lichii_options(ctx):
@@ -121,6 +141,9 @@ FRAME_STEP = {'e0f3ccfaf50065ae4ea01eb5aeb13b1a': frame_step}
 # How general each patch is and could be (dm/tools/docs_patches.py "Binding", listed in docs/agents/game-patches.md): what, its binding now, the loosest it could have (goal),
 # purpose, why; blocked or kept: why the gap stays open (cannot close yet, or left open on purpose); checked: what was checked on game files (else a judgement)
 BINDING = [
+    {'what': 'camera aspect: the 3D cameras follow the picture shape (Game settings > Aspect ratio)', 'now': 'build', 'goal': 'game', 'purpose': 'rendering',
+     'why': 'sead::PerspectiveProjection is the same in every title of this engine, but the five read sites are fixed addresses of this build',
+     'blocked': 'one build on hand; the projection reads are plain sead code and could be found by function fingerprint'},
     {'what': 'Max Resolution: optional full-scale dynamic resolution path', 'now': 'build', 'goal': 'game', 'purpose': 'rendering',
      'why': 'the title has its own dynamic resolution controller and full-scale branch', 'blocked': 'one full build ID and branch verified'},
     {'what': 'Texture Pool x2: optional larger initial graphics allocation', 'now': 'build', 'goal': 'game', 'purpose': 'memory',
