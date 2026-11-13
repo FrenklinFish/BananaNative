@@ -16,6 +16,7 @@ graphics to Vulkan. It is an Android port of [nxnative](https://github.com/seedd
 | Game | Version | Status | Notes |
 |---|---|---|---|
 | Donkey Kong Bananza (`040074A01BF12000`) | update 458752 | Supported | 30 fps |
+| Fire Emblem Fortune's Weave (`04007EF01F8AE000`) | update 131072 | Supported | Up to 60 fps |
 | Mario Kart World (`0400C3F00006E000`) | 1.8.0 | Supported | a phone cooler is recommended |
 | Pokémon Pokopia (`0400A3A01EE4C000`) | update 655360 (Ver. 2.0.1) | Supported | about 60 fps |
 | The Legend of Zelda: Ocarina of Time (`0400486024DEC000`) | 2.0 | Experimental | plays, with visual glitches (too bright, mesh foliage missing); system driver only |
