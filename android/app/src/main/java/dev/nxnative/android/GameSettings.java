@@ -40,10 +40,20 @@ final class GameSettings {
     private static boolean custom;   // the player picked Custom while nothing was changed yet (else the choice follows the changed count)
     private static String customFor;
 
-    /** Opens a game's page (⋯ on its card) at its first tab */
+    /** Opens a game's page (a tap on its tile) at its first tab */
     static void open(MainActivity a, Game g) {
         tab = Profile.missing(g.titleId, g.name) == null ? PERFORMANCE : SAVES;   // a game this app has no profile for has no settings
         a.gameSettings(g);
+    }
+
+    /** A controller's L1 / R1: the next (+1) or previous (-1) tab of the game's page, round; false when there is nothing to switch to */
+    static boolean stepTab(Game g, int delta) {
+        String[] keys = Profile.missing(g.titleId, g.name) == null ? new String[] {PERFORMANCE, GAME, SAVES, STORAGE} : new String[] {SAVES, STORAGE};
+        int cur = Math.max(0, Arrays.asList(keys).indexOf(tab));
+        int next = PadPanel.tab(cur, delta, keys.length);
+        if (next == cur) return false;
+        tab = keys[next];
+        return true;
     }
 
     /** One section of the page: its rail entry and label, its card of rows, and a small line under the card */
@@ -94,7 +104,7 @@ final class GameSettings {
             seg[0] = Ui.add(card, new Ui.Segmented(a, new String[] {"Recommended", "Custom"}, 0, k -> {
                 if (k == 1) { custom = true; refresh[0].run(); return; }   // Custom keeps the player's values: nothing to change
                 if (Recommend.changedCount(Prefs.recStates(a, id)) == 0) { custom = false; refresh[0].run(); return; }
-                new AlertDialog.Builder(a).setTitle("Use recommended · " + g.name)
+                new PadFocus.Builder(a).setTitle("Use recommended · " + g.name)
                         .setMessage("The settings you changed for this game that have a recommendation for this phone take it again. Your other settings stay.")
                         .setPositiveButton("Use recommended", (x, w) -> { Prefs.backToRecommended(a, id); custom = false; again.run(); })
                         .setNegativeButton("Cancel", (x, w) -> seg[0].select(1)).setOnCancelListener(x -> seg[0].select(1)).show();
@@ -270,7 +280,7 @@ final class GameSettings {
                 .value(envLines == 0 ? "None" : envLines + (envLines == 1 ? " line: " : " lines: ") + env.replace('\n', ' ')).chevron(a));
 
         Section[] all = perf ? new Section[] {picture, speed, advanced} : new Section[] {options, controls};   // Performance: what changes speed and picture; Game: the game's own options, language and controls
-        View reset = recLine != null ? null : Ui.button(a, "Reset to defaults", Ui.Kind.SOFT, v -> new AlertDialog.Builder(a).setTitle("Reset to defaults · " + g.name)
+        View reset = recLine != null ? null : Ui.button(a, "Reset to defaults", Ui.Kind.SOFT, v -> new PadFocus.Builder(a).setTitle("Reset to defaults · " + g.name)
                 .setMessage("The game will follow global settings. Extra environment lines are kept.")
                 .setPositiveButton("Reset", (x, w) -> { Prefs.resetGame(a, id); again.run(); }).setNegativeButton("Cancel", null).show());
         if (wide) rail(a, content, all, reset, again);
@@ -628,7 +638,7 @@ final class GameSettings {
         System.arraycopy(GameLanguage.NAMES, 0, labels, 1, GameLanguage.NAMES.length);
         String m = Prefs.gameLang(a, g.titleId);
         int checked = m == null ? 0 : 1 + Math.max(0, Arrays.asList(GameLanguage.CODES).indexOf(m));
-        new AlertDialog.Builder(a).setTitle("Game language · " + g.name).setSingleChoiceItems(labels, checked, (x, w) -> {
+        new PadFocus.Builder(a).setTitle("Game language · " + g.name).setSingleChoiceItems(labels, checked, (x, w) -> {
             Prefs.gameLang(a, g.titleId, w == 0 ? null : GameLanguage.CODES[w - 1]);
             x.dismiss();
             done.run();
@@ -647,7 +657,7 @@ final class GameSettings {
         Profile mp = Profile.of(g.titleId);
         String[] modes = mp != null ? mp.modes() : null;
         if (modes != null) {   // a game with one docked and one handheld row (Profile.modes): those two choices only, as Display shows its two
-            new AlertDialog.Builder(a).setTitle(windowTitle(g) + " · " + g.name).setSingleChoiceItems(new String[] {mp.modeLabel(0), mp.modeLabel(1)},
+            new PadFocus.Builder(a).setTitle(windowTitle(g) + " · " + g.name).setSingleChoiceItems(new String[] {mp.modeLabel(0), mp.modeLabel(1)},
                     mp.modeOf(Prefs.gameWindow(a, g.titleId)), (x, w) -> {
                 Prefs.gameWindow(a, g.titleId, modes[w]);
                 keepAdvanced(a, g);
@@ -660,7 +670,7 @@ final class GameSettings {
         labels[0] = "Default (" + Prefs.windowName(Prefs.defaultWindow(a, g.titleId), false) + ")";
         { Profile lp = Profile.of(g.titleId); for (int li = 0; li < Prefs.WINDOWS.length; li++) labels[li + 1] = lp != null ? lp.windowLabel(Prefs.WINDOWS[li], Prefs.WINDOW_NAMES[li]) : Prefs.WINDOW_NAMES[li]; }   // a choice the game draws at another size says so (Profile.windowLabel)
         int checked = Prefs.ownWindow(a, g.titleId) ? 1 + Math.max(0, Arrays.asList(Prefs.WINDOWS).indexOf(Prefs.gameWindow(a, g.titleId))) : 0;
-        new AlertDialog.Builder(a).setTitle(windowTitle(g) + " · " + g.name).setSingleChoiceItems(labels, checked, (x, w) -> {
+        new PadFocus.Builder(a).setTitle(windowTitle(g) + " · " + g.name).setSingleChoiceItems(labels, checked, (x, w) -> {
             Prefs.gameWindow(a, g.titleId, w == 0 ? null : Prefs.WINDOWS[w - 1]);
             keepAdvanced(a, g);
             x.dismiss();
@@ -670,7 +680,7 @@ final class GameSettings {
 
     /** Display: Fit keeps the game's 16:9 picture with bars on a screen of another shape; Stretch fills the screen (DM_VK_STRETCH), the touch mapping with it */
     private static void display(MainActivity a, Game g, Runnable done) {
-        new AlertDialog.Builder(a).setTitle("Display · " + g.name).setSingleChoiceItems(Prefs.DISPLAY_NAMES, Prefs.stretch(a, g.titleId) ? 1 : 0, (x, w) -> {
+        new PadFocus.Builder(a).setTitle("Display · " + g.name).setSingleChoiceItems(Prefs.DISPLAY_NAMES, Prefs.stretch(a, g.titleId) ? 1 : 0, (x, w) -> {
             Prefs.stretch(a, g.titleId, w == 1);
             x.dismiss();
             done.run();
@@ -682,7 +692,7 @@ final class GameSettings {
         labels[0] = "Default (Settings: " + Prefs.xboxLabel(Prefs.xboxButtons(a)) + ")";
         System.arraycopy(Prefs.XBOX_NAMES, 0, labels, 1, Prefs.XBOX_NAMES.length);
         int checked = Prefs.ownXboxButtons(a, g.titleId) ? Prefs.xboxButtons(a, g.titleId) + 1 : 0;
-        new AlertDialog.Builder(a).setTitle("Xbox button label swap · " + g.name).setSingleChoiceItems(labels, checked, (x, w) -> {
+        new PadFocus.Builder(a).setTitle("Xbox button label swap · " + g.name).setSingleChoiceItems(labels, checked, (x, w) -> {
             Prefs.xboxButtons(a, g.titleId, w == 0 ? null : w - 1);
             x.dismiss();
             done.run();
@@ -697,7 +707,7 @@ final class GameSettings {
             labels[0] = rc != null ? "Recommended (" + Prefs.paceLabel(rc) + ")" : pl > 0 ? "Default (this game's: " + Prefs.paceLabel(Prefs.paceOf(pl)) + ")" : "Default (Settings: " + Prefs.paceLabel(Prefs.paceOf(Prefs.fpsCap(a))) + ")";
             int checked = 0, cur = Prefs.paceCap(a, g.titleId);
             for (int k = 0; k < Prefs.PACE_CAPS.length; k++) { labels[k + 1] = Prefs.paceLabel(Prefs.PACE_CAPS[k]); if (Prefs.ownFpsCap(a, g.titleId) && Prefs.PACE_CAPS[k] == cur) checked = k + 1; }
-            new AlertDialog.Builder(a).setTitle("Frame rate cap · " + g.name).setSingleChoiceItems(labels, checked, (x, w) -> {
+            new PadFocus.Builder(a).setTitle("Frame rate cap · " + g.name).setSingleChoiceItems(labels, checked, (x, w) -> {
                 Prefs.fpsCap(a, g.titleId, w == 0 ? null : Prefs.PACE_CAPS[w - 1]);
                 x.dismiss(); done.run();
             }).setNegativeButton("Cancel", null).show();
@@ -716,7 +726,7 @@ final class GameSettings {
             labels[k + 2] = MainActivity.capLabel(Prefs.FPS_CAPS[k]);
             if (own && Prefs.FPS_CAPS[k] == cur) checked = k + 2;
         }
-        new AlertDialog.Builder(a).setTitle("Frame rate cap · " + g.name).setSingleChoiceItems(labels, checked, (x, w) -> {
+        new PadFocus.Builder(a).setTitle("Frame rate cap · " + g.name).setSingleChoiceItems(labels, checked, (x, w) -> {
             Prefs.fpsCap(a, g.titleId, w == 0 ? null : w == 1 ? -1 : Prefs.FPS_CAPS[w - 2]);
             x.dismiss();
             done.run();
@@ -736,7 +746,7 @@ final class GameSettings {
             labels.add(inst.get(k).label());
             if (c != null && inst.get(k).dir.getName().equals(c)) checked = k + 2;
         }
-        new AlertDialog.Builder(a).setTitle("GPU driver · " + g.name).setSingleChoiceItems(labels.toArray(new String[0]), checked, (x, w) -> {
+        new PadFocus.Builder(a).setTitle("GPU driver · " + g.name).setSingleChoiceItems(labels.toArray(new String[0]), checked, (x, w) -> {
             GpuDriver.choice(a, g.titleId, w == 0 ? null : w == 1 ? GpuDriver.SYSTEM : inst.get(w - 2).dir.getName());
             x.dismiss();
             done.run();
@@ -770,7 +780,7 @@ final class GameSettings {
         String[] labels = new String[items.length + 1];
         labels[0] = first;
         System.arraycopy(items, 0, labels, 1, items.length);
-        new AlertDialog.Builder(a).setTitle(title).setSingleChoiceItems(labels, own ? cur + 1 : 0, (x, w) -> { set.accept(w == 0 ? null : w - 1); x.dismiss(); done.run(); })
+        new PadFocus.Builder(a).setTitle(title).setSingleChoiceItems(labels, own ? cur + 1 : 0, (x, w) -> { set.accept(w == 0 ? null : w - 1); x.dismiss(); done.run(); })
                 .setNegativeButton("Cancel", null).show();
     }
 
@@ -832,7 +842,7 @@ final class GameSettings {
                     : " (3D view follows it; HUD and menus keep their 16:9 layout)");
         String cur = Prefs.aspect(a, g.titleId);
         int checked = cur == null ? 0 : Math.max(0, as.indexOf(cur) + 1);
-        new AlertDialog.Builder(a).setTitle("Aspect ratio · " + g.name).setSingleChoiceItems(labels, checked, (x, w) -> {
+        new PadFocus.Builder(a).setTitle("Aspect ratio · " + g.name).setSingleChoiceItems(labels, checked, (x, w) -> {
             Prefs.aspect(a, g.titleId, w == 0 ? null : as.get(w - 1));
             x.dismiss();
             done.run();

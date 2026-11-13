@@ -88,7 +88,7 @@ final class SaveUi {
     /** Runs work off the main thread with a wait dialog; done gets null or the error */
     private static void run(MainActivity a, Game g, String wait, Work work, Done done) {
         if (!take(g.titleId)) return;
-        AlertDialog w = new AlertDialog.Builder(a).setMessage(wait).setCancelable(false).show();
+        AlertDialog w = new PadFocus.Builder(a).setMessage(wait).setCancelable(false).show();
         new Thread(() -> {
             String err = null;
             Object r = null;
@@ -177,7 +177,7 @@ final class SaveUi {
             labels[i] = SaveStore.when(b.name) + "\n" + b.files + " files, " + SaveStore.size(b.bytes) + (b.device ? " (with the device save)" : "") + from;
         }
         labels[l.size()] = "Import save… (a .zip or a folder)";
-        new AlertDialog.Builder(a).setTitle(l.isEmpty() ? "No backups of " + g.name + " here yet" : "Restore " + g.name + "'s save from")
+        new PadFocus.Builder(a).setTitle(l.isEmpty() ? "No backups of " + g.name + " here yet" : "Restore " + g.name + "'s save from")
                 .setItems(labels, (d, w) -> {
                     if (w == l.size()) importPick(a, g);
                     else confirm(a, g, l.get(w).dir, SaveStore.when(l.get(w).name), null);
@@ -188,7 +188,7 @@ final class SaveUi {
     /** Import save…: a .zip or a folder, through the system picker */
     static void importPick(MainActivity a, Game g) {
         if (!ready(a, g, "import")) return;
-        new AlertDialog.Builder(a).setTitle("Import " + g.name + "'s save from")
+        new PadFocus.Builder(a).setTitle("Import " + g.name + "'s save from")
                 .setItems(new String[] {"A .zip (from Back up saves, or a zipped save folder)", "A save folder"}, (d, w) -> {
                     pendingFor = g;
                     if (w == 0) {

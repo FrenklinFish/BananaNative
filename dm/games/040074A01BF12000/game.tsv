@@ -57,6 +57,13 @@ fps_decouple	sead
 # and a preset's automatic flag (ldrb w8, [x20, #0x29]). The row also tells the launcher the game has the setting
 drs_ctl	e25c90c1c136638885659fd55bf8a03b	0x38e100	0x38de2c	0x38dcbc	0x38dbc8
 
+# Game settings > Aspect ratio (dm/games/README.md "Aspect ratio without a variant"): the picture shapes the 3D camera follows (dm/host/android/dkb_wide.c, patches.py OBS rows). The picture is fitted
+# at that shape (DM_VK_PICTURE_ASPECT) and the scene camera takes the same ratio; the full-screen UI projection stays in the middle 16:9. 16:9 stays the default
+aspect	21:9
+aspect	4:3
+aspect	10:9
+aspect	1:1
+
 # ---- Test runs ----
 # DM_FASTBOOT=1: A every 12 presented frames (0.1 s held) from the first present through the boot screen, the title, Continue and the file, a [mark] once 5 frames in a row
 # have 3,000 draws or more (the title has 63, the loading screen 6-9, the first level 5,500 and more) and no presses after it. With the seed save, am start to the first level in 45-50 s on the PNM-N49

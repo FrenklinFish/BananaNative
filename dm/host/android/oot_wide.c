@@ -32,50 +32,22 @@
 //           at +12 and max y at +20 (narrower) pulled in by the margin, so a 16:9 movie plays in the middle.
 //   Thumb   main+0x284824 (ldr x8,[x8] before the blr of SetViewport; x1..x4 = x, y, w, h of 0,0,543,306): the save picture's texture gets the middle 16:9 (viewport made wider
 //           than the texture, or taller, centred).
-#include "hle.h"
-#include "dm.h"
-#include <math.h>
-#include <stdatomic.h>
-#include <stdio.h>
-#include <stdlib.h>
-#include <string.h>
+#include "wide_shape.h"
 
 #define OOT_MAIN_BUILD "e0f3ccfaf50065ae4ea01eb5aeb13b1a"
-#define K169 (16.0 / 9.0)
-enum { P_FOVY = 0xa0, P_SIN = 0xa4, P_COS = 0xa8, P_TAN = 0xac, P_ASPECT = 0xb0, NSEEN = 256 };
+#define OOT_MAIN_BUILD "e0f3ccfaf50065ae4ea01eb5aeb13b1a"
+#define K169 WS_K169
+#define close_to ws_close_to
+#define rdf ws_rdf
+#define wrf ws_wrf
+enum { P_FOVY = 0xa0, P_SIN = 0xa4, P_COS = 0xa8, P_TAN = 0xac, P_ASPECT = 0xb0 };
 
-static pthread_once_t g_cfg_once = PTHREAD_ONCE_INIT;
-static double g_aspect;
-static struct { _Atomic uint64_t proj; _Atomic uint32_t tan; } g_seen[NSEEN];   // projections we scaled: where, and the tangent we wrote
+static ws_cfg_t g_cfg = WS_CFG_INIT;
+static ws_seen_t g_seen;   // projections we scaled: where, and the tangent we wrote
 static _Atomic unsigned g_fixes;
 
-static int close_to(double a, double b, double e) { return fabs(a - b) < e; }
-static float rdf(uint64_t a) { float f; memcpy(&f, (void *)a, 4); return f; }
-static void wrf(uint64_t a, float f) { memcpy((void *)a, &f, 4); }
-static uint32_t bits(float f) { uint32_t u; memcpy(&u, &f, 4); return u; }
-
-// DM_VK_PICTURE_ASPECT=<w>:<h> → w / h, or 0
-static double parse_aspect(const char *e) {
-    int w = 0, h = 0;
-    char tail;
-    if (!e || sscanf(e, "%d:%d%c", &w, &h, &tail) != 2 || w <= 0 || h <= 0) return 0;
-    double a = (double)w / h;
-    return a > 0.4 && a < 4.0 && !close_to(a, K169, 0.02) ? a : 0;
-}
-
-static void cfg_init(void) {
-    g_aspect = parse_aspect(getenv("DM_VK_PICTURE_ASPECT"));
-    if (g_aspect) LOG("oot wide: cameras follow the %.4f picture (%s; restart to change)", g_aspect, g_aspect > K169 ? "Hor+" : "Vert+");
-}
-
-static double aspect(void) {
-    if (strcmp(dm_main_build(), OOT_MAIN_BUILD)) return 0;
-    pthread_once(&g_cfg_once, cfg_init);
-    return g_aspect;
-}
-
-static uint8_t *main_base(void) { for (int i = 0; i < g_nmod; i++) if (!strcmp(g_mod[i].name, "main")) return g_mod[i].base; return NULL; }
-static unsigned slot_of(uint64_t p) { return (unsigned)((p >> 4) ^ (p >> 12)) % NSEEN; }
+static double aspect(void) { return ws_aspect(&g_cfg, OOT_MAIN_BUILD, "oot"); }
+static uint8_t *main_base(void) { return ws_main_base(); }
 
 // One projection, in place (the callbacks below; the unit test calls it through them)
 static void fix(uint64_t proj) {
@@ -85,11 +57,8 @@ static void fix(uint64_t proj) {
     float tn = rdf(proj + P_TAN);
     if (!(tn > 0.01f && tn < 20.0f)) return;   // not a perspective lens the game made
     if (a < K169) {
-        unsigned s = slot_of(proj);
-        uint32_t tb = bits(tn);
-        if (!(atomic_load_explicit(&g_seen[s].proj, memory_order_relaxed) == proj && atomic_load_explicit(&g_seen[s].tan, memory_order_relaxed) == tb)) {
-            double half = atan(tn * K169 / a);
-            if (half > 1.50) half = 1.50;   // under 172 degrees: a tangent past that is no lens
+        if (!ws_seen_has(g_seen, proj, tn)) {
+            double half = ws_vertplus_half(tn, a);   // under 172 degrees: a tangent past that is no lens
             float ntan = (float)tan(half);
             if (atomic_fetch_add_explicit(&g_fixes, 1, memory_order_relaxed) == 0)
                 LOG("oot wide: first projection fovy %.2f (sin %.4f cos %.4f tan %.4f) -> %.2f deg vertical (aspect %.4f -> %.4f)", rdf(proj + P_FOVY) * 57.29578,
@@ -98,8 +67,7 @@ static void fix(uint64_t proj) {
             wrf(proj + P_SIN, (float)sin(half));
             wrf(proj + P_COS, (float)cos(half));
             wrf(proj + P_TAN, ntan);
-            atomic_store_explicit(&g_seen[s].tan, bits(ntan), memory_order_relaxed);
-            atomic_store_explicit(&g_seen[s].proj, proj, memory_order_relaxed);
+            ws_seen_set(g_seen, proj, ntan);
         }
     }
     wrf(proj + P_ASPECT, (float)a);
@@ -144,9 +112,7 @@ static void hud(uint64_t *r) {
         }
     }
     if (whole) return;
-    memcpy(t_rows, (void *)m, sizeof t_rows);
-    float q = (float)(a > K169 ? K169 / a : a / K169);
-    for (int k = 0; k < 4; k++) t_rows[(a > K169 ? 0 : 4) + k] *= q;
+    ws_squeeze_rows(t_rows, (const float *)(uintptr_t)m, a);
     r[2] = (uint64_t)(uintptr_t)t_rows;
 }
 
@@ -159,7 +125,7 @@ static void movie(uint64_t *r) {
     memcpy(v, (void *)(vp + 8), 4); memcpy(v + 1, (void *)(vp + 12), 4); memcpy(v + 2, (void *)(vp + 16), 4); memcpy(v + 3, (void *)(vp + 20), 4);
     if (!(v[2] > v[0]) && !(v[3] > v[1])) return;
     int wide = a > K169;
-    double margin = (1.0 - (wide ? K169 / a : a / K169)) / 2;
+    double margin = ws_margin(a);
     int lo = wide ? 0 : 1, hi = wide ? 2 : 3;
     if (!(v[hi] > v[lo])) return;
     float in = (float)((v[hi] - v[lo]) * margin), nlo = v[lo] + in, nhi = v[hi] - in;

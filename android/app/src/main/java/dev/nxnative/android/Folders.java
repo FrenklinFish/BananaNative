@@ -147,11 +147,11 @@ final class Folders {
     /** Settings › Folders: the only game's folders, else the user picks the game first */
     static void dialog(MainActivity a) {
         List<Game> list = Game.load(a);
-        if (list.isEmpty()) { a.error("No games yet: + Add game first. Each game has its own folders (its card's ⋯ › Folders…)."); return; }
+        if (list.isEmpty()) { a.error("No games yet: + Add game first. Each game has its own folders (tap its tile, then Storage › Folders…)."); return; }
         if (list.size() == 1) { dialog(a, list.get(0)); return; }
         String[] names = new String[list.size()];
         for (int i = 0; i < names.length; i++) names[i] = list.get(i).name + "  (" + list.get(i).titleId + ")";
-        new AlertDialog.Builder(a).setTitle("Folders of which game?").setItems(names, (d, w) -> dialog(a, list.get(w))).setNegativeButton("Cancel", null).show();
+        new PadFocus.Builder(a).setTitle("Folders of which game?").setItems(names, (d, w) -> dialog(a, list.get(w))).setNegativeButton("Cancel", null).show();
     }
 
     static void dialog(MainActivity a, Game g) {
@@ -242,7 +242,7 @@ final class Folders {
         pickedPack(a, p.titleId, dir.getPath());
         setPack(a, p.titleId, dir);
         String lp = Pack.libraryProblem(dir, p.titleId);
-        new AlertDialog.Builder(a).setTitle("Pack folder set").setMessage(dir + "\n\n" + (lp == null ? "It has this app's shader library (" + BuildConfig.NX_DMSH_VK_CHAIN + "): ready to play." : lp))
+        new PadFocus.Builder(a).setTitle("Pack folder set").setMessage(dir + "\n\n" + (lp == null ? "It has this app's shader library (" + BuildConfig.NX_DMSH_VK_CHAIN + "): ready to play." : lp))
                 .setPositiveButton("OK", (x, w) -> { if (g != null) dialog(a, g); }).show();
     }
 
@@ -253,7 +253,7 @@ final class Folders {
         File old = save(a, g);
         if (old != null && old.getAbsolutePath().equals(dir.getAbsolutePath())) { dialog(a, g); return; }
         if (isEmpty(dir) && old != null && !isEmpty(old)) {
-            new AlertDialog.Builder(a).setTitle("Copy the save?")
+            new PadFocus.Builder(a).setTitle("Copy the save?")
                     .setMessage("The folder you picked is empty. Your current save is in " + old + ".\n\nCopy it into " + dir + "? The current folder stays as it is: nothing is deleted.")
                     .setPositiveButton("Copy and use", (x, w) -> new Thread(() -> {
                         String err = null;

@@ -95,10 +95,20 @@ taps it, from the public GitHub release pages of [MrPurple666/purple-turnip](htt
 and [StevenMXZ/Adreno-Tools-Drivers](https://github.com/StevenMXZ/Adreno-Tools-Drivers);
 thanks to their authors. Each download keeps its own licence: Mesa's Turnip driver is MIT-licensed, Qualcomm's Adreno driver binaries are proprietary.
 
+**The optional Mario Kart World camera and 2D layer aspect (`dm/host/android/mkw_wide.c`, with the five gates in `dm/games/0400C3F00006E000/patches.py`) is GPL-3.0-or-later.**
+The sites (the camera aspect stores, DrawInfo's projection getter calls and the rows read of 1.8.0) and the idea of widening a view's aspect where it is stored and keeping the 2D layer in the middle 16:9 come from adriadam10's [mkw-recomp](https://github.com/adriadam10/mkw-recomp) (MIT; `recomp/patches-mkw-180.txt`, `runtime/core/boot/patches.c`). The Android file re-expresses them as host callbacks on rewriter gates (the original instruction of a site is a branch in two cases, so the gates sit on the instruction before it), keeps the game's frame 16:9 and adds the vertical field-of-view correction for pictures narrower than 16:9. It lives under `dm/host/android/` so the Mac and iPhone builds do not include it.
+
 **The optional Ocarina of Time camera and 2D layer aspect (`dm/host/android/oot_wide.c`, with the eight gates in `dm/games/0400486024DEC000/patches.py`) is GPL-3.0-or-later.**
 The camera, HUD, movie and save picture sites (the UI, movie and matrix sites are Ivan0xFF's, the save picture and the narrow-screen HUD Hookshot's own) and the idea of replacing the 16:9 ratio where the projection is read come from Jbuck7's GameBanana mod 737495 (Ocarina of Time 1.1.1 ultrawide), carried to the
 NX2navi patch list `patches-v111.txt` by Ivan0xFF (MIT) and to [`nx2/oot_wide.py`](https://github.com/NotRexed/Hookshot) of Hookshot by NotRexed (GPL-3.0). The Android file re-expresses
 them as host callbacks on rewriter gates and adds the vertical field-of-view correction for pictures narrower than 16:9. It lives under `dm/host/android/` so the Mac and iPhone builds do not include it.
+
+**The optional Donkey Kong Bananza camera and 2D layer aspect (`dm/host/android/dkb_wide.c`, with the three gates in `dm/games/040074A01BF12000/patches.py`) is GPL-3.0-or-later.**
+The idea of changing the scene camera's aspect and of scaling the UI projection where it is copied into the draw info (two of their four sites, `main+0x45f9dc` and `main+0x803c94`, are the layout projection setups gated here) come from the `dkbwide` patch set of Lucas-blip-png's
+[dkb-pc-recomp](https://github.com/Lucas-blip-png/dkb-pc-recomp) (`recomp/patches-dkb458752.txt`, GPL-3.0). The Android file re-expresses them as host callbacks on rewriter gates, reads the camera's
+values where the game uses them, squeezes the UI into the middle of the unchanged 16:9 frame instead of widening it, and adds the vertical field-of-view correction for pictures narrower than 16:9.
+It lives under `dm/host/android/` so the Mac and iPhone builds do not include it. The shared parts of both games' callbacks are in `dm/host/android/wide_shape.h`.
+
 **The optional Pokopia world-camera correction is GPL-3.0-or-later.**
 [`dm/host/android/pkp_aspect.c`](../dm/host/android/pkp_aspect.c) adapts the camera/FOV handling in
 [`runtime/games/pkp/render/pkp_aspect.cpp`](https://github.com/Dittobyte/Recompia/blob/75dae2f2ccdada74e6b8ba12ea7de30560a84221/runtime/games/pkp/render/pkp_aspect.cpp)

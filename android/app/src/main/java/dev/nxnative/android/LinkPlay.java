@@ -45,7 +45,7 @@ final class LinkPlay {
 
     static void dialog(MainActivity a, Game g, Runnable done) {
         String id = g.titleId;
-        new AlertDialog.Builder(a).setTitle("Link Play")
+        new PadFocus.Builder(a).setTitle("Link Play")
                 .setSingleChoiceItems(new String[] {"Off", "Join PC host"}, "visit".equals(mode(a, id)) ? 1 : 0, (x, w) -> {
                     x.dismiss();
                     if (w == 0) {

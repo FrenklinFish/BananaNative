@@ -75,3 +75,10 @@ render_cond	on
 graphics_scale	2560x1440	1	console
 graphics_scale	1920x1080	0	handheld
 graphics_scale	1280x720	2	handheld
+
+# Game settings > Aspect ratio (dm/games/README.md "Aspect ratio without a variant"): the picture shapes the 3D cameras and the 2D layer follow (dm/host/android/mkw_wide.c, patches.py OBS rows).
+# The picture is fitted at that shape (DM_VK_PICTURE_ASPECT) and the cameras take the same ratio; 16:9 stays the default (README.md "Aspect ratio")
+aspect	21:9
+aspect	4:3
+aspect	10:9
+aspect	1:1

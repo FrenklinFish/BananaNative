@@ -53,7 +53,7 @@ final class PackUi {
 
     static void importPick(MainActivity a, Game g) {
         if (!ready(a, g)) return;
-        new AlertDialog.Builder(a).setTitle("Import " + g.name + "'s pack from…")
+        new PadFocus.Builder(a).setTitle("Import " + g.name + "'s pack from…")
                 .setItems(new String[] {"A .zip file (made by Export pack…)", "A pack folder (with pack.tsv and shaders/)"}, (d, w) -> {
                     pending = g;
                     if (w == 1) { a.pickFolder(PICK_IMPORT_DIR, "Pick the pack folder (the one with pack.tsv and shaders/)"); return; }
@@ -124,7 +124,7 @@ final class PackUi {
         }, (r, err) -> {
             if (err != null) { a.error("No pack was exported: " + err + "\n\nThe pack in " + pack + " was only read."); return; }
             File z = (File) r;
-            new AlertDialog.Builder(a).setTitle("Pack exported").setMessage(z + "\n\n" + SaveStore.size(z.length()) + ", checked against the pack file by file. Import pack… on another "
+            new PadFocus.Builder(a).setTitle("Pack exported").setMessage(z + "\n\n" + SaveStore.size(z.length()) + ", checked against the pack file by file. Import pack… on another "
                     + "phone (or after a new install) puts it back.").setPositiveButton("OK", null).show();
         });
     }
@@ -177,7 +177,7 @@ final class PackUi {
 
     private static void run(MainActivity a, Game g, String wait, Work work, Done done) {
         if (!take(g.titleId)) return;
-        AlertDialog w = new AlertDialog.Builder(a).setMessage(wait).setCancelable(false).show();
+        AlertDialog w = new PadFocus.Builder(a).setMessage(wait).setCancelable(false).show();
         new Thread(() -> {
             String err = null;
             Object r = null;

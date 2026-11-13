@@ -167,7 +167,7 @@ final class GpuDriver {
      *  thread, also after a failure; may be null). Nothing it throws reaches the app: a failed install is a message and changes no pick. */
     static void installInBackground(Activity a, String what, Job job, Runnable after) {
         Context app = a.getApplicationContext();
-        AlertDialog wait = new AlertDialog.Builder(a).setMessage("Installing " + what + "…").setCancelable(false).create();
+        AlertDialog wait = new PadFocus.Builder(a).setMessage("Installing " + what + "…").setCancelable(false).create();
         wait.show();
         new Thread(() -> {
             Info got = null; String fail = null;
@@ -204,7 +204,7 @@ final class GpuDriver {
         labels.add("System (the phone's own driver)");
         int checked = 0;
         for (int k = 0; k < inst.size(); k++) { labels.add(inst.get(k).label() + (recommended(inst.get(k)) ? " (recommended)" : "")); if (sel != null && inst.get(k).dir.equals(sel.dir)) checked = k + 1; }
-        new AlertDialog.Builder(a).setTitle("GPU driver (takes effect at the next game start)")
+        new PadFocus.Builder(a).setTitle("GPU driver (takes effect at the next game start)")
                 .setSingleChoiceItems(labels.toArray(new String[0]), checked, (d, w) -> { select(a, w == 0 ? null : inst.get(w - 1)); d.dismiss(); })
                 .setPositiveButton("Install…", (d, w) -> installDialog(a, request))
                 .setNeutralButton(sel != null ? "Remove picked…" : "Close", (d, w) -> {
@@ -224,7 +224,7 @@ final class GpuDriver {
         for (File f : zips) labels.add(f.getName() + "  (the app's gpu_drivers folder)");
         labels.add("Pick a zip…");
         labels.add("Download…");   // DriverFetch: GitHub releases, only on a tap
-        new AlertDialog.Builder(a).setTitle("Install a driver zip (with meta.json)")
+        new PadFocus.Builder(a).setTitle("Install a driver zip (with meta.json)")
                 .setItems(labels.toArray(new String[0]), (d, w) -> {
                     if (w == zips.size() + 1) { DriverFetch.dialog(a, request); return; }
                     if (w == zips.size()) {

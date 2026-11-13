@@ -195,7 +195,7 @@ final class Ui {
         t.setSingleLine(true);
         t.setEllipsize(TextUtils.TruncateAt.END);
         t.setContentDescription(s + ": tap for details");
-        t.setOnClickListener(v -> new AlertDialog.Builder(a).setTitle(title).setMessage(message).setPositiveButton("OK", null).show());
+        t.setOnClickListener(v -> new PadFocus.Builder(a).setTitle(title).setMessage(message).setPositiveButton("OK", null).show());
         return t;
     }
 
@@ -800,14 +800,14 @@ final class Ui {
         int p = dp(a, 20);
         content.setPadding(p, dp(a, 4), p, dp(a, 8));
         sv.addView(content);
-        return new AlertDialog.Builder(a).setTitle(title).setView(sv);
+        return new PadFocus.Builder(a).setTitle(title).setView(sv);
     }
 
     /**
      * Asks before something is deleted or forgotten: what goes and what stays, in the message; the yes button in the danger color, Cancel the default.
      */
     static void confirmDanger(Activity a, String title, CharSequence message, String yes, Runnable r) {
-        AlertDialog d = new AlertDialog.Builder(a).setTitle(title).setMessage(message)
+        AlertDialog d = new PadFocus.Builder(a).setTitle(title).setMessage(message)
                 .setPositiveButton(yes, (x, w) -> r.run()).setNegativeButton("Cancel", null).create();
         d.setOnShowListener(x -> {
             Button b = d.getButton(AlertDialog.BUTTON_POSITIVE);

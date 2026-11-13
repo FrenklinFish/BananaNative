@@ -258,7 +258,7 @@ final class Updater {
         }
         int[] cur = UpdateCheck.appVersion(version(a));
         if (cur == null) { msg(a, "Updates", "This build's version (" + version(a) + ") is not a release version: nothing to compare."); return; }
-        AlertDialog wait = new AlertDialog.Builder(a).setMessage("Checking for updates…").setCancelable(false).create();
+        AlertDialog wait = new PadFocus.Builder(a).setMessage("Checking for updates…").setCancelable(false).create();
         wait.show();
         Context app = a.getApplicationContext();
         new Thread(() -> {
@@ -276,7 +276,7 @@ final class Updater {
         }, "nx-update-check").start();
     }
 
-    private static void msg(Activity a, String title, String msg) { new AlertDialog.Builder(a).setTitle(title).setMessage(msg).setPositiveButton("OK", null).show(); }
+    private static void msg(Activity a, String title, String msg) { new PadFocus.Builder(a).setTitle(title).setMessage(msg).setPositiveButton("OK", null).show(); }
 
     /** The release page (ReleasePage): version, the release notes with their pictures, size; Later, Update */
     static void popup(Activity a, UpdateCheck.Update u) { ReleasePage.show(a, u, version(a), () -> download(a, u)); }
@@ -415,7 +415,7 @@ final class Updater {
     private static void install(Activity a, File apk) {
         if (!a.getPackageManager().canRequestPackageInstalls()) {
             pending = apk;
-            new AlertDialog.Builder(a).setTitle("Allow installs")
+            new PadFocus.Builder(a).setTitle("Allow installs")
                     .setMessage("To install the update, allow Banana Native to install apps (\"Install unknown apps\"), then come back.")
                     .setPositiveButton("Open settings", (d, w) -> a.startActivity(new Intent(Settings.ACTION_MANAGE_UNKNOWN_APP_SOURCES, Uri.parse("package:" + a.getPackageName()))))
                     .setNegativeButton("Cancel", (d, w) -> { pending = null; apk.delete(); })

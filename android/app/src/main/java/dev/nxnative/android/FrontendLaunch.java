@@ -158,7 +158,7 @@ public final class FrontendLaunch extends Activity {
     }
 
     private void fail(String why) {
-        new AlertDialog.Builder(this, android.R.style.Theme_DeviceDefault_Dialog_Alert).setTitle("Cannot start the game").setMessage(why)
+        new PadFocus.Builder(this, android.R.style.Theme_DeviceDefault_Dialog_Alert).setTitle("Cannot start the game").setMessage(why)
                 .setPositiveButton("OK", null).setOnDismissListener(d -> finish()).show();
     }
 }

@@ -354,8 +354,8 @@ will catch before testing: each pane's translate, size and parent, and the anima
 A game whose cameras can follow the picture's shape at run time needs no second copy of its code: a profile lists the shapes in `aspect` rows (`aspect	21:9`) and Game settings › Aspect ratio offers them
 next to any variant's. Choosing one sets `DM_VK_PICTURE_ASPECT=<w>:<h>` only. The present fits the game's 16:9 frame into that shape (the whole screen when the screen has it, bars otherwise; Display › Stretch
 still fills the screen), and the game's build-gated host callbacks (observation gates in `patches.py`, code under `dm/host/android/`) read the same switch for the cameras' ratio, so the picture and the cameras
-cannot disagree. Ocarina of Time (`0400486024DEC000`) is the example (`oot_wide.c`): wider than 16:9 keeps the vertical field of view, narrower keeps the horizontal reach. The 3D view follows; a game's HUD
-and menus keep their layout until its profile says otherwise (Ocarina of Time keeps them in the middle 16:9 with more gates).
+cannot disagree. Ocarina of Time (`0400486024DEC000`, `oot_wide.c`) and Donkey Kong Bananza (`040074A01BF12000`, `dkb_wide.c`) are the examples, sharing `wide_shape.h` (the shape, the table of converted lenses, the row squeeze): wider than 16:9 keeps the vertical field of view, narrower keeps the horizontal reach. The 3D view follows; a game's HUD
+and menus keep their layout until its profile says otherwise (both keep them in the middle 16:9 with more gates). Mario Kart World (`0400C3F00006E000`, `mkw_wide.c`) does the same for its layer cameras and its 2D projection.
 
 A profile with any `aspect` row also gets **Screen shape** in that list: the picture takes the shape of the game window, so it fills the whole screen (no bars on a 19.5:9 phone or on a foldable's
 inner screen). `GameActivity` reads the window's size at the start (`ScreenShape.ratio`: the window's width and height reduced by their greatest common divisor, turned to landscape when

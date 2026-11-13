@@ -120,7 +120,7 @@ final class DriverFetch {
     private static boolean gone(Activity a) { return a.isFinishing() || a.isDestroyed(); }
 
     private static AlertDialog busy(Activity a, String msg) {
-        AlertDialog d = new AlertDialog.Builder(a).setMessage(msg).setCancelable(false).create();
+        AlertDialog d = new PadFocus.Builder(a).setMessage(msg).setCancelable(false).create();
         d.show();
         return d;
     }
@@ -129,7 +129,7 @@ final class DriverFetch {
     static void dialog(Activity a, int request) {
         String[] labels = new String[REPOS.length];
         for (int k = 0; k < REPOS.length; k++) labels[k] = REPOS[k][1] + "\n  github.com/" + REPOS[k][0];
-        new AlertDialog.Builder(a).setTitle("Download a driver (GitHub releases)")
+        new PadFocus.Builder(a).setTitle("Download a driver (GitHub releases)")
                 .setItems(labels, (d, w) -> releases(a, REPOS[w][0], request))
                 .setNegativeButton("Cancel", null).show();
     }
@@ -147,7 +147,7 @@ final class DriverFetch {
                 if (got.isEmpty()) { Toast.makeText(a, repo + ": no .zip assets in its releases", Toast.LENGTH_LONG).show(); return; }
                 String[] labels = new String[got.size()];
                 for (int k = 0; k < got.size(); k++) labels[k] = got.get(k).label();
-                new AlertDialog.Builder(a).setTitle(repo)
+                new PadFocus.Builder(a).setTitle(repo)
                         .setItems(labels, (d, w) -> download(a, got.get(w), request))
                         .setNegativeButton("Back", (d, w) -> dialog(a, request)).show();
             });

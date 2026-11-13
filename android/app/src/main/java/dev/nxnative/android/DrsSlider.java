@@ -56,7 +56,7 @@ final class DrsSlider {
         }
         box.addView(slider);
         CheckBox d = dflt;
-        dlg[0] = new AlertDialog.Builder(c).setTitle(title(index) + suffix).setView(box)
+        dlg[0] = new PadFocus.Builder(c).setTitle(title(index) + suffix).setView(box)
                 .setPositiveButton("OK", (x, w) -> { set.accept(d != null && d.isChecked() ? null : cur[0]); done.run(); })
                 .setNegativeButton("Cancel", null).show();
     }

@@ -403,7 +403,7 @@ final class Ondevice {
         void tryAnyway() {
             Job j = job;
             if (j == null || alive()) return;
-            new AlertDialog.Builder(a).setTitle("Try anyway?").setMessage(PrepareText.ANYWAY_WARNING)
+            new PadFocus.Builder(a).setTitle("Try anyway?").setMessage(PrepareText.ANYWAY_WARNING)
                     .setPositiveButton("Try anyway", (d, w) -> {
                         if (a.needAccess(j.dump())) return;
                         try {
@@ -642,7 +642,7 @@ final class Ondevice {
                 Game.put(a, g);   // one card per game (GameList)
                 a.refresh();
                 show();
-                new AlertDialog.Builder(a).setTitle("Ready to play").setMessage("Its pack fits: nothing needs preparing.\n\nPack: " + packDir).setPositiveButton("OK", null).show();
+                new PadFocus.Builder(a).setTitle("Ready to play").setMessage("Its pack fits: nothing needs preparing.\n\nPack: " + packDir).setPositiveButton("OK", null).show();
             } catch (Exception e) {
                 a.error("Cannot use " + packDir + ": " + e.getMessage());
             }
@@ -661,7 +661,7 @@ final class Ondevice {
         }
 
         void confirm(String t, String msg, String yes, Runnable r) {
-            new AlertDialog.Builder(a).setTitle(t).setMessage(msg).setPositiveButton(yes, (d, w) -> r.run()).setNegativeButton("Cancel", null).show();
+            new PadFocus.Builder(a).setTitle(t).setMessage(msg).setPositiveButton(yes, (d, w) -> r.run()).setNegativeButton("Cancel", null).show();
         }
 
         void startService(Job j) {

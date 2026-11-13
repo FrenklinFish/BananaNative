@@ -38,9 +38,11 @@ class DumpModules(unittest.TestCase):
     def test_build_with_one_module_less(self):
         self.assertEqual(pa.dump_modules(self.G, self.exefs({'main': A, 'subsdk0': B, 'sdk': C})), ['main', 'subsdk0', 'sdk'])
 
-    def test_unregistered_set_is_left_to_the_caller(self):
-        self.assertEqual(pa.dump_modules(self.G, self.exefs({'main': A, 'subsdk0': D, 'sdk': C})), ['main', 'subsdk0', 'subsdk1', 'sdk'])   # ids of no row: the caller says what is missing
-        self.assertEqual(pa.dump_modules(self.G, self.exefs({'main': A, 'sdk': C})), ['main', 'subsdk0', 'subsdk1', 'sdk'])
+    def test_unregistered_set_takes_the_modules_there(self):
+        self.assertEqual(pa.dump_modules(self.G, self.exefs({'main': A, 'subsdk0': D, 'sdk': C})), ['main', 'subsdk0', 'sdk'])   # ids of no row: Try anyway
+
+    def test_no_main_is_left_to_the_caller(self):
+        self.assertEqual(pa.dump_modules(self.G, self.exefs({'subsdk0': D, 'sdk': C})), ['main', 'subsdk0', 'subsdk1', 'sdk'])   # the caller says what is missing
 
 
 class OptionalKeys(unittest.TestCase):

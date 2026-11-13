@@ -278,7 +278,7 @@ final class ExitWatch {
                 File dg = log == null ? null : digestOf(log);
                 String url = v == null ? null : v.docUrl();
                 String likely = LogDigest.likely(v, end.why);
-                AlertDialog.Builder b = new AlertDialog.Builder(a).setTitle(ExitNotice.TITLE).setMessage(ExitNotice.message(rec.get("name"), end.why, likely))
+                AlertDialog.Builder b = new PadFocus.Builder(a).setTitle(ExitNotice.TITLE).setMessage(ExitNotice.message(rec.get("name"), end.why, likely))
                         .setPositiveButton("OK", null);
                 if (log != null) b.setNeutralButton("Share log", (d, w) -> a.shareLog(log, dg != null && dg.isFile() ? dg : null));
                 if (v != null && v.rule != null) {
@@ -292,7 +292,7 @@ final class ExitWatch {
                                 msg = ss;
                             }
                         }
-                        AlertDialog.Builder mb = new AlertDialog.Builder(a).setTitle(ExitNotice.MEANING_TITLE).setMessage(msg)
+                        AlertDialog.Builder mb = new PadFocus.Builder(a).setTitle(ExitNotice.MEANING_TITLE).setMessage(msg)
                                 .setPositiveButton("OK", null);
                         if (url != null) mb.setNegativeButton("More details", (d2, w2) -> a.openLink(url));
                         showing = mb.show();

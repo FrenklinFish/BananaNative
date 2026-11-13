@@ -225,7 +225,9 @@ def dump_modules(g, exe):
     for row in g.builds().values():
         want = [m for m in mods if m in row]
         if want and want == have and all(nso_build_id(exe / m) == row[m] for m in want): return have
-    return mods   # no row has this set of modules: the caller names what is missing
+    # No row has this set of modules (a build the profile does not register, e.g. Mario Kart World 1.0.0, whose row was dropped): "Try anyway" takes the
+    # modules the dump has, when main is among them; build-gated cuts do not apply (the caller flags it in red). Without main the caller names what is missing.
+    return have if 'main' in have else mods
 
 
 def optional_keys(g):

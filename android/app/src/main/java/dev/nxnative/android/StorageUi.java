@@ -65,7 +65,7 @@ final class StorageUi {
         List<Game> games = Game.load(a);
         String why = busy(a, games);
         if (why != null) { a.error(why); return; }
-        AlertDialog wait = new AlertDialog.Builder(a).setMessage("Looking at the app's storage…").setCancelable(false).show();
+        AlertDialog wait = new PadFocus.Builder(a).setMessage("Looking at the app's storage…").setCancelable(false).show();
         Context app = a.getApplicationContext();
         new Thread(() -> {
             StorageScan.Roots r = roots(app, games);
@@ -140,7 +140,7 @@ final class StorageUi {
         Ui.confirmDanger(a, title, m, "Remove", () -> {
             String why = busy(a, Game.load(a));   // something may have started while the list showed
             if (why != null) { a.error(why); return; }
-            AlertDialog wait = new AlertDialog.Builder(a).setMessage("Removing…").setCancelable(false).show();
+            AlertDialog wait = new PadFocus.Builder(a).setMessage("Removing…").setCancelable(false).show();
             new Thread(() -> {
                 StorageScan.Result res = StorageScan.delete(r, l);
                 a.runOnUiThread(() -> {
@@ -148,7 +148,7 @@ final class StorageUi {
                     if (gone(a)) return;
                     a.refresh();
                     String done = StorageScan.bytes(res.freed) + " freed.";
-                    if (res.problems.isEmpty()) new AlertDialog.Builder(a).setMessage(done).setPositiveButton("OK", null).show();
+                    if (res.problems.isEmpty()) new PadFocus.Builder(a).setMessage(done).setPositiveButton("OK", null).show();
                     else Ui.explain(a, "Not everything was removed", done, String.join("\n", res.problems)).setPositiveButton("OK", null).show();
                 });
             }, "nxstorage-remove").start();
