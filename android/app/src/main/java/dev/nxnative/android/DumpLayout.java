@@ -42,6 +42,63 @@ final class DumpLayout {
         return x != null && !x.dir;
     }
 
+    /** One thing a dump holds, for the game page's Game files (MainActivity.gameTab): its kind (base, update, dlc, problem), its title and a detail line */
+    static final class Item {
+        final String kind, title, detail;
+
+        Item(String kind, String title, String detail) { this.kind = kind; this.title = title; this.detail = detail; }
+
+        @Override public String toString() { return kind + ": " + title + (detail == null ? "" : " — " + detail); }
+    }
+
+    /** A version in the player's words: the profile's name for it ("1.2.1"), else its number */
+    static String versionLabel(Profile prof, long v) {
+        String d = prof == null ? null : prof.display(v);
+        return d != null ? d : String.valueOf(v);
+    }
+
+    /**
+     * What a dump holds (read from the dump: a .nup's TOC is hashed, so off the main thread): the base game, each update with its version, and each DLC (its
+     * title ID, and its name when its .nup carries one)
+     */
+    static List<Item> contents(File dump, Profile prof) {
+        List<Item> out = new ArrayList<>();
+        java.util.Set<Long> supported = prof == null ? java.util.Set.of() : prof.buildMap().keySet();
+        try {
+            if (Nup.isNup(dump)) {
+                Nup n = Nup.open(dump);
+                for (Nup.Pkg p : n.packages) {
+                    if (p.kind == Nup.BASE) out.add(new Item("base", "Base game", p.exefsDir == Nup.NONE ? "no game code of its own" : null));
+                    else if (p.kind == Nup.UPDATE)
+                        out.add(new Item("update", "Update " + versionLabel(prof, p.version), "version " + p.version + (supported.contains(p.version) ? ", a build this app supports" : "")
+                                + (p.flags != 0 ? ", a whole game (packed from an update dump)" : "")));
+                    else if (p.kind == Nup.ADDON) {
+                        String name = null;
+                        try { byte[] m = n.metaBlock(p); if (m != null) name = Nup.Meta.parse(m).title; } catch (IOException e) { /* no name */ }
+                        String tid = String.format(Locale.ROOT, "%016X", p.titleId);
+                        out.add(new Item("dlc", name != null ? name : "DLC " + tid, name != null ? tid : "add-on " + (p.titleId & 0xFFF)));
+                    }
+                }
+            } else {
+                for (long v : versions(dump))
+                    out.add(v == 0 ? new Item("base", "Base game", supported.contains(0L) ? "a build this app supports" : null)
+                            : new Item("update", "Update " + versionLabel(prof, v), "version " + v + (supported.contains(v) ? ", a build this app supports" : "")));
+                File[] dlc = new File(dump, "dlc").listFiles(File::isDirectory);
+                if (dlc != null) {
+                    java.util.Arrays.sort(dlc);
+                    for (File d : dlc) {
+                        String[] parts = d.list();
+                        out.add(new Item("dlc", "DLC " + d.getName().toUpperCase(Locale.ROOT), parts == null || parts.length == 0 ? "empty" : parts.length == 1 ? null : parts.length + " versions"));
+                    }
+                }
+            }
+        } catch (IOException | RuntimeException e) {
+            out.add(new Item("problem", "Cannot be read", e.getMessage()));
+        }
+        if (out.stream().noneMatch(i -> i.kind.equals("dlc"))) out.add(new Item("dlc", "No DLC", null));
+        return out;
+    }
+
     /** The newest version a dump holds, -1 when none */
     static long newest(File dump) {
         List<Long> v = versions(dump);
