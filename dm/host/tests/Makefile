@@ -486,3 +486,24 @@ $(B)/t_android_memu: t_android_memu.c $(VKA)/vka_memu_spv.c $(VKA)/vka_memu_spv.
 # The replay's SPIR-V rewrite of integer-fed vertex inputs (vka_spvpatch.c): the selftest's vertex shader, validated by spirv-val when it is on the PATH; DM_VK_SPV_DIR=<.spv folder> adds those modules
 $(B)/t_android_spvpatch: t_android_spvpatch.c $(VKA)/vka_spvpatch.c $(VKA)/vka_spvpatch.h $(VKA)/vka_selftest_spv.h | $(B)
 	$(CLANG) -O1 -g -Wall -Werror -Wno-unused-function -fsanitize=address,undefined -I.. -o $@ t_android_spvpatch.c $(VKA)/vka_spvpatch.c
+
+# Optional local-wireless host checks. COOP_DIR is the separately pinned module;
+# the default test run does not require it or open any network connection.
+COOP_DIR ?= ../../third_party/pokopia-coop
+COOP_TEST_SRC = $(addprefix $(COOP_DIR)/coop_,ldn.c vnet.c mpnet.c plat.c auth.c disc.c)
+COOP_TEST_LIBS = $(if $(filter Darwin,$(shell uname -s)),-ldns_sd,)
+$(B)/t_net_eventfd: t_net_eventfd.c ../hle_net.c ../hle_coop.h ../hle.h ../dm.h $(GAME_H) | $(B)
+	$(CLANG) -O1 -g -Wall -Werror -Wno-unused-function -I.. $(GINC) -o $@ t_net_eventfd.c
+$(B)/t_net_coop: t_net_coop.c ../hle_net.c ../hle_offline.c ../hle_coop.c ../hle_coop.h ../hle.h ../dm.h $(GAME_H) $(COOP_TEST_SRC) | $(B)
+	$(CLANG) -O1 -g -Wall -Wno-unused-function -DNX_COOP_VENDOR=1 -I.. $(GINC) -I$(COOP_DIR) -o $@ t_net_coop.c $(COOP_TEST_SRC) $(COOP_TEST_LIBS)
+.PHONY: net-eventfd net-coop
+net-eventfd: $(B)/t_net_eventfd
+	$(B)/t_net_eventfd
+net-coop: $(B)/t_net_coop
+	$(B)/t_net_coop unset
+	$(B)/t_net_coop off
+	$(B)/t_net_coop zero
+	$(B)/t_net_coop empty
+	$(B)/t_net_coop invalid
+	$(B)/t_net_coop enabled
+	$(B)/t_net_coop select-race

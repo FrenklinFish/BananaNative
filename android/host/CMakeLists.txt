@@ -42,6 +42,26 @@ endforeach()
 file(GLOB HOST_C CONFIGURE_DEPENDS ${HOST}/*.c)
 list(REMOVE_ITEM HOST_C ${HOST}/hle_movie_avc.c)   # VideoToolbox: dm/host/plat/movie_avc_android.c stands in
 list(APPEND HOST_C ${HOST}/plat/plat_android.c ${HOST}/plat/movie_avc_android.c ${HOST}/plat/front_android.c)
+# Local wireless (nn::ldn) over IP: pokopia-native's portable co-op module, wired by dm/host/hle_coop.c and inert unless DM_COOP is set. The module is a pinned
+# third-party source the tree vendors separately (dm/third_party/pokopia-coop by default; -DNX_COOP_VENDOR_DIR=<dir> builds against a copy elsewhere). Where it is absent
+# the host builds as before: NX_COOP_VENDOR=0, dm_coop_node() is NULL and every hook keeps its offline answer
+# Tested dependency: Dittobyte/Recompia runtime/third_party/pokopia-coop at 75dae2f2ccdada74e6b8ba12ea7de30560a84221.
+# Preserve the MIT originals' notices and Recompia extension attribution. Vendoring/licence changes are a separate maintainer-owned version bump.
+set(NX_COOP_VENDOR_DIR "${TP}/pokopia-coop" CACHE PATH "The portable co-op module's sources (coop.h and its .c files)")
+set(NX_COOP_VENDOR 0)
+if(EXISTS "${NX_COOP_VENDOR_DIR}/coop.h")
+  set(COOP_C)
+  foreach(part ldn vnet mpnet plat auth disc)
+    if(NOT EXISTS "${NX_COOP_VENDOR_DIR}/coop_${part}.c")
+      message(FATAL_ERROR "Incomplete co-op module: missing coop_${part}.c in NX_COOP_VENDOR_DIR")
+    endif()
+    list(APPEND COOP_C "${NX_COOP_VENDOR_DIR}/coop_${part}.c")
+  endforeach()
+  list(APPEND HOST_C ${COOP_C})
+  set(NX_COOP_VENDOR 1)
+else()
+  message(STATUS "co-op module not found at ${NX_COOP_VENDOR_DIR}: local wireless stays offline (NX_COOP_VENDOR=0)")
+endif()
 # Audio (AAudio, in hle_audio.c), AAC and H.264 (AMediaCodec), input, motion, rumble and the JNI bindings: dm/host/android
 file(GLOB HOST_ANDROID_C CONFIGURE_DEPENDS ${HOST}/android/*.c)
 list(APPEND HOST_C ${HOST_ANDROID_C})
@@ -91,9 +111,9 @@ function(nxhost_add tgt game)
   add_custom_target(${tgt}_seed COMMAND ${Python3_EXECUTABLE} ${ROOT}/dm/games/game.py seed ${game} ${SEED_H} BYPRODUCTS ${SEED_H} COMMENT "prewarm seed ${game}")
   add_library(${tgt} SHARED ${HOST_C} ${GFX_C} ${ASM_OUT} ${GAME_H} ${SEED_H})
   add_dependencies(${tgt} ${tgt}_seed)
-  target_include_directories(${tgt} PRIVATE ${GEN}/${game} ${GFX}/nvn/include ${TP}/vulkan-headers/include ${TP}/libvpx ${TP}/libvpx/config ${TP}/dav1d/include ${TP}/stb_vorbis ${HOST})
+  target_include_directories(${tgt} PRIVATE ${GEN}/${game} ${GFX}/nvn/include ${TP}/vulkan-headers/include ${TP}/libvpx ${TP}/libvpx/config ${TP}/dav1d/include ${TP}/stb_vorbis ${HOST} ${NX_COOP_VENDOR_DIR})
   # DM_NUP_ZSTD: compressed files of a NUP container are decompressed with zstddec (dm/host/nup_image.h)
-  target_compile_definitions(${tgt} PRIVATE _GNU_SOURCE DM_NUP_ZSTD $<$<BOOL:${NX_LSFG}>:NX_LSFG>)
+  target_compile_definitions(${tgt} PRIVATE _GNU_SOURCE DM_NUP_ZSTD NX_COOP_VENDOR=${NX_COOP_VENDOR} $<$<BOOL:${NX_LSFG}>:NX_LSFG>)
   # As the Mac host (-O1 -g -Wall -Wno-unused-function). Hidden visibility: the assembly reaches C symbols with adrp, which a shared library allows only for symbols it binds itself
   # -Wno-format: the host prints uint64_t with %ll* (unsigned long long on Darwin, unsigned long on Linux: the same 64 bits)
   target_compile_options(${tgt} PRIVATE -O1 -g -Wall -Wno-unused-function -Wno-format -fvisibility=hidden)
