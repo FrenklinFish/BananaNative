@@ -102,6 +102,8 @@ Game-specific findings; the general host changes they led to are listed under [F
 
 ## Found on this game
 
+- **Resolved: button icons as "?" on Android** ("Press ? + ? to start"): [Button icons drawn as "?" on Android](../../../docs/reference/services.md#button-icons-drawn-as--on-android).
+
 - [Offline pipeline archive missing for the device GPU](../../../docs/reference/shaders.md#offline-pipeline-archive-missing-for-the-device-gpu): archive targets can follow profile metadata while iOS Metal 4 remains opt-in; [the probe above](#offline-pipeline-archive-probe) records the build evidence and open device checks.
 General host changes first needed here; each applies to every game:
 

@@ -306,6 +306,36 @@ def nxFontAssets = tasks.register('nxFontAssets', Sync) {
 android.sourceSets.main.assets.srcDir(layout.buildDirectory.dir('generated/nxfonts/assets'))
 tasks.named('preBuild') { dependsOn nxFontAssets }
 
+// The Nintendo extension shared font's stand-in (button icons in game text, e.g. "Press L + R"): dm/tools/make_ext_font.py makes assets/fonts/nintendo_ext.ttf at
+// every build where its inputs changed (no font file in the sources); GameFonts places it beside standard.ttf in DM_FONT_DIR (hle_sdk16.c, shared-font type 5).
+// Its letters come from the bundled Noto Sans above (SIL OFL, so the APK ships no system font's glyphs); -PnxLetterFont=<a .ttf> names another. It needs a python3
+// with fontTools (android/environment.yml). Without fontTools the APK is built without it, and the games draw '?' for the icons (said here, and by the host's [YELLOW] line)
+def nxFontOut = layout.buildDirectory.dir('generated/nxextfont/assets/fonts')
+def nxFont = tasks.register('nxExtFont') {
+    def tool = new File(repo, 'dm/tools/make_ext_font.py')
+    def letters = providers.gradleProperty('nxLetterFont').getOrElse(new File(repo, 'dm/third_party/fonts/NotoSans-Regular-subset.ttf').path)
+    inputs.file(tool)
+    inputs.file(letters)
+    outputs.dir(nxFontOut)
+    outputs.upToDateWhen { nxFontOut.get().file('nintendo_ext.ttf').asFile.isFile() }   // one not made (no fontTools then) is tried again at the next build
+    doLast {
+        def out = nxFontOut.get().file('nintendo_ext.ttf').asFile
+        out.parentFile.mkdirs()
+        def cmd = ['python3', tool.path, out.path, letters]
+        def p
+        try { p = new ProcessBuilder(cmd).redirectErrorStream(true).start() } catch (IOException e) { p = null; logger.warn("[RED] nintendo_ext.ttf not made (python3: $e.message): button icons in game text will be drawn as '?'") }
+        if (p != null) {
+            def text = p.inputStream.text
+            if (p.waitFor() != 0 || !out.isFile()) {
+                out.delete()
+                logger.warn("[RED] nintendo_ext.ttf not made: button icons in game text will be drawn as '?' (dm/tools/make_ext_font.py needs fontTools: android/environment.yml)\n" + text.trim())
+            } else logger.lifecycle(text.trim())
+        }
+    }
+}
+android.sourceSets.main.assets.srcDir(layout.buildDirectory.dir('generated/nxextfont/assets'))
+tasks.named('preBuild') { dependsOn nxFont }
+
 // ./gradlew apk → out/nxnative-android.apk (-PnxPlay=true: nxnative-android-play.apk; -PnxApp=<suffix>: nxnative-android-<suffix>.apk)
 tasks.register('apk', Copy) {
     dependsOn 'assembleRelease'

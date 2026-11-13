@@ -914,9 +914,16 @@ Most service calls can be found before they crash, before the first boot or the 
 
 - **Symptom:** (Android) `[RED] cannot open the standard shared font` at boot, then a crash in the game's font code (Splatoon Raiders: `CRASH sig=11 addr=0x66637300000100 pc=main+0x8109d8`).
 - **Cause:** the standard shared font falls back to the system's own font when neither `DM_SHARED_FONT` nor `DM_FONT_DIR/standard.ttf` is set, and that fallback was macOS's Arial Unicode only. On the phone nothing opened, so SDK 21's `GetBuiltInFontData` filled no record, and the game, which on the console always has its fonts, used the record anyway.
-- **Fix:** `hle_sdk16.c` `SYSTEM_FONT`: Android's `/system/fonts/Roboto-Regular.ttf`, which every Android has (Latin, Greek, Cyrillic). The CJK fonts there are `.ttc` collections, not one TTF, so Chinese and Korean system text has no glyphs yet (open). The Nintendo extension font (`nintendo_ext.ttf`, button icons) is still missing on the phone, so those icons draw as `?` (open).
+- **Fix:** `hle_sdk16.c` `SYSTEM_FONT`: Android's `/system/fonts/Roboto-Regular.ttf`, which every Android has (Latin, Greek, Cyrillic). The CJK fonts there are `.ttc` collections, not one TTF, so Chinese and Korean system text has no glyphs yet (open). The Nintendo extension font (`nintendo_ext.ttf`, button icons) was missing on the phone, so those icons drew as `?`: resolved, [Button icons drawn as "?" on Android](#button-icons-drawn-as--on-android).
 - **Found on:** [Splatoon Raiders](../../dm/games/0400380020056000/README.md) on the phone (Turnip): boots past the font with it, as with `DM_SHARED_FONT=/system/fonts/Roboto-Regular.ttf`.
 - **Check:** `make -C dm/host/tests GAME=<id> build/t_shared_font && dm/host/tests/build/t_shared_font`.
+
+### Button icons drawn as "?" on Android
+
+- **Symptom:** (Android) button icons in game text show as `?` ("Press ? + ? to start" on Super Mario Bros. Wonder's title screen); the log has `[YELLOW] Nintendo extended shared font missing (dm/tools/make_ext_font.py generates nintendo_ext.ttf)`.
+- **Cause:** the icons are glyphs of shared-font type 5, the Nintendo extension, at private-use code points (U+E0E0 = A button). The host serves `make_ext_font.py`'s stand-in for it (`DM_SHARED_FONT_EXT`, or `DM_FONT_DIR/nintendo_ext.ttf`), which the iOS and Mac apps ship; the APK had none, and the script's letters came from a macOS font only.
+- **Fix:** the APK build makes it (`android/app/build.gradle` `nxExtFont`: `make_ext_font.py` into the assets, no font file in the sources; it needs fontTools, now in `android/environment.yml`, and is tried again at the next build when it could not be made), `GameActivity` places it with `GameFonts` as `nintendo_ext.ttf` in the same `DM_FONT_DIR` folder as the bundled `standard.ttf`. Its letters come from that bundled Noto Sans (`dm/third_party/fonts`, SIL OFL), which the build passes to `make_ext_font.py`, so the APK ships no system font's glyphs; it is also the script's default when macOS's Arial Rounded Bold is not there (`LETTER_FONTS`).
+- **Found on:** [Super Mario Bros. Wonder](../../dm/games/010015100B514000/README.md) on the AYN Thor (2026-11-13).
 
 ### The system window's text missing with Android's variable Roboto
 
