@@ -143,6 +143,7 @@ final class Prefs {
     static void resetGame(Context c, String titleId) {
         SharedPreferences.Editor e = of(c).edit();
         for (String k : GAME_SETTINGS) e.remove(gameKey(k, titleId));
+        e.remove(gameKey("lp_mode", titleId));   // Turn Link Play off, retaining the saved host and room for next time.
         Profile p = Profile.of(titleId);
         if (p != null) {
             for (Profile.Option opt : p.options) e.remove(gameKey("opt_" + opt.env, titleId));
