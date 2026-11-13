@@ -206,6 +206,11 @@ def header(g):
             w, h = map(int, r[3].split('x'))
             if not (0 < w < 65536 and 0 < h < 65536): sys.exit(f'{g.id}: window_fn size must be 1..65535 each: {r[3]}')
             wfn.append('{' + q(r[0]) + f', {r[1]}, {r[2]}, {w}, {h}' + '}')
+    shp = []   # shape tables, one row per main build: <main build ID> <variant> <cam> <squeeze> <shift> <nshift> <fade> <top> <stretch> (word offsets; loader.c shape_apply writes them from DM_VK_PICTURE_ASPECT for the variant)
+    for r in (g.values('shape_table') if g.get('shape_table', '') else []):
+        if len(r) != 9 or not re.fullmatch(r'[0-9a-f]{32}', r[0]) or not r[1].isalnum() or not all(re.fullmatch(r'0x[0-9a-fA-F]+', x) for x in r[2:]):
+            sys.exit(f"{g.id}: shape_table takes <main build ID (32 hex)> <variant> and seven word offsets (cam squeeze shift nshift fade top stretch): {r}")
+        shp.append('{' + q(r[0]) + ', ' + q(r[1]) + ', {' + ', '.join(r[2:]) + '}}')
     # fps_decouple sead: the game's speed follows its measured frame rate through sead's frame-rate controller, which the rewriter gates in main only for a profile with this key (dm/tools/nso_code.py sead_find,
     # hle_fpslock.c sead_rate; pack_android.py build_rows keys it), and the Android launcher (build.gradle decoupleOf: a frame limit with presentation on the host's tick); a build's own place is an OBS row of its patches.py
     for r in g.values('fps_decouple') if g.get('fps_decouple', '') else []:
@@ -408,6 +413,7 @@ def header(g):
          f'#define DM_GAME_LOW_RAM_PLACE_PART_MB {int(lpp)}', f'#define DM_GAME_LOW_RAM_IMG_CACHE_MAX_MB {int(lic)}', f'#define DM_GAME_LOW_RAM_APP_POOL_MB {int(lap)}',
          f'#define DM_GAME_ROMFS_SUBST {q(rsub)}',
          f'#define DM_GAME_WINDOW_FN {{{", ".join(wfn) or "{\"\", 0, 0, 0, 0}"}}}', f'#define DM_GAME_NWINDOW_FN {len(wfn)}',
+         '#define DM_GAME_SHAPE_TABLE {' + (', '.join(shp) or '{"", "", {0}}') + '}', f'#define DM_GAME_NSHAPE_TABLE {len(shp)}',
          '#define DM_GAME_SUBGROUP_ONE_LANE {' + (', '.join(sol) or '0') + '}', f'#define DM_GAME_NSUBGROUP_ONE_LANE {len(sol)}',
          '#define DM_GAME_MESH_VEGETATION_CUT {' + (', '.join(f'0x{k}ull' for k in vegetation) or '0') + '}',
          f'#define DM_GAME_NMESH_VEGETATION_CUT {len(vegetation)}',

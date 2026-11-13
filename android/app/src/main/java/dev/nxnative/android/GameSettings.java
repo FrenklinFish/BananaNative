@@ -821,7 +821,7 @@ final class GameSettings {
         if (p == null) return out;
         for (String v : p.variants.split(",")) { int eq = v.indexOf('='); if (eq > 0 && v.substring(eq + 1).matches("[0-9]+:[0-9]+")) out.add(v.substring(eq + 1)); }
         for (String v : p.cameraAspects.split(",")) if (v.matches("[0-9]+:[0-9]+") && !out.contains(v)) out.add(v);   // the host follows these with the game's 3D cameras (no module variant)
-        if (!p.cameraAspects.isEmpty()) out.add(ScreenShape.CHOICE);   // last: the window's own shape, for a game that follows any shape
+        if (!p.cameraAspects.isEmpty() || p.aspectVariant(ScreenShape.CHOICE) != null) out.add(ScreenShape.CHOICE);   // last: the window's own shape, for a game that follows any shape (host cameras, or a variant labelled "screen")
         return out;
     }
 

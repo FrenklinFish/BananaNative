@@ -119,7 +119,7 @@ def presentOnlyOf = { String game -> tsvRows(game, 'fps_limit_present').isEmpty(
 // Hold 60 fps (Prefs.steps, Prefs.hold60: DM_FPS_HOLD60), one step a frame, where the game's own mode drops to two steps (30 fps) after a frame its work overran
 // or a host frame step (fps_target with the rewriter's FRAME_STEP stubs in the profile's patches.py: Ocarina of Time), which Hold 60 fps keeps at one vsync, late time paid back
 def stepsOf = { String game -> def pp = new File(repo, "dm/games/$game/patches.py"); def ft = tsvRows(game, 'fps_target'); (!tsvRows(game, 'fps_steps').isEmpty() || (!ft.isEmpty() && ft[0].size() > 1 && ft[0][1].trim() != '0' && pp.isFile() && pp.text.contains('FRAME_STEP'))) ? '1' : '' }
-def variantsOf = { String game -> tsvRows(game, 'variant').findAll { it.size() > 1 && it[1].trim() }.collect { it[1].trim() + '=' + (it.size() > 3 && it[3].trim() ? it[3].trim() : it[1].trim()) }.join(',') }   // game.tsv variant rows: "43=4:3,..." (Game settings > Aspect ratio)
+def variantsOf = { String game -> tsvRows(game, 'variant').findAll { it.size() > 1 && it[1].trim() }.collectMany { r -> (r.size() > 3 && r[3].trim() ? r[3].trim() : r[1].trim()).split('\\|').collect { l -> r[1].trim() + '=' + l.trim() } }.join(',') }   // game.tsv variant rows: "43=4:3,..." (Game settings > Aspect ratio); a label "4:3|screen" names one variant for two choices ("screen": Screen shape)
 // Profile-declared opt-in settings (game.tsv option rows: "<env>|<label>|<description>|<restart or live>", ';' between them: Profile.options)
 def optionsOf = { String game ->
     tsvRows(game, 'option').collect { c ->

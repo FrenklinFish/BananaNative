@@ -416,8 +416,40 @@ _UI_V22 = [
     (0x005d7994, '00000000', 'b8dafe17', 'v23: b 0x58e474 (no further rule)'),
 ]
 
+# Screen shape (Game settings › Aspect ratio › Screen shape): every value above that depends on the 4:3 shape is read from one of seven words instead of being part of an
+# instruction, so the host can lay the UI out for any shape from 1:1 to 16:9 by writing those words at load (game.tsv shape_table, loader.c shape_apply). The words hold the
+# 4:3 values, so the variant is the 4:3 mod as before when nothing writes them (4:3 itself, or a host without shape_apply). Each site's fmov / mov becomes an `ldr` of its
+# word (one instruction, any value); the words are zero padding after a ret, out of the rule chains. Checked on a PC emulator at 1:1, 5:4 (generated only), 4:3, 7:5, 3:2
+# and 16:10: title, world map, World Map menu, tutorials, a map battle's forecast and combat (1:1) lay out against the picture's edges as the 4:3 mod does.
+#   cam      0xb52094  the 3D camera's height / width (0xb51e38; 4:3 0.75)
+#   squeeze  0x55f5b8  the UI projection's y row and the scissor's y (0x55f618, 0x574568, 0x59c550; 4:3 0.75 = shape x 9/16)
+#   shift    0x560328  the edge rule's move and L_Info's (0x58e5c4, 0x5d7988; 4:3 180 = (1920 / shape - 1080) / 2)
+#   nshift   0x560398  the obelisk Fade's move (0x5cd904; 4:3 -180)
+#   fade     0x560598  the obelisk Fade's y scale (0x5cd910; 4:3 1.5 = 1 + shift / 360)
+#   top      0x168ee28 the travel map backdrop's top edge (0x168ed78; 4:3 720 = 960 / shape)
+#   stretch  0x5605a8  the overlay rule's y scale (0x5a3c88, with 0x57f04c a nop; 4:3 4/3 = 1920 / shape / 1080)
+_SHAPE_WORDS = {'cam': 0xb52094, 'squeeze': 0x55f5b8, 'shift': 0x560328, 'nshift': 0x560398, 'fade': 0x560598, 'top': 0x168ee28, 'stretch': 0x5605a8}
+
+
+def _ldr(rt, pc, lit, base):   # ldr s<rt> (base 0x1c000000) / w<rt> (0x18000000), <literal at lit>
+    return (base | ((((lit - pc) // 4) & 0x7ffff) << 5) | rt).to_bytes(4, 'little').hex()
+
+
+def _shape(cuts):
+    import struct
+    t, s, w = _SHAPE_WORDS, 0x1c000000, 0x18000000
+    new = {0xb51e38: _ldr(1, 0xb51e38, t['cam'], s), 0x55f618: _ldr(27, 0x55f618, t['squeeze'], s), 0x574568: _ldr(1, 0x574568, t['squeeze'], s),
+           0x59c550: _ldr(21, 0x59c550, t['squeeze'], s), 0x58e5c4: _ldr(10, 0x58e5c4, t['shift'], w), 0x5d7988: _ldr(10, 0x5d7988, t['shift'], w),
+           0x5cd904: _ldr(10, 0x5cd904, t['nshift'], w), 0x5cd910: _ldr(19, 0x5cd910, t['fade'], s), 0x168ed78: _ldr(8, 0x168ed78, t['top'], w),
+           0x5a3c88: _ldr(10, 0x5a3c88, t['stretch'], w), 0x57f04c: '1f2003d5'}
+    out = [(o, orig, new[o], why + ' (Screen shape: its value from _SHAPE_WORDS)') if o in new else (o, orig, nw, why) for o, orig, nw, why in cuts]
+    assert len({c[0] for c in out} & set(new)) == len(new)
+    vals = {'cam': 0.75, 'squeeze': 0.75, 'shift': 180.0, 'nshift': -180.0, 'fade': 1.5, 'top': 720.0, 'stretch': 4 / 3}
+    return out + [(t[k], '00000000', struct.pack('<f', vals[k]).hex(), f'Screen shape table: {k} (4:3 {vals[k]:g})') for k in t]
+
+
 _MAIN = 'db93b0125f4850601d61c3edde012f8e'
-VARIANT_CUTS = {'43': {_MAIN: _V11 + _SCISSOR43 + _UI_V12 + _UI_V13 + _UI_V14 + _UI_V15 + _UI_V16 + _UI_V17 + _UI_V18 + _UI_V20 + _UI_V21 + _UI_V22}}
+VARIANT_CUTS = {'43': {_MAIN: _shape(_V11 + _SCISSOR43 + _UI_V12 + _UI_V13 + _UI_V14 + _UI_V15 + _UI_V16 + _UI_V17 + _UI_V18 + _UI_V20 + _UI_V21 + _UI_V22)}}
 
 BINDING = [
     {'what': "Fire Emblem Fortune's Weave native 4:3 variant (VARIANT_CUTS['43']: camera aspect and ui2d pane rules)", 'now': 'build', 'goal': 'unreviewed', 'purpose': 'rendering',

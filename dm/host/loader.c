@@ -790,6 +790,35 @@ static void rt_pool_apply(module_t *m) {
     if (st) snprintf(wr, sizeof wr, "%08x -> %08x", was, rtp_encode(row->word, mb)); else snprintf(wr, sizeof wr, "%08x kept", was);
     LOG("[res] render-target pool %u MiB (%s%s; %s+%#llx %s): max_render %ux%u%s", mb, whyb, st ? "" : ", the game's own size", m->name, (unsigned long long)row->off, wr,
         g_rtp_raised ? g_rtp_w : cw, g_rtp_raised ? g_rtp_h : ch, g_rtp_raised ? " (rt_pool's)" : st ? " (render_cfg's: below rt_pool's sizes)" : " (render_cfg's)");
+// A native-aspect variant that follows the picture's shape (profile key shape_table; Fire Emblem Fortune's Weave's 4:3 mod, its patches.py _SHAPE_WORDS): the variant reads
+// every value that depends on the shape from seven float words of main's text, which hold the 4:3 values. With DM_PATCH_VARIANT=<the row's variant> and
+// DM_VK_PICTURE_ASPECT=<w>:<h> from 1:1 to 16:9 (the launcher's Aspect ratio › Screen shape, or a fixed shape), they are written here for that shape, while the text is still
+// writable: cam = h / w (the 3D camera's height over width), squeeze = shape x 9/16 (the UI's y in the 16:9 frame), the UI height 1920 / shape, shift = (that - 1080) / 2
+// (the edge move), nshift = -shift, fade = 1 + shift / 360, top = half the UI height, stretch = the UI height / 1080. A word that does not hold its 4:3 value (another
+// pack's cut) leaves all seven as they are, and so does a shape outside 1:1..16:9: the variant is then the 4:3 mod.
+static void shape_apply(module_t *m) {
+    static const struct { const char *build, *variant; uint64_t off[7]; } rows[] = DM_GAME_SHAPE_TABLE;
+    static const float four3[7] = {0.75f, 0.75f, 180.0f, -180.0f, 1.5f, 720.0f, 4.0f / 3.0f};
+    static const char *names[7] = {"cam", "squeeze", "shift", "nshift", "fade", "top", "stretch"};
+    if (strcmp(m->name, "main") || m->nro) return;
+    const char *v = getenv("DM_PATCH_VARIANT"), *e = getenv("DM_VK_PICTURE_ASPECT");
+    int r = -1;
+    for (int i = 0; i < DM_GAME_NSHAPE_TABLE; i++) if (!strcmp(rows[i].build, m->build_id) && v && !strcmp(rows[i].variant, v)) r = i;
+    if (r < 0 || !e || !*e) return;
+    unsigned aw, ah; char x;
+    if (sscanf(e, "%u:%u%c", &aw, &ah, &x) != 2 || !aw || !ah) { LOG("[RED] shape_table: DM_VK_PICTURE_ASPECT=%s is not <w>:<h>; the variant stays 4:3", e); return; }
+    double a = (double)aw / ah;
+    if (a < 1.0 - 1e-6 || a > 16.0 / 9.0 + 1e-6) { LOG("[RED] shape_table: %s is outside 1:1..16:9; the variant stays 4:3", e); return; }
+    for (int i = 0; i < 7; i++) {
+        float f;
+        if (rows[r].off[i] + 4 > m->text_end) { LOG("[RED] shape_table: main+%#llx is outside main's text; the variant stays 4:3", (unsigned long long)rows[r].off[i]); return; }
+        memcpy(&f, m->base + rows[r].off[i], 4);
+        if (f != four3[i]) { LOG("[RED] shape_table: %s at main+%#llx is %g, not its 4:3 value %g (another cut of the variant); the variant stays 4:3", names[i], (unsigned long long)rows[r].off[i], f, four3[i]); return; }
+    }
+    double uh = 1920.0 / a, shift = (uh - 1080.0) / 2;
+    float val[7] = {(float)(1.0 / a), (float)(a * 9.0 / 16.0), (float)shift, (float)-shift, (float)(1.0 + shift / 360.0), (float)(uh / 2), (float)(uh / 1080.0)};
+    for (int i = 0; i < 7; i++) memcpy(m->base + rows[r].off[i], &val[i], 4);
+    LOG("shape_table: variant %s laid out for %s (cam %.4f, squeeze %.4f, shift %.1f, fade %.3f, top %.1f, stretch %.4f)", v, e, val[0], val[1], val[2], val[4], val[5], val[6]);
 }
 
 // Switch 2 SDKs (Ounce) compile with APIBKey (pacibsp / autibsp / retab) and APGAKey (pacga), both process-wide on Linux arm64, except in
@@ -870,7 +899,7 @@ static void map_image(module_t *m, const char *dir) {
         if (a == MAP_FAILED) die("%s mmap %#llx", m->name, (unsigned long long)(pre + m->size));
         m->base = a + pre;
         memcpy(m->base, raw, fl); memcpy(a, raw + fl, sz - bl - fl); if (bl) memcpy(m->base + m->back_off, raw + sz - bl, bl);
-        free(raw); install_key_page(m); window_apply(m); fiber_pac_apply(m); pac_patch_text(m); rt_pool_apply(m);
+        free(raw); install_key_page(m); window_apply(m); shape_apply(m); fiber_pac_apply(m); pac_patch_text(m); rt_pool_apply(m);
         if (bl && mprotect(m->base + m->back_off, bl, PROT_READ | PROT_EXEC)) die("%s mprotect back patch", m->name);
         uint64_t rx = (m->text_end + 0x3FFF) & ~0x3FFFull;
         if (mprotect(m->base, rx, PROT_READ | PROT_EXEC)) die("%s mprotect text", m->name);
@@ -881,7 +910,7 @@ static void map_image(module_t *m, const char *dir) {
     m->size = (sz + 0x3FFF) & ~0x3FFFull;
     m->base = mmap(NULL, m->size, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANON, -1, 0);
     if (m->base == MAP_FAILED) die("%s mmap", m->name);
-    memcpy(m->base, raw, sz); free(raw); install_key_page(m); window_apply(m); fiber_pac_apply(m); pac_patch_text(m); rt_pool_apply(m);
+    memcpy(m->base, raw, sz); free(raw); install_key_page(m); window_apply(m); shape_apply(m); fiber_pac_apply(m); pac_patch_text(m); rt_pool_apply(m);
     uint64_t rx = (m->text_end + 0x3FFF) & ~0x3FFFull;
     if (mprotect(m->base, rx, PROT_READ | PROT_EXEC)) die("%s mprotect text", m->name);
     uint64_t po = m->patch_off & ~0x3FFFull;

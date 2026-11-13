@@ -470,7 +470,12 @@ public final class GameActivity extends Activity implements SurfaceHolder.Callba
         if (!padMap.isEmpty()) env.add("DM_PAD_MAP=" + padMap);
         if (Prefs.stretch(this, id)) env.add("DM_VK_STRETCH=1");   // Game settings › Display › Stretch to screen (or the in-game panel's Picture rows)
         String aspect = Prefs.aspect(this, id), variant = aspect == null || Profile.of(id) == null ? null : Profile.of(id).aspectVariant(aspect);
-        if (variant != null) {   // Game settings › Aspect ratio: the pack's native-aspect modules (<pack>/<variant>/, loader.c) and the picture shown at that aspect
+        if (variant != null && ScreenShape.CHOICE.equals(aspect)) {   // Screen shape on a native-aspect variant that follows the shape (game.tsv variant label "screen", loader.c shape_apply): the window's shape, 1:1 to 16:9
+            android.graphics.Rect b = getWindowManager().getCurrentWindowMetrics().getBounds();
+            String shape = ScreenShape.tall(ScreenShape.ratio(b.width(), b.height(), orientationFixed()));
+            if (shape != null) { env.add("DM_PATCH_VARIANT=" + variant); env.add("DM_VK_PICTURE_ASPECT=" + shape); }
+            shapeNote = ("[nxlaunch] aspect ratio: screen shape (native variant " + variant + "), window " + b.width() + "x" + b.height() + (orientationFixed() ? " (landscape)" : "") + (shape == null ? ": 16:9 or wider, as shipped" : " -> " + shape));
+        } else if (variant != null) {   // Game settings › Aspect ratio: the pack's native-aspect modules (<pack>/<variant>/, loader.c) and the picture shown at that aspect
             env.add("DM_PATCH_VARIANT=" + variant);
             env.add("DM_VK_PICTURE_ASPECT=" + aspect);
         } else if (aspect != null && Profile.of(id) != null && Arrays.asList(Profile.of(id).cameraAspects.split(",")).contains(aspect)) {   // a shape the host's camera patch follows (game.tsv aspect rows): the picture at that shape, no variant

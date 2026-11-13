@@ -34,5 +34,15 @@ final class ScreenShape {
         return (w / g) + ":" + (h / g);
     }
 
+    /** For a native-aspect variant that lays out tall shapes only (loader.c shape_apply: 1:1 to 16:9): the shape itself, "1:1" for a narrower one, null (as shipped) for
+     *  16:9 or wider or none */
+    static String tall(String shape) {
+        if (shape == null) return null;
+        int c = shape.indexOf(':');
+        double a = Double.parseDouble(shape.substring(0, c)) / Double.parseDouble(shape.substring(c + 1));
+        if (a >= 16.0 / 9.0) return null;
+        return a < 1 ? "1:1" : shape;
+    }
+
     private static int gcd(int a, int b) { return b == 0 ? a : gcd(b, a % b); }
 }

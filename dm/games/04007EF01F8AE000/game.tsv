@@ -72,8 +72,11 @@ op_mode	handheld
 android_window	1920x1080
 
 # ---- Variants (patches.py VARIANT_CUTS; Game settings > Aspect ratio) ----
-# 43: native 4:3 (cameras and UI laid out for 4:3, shown at 4:3): main only
-variant	43	main	4:3
+# 43: native 4:3 (cameras and UI laid out for 4:3, shown at 4:3): main only. Also Screen shape (label "screen"): the same variant laid out for the game window's own shape
+# from 1:1 to 16:9; its seven shape-dependent values are words of main (patches.py _SHAPE_WORDS) that the host writes at load from DM_VK_PICTURE_ASPECT (loader.c shape_apply).
+# A window wider than 16:9 plays as shipped (the variant lays out tall shapes only)
+variant	43	main	4:3|screen
+shape_table	db93b0125f4850601d61c3edde012f8e	43	0xb52094	0x55f5b8	0x560328	0x560398	0x560598	0x168ee28	0x5605a8
 
 # ---- Files ----
 modules	main subsdk2 sdk
