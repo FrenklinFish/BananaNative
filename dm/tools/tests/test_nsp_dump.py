@@ -1,6 +1,7 @@
 """NSP script with a dump folder (scripts/pack_dump.py), its only input: the folder's layout is read and packed into what the script's later steps read.
 The run stops at the prerequisite check; no game files or Xcode needed."""
 import importlib.util
+import io
 from pathlib import Path
 import shutil
 import struct
@@ -11,7 +12,7 @@ from unittest import mock
 
 REPO = Path(__file__).resolve().parents[3]
 sys.path.insert(0, str(REPO / 'dm/tools')); sys.path.insert(0, str(REPO / 'dm/games'))
-import romfs_image
+import cnmt, romfs_image
 spec = importlib.util.spec_from_file_location('build_ipa_from_nsp', REPO / 'scripts/build_ipa_from_nsp.py')
 if spec is None or spec.loader is None: raise ImportError('scripts/build_ipa_from_nsp.py')
 nsp = importlib.util.module_from_spec(spec); spec.loader.exec_module(nsp)
@@ -28,6 +29,12 @@ def npdm(tid):
     d[0x80:0x84] = b'ACI0'
     struct.pack_into('<Q', d, 0x90, tid)
     return bytes(d)
+
+
+def cnmt_record(rid, ver, typ, ext, contents, extdata=b''):   # a content meta record in switchbrew's layout: header, extended header, content infos, extended data, digest
+    b = struct.pack('<QIBBHHHB3xI4x', rid, ver, typ, 1, len(ext), len(contents), 0, 0, 0) + ext
+    for t, off in contents: b += b'\0' * 0x20 + b'\x11' * 0x10 + (1000).to_bytes(5, 'little') + bytes([1, t, off])
+    return b + extdata + b'\0' * 0x20
 
 
 def version(folder, tid=TID, main=b'code', marker='marker'):
@@ -65,6 +72,58 @@ class Scan(Base):
         with self.assertRaisesRegex(pack_dump.Error, 'base/romfs'): pack_dump.scan(self.dump)
         with self.assertRaisesRegex(pack_dump.Error, 'romfs'): pack_dump.pack_version(self.dump / 'base', TID, self.dump / 'out', say=lambda s: None)
 
+    def test_ouncecake_dlc(self):   # OunceCake's DLC layout: <version>/base/program/<index>/romfs and its data patches' updates/<version>/...; the newest patch is the patched tree
+        d = self.dump / 'dlc/040074a01bf13002/0'
+        for p in ('base/program/0/romfs', 'updates/65536/program/0/romfs', 'updates/131072/program/0/romfs', 'base/program/0/meta'): (d / p).mkdir(parents=True)
+        self.assertEqual(pack_dump.scan(self.dump)[2][TID + 0x1002], d / 'updates/131072/program/0/romfs')
+        shutil.rmtree(d / 'updates')
+        self.assertEqual(pack_dump.scan(self.dump)[2][TID + 0x1002], d / 'base/program/0/romfs')
+        shutil.rmtree(d / 'base/program/0/romfs'); (d / 'base/program/0/data/romfs').mkdir(parents=True)   # a program and a data content at one index
+        self.assertEqual(pack_dump.scan(self.dump)[2][TID + 0x1002], d / 'base/program/0/data/romfs')
+        (d / 'base/program/1/romfs').mkdir(parents=True)
+        with self.assertRaisesRegex(pack_dump.Error, 'expected one RomFS folder'): pack_dump.scan(self.dump)
+
+    def test_ouncecake_game(self):   # OunceCake's unflattened layout: each version's package at program/0/; a Switch 2 Edition's program/1 is not read
+        d = self.dump.parent / 'ounce'
+        version(d / 'base/program/0', marker='old')
+        version(d / f'updates/{VER}/program/0', main=b'new code', marker='new')
+        version(d / f'updates/{VER}/program/1', tid=TID + 0x1, main=b'switch 2 code')
+        (d / f'updates/{VER}/program/0/control').mkdir()
+        self.assertTrue(nsp.dump_folder(d))
+        app, vers, _ = pack_dump.scan(d)
+        self.assertEqual((app, vers), (TID, {VER: d / f'updates/{VER}/program/0'}))
+        self.assertEqual(pack_dump.version_dir(d, vers, 0), d / 'base/program/0')
+        self.assertEqual(pack_dump.version_part(d, vers, VER, 'exefs'), d / f'updates/{VER}/program/0/exefs')
+        shutil.rmtree(d / f'updates/{VER}/program/0/romfs')   # an update without a RomFS of its own: the base's
+        self.assertEqual(pack_dump.version_part(d, vers, VER, 'romfs'), d / 'base/program/0/romfs')
+        e = self.dump.parent / 'ounce-data'; version(e / 'base/program/0/program')   # a program and a data content at one index
+        self.assertEqual(pack_dump.scan(e)[0], TID)
+        self.assertEqual(pack_dump.base_dir(e), e / 'base/program/0/program')
+
+    def test_content_meta_records(self):   # the records in meta/ (the layout of Super Mario Bros. Wonder's add-on and data patch records): checked, and their version needs read
+        d = self.dump / 'dlc/040074a01bf13002/0'
+        (d / 'base/program/0/romfs').mkdir(parents=True); (d / 'updates/131072/program/0/romfs').mkdir(parents=True)
+        def put(path, rec): (d / path).mkdir(parents=True, exist_ok=True); (d / path / 'r.cnmt').write_bytes(rec)
+        put('base/program/0/meta', cnmt_record(TID + 0x1002, 0, 0x82, struct.pack('<QIB3xQ', TID, 196608, 0, TID + 0x1802), [(2, 0)]))
+        put('updates/131072/program/0/meta', cnmt_record(TID + 0x1802, 131072, 0x84, struct.pack('<QQII8x', TID + 0x1002, TID, VER, 0), [(2, 0), (6, 0)]))
+        rom = pack_dump.scan(self.dump)[2][TID + 0x1002]
+        self.assertEqual(rom, d / 'updates/131072/program/0/romfs')
+        self.assertEqual(pack_dump.dlc_required_version(rom), VER)   # the data patch's need, the package the RomFS came from
+        self.assertEqual(pack_dump.dlc_required_version(d / 'base/program/0/romfs'), 196608)
+        r = cnmt.read(d / 'base/program/0/meta/r.cnmt')
+        self.assertEqual((r.id, r.type, r.application_id, r.data_patch_id, r.contents), (TID + 0x1002, cnmt.ADDON, TID, TID + 0x1802, [(2, 0, 1000)]))
+        put('updates/131072/program/0/meta', cnmt_record(TID + 0x1803, 131072, 0x84, struct.pack('<QQII8x', TID + 0x1003, TID, VER, 0), []))   # another add-on's
+        with self.assertRaisesRegex(pack_dump.Error, 'data patch 040074A01BF13803 of add-on 040074A01BF13003'): pack_dump.scan(self.dump)
+        put('base/program/0/meta', cnmt_record(TID + 0x1009, 0, 0x82, struct.pack('<QIB3xQ', TID, 0, 0, 0), []))
+        with self.assertRaisesRegex(pack_dump.Error, 'add-on 040074A01BF13009, the folder is 040074A01BF13002'): pack_dump.scan(self.dump)
+        (d / 'base/program/0/meta/r.cnmt').write_bytes(b'\0' * 0x10)
+        with self.assertRaisesRegex(pack_dump.Error, 'shorter than a content meta header'): pack_dump.scan(self.dump)
+
+    def test_dlc_highest_version(self):   # the console keeps one version of an add-on installed: of several version folders the highest is read
+        d = self.dump / 'dlc/040074a01bf13003'
+        for p in ('0/base/program/0/romfs', '65536/base/program/0/romfs', '65536/updates/131072/program/0/romfs', '9/romfs'): (d / p).mkdir(parents=True)
+        self.assertEqual(pack_dump.scan(self.dump)[2][TID + 0x1003], d / '65536/updates/131072/program/0/romfs')
+
     def test_refuses(self):
         (self.dump / 'dlc/0100000000000000/romfs').mkdir(parents=True)
         with self.assertRaisesRegex(pack_dump.Error, 'is not a DLC of'): pack_dump.scan(self.dump)
@@ -75,6 +134,52 @@ class Scan(Base):
     def test_layout_is_the_only_input(self):
         self.assertTrue(nsp.dump_folder(self.dump))
         self.assertFalse(nsp.dump_folder(self.dump / 'dlc'))
+
+
+sys.path.insert(0, str(REPO / 'scripts'))
+import dump_layout, nup_pack
+
+
+class Layout(Base):
+    """scripts/dump_layout.py: a flattened dump (a Switch 2 Edition's program1/, control/, a flattened add-on) moved into the console's layout and back"""
+    def setUp(self):
+        super().setUp()
+        version(self.dump / f'updates/{VER}/program1', tid=TID + 1, main=b'switch 2 code')
+        (self.dump / f'updates/{VER}/control').mkdir(); (self.dump / f'updates/{VER}/control/control.nacp').write_bytes(b'nacp')
+        (self.dump / '.listing').write_text('ftp listing')
+        self.files = sorted(p.relative_to(self.dump).as_posix() for p in self.dump.rglob('*') if p.is_file())
+
+    def run_layout(self, *opts):
+        with mock.patch('builtins.print'): return dump_layout.main([str(self.dump), *opts])
+
+    def test_moves_and_undo(self):
+        before = pack_dump.scan(self.dump)
+        self.assertEqual(self.run_layout(), 0)   # a listing only
+        self.assertTrue((self.dump / 'base/exefs').is_dir())
+        self.assertEqual(self.run_layout('--apply'), 0)
+        for p in ('base/program/0/exefs/main', 'base/program/0/romfs/dir/old', f'updates/{VER}/program/0/exefs/main', f'updates/{VER}/program/0/control/control.nacp',
+                  f'updates/{VER}/program/1/exefs/main', 'dlc/040074a01bf13001/0/base/program/0/romfs/dlcfile', '.listing'):
+            self.assertTrue((self.dump / p).is_file(), p)
+        self.assertFalse((self.dump / 'base/exefs').exists() or (self.dump / f'updates/{VER}/program1').exists())
+        app, vers, dlc = pack_dump.scan(self.dump)
+        self.assertEqual((app, sorted(vers), sorted(dlc)), (before[0], sorted(before[1]), sorted(before[2])))
+        self.assertEqual(vers[VER], self.dump / f'updates/{VER}/program/0')
+        self.assertEqual(dump_layout.plan(self.dump), [])   # already in it
+        self.assertEqual(self.run_layout('--undo'), 0)
+        self.assertEqual(sorted(p.relative_to(self.dump).as_posix() for p in self.dump.rglob('*') if p.is_file()), self.files)   # every file back, the log gone
+        self.assertFalse((self.dump / 'base/program').exists())
+
+    def test_both_layouts_refused(self):
+        (self.dump / 'base/program/0/exefs').mkdir(parents=True)
+        with self.assertRaisesRegex(dump_layout.Error, 'both layouts'): dump_layout.plan(self.dump)
+
+    def test_nup_writer_reads_both(self):   # dm/tools/nup_pack.py finds the same packages in either layout
+        def packages():
+            return [(k, t, v, sorted(c.name for c in r.kids)) for k, t, v, _, r in nup_pack.discover(str(self.dump), ('base', 'update', 'addon'))]
+        flat = packages()
+        self.run_layout('--apply')
+        self.assertEqual(packages(), flat)
+        self.assertEqual([p[3] for p in flat], [[b'exefs', b'romfs']] * 2 + [[b'romfs']])
 
 
 class Pack(Base):

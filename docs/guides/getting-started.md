@@ -15,10 +15,12 @@ This guide sets up a game with the phone alone. A Windows PC or a Mac prepares a
   ```
   Switch2/
     DonkeyKongBananza/
-      base/                  the game (exefs/, romfs/)
-      updates/<version>/     its update (exefs/, romfs/), if any
-      dlc/<title id>/<n>/    extra content, if any
+      base/program/0/                the game (exefs/, romfs/)
+      updates/<version>/program/0/   its update (exefs/, romfs/), if any
+      dlc/<title id>/<version>/      extra content (base/, and updates/ with its patch), if any
   ```
+  This is the console's own layout, the folder OunceCake serves: copy it as it is. A flattened folder, with
+  `exefs/` and `romfs/` directly in `base/` and `updates/<version>/`, works too.
 - About 1 GB free on the phone for the prepared game (the dump itself is read in place); preparing on the phone needs
   2 GB more while it runs.
 - Optional: your own `Lossless.dll` from Lossless Scaling for Windows, for frame generation (not included).

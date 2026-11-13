@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 # A small clean-room NUP writer (github.com/a55uka/nup SPEC.md, format 1.0-draft), for test fixtures: a folder dump in the layout
-# scripts/pack_dump.py reads (base/, updates/<version>/, dlc/<title id>/<n>/) becomes one .nup. Not a tool for users: they make their
-# .nup files with the format's own tools. Written from the spec alone, so the host's and dm/tools/nup.py's readers are checked against
+# scripts/pack_dump.py reads (base/, updates/<version>/, dlc/<title id>/<version>/, the console's or the flattened one) becomes one .nup.
+# Not a tool for users: they make their .nup files with the format's reference implementation (github.com/a55uka/nup
+# tools/nup). Written from the spec alone, so the host's and dm/tools/nup.py's readers are checked against
 # a second implementation, not against themselves.
 #
 #   nup_pack.py <dump folder> <out.nup> [--level N] [--raw] [--only base,update,addon]
@@ -10,6 +11,9 @@
 # shrink it. Equal files (same SHA-256) share one extent. Needs the zstandard module, compression.zstd (Python 3.14) or
 # backports.zstd unless --raw.
 import argparse, hashlib, os, re, struct, sys
+from pathlib import Path
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', '..', 'scripts'))
+import pack_dump   # the dump layout (package_root, dlc_romfs): one reading of it for the packer and this writer
 
 KIND = {'base': 0, 'update': 1, 'addon': 2}
 NONE = 0xFFFFFFFF
@@ -50,19 +54,24 @@ def discover(src, only):
         for sub in ('exefs', 'romfs'):
             if os.path.isdir(os.path.join(p, sub)): root.kids.append(tree(sub.encode(), os.path.join(p, sub)))
         return root
-    base_tid = npdm_program_id(os.path.join(src, 'base', 'exefs', 'main.npdm'))
+    # the packages where scripts/pack_dump.py finds them, in either layout (the console's: <version folder>/program/0/, or the flattened one)
+    root = lambda p: str(pack_dump.package_root(Path(p)))
+    base = root(os.path.join(src, 'base'))
+    base_tid = npdm_program_id(os.path.join(base, 'exefs', 'main.npdm'))
     has_base = os.path.isdir(os.path.join(src, 'base'))
-    if has_base and 'base' in only: pk.append((0, base_tid, 0, 0, content(os.path.join(src, 'base'))))
+    if has_base and 'base' in only: pk.append((0, base_tid, 0, 0, content(base)))
     up = os.path.join(src, 'updates')
     if os.path.isdir(up) and 'update' in only:
         for v in sorted((v for v in os.listdir(up) if re.fullmatch(r'\d+', v)), key=int):
-            tid = npdm_program_id(os.path.join(up, v, 'exefs', 'main.npdm')) or base_tid
-            pk.append((1, tid, int(v), 0 if has_base else 1, content(os.path.join(up, v))))
+            r = root(os.path.join(up, v))
+            tid = npdm_program_id(os.path.join(r, 'exefs', 'main.npdm')) or base_tid
+            pk.append((1, tid, int(v), 0 if has_base else 1, content(r)))
     dl = os.path.join(src, 'dlc')
     if os.path.isdir(dl) and 'addon' in only:
         for t in sorted(t for t in os.listdir(dl) if re.fullmatch(r'[0-9a-fA-F]{16}', t)):
-            for n in sorted(os.listdir(os.path.join(dl, t))):
-                if os.path.isdir(os.path.join(dl, t, n)): pk.append((2, int(t, 16), 0, 0, content(os.path.join(dl, t, n))))
+            try: rom = pack_dump.dlc_romfs(Path(dl, t))   # the add-on's RomFS (its newest data patch's in the console layout)
+            except pack_dump.Error as e: sys.exit(str(e))
+            pk.append((2, int(t, 16), 0, 0, content(str(rom.parent))))
     if not pk: sys.exit(f'{src}: no base/, updates/<version>/ or dlc/<title id>/<n>/ to pack')
     return pk
 

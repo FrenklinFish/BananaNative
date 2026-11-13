@@ -26,9 +26,9 @@ final class DumpLayout {
                 for (Nup.Pkg p : n.packages)
                     if ((p.kind == Nup.BASE || p.kind == Nup.UPDATE) && isFile(n, p, "exefs/main")) out.add(p.kind == Nup.BASE ? 0L : p.version);
             } else {
-                if (new File(dump, "base/exefs/main").isFile()) out.add(0L);   // a one-version folder (exefs/ at its top) has no version number: not here
+                if (new File(root(new File(dump, "base")), "exefs/main").isFile()) out.add(0L);   // a one-version folder (exefs/ at its top) has no version number: not here
                 File[] ups = new File(dump, "updates").listFiles(File::isDirectory);
-                if (ups != null) for (File u : ups) if (u.getName().matches("\\d+") && new File(u, "exefs/main").isFile()) out.add(Long.parseLong(u.getName()));
+                if (ups != null) for (File u : ups) if (u.getName().matches("\\d+") && new File(root(u), "exefs/main").isFile()) out.add(Long.parseLong(u.getName()));
             }
         } catch (IOException | RuntimeException e) {
             // an unreadable dump holds no version here (DumpCheck says why)
@@ -48,11 +48,24 @@ final class DumpLayout {
         return v.isEmpty() ? -1 : v.get(v.size() - 1);
     }
 
-    /** A folder dump's folder of a version: updates/&lt;v&gt;, base, or the dump itself for a one-version folder */
-    private static File dir(File dump, long v) {
-        if (v != 0) return new File(dump, "updates/" + v);
+    /** A folder dump's folder of a version: updates/&lt;v&gt;, base (each its package: root), or the dump itself for a one-version folder */
+    static File dir(File dump, long v) {
+        if (v != 0) return root(new File(dump, "updates/" + v));
         File b = new File(dump, "base");
-        return b.isDirectory() || !new File(dump, "exefs").isDirectory() ? b : dump;
+        return b.isDirectory() || !new File(dump, "exefs").isDirectory() ? root(b) : dump;
+    }
+
+    /**
+     * A version folder's package, the folder that holds its exefs/ and romfs/ (scripts/pack_dump.py package_root): the folder itself, or in OunceCake's layout
+     * program/0/ in it (each content at program/&lt;index&gt;/, with program/ below that when a data content shares the index). Program 0 is the application's own;
+     * a Switch 2 Edition's program/1/ is another program, not read
+     */
+    static File root(File verDir) {
+        for (String r : new String[] {"", "program/0", "program/0/program"}) {
+            File d = r.isEmpty() ? verDir : new File(verDir, r);
+            if (new File(d, "exefs").isDirectory() || new File(d, "romfs").isDirectory()) return d;
+        }
+        return verDir;
     }
 
     private static boolean nonEmpty(File d) {
