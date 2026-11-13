@@ -241,9 +241,14 @@ static int oq_report(uint64_t ad, uint32_t t) {   // OP_REPORT_COUNTER(SAMPLES_P
     if (!oq_on() || !g_oq_count) { g_oqs_const++; return 0; }
     // No command buffer (a GPU hang: its effects run at once on the CPU, vka_fence_cpu): the constant 1, not an empty segment's 0; the segment stays open for the next counted report
     if (!g_cb) { g_oqs_const++; return 0; }
+    // On Qualcomm 891.14, closing the depth pass after a counted query keeps Ocarina of Time's cave geometry stable.
+    // Store and reload the attachments through vka_rp_end. The reported count and its completion fence still use the regular query path.
+    int split = g_oq_open && vka_rp_depth(NULL, NULL) &&
+                VKA_ENV("DM_VK_OQ_SPLIT_PASS", DM_GAME_OCCLUSION_SPLIT_PASS && V.driver_id == VK_DRIVER_ID_QUALCOMM_PROPRIETARY);
     oq_close(); vka_draw_run_break();   // (draws after it begin a new query; an instanced run is not extended across the report, even with no query open)
     post((pop){5, (uint32_t)g_oq_fresh, g_oq_lost, t, ad, g_oq_seg0, g_oq_head});
     g_oq_seg0 = g_oq_head; g_oq_fresh = 0; g_oq_lost = 0;
+    if (split) vka_rp_end();
     return 1;
 }
 static void oq_lost(uint64_t skipped0) {   // after a draw while counting: one the replay skipped counts 1
