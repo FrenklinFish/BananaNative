@@ -95,6 +95,14 @@ body:
     validations:
       required: true
   - type: textarea
+    id: save
+    attributes:
+      label: Save zip (strongly recommended)
+      description: |
+        A save lets the problem be reproduced on another phone instead of guessed at. On the game's page tap **Back up saves**; if it asks where to put a `.zip`, save it and drag that file into this box. Otherwise zip the newest folder in `Switch2/save-backups/<title ID>/` (it holds `main/`, and `device/` if the game has one) and drag the zip in. If the problem starts at a certain point, back up right there, and say where in "What happened".
+        A save is not game data. It holds your progress only, so it is fine to attach. If you cannot attach it, write why (for example the problem happens on a new game).
+      placeholder: "Drag the save .zip here"
+  - type: textarea
     id: extra
     attributes:
       label: Anything else
