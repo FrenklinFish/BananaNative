@@ -80,7 +80,7 @@ public final class GameActivity extends Activity implements SurfaceHolder.Callba
     private AudioFocusRequest focus;
     private final AudioFocus focusState = new AudioFocus();
     private boolean requestFocus() { boolean g = audio.requestAudioFocus(focus) == AudioManager.AUDIOFOCUS_REQUEST_GRANTED; focusState.requested(g); return g; }
-    private AudioDeviceCallback route;
+    private volatile AudioDeviceCallback route;
     private boolean routeReady;
 
     @Override protected void onCreate(Bundle saved) {
@@ -898,7 +898,7 @@ public final class GameActivity extends Activity implements SurfaceHolder.Callba
         if (inputManager != null) inputManager.unregisterInputDeviceListener(this);
         if (audio != null) {
             if (focus != null) audio.abandonAudioFocusRequest(focus);
-            if (route != null) audio.unregisterAudioDeviceCallback(route);
+            if (route != null) { audio.unregisterAudioDeviceCallback(route); route = null; }
         }
         super.onDestroy();
     }
@@ -1054,8 +1054,14 @@ public final class GameActivity extends Activity implements SurfaceHolder.Callba
             @Override public void onAudioDevicesAdded(AudioDeviceInfo[] d) { if (routeReady) Native.audioRouteChanged(); }
             @Override public void onAudioDevicesRemoved(AudioDeviceInfo[] d) { if (routeReady) Native.audioRouteChanged(); }
         };
-        audio.registerAudioDeviceCallback(route, ui);
-        ui.post(() -> routeReady = true);
+        // Off the UI thread: the call lists the audio ports in system_server and can take seconds (issue 251: ANR in AudioSystem.listAudioPatches)
+        final AudioDeviceCallback cb = route;
+        Thread rt = new Thread(() -> {
+            audio.registerAudioDeviceCallback(cb, ui);
+            if (route != cb) audio.unregisterAudioDeviceCallback(cb);   // the screen went meanwhile
+            else ui.post(() -> routeReady = true);
+        }, "audio-route");
+        rt.start();
     }
 
     // ---- Paused: the game suspended while its screen shows (nxhost_lifecycle 4 / 5); on its return from the background with pause-on-return on (the game's setting, on by
