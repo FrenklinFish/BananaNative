@@ -281,7 +281,7 @@ public final class MainActivity extends Activity {
         LinearLayout sys = settingsCard(content);
         gpuRow = new Ui.Setting(this, "🎮", "GPU driver", v -> GpuDriver.dialog(this, PICK_DRIVER)).chevron(this);   // custom GPU drivers (GpuDriver.java)
         sys.addView(gpuRow.view);
-        timeRow = new Ui.Setting(this, "🕒", "Time of day", v -> timeOfDay()).chevron(this);   // the clock the next start gives the game (Prefs.timeOverride → DM_TIME)
+        timeRow = new Ui.Setting(this, "🕒", "Time of day", v -> TimeOfDay.dialog(this, this::refreshSettings)).chevron(this);   // the clock the next start gives the game (Prefs.timeOverride → DM_TIME)
         sys.addView(timeRow.view);
         sys.addView(new Ui.Setting(this, "📁", "Folders", v -> Folders.dialog(this)).value("Game, pack and save folders").chevron(this).view);
         sys.addView(new Ui.Setting(this, "🧹", "Storage", v -> StorageUi.dialog(this)).value("Remove leftovers and old files; never saves").chevron(this).view);   // (StorageUi.java)
@@ -345,8 +345,7 @@ public final class MainActivity extends Activity {
         lsfgRow.value(!BuildConfig.NX_LSFG ? "Not in this build" : Lsfg.on(this) ? "On · " + Lsfg.multiplier(this) + "x" + (Lsfg.find(this) == null ? " · Lossless.dll missing" : "") : "Off");
         GpuDriver.Info d = GpuDriver.selected(this);
         gpuRow.value(d == null ? "System" : d.label());
-        String tod = Prefs.timeOverride(this);
-        timeRow.value(tod.isEmpty() ? "The phone's clock" : tod.replace('T', ' '));
+        timeRow.value(TimeOfDay.label(this));
     }
 
     @Override public void onWindowFocusChanged(boolean focus) {
@@ -1358,43 +1357,6 @@ public final class MainActivity extends Activity {
         int i = Math.max(0, java.util.Arrays.asList(Prefs.WINDOWS).indexOf(Prefs.window(this)));
         new PadFocus.Builder(this).setTitle("Game resolution").setSingleChoiceItems(Prefs.WINDOW_NAMES, i, (d, w) -> { Prefs.window(this, Prefs.WINDOWS[w]); refreshSettings(); d.dismiss(); })
                 .setNegativeButton("Cancel", null).show();
-    }
-
-    /**
-     * System › Time of day: the clock the next game start hands the game (DM_TIME), for a game with a day/night cycle.
-     * Same format as the host's switch, YYYY-MM-DDTHH:MM, so env.txt can still be used instead.
-     */
-    private void timeOfDay() {
-        String cur = Prefs.timeOverride(this);
-        String[] items = {"Pick a date and time…", "The phone's clock"};
-        new AlertDialog.Builder(this).setTitle("Time of day")
-                .setItems(items, (d, w) -> { if (w == 0) pickDate(); else { Prefs.timeOverride(this, null); refreshSettings(); } })
-                .setNegativeButton("Cancel", null).show();
-    }
-
-    /** The system date picker, then the system time picker; the result goes through validDmTime before it is stored (DM_TIME's format) */
-    private void pickDate() {
-        final java.util.Calendar cal = java.util.Calendar.getInstance();
-        String cur = Prefs.timeOverride(this);
-        java.text.SimpleDateFormat in = new java.text.SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss", java.util.Locale.ROOT);
-        if (!cur.isEmpty()) { try { cal.setTime(in.parse(cur.length() == 16 ? cur + ":00" : cur)); } catch (java.text.ParseException ignored) { } }
-        new android.app.DatePickerDialog(this, (dp, y, m, d) -> {
-            cal.set(y, m, d);
-            new android.app.TimePickerDialog(this, (tv, h, min) -> {
-                cal.set(java.util.Calendar.HOUR_OF_DAY, h); cal.set(java.util.Calendar.MINUTE, min); cal.set(java.util.Calendar.SECOND, 0);
-                String v = new java.text.SimpleDateFormat("yyyy-MM-dd'T'HH:mm", java.util.Locale.ROOT).format(cal.getTime());
-                if (!validDmTime(v)) { Toast.makeText(this, "Not a valid date and time: " + v, Toast.LENGTH_LONG).show(); return; }
-                Prefs.timeOverride(this, v); refreshSettings();
-            }, cal.get(java.util.Calendar.HOUR_OF_DAY), cal.get(java.util.Calendar.MINUTE), true).show();
-        }, cal.get(java.util.Calendar.YEAR), cal.get(java.util.Calendar.MONTH), cal.get(java.util.Calendar.DAY_OF_MONTH)).show();
-    }
-
-    /** The host's DM_TIME: YYYY-MM-DDTHH:MM[:SS], and a date that exists (2026-02-30 is refused) */
-    static boolean validDmTime(String v) {
-        if (v == null || !v.matches("\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}(:\\d{2})?")) return false;
-        java.text.SimpleDateFormat f = new java.text.SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss", java.util.Locale.ROOT);
-        f.setLenient(false);
-        try { f.parse(v.length() == 16 ? v + ":00" : v); return true; } catch (java.text.ParseException e) { return false; }
     }
 
     static String capLabel(int v) { return v < 0 ? "Default" : v == 0 ? "The game's own" : v + " fps"; }

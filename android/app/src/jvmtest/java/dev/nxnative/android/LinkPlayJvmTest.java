@@ -24,6 +24,12 @@ public final class LinkPlayJvmTest {
         fields[27] = "0";
         equal(false, Profile.parse(String.join("\t", fields)).get(0).linkPlay);
         equal(false, Profile.parse(String.join("\t", Arrays.copyOf(fields, 27))).get(0).linkPlay);
+        String[] tod = Arrays.copyOf(fields, 30);   // time_of_day is the 30th column (index 29); an older row without it means no row
+        Arrays.fill(tod, 28, 30, "");
+        equal(false, Profile.parse(String.join("\t", tod)).get(0).timeOfDay);
+        tod[29] = "1";
+        equal(true, Profile.parse(String.join("\t", tod)).get(0).timeOfDay);
+        equal(false, Profile.parse(String.join("\t", Arrays.copyOf(fields, 29))).get(0).timeOfDay);
         String code = "0123456789ABCDEF";
         List<String> off = Arrays.asList("DM_COOP=off", "DM_COOP_INTERNET=0", "DM_COOP_ROOM=");
         equal(off, LinkPlayConfig.env(false, "localhost", false, ""));
