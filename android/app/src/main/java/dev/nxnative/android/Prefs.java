@@ -468,6 +468,13 @@ final class Prefs {
     }
 
     /**
+     * The user clock the next game start gets: "YYYY-MM-DDTHH:MM[:SS]" (the host's DM_TIME), "" = the phone's clock. A DM_TIME or
+     * DM_TIME_OFFSET line in env.txt still wins for a run; DM_FIXED_TIME= overrides both (deterministic replays).
+     */
+    static String timeOverride(Context c) { return of(c).getString("time_override", ""); }
+    static void timeOverride(Context c, String v) { put(c, "time_override", v == null || v.isEmpty() ? null : v); }
+
+    /**
      * Folders the user picked (main screen, Folders…), as /storage paths; null = the default. Kept in the app's preferences, so an APK update keeps them (an
      * uninstall does not). "pack_<title ID>": the game's pack folder (pack.tsv and shaders/; default the app's packs/<id> when it holds one, else
      * <game>/../<id>-work/android-pack, Pack.find; the older single-game "pack" key is still read when it holds a pack of that title, Folders.packFor);
