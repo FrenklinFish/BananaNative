@@ -80,6 +80,7 @@ static void host_preload(int argc, char **argv) {
     // localtime_r / mktime (hle_table.c wires them straight to the host). So only when the host follows the system time zone do the original game's screens (chronicle discovery time etc.) show this machine's time.
     // Only deterministic comparison (DM_FIXED_TIME) pins it to UTC: the same replay must convert to the same calendar time on this machine (UTC+8) and on the second Mac (UTC+9)
     if (getenv("DM_FIXED_TIME")) setenv("TZ", "UTC", 1);
+    else { const char *tz = getenv("DM_TZ"); if (tz && *tz) { setenv("TZ", tz, 1); LOG("time zone DM_TZ=%s (the user clock's own zone)", tz); } }
     // Open file limit: the soft limit starts at 256 on iOS (and in a default macOS shell), while the game's file handles, the RomFS archives, save transactions and Metal caches share it. Raise it to 4096 (as far as the hard limit allows)
     struct rlimit rl; if (!getrlimit(RLIMIT_NOFILE, &rl) && rl.rlim_cur < 4096) {
         rlim_t was = rl.rlim_cur; rl.rlim_cur = rl.rlim_max < 4096 ? rl.rlim_max : 4096;

@@ -437,6 +437,10 @@ public final class GameActivity extends Activity implements SurfaceHolder.Callba
         // Resolution, Upscaling quality and Graphics quality (a render_cfg row: Profile.renderCfg), kept as the setting this run starts with: the loader sizes the render target
         // pool for it, and the in-game panel compares a pick with it (Profile.renderRestartNote)
         if (prof != null && prof.renderCfg()) { startRender = Prefs.render(this, prof, id); env.addAll(Profile.renderEnv(startRender)); }
+        {   // Time of day (the launcher's System › Time of day): the host's DM_TIME, so a game with a day/night cycle can be started at a chosen time
+            String tod = Prefs.timeOverride(this);
+            if (!tod.isEmpty()) env.add("DM_TIME=" + tod);
+        }
         if (prof != null && prof.vegetationDetail && !Prefs.fullVegetation(this, id)) env.add("DM_VK_VEGETATION=0");
         if (prof != null) env.addAll(prof.optionsEnv(optEnv -> Prefs.gameOption(this, id, optEnv)));
         Lsfg.env(this, env);   // frame generation: the user's Lossless.dll and the settings

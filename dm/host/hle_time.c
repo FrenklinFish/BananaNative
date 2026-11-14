@@ -15,6 +15,33 @@ static int64_t fixed_time(void) {
                    if (v >= 0) LOG("DM_FIXED_TIME=%lld: the user clock returns a fixed value", (long long)v); }
     return v;
 }
+// DM_TIME=YYYY-MM-DDTHH:MM[:SS] / DM_TIME_OFFSET=<±seconds>: a custom user clock, as Eden's "set the time" does. The clock runs from
+// there instead of the host's: DM_TIME anchors it to the host's monotonic clock (it advances as much as the run lasts), DM_TIME_OFFSET
+// follows the host clock at that offset. DM_FIXED_TIME= keeps precedence (a replay needs the same calendar time every run).
+static void user_clock(int64_t *sec, int64_t *nsec) {
+    static int mode = -2; static int64_t arg, base_ns;   // -1 host clock, 0 offset, 1 fixed start
+    if (mode == -2) {
+        const char *of = getenv("DM_TIME_OFFSET"), *t = getenv("DM_TIME");
+        mode = -1; arg = 0;
+        if (of && *of) { mode = 0; arg = (int64_t)strtoll(of, NULL, 0); LOG("DM_TIME_OFFSET=%lld: the user clock runs %+lld s off the host clock", (long long)arg, (long long)arg); }
+        else if (t && *t) {
+            struct tm tm; memset(&tm, 0, sizeof tm); tm.tm_sec = 0;
+            if (sscanf(t, "%d-%d-%dT%d:%d:%d", &tm.tm_year, &tm.tm_mon, &tm.tm_mday, &tm.tm_hour, &tm.tm_min, &tm.tm_sec) >= 5) {
+                tm.tm_year -= 1900; tm.tm_mon -= 1;
+                // local wall-clock time, as Eden's "set the time" means it: the fields are read in the host's zone (DM_TZ, else the
+                // system's), not in UTC. timegm gives the fields as UTC; the zone's offset at that instant moves them back
+                mode = 1; arg = (int64_t)timegm(&tm);
+                { struct tm lt; time_t e = (time_t)arg; if (localtime_r(&e, &lt)) arg -= (int64_t)lt.tm_gmtoff; }
+                base_ns = (int64_t)plat_clock_ns(CLOCK_MONOTONIC);
+                LOG("DM_TIME=%s: the user clock starts there and advances (epoch %lld, local time)", t, (long long)arg);
+            } else LOG("[RED] DM_TIME=%s: want YYYY-MM-DDTHH:MM[:SS]", t);
+        }
+    }
+    if (mode == 1) { int64_t ns = (int64_t)plat_clock_ns(CLOCK_MONOTONIC) - base_ns; *sec = arg + ns / 1000000000; *nsec = ns % 1000000000; return; }
+    struct timespec ts; clock_gettime(CLOCK_REALTIME, &ts);
+    *sec = (int64_t)ts.tv_sec + (mode == 0 ? arg : 0); *nsec = ts.tv_nsec;
+}
+static int64_t user_now(void) { int64_t s, ns; user_clock(&s, &ns); return s; }
 HLE_FORCE("_ZN2nn4time10InitializeEv", "connect to the time service; clocks come from the host system time instead", Result, h_time_Initialize, void) { return RES_OK; }
 HLE_FORCE("_ZN2nn4time13IsInitializedEv", "the time service is taken over, always initialized", int, h_time_IsInitialized, void) { return 1; }
 // Steady clock (seconds since boot + a clock source ID, a 16-byte UUID): the host's monotonic seconds with a fixed source ID. GetSpanBetween runs as is in sdk: it subtracts only when the source IDs match
@@ -24,7 +51,7 @@ HLE_FORCE("_ZN2nn4time19StandardSteadyClock19GetCurrentTimePointEPNS0_20SteadyCl
 }
 HLE_FORCE("_ZN2nn4time38GetStandardSteadyClockCurrentTimePointEPNS0_20SteadyClockTimePointE", "steady clock (the free function form, SDK 20) → host monotonic clock", Result, h_time_SteadyNowFn, uint8_t *out) { return h_time_SteadyNow(out); }
 HLE_FORCE("_ZN2nn4time23StandardUserSystemClock14GetCurrentTimeEPNS0_9PosixTimeE", "user clock → host time()", Result, h_time_GetCurrentTime, int64_t *out) {
-    int64_t ft = fixed_time(); *out = ft >= 0 ? ft : time(NULL); return RES_OK;
+    int64_t ft = fixed_time(); *out = ft >= 0 ? ft : user_now(); return RES_OK;
 }
 // The adjustable user clock (Animal Crossing: New Horizons 3.0.3, whose days follow it): the SDK keeps it in a MonotonicSystemClock that Adjust sets from the user clock's context, and its
 // GetCurrentTime reads the time service's shared memory, which the host never maps (an abort in MonotonicSystemClock::GetCurrentTime, sdk+0x4421cc on that build). On the host the user clock
@@ -36,7 +63,7 @@ HLE_FORCE("_ZN2nn4time25AdjustableUserSystemClock14GetCurrentTimeEPNS0_9PosixTim
 static int h_time_timespec(int64_t *ts) {
     int64_t ft = fixed_time();
     if (ft >= 0) { ts[0] = ft; ts[1] = 0; return 0; }
-    struct timespec t; clock_gettime(CLOCK_REALTIME, &t); ts[0] = t.tv_sec; ts[1] = t.tv_nsec; return 0;
+    user_clock(&ts[0], &ts[1]); return 0;
 }
 HLE_FORCE("_ZN2nn4time41GetStandardUserSystemClockCurrentTimespecEP8timespec", "C library real-time clock from the user clock → host real time", int, h_time_StdTimespec, int64_t *ts) { return h_time_timespec(ts); }
 HLE_FORCE("_ZN2nn4time43GetAdjustableUserSystemClockCurrentTimespecEP8timespec", "C library real-time clock from the adjustable user clock → host real time", int, h_time_AdjTimespec, int64_t *ts) { return h_time_timespec(ts); }
@@ -67,7 +94,7 @@ HLE_FORCE("_ZN2nn4time23StandardUserSystemClock21GetSystemClockContextEPNS0_18Sy
     return RES_OK;
 }
 HLE_FORCE("_ZN2nn4time23StandardUserSystemClock3nowEv", "user clock → host time()", int64_t, h_time_now, void) {
-    int64_t ft = fixed_time(); return ft >= 0 ? ft : time(NULL); }
+    int64_t ft = fixed_time(); return ft >= 0 ? ft : user_now(); }
 HLE_FORCE("_ZN2nn4time23StandardUserSystemClock9to_time_tERKNSt3__16chrono10time_pointINS0_17SystemClockTraitsENS3_8durationIlNS2_5ratioILl1ELl1EEEEEEE",
           "the SDK implementation pairs with now(), taken over with it", int64_t, h_time_to_time_t, const int64_t *tp) { return *tp; }
 HLE_FORCE("_ZN2nn4time14ToCalendarTimeEPNS0_12CalendarTimeEPNS0_22CalendarAdditionalInfoERKNS0_9PosixTimeE",
