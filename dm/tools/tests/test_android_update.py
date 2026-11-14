@@ -76,6 +76,17 @@ class UpdaterSource(unittest.TestCase):
         self.assertIn('UpdateCheck.allowedAsset(u.apk.url, u.release.source)', src)
         self.assertIn('sp.setAppPackageName(', src)
 
+    def test_matcher_append_api33(self):
+        """Matcher.appendReplacement / appendTail take a StringBuilder only from API 34 (the launcher supports Android 13, API 33): the JVM test runs on a newer
+        runtime and cannot catch it, so the launcher's sources must pass a StringBuffer (issue 252: a crash at start whenever the notes had an image)"""
+        import re
+        for f in sorted(SRC.glob('*.java')):
+            t = f.read_text()
+            if not re.search(r'\.append(Replacement|Tail)\(', t):
+                continue
+            self.assertNotIn('StringBuilder b = new StringBuilder()', t.split('htmlImages(String s)')[-1].split('}')[0] if f.name == 'ReleaseNotes.java' else '', f.name)
+            self.assertIn('StringBuffer', t, f.name)
+
 
 if __name__ == '__main__':
     unittest.main()
