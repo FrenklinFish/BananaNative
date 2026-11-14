@@ -78,7 +78,7 @@ final class ReleaseNotes {
     /** HTML &lt;img src="u" alt="a"&gt; tags as Markdown images (a tag without a src is dropped); the rest of the HTML stays as text */
     private static String htmlImages(String s) {
         Matcher m = IMG_TAG.matcher(s);
-        StringBuilder b = new StringBuilder();
+        StringBuffer b = new StringBuffer();   // StringBuffer: Matcher.appendReplacement/appendTail(StringBuilder) need API 34, minSdk is 33
         while (m.find()) {
             String tag = m.group(), src = attr(tag, "src"), alt = attr(tag, "alt");
             m.appendReplacement(b, Matcher.quoteReplacement(src == null ? "" : "![" + (alt == null ? "" : alt.replaceAll("[\\[\\]\n]", " ")) + "](" + src.replace(")", "%29").replace(" ", "%20") + ")"));
